@@ -611,6 +611,13 @@ main () = id (id ())
             >= 2,
         "expected both call sites without requiring declarations: {response:?}"
     );
+    assert!(
+        references.iter().all(|location| {
+            location["range"]["start"]["line"].as_u64() != Some(2)
+                && location["range"]["start"]["line"].as_u64() != Some(3)
+        }),
+        "declarations should be omitted when includeDeclaration is false: {response:?}"
+    );
 }
 
 #[test]

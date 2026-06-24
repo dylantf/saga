@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -55,7 +55,28 @@ struct SemanticSnapshot {
 struct SemanticIndex {
     definition_locations: HashMap<ast::NodeId, Location>,
     references: HashMap<ast::NodeId, ast::NodeId>,
-    references_by_definition: HashMap<ast::NodeId, Vec<Location>>,
+    references_by_definition: HashMap<ast::NodeId, Vec<SemanticOccurrence>>,
+    type_definition_locations: HashMap<String, Location>,
+    type_occurrences_by_name: HashMap<String, Vec<SemanticOccurrence>>,
+    type_occurrences: Vec<NamedLocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OccurrenceKind {
+    Definition,
+    Reference,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SemanticOccurrence {
+    kind: OccurrenceKind,
+    location: Location,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NamedLocation {
+    name: String,
+    location: Location,
 }
 
 impl SemanticIndex {
@@ -64,19 +85,96 @@ impl SemanticIndex {
             definition_locations,
             references: HashMap::new(),
             references_by_definition: HashMap::new(),
+            type_definition_locations: HashMap::new(),
+            type_occurrences_by_name: HashMap::new(),
+            type_occurrences: Vec::new(),
         }
     }
 
-    fn add_references(&mut self, references: &HashMap<ast::NodeId, ast::NodeId>) {
+    fn add_references(
+        &mut self,
+        references: &HashMap<ast::NodeId, ast::NodeId>,
+        definition_nodes: &std::collections::HashSet<ast::NodeId>,
+    ) {
         for (&usage_id, &definition_id) in references {
             self.references.insert(usage_id, definition_id);
             if let Some(location) = self.definition_locations.get(&usage_id) {
+                let kind = if definition_nodes.contains(&usage_id) {
+                    OccurrenceKind::Definition
+                } else {
+                    OccurrenceKind::Reference
+                };
                 self.references_by_definition
                     .entry(definition_id)
                     .or_default()
-                    .push(location.clone());
+                    .push(SemanticOccurrence {
+                        kind,
+                        location: location.clone(),
+                    });
             }
         }
+    }
+
+    fn add_type_definition(&mut self, name: String, location: Location) {
+        self.type_definition_locations
+            .entry(name.clone())
+            .or_insert_with(|| location.clone());
+        self.type_occurrences_by_name
+            .entry(name.clone())
+            .or_default()
+            .push(SemanticOccurrence {
+                kind: OccurrenceKind::Definition,
+                location: location.clone(),
+            });
+        self.type_occurrences.push(NamedLocation { name, location });
+    }
+
+    fn add_type_reference(&mut self, name: String, location: Location) {
+        self.type_occurrences_by_name
+            .entry(name.clone())
+            .or_default()
+            .push(SemanticOccurrence {
+                kind: OccurrenceKind::Reference,
+                location: location.clone(),
+            });
+        self.type_occurrences.push(NamedLocation { name, location });
+    }
+
+    fn type_name_at_position(&self, uri: &Url, position: Position) -> Option<&str> {
+        self.type_occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.location.uri == *uri
+                    && range_contains_position(&occurrence.location.range, position)
+            })
+            .min_by_key(|occurrence| range_width(&occurrence.location.range))
+            .map(|occurrence| occurrence.name.as_str())
+    }
+
+    fn type_definition_location_at(&self, uri: &Url, position: Position) -> Option<Location> {
+        let name = self.type_name_at_position(uri, position)?;
+        self.type_definition_locations.get(name).cloned()
+    }
+
+    fn type_reference_locations_at(
+        &self,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let name = self.type_name_at_position(uri, position)?;
+        let mut locations: Vec<Location> = self
+            .type_occurrences_by_name
+            .get(name)
+            .into_iter()
+            .flat_map(|occurrences| occurrences.iter())
+            .filter(|occurrence| {
+                include_declaration || occurrence.kind == OccurrenceKind::Reference
+            })
+            .map(|occurrence| occurrence.location.clone())
+            .collect();
+        sort_and_dedup_locations(&mut locations);
+        Some(locations)
     }
 
     fn identity_for_node(&self, node_id: ast::NodeId) -> ast::NodeId {
@@ -94,11 +192,16 @@ impl SemanticIndex {
         include_declaration: bool,
     ) -> Vec<Location> {
         let definition_id = self.identity_for_node(node_id);
-        let mut locations = self
+        let mut locations: Vec<Location> = self
             .references_by_definition
             .get(&definition_id)
-            .cloned()
-            .unwrap_or_default();
+            .into_iter()
+            .flat_map(|occurrences| occurrences.iter())
+            .filter(|occurrence| {
+                include_declaration || occurrence.kind == OccurrenceKind::Reference
+            })
+            .map(|occurrence| occurrence.location.clone())
+            .collect();
 
         if include_declaration && let Some(location) = self.definition_locations.get(&definition_id)
         {
@@ -1379,6 +1482,7 @@ fn analyze_document(
                     uri,
                     &line_index,
                     text,
+                    &semantic_program,
                     &check,
                     &source_overlay,
                     CachedDefinitionSources {
@@ -1609,6 +1713,7 @@ fn build_semantic_index(
     current_uri: Option<&Url>,
     current_line_index: &LineIndex,
     current_source: &str,
+    current_program: &[ast::Decl],
     check: &typechecker::CheckResult,
     source_overlay: &HashMap<PathBuf, String>,
     cached: CachedDefinitionSources<'_>,
@@ -1622,10 +1727,51 @@ fn build_semantic_index(
         cached,
     );
     let mut index = SemanticIndex::new(definition_locations);
-    index.add_references(&check.references);
+    let definition_nodes = collect_value_definition_nodes(current_program);
+    let references = semantic_value_references_for_program(check, current_program);
+    index.add_references(&references, &definition_nodes);
+    if let Some(uri) = current_uri {
+        let (module_name, _) = extract_module_info(current_program);
+        add_program_type_symbols(
+            &mut index,
+            uri,
+            current_line_index,
+            current_source,
+            current_program,
+            check,
+            module_name.as_deref(),
+        );
+    }
 
-    for module_result in check.module_check_results().values() {
-        index.add_references(&module_result.references);
+    for (module_name, module_result) in check.module_check_results() {
+        let mut module_definition_nodes = HashSet::new();
+        let program = check
+            .programs()
+            .get(module_name)
+            .or_else(|| module_result.programs().get(module_name));
+        let references = if let Some(program) = program {
+            collect_value_definition_nodes_into(program, &mut module_definition_nodes);
+            semantic_value_references_for_program(module_result, program)
+        } else {
+            module_result.references.clone()
+        };
+        index.add_references(&references, &module_definition_nodes);
+        if let Some(program) = program
+            && let Some(path) = check.resolve_module_path(module_name)
+            && let Ok(uri) = Url::from_file_path(&path)
+            && let Some(source) = source_for_path(&path, source_overlay)
+        {
+            let line_index = LineIndex::new(&source);
+            add_program_type_symbols(
+                &mut index,
+                &uri,
+                &line_index,
+                &source,
+                program,
+                module_result,
+                Some(module_name),
+            );
+        }
     }
 
     if let Some(project) = cached.projects.projects.get(cached.project_root) {
@@ -1639,11 +1785,1433 @@ fn build_semantic_index(
             let Some(module_result) = entry.check_result.as_ref() else {
                 continue;
             };
-            index.add_references(&module_result.references);
+            let mut module_definition_nodes = HashSet::new();
+            let program = module_result.programs().get(module_name);
+            let references = if let Some(program) = program {
+                collect_value_definition_nodes_into(program, &mut module_definition_nodes);
+                semantic_value_references_for_program(module_result, program)
+            } else {
+                module_result.references.clone()
+            };
+            index.add_references(&references, &module_definition_nodes);
+            if let Some(program) = program
+                && let Some(path) = entry.path.as_ref()
+                && let Ok(uri) = Url::from_file_path(path)
+                && let Some(source) = source_for_path(path, source_overlay)
+            {
+                let line_index = LineIndex::new(&source);
+                add_program_type_symbols(
+                    &mut index,
+                    &uri,
+                    &line_index,
+                    &source,
+                    program,
+                    module_result,
+                    Some(module_name),
+                );
+            }
         }
     }
 
     index
+}
+
+fn source_for_path(path: &Path, source_overlay: &HashMap<PathBuf, String>) -> Option<String> {
+    source_overlay
+        .get(path)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(path).ok())
+}
+
+fn add_program_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    program: &[ast::Decl],
+    check: &typechecker::CheckResult,
+    module_name: Option<&str>,
+) {
+    for decl in program {
+        add_decl_type_symbols(index, uri, line_index, source, decl, check, module_name);
+    }
+}
+
+fn type_definition_name(module_name: Option<&str>, name: &str) -> String {
+    module_name
+        .map(|module| format!("{module}.{name}"))
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn name_range(start: usize, name: &str, line_index: &LineIndex, source: &str) -> Range {
+    span_to_range(
+        &saga::token::Span {
+            start,
+            end: start + name.len(),
+        },
+        line_index,
+        source,
+    )
+}
+
+fn add_type_definition_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    module_name: Option<&str>,
+    name: &str,
+    name_span: saga::token::Span,
+) {
+    index.add_type_definition(
+        type_definition_name(module_name, name),
+        Location {
+            uri: uri.clone(),
+            range: span_to_range(&name_span, line_index, source),
+        },
+    );
+}
+
+fn add_type_reference_symbol(index: &mut SemanticIndex, uri: &Url, name: String, range: Range) {
+    index.add_type_reference(
+        name,
+        Location {
+            uri: uri.clone(),
+            range,
+        },
+    );
+}
+
+fn add_decl_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    decl: &ast::Decl,
+    check: &typechecker::CheckResult,
+    module_name: Option<&str>,
+) {
+    match decl {
+        ast::Decl::FunSignature {
+            params,
+            return_type,
+            effects: _,
+            where_clause,
+            ..
+        } => {
+            for (_, type_expr) in params {
+                add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+            }
+            add_type_expr_symbols(index, uri, line_index, source, return_type, check);
+            add_where_clause_type_symbols(index, uri, line_index, source, where_clause, check);
+        }
+        ast::Decl::FunBinding {
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            for param in params {
+                add_pat_type_symbols(index, uri, line_index, source, param, check);
+            }
+            if let Some(guard) = guard {
+                add_expr_type_symbols(index, uri, line_index, source, guard, check);
+            }
+            add_expr_type_symbols(index, uri, line_index, source, body, check);
+        }
+        ast::Decl::Let {
+            annotation, value, ..
+        } => {
+            if let Some(annotation) = annotation {
+                add_type_expr_symbols(index, uri, line_index, source, annotation, check);
+            }
+            add_expr_type_symbols(index, uri, line_index, source, value, check);
+        }
+        ast::Decl::TypeDef {
+            name,
+            name_span,
+            variants,
+            ..
+        } => {
+            add_type_definition_symbol(
+                index,
+                uri,
+                line_index,
+                source,
+                module_name,
+                name,
+                *name_span,
+            );
+            for variant in variants {
+                for (_, type_expr) in &variant.node.fields {
+                    add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+                }
+            }
+        }
+        ast::Decl::TypeAlias {
+            name,
+            name_span,
+            body,
+            ..
+        } => {
+            add_type_definition_symbol(
+                index,
+                uri,
+                line_index,
+                source,
+                module_name,
+                name,
+                *name_span,
+            );
+            add_type_expr_symbols(index, uri, line_index, source, body, check);
+        }
+        ast::Decl::RecordDef {
+            name,
+            name_span,
+            fields,
+            ..
+        } => {
+            add_type_definition_symbol(
+                index,
+                uri,
+                line_index,
+                source,
+                module_name,
+                name,
+                *name_span,
+            );
+            for field in fields {
+                add_type_expr_symbols(index, uri, line_index, source, &field.node.1, check);
+            }
+        }
+        ast::Decl::EffectDef { operations, .. } => {
+            for op in operations {
+                for (_, type_expr) in &op.node.params {
+                    add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+                }
+                add_type_expr_symbols(index, uri, line_index, source, &op.node.return_type, check);
+                add_where_clause_type_symbols(
+                    index,
+                    uri,
+                    line_index,
+                    source,
+                    &op.node.where_clause,
+                    check,
+                );
+            }
+        }
+        ast::Decl::HandlerDef { body, .. } => {
+            add_handler_body_type_symbols(index, uri, line_index, source, body, check);
+        }
+        ast::Decl::TraitDef {
+            supertraits,
+            methods,
+            ..
+        } => {
+            let _ = supertraits;
+            for method in methods {
+                for (_, type_expr) in &method.node.params {
+                    add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+                }
+                add_type_expr_symbols(
+                    index,
+                    uri,
+                    line_index,
+                    source,
+                    &method.node.return_type,
+                    check,
+                );
+            }
+        }
+        ast::Decl::ImplDef {
+            id,
+            target_type,
+            target_type_span,
+            target_type_expr,
+            trait_type_args,
+            where_clause,
+            where_apps,
+            methods,
+            ..
+        } => {
+            if let Some(name) = check.resolved_type_name_for_node(*id) {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    name.to_string(),
+                    span_to_range(target_type_span, line_index, source),
+                );
+            } else {
+                let _ = target_type;
+            }
+            if let Some(target_type_expr) = target_type_expr {
+                add_type_expr_symbols(index, uri, line_index, source, target_type_expr, check);
+            }
+            for type_expr in trait_type_args {
+                add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+            }
+            add_where_clause_type_symbols(index, uri, line_index, source, where_clause, check);
+            for app in where_apps {
+                for type_expr in &app.type_args {
+                    add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+                }
+            }
+            for method in methods {
+                for param in &method.node.params {
+                    add_pat_type_symbols(index, uri, line_index, source, param, check);
+                }
+                add_expr_type_symbols(index, uri, line_index, source, &method.node.body, check);
+            }
+        }
+        ast::Decl::DictConstructor { methods, .. } => {
+            for method in methods {
+                add_expr_type_symbols(index, uri, line_index, source, method, check);
+            }
+        }
+        ast::Decl::Import { .. } | ast::Decl::ModuleDecl { .. } => {}
+    }
+}
+
+fn add_where_clause_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    where_clause: &[ast::TraitBound],
+    check: &typechecker::CheckResult,
+) {
+    for bound in where_clause {
+        for trait_ref in &bound.traits {
+            for type_expr in &trait_ref.type_args {
+                add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+            }
+        }
+    }
+}
+
+fn add_type_expr_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    type_expr: &ast::TypeExpr,
+    check: &typechecker::CheckResult,
+) {
+    match type_expr {
+        ast::TypeExpr::Named { id, name, span } => {
+            if let Some(resolved) = check.resolved_type_name_for_node(*id) {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    resolved.to_string(),
+                    span_to_range(span, line_index, source),
+                );
+            } else {
+                let _ = name;
+            }
+        }
+        ast::TypeExpr::App { func, arg, .. } => {
+            add_type_expr_symbols(index, uri, line_index, source, func, check);
+            add_type_expr_symbols(index, uri, line_index, source, arg, check);
+        }
+        ast::TypeExpr::Arrow {
+            from, to, effects, ..
+        } => {
+            add_type_expr_symbols(index, uri, line_index, source, from, check);
+            add_type_expr_symbols(index, uri, line_index, source, to, check);
+            for effect in effects {
+                for type_arg in &effect.type_args {
+                    add_type_expr_symbols(index, uri, line_index, source, type_arg, check);
+                }
+            }
+        }
+        ast::TypeExpr::Record { fields, .. } => {
+            for (_, type_expr) in fields {
+                add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+            }
+        }
+        ast::TypeExpr::Labeled { inner, .. } => {
+            add_type_expr_symbols(index, uri, line_index, source, inner, check);
+        }
+        ast::TypeExpr::Var { .. } | ast::TypeExpr::Symbol { .. } => {}
+    }
+}
+
+fn add_pat_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    pat: &ast::Pat,
+    check: &typechecker::CheckResult,
+) {
+    match pat {
+        ast::Pat::Constructor { args, .. } | ast::Pat::Tuple { elements: args, .. } => {
+            for arg in args {
+                add_pat_type_symbols(index, uri, line_index, source, arg, check);
+            }
+        }
+        ast::Pat::Record {
+            id, name, fields, ..
+        } => {
+            if let Some(resolved) = check.resolved_type_name_for_node(*id) {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    resolved.to_string(),
+                    name_range(pat.span().start, name, line_index, source),
+                );
+            }
+            for (_, field_pat) in fields {
+                if let Some(field_pat) = field_pat {
+                    add_pat_type_symbols(index, uri, line_index, source, field_pat, check);
+                }
+            }
+        }
+        ast::Pat::AnonRecord { fields, .. } => {
+            for (_, field_pat) in fields {
+                if let Some(field_pat) = field_pat {
+                    add_pat_type_symbols(index, uri, line_index, source, field_pat, check);
+                }
+            }
+        }
+        ast::Pat::StringPrefix { rest, .. } => {
+            add_pat_type_symbols(index, uri, line_index, source, rest, check);
+        }
+        ast::Pat::BitStringPat { segments, .. } => {
+            for segment in segments {
+                add_pat_type_symbols(index, uri, line_index, source, &segment.value, check);
+                if let Some(size) = &segment.size {
+                    add_expr_type_symbols(index, uri, line_index, source, size, check);
+                }
+            }
+        }
+        ast::Pat::ListPat { elements, .. }
+        | ast::Pat::Or {
+            patterns: elements, ..
+        } => {
+            for element in elements {
+                add_pat_type_symbols(index, uri, line_index, source, element, check);
+            }
+        }
+        ast::Pat::ConsPat { head, tail, .. } => {
+            add_pat_type_symbols(index, uri, line_index, source, head, check);
+            add_pat_type_symbols(index, uri, line_index, source, tail, check);
+        }
+        ast::Pat::Wildcard { .. } | ast::Pat::Var { .. } | ast::Pat::Lit { .. } => {}
+    }
+}
+
+fn add_stmt_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    stmt: &ast::Stmt,
+    check: &typechecker::CheckResult,
+) {
+    match stmt {
+        ast::Stmt::Let {
+            pattern,
+            annotation,
+            value,
+            ..
+        } => {
+            add_pat_type_symbols(index, uri, line_index, source, pattern, check);
+            if let Some(annotation) = annotation {
+                add_type_expr_symbols(index, uri, line_index, source, annotation, check);
+            }
+            add_expr_type_symbols(index, uri, line_index, source, value, check);
+        }
+        ast::Stmt::LetFun {
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            for param in params {
+                add_pat_type_symbols(index, uri, line_index, source, param, check);
+            }
+            if let Some(guard) = guard {
+                add_expr_type_symbols(index, uri, line_index, source, guard, check);
+            }
+            add_expr_type_symbols(index, uri, line_index, source, body, check);
+        }
+        ast::Stmt::Expr(expr) => add_expr_type_symbols(index, uri, line_index, source, expr, check),
+    }
+}
+
+fn add_expr_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    expr: &ast::Expr,
+    check: &typechecker::CheckResult,
+) {
+    match &expr.kind {
+        ast::ExprKind::Lit { .. }
+        | ast::ExprKind::Var { .. }
+        | ast::ExprKind::Constructor { .. }
+        | ast::ExprKind::QualifiedName { .. }
+        | ast::ExprKind::DictRef { .. }
+        | ast::ExprKind::SymbolIntrinsic { .. } => {}
+        ast::ExprKind::App { func, arg } => {
+            add_expr_type_symbols(index, uri, line_index, source, func, check);
+            add_expr_type_symbols(index, uri, line_index, source, arg, check);
+        }
+        ast::ExprKind::BinOp { left, right, .. } => {
+            add_expr_type_symbols(index, uri, line_index, source, left, check);
+            add_expr_type_symbols(index, uri, line_index, source, right, check);
+        }
+        ast::ExprKind::UnaryMinus { expr } => {
+            add_expr_type_symbols(index, uri, line_index, source, expr, check);
+        }
+        ast::ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            add_expr_type_symbols(index, uri, line_index, source, cond, check);
+            add_expr_type_symbols(index, uri, line_index, source, then_branch, check);
+            add_expr_type_symbols(index, uri, line_index, source, else_branch, check);
+        }
+        ast::ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            add_expr_type_symbols(index, uri, line_index, source, scrutinee, check);
+            for arm in arms {
+                add_pat_type_symbols(index, uri, line_index, source, &arm.node.pattern, check);
+                if let Some(guard) = &arm.node.guard {
+                    add_expr_type_symbols(index, uri, line_index, source, guard, check);
+                }
+                add_expr_type_symbols(index, uri, line_index, source, &arm.node.body, check);
+            }
+        }
+        ast::ExprKind::Block { stmts, .. } => {
+            for stmt in stmts {
+                add_stmt_type_symbols(index, uri, line_index, source, &stmt.node, check);
+            }
+        }
+        ast::ExprKind::Lambda { params, body } => {
+            for param in params {
+                add_pat_type_symbols(index, uri, line_index, source, param, check);
+            }
+            add_expr_type_symbols(index, uri, line_index, source, body, check);
+        }
+        ast::ExprKind::FieldAccess { expr, .. } => {
+            add_expr_type_symbols(index, uri, line_index, source, expr, check);
+        }
+        ast::ExprKind::RecordCreate { name, fields, .. } => {
+            if let Some(resolved) = check.resolved_type_name_for_node(expr.id) {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    resolved.to_string(),
+                    name_range(expr.span.start, name, line_index, source),
+                );
+            }
+            for (_, _, value) in fields {
+                add_expr_type_symbols(index, uri, line_index, source, value, check);
+            }
+        }
+        ast::ExprKind::AnonRecordCreate { fields } => {
+            for (_, _, value) in fields {
+                add_expr_type_symbols(index, uri, line_index, source, value, check);
+            }
+        }
+        ast::ExprKind::RecordUpdate { record, fields, .. } => {
+            add_expr_type_symbols(index, uri, line_index, source, record, check);
+            for (_, _, value) in fields {
+                add_expr_type_symbols(index, uri, line_index, source, value, check);
+            }
+        }
+        ast::ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                add_expr_type_symbols(index, uri, line_index, source, arg, check);
+            }
+        }
+        ast::ExprKind::With { expr, handler } => {
+            add_expr_type_symbols(index, uri, line_index, source, expr, check);
+            add_handler_type_symbols(index, uri, line_index, source, handler, check);
+        }
+        ast::ExprKind::Resume { value } => {
+            add_expr_type_symbols(index, uri, line_index, source, value, check);
+        }
+        ast::ExprKind::Tuple { elements } | ast::ExprKind::ListLit { elements } => {
+            for element in elements {
+                add_expr_type_symbols(index, uri, line_index, source, element, check);
+            }
+        }
+        ast::ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (pattern, value) in bindings {
+                add_pat_type_symbols(index, uri, line_index, source, pattern, check);
+                add_expr_type_symbols(index, uri, line_index, source, value, check);
+            }
+            add_expr_type_symbols(index, uri, line_index, source, success, check);
+            for arm in else_arms {
+                add_pat_type_symbols(index, uri, line_index, source, &arm.node.pattern, check);
+                if let Some(guard) = &arm.node.guard {
+                    add_expr_type_symbols(index, uri, line_index, source, guard, check);
+                }
+                add_expr_type_symbols(index, uri, line_index, source, &arm.node.body, check);
+            }
+        }
+        ast::ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for arm in arms {
+                add_pat_type_symbols(index, uri, line_index, source, &arm.node.pattern, check);
+                if let Some(guard) = &arm.node.guard {
+                    add_expr_type_symbols(index, uri, line_index, source, guard, check);
+                }
+                add_expr_type_symbols(index, uri, line_index, source, &arm.node.body, check);
+            }
+            if let Some((timeout, body)) = after_clause {
+                add_expr_type_symbols(index, uri, line_index, source, timeout, check);
+                add_expr_type_symbols(index, uri, line_index, source, body, check);
+            }
+        }
+        ast::ExprKind::BitString { segments } => {
+            for segment in segments {
+                add_expr_type_symbols(index, uri, line_index, source, &segment.value, check);
+                if let Some(size) = &segment.size {
+                    add_expr_type_symbols(index, uri, line_index, source, size, check);
+                }
+            }
+        }
+        ast::ExprKind::Ascription { expr, type_expr } => {
+            add_expr_type_symbols(index, uri, line_index, source, expr, check);
+            add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+        }
+        ast::ExprKind::HandlerExpr { body } => {
+            add_handler_body_type_symbols(index, uri, line_index, source, body, check);
+        }
+        ast::ExprKind::Pipe { segments, .. }
+        | ast::ExprKind::BinOpChain { segments, .. }
+        | ast::ExprKind::PipeBack { segments }
+        | ast::ExprKind::ComposeForward { segments } => {
+            for segment in segments {
+                add_expr_type_symbols(index, uri, line_index, source, &segment.node, check);
+            }
+        }
+        ast::ExprKind::Cons { head, tail } => {
+            add_expr_type_symbols(index, uri, line_index, source, head, check);
+            add_expr_type_symbols(index, uri, line_index, source, tail, check);
+        }
+        ast::ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let ast::StringPart::Expr(expr) = part {
+                    add_expr_type_symbols(index, uri, line_index, source, expr, check);
+                }
+            }
+        }
+        ast::ExprKind::ListComprehension { body, qualifiers } => {
+            add_expr_type_symbols(index, uri, line_index, source, body, check);
+            for qualifier in qualifiers {
+                match qualifier {
+                    ast::ComprehensionQualifier::Generator(pattern, value)
+                    | ast::ComprehensionQualifier::Let(pattern, value) => {
+                        add_pat_type_symbols(index, uri, line_index, source, pattern, check);
+                        add_expr_type_symbols(index, uri, line_index, source, value, check);
+                    }
+                    ast::ComprehensionQualifier::Guard(value) => {
+                        add_expr_type_symbols(index, uri, line_index, source, value, check);
+                    }
+                }
+            }
+        }
+        ast::ExprKind::DictMethodAccess { dict, .. }
+        | ast::ExprKind::DictSuperAccess { dict, .. } => {
+            add_expr_type_symbols(index, uri, line_index, source, dict, check);
+        }
+        ast::ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                add_expr_type_symbols(index, uri, line_index, source, arg, check);
+            }
+        }
+    }
+}
+
+fn add_handler_body_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    body: &ast::HandlerBody,
+    check: &typechecker::CheckResult,
+) {
+    add_where_clause_type_symbols(index, uri, line_index, source, &body.where_clause, check);
+    for arm in &body.arms {
+        add_handler_arm_type_symbols(index, uri, line_index, source, &arm.node, check);
+    }
+    if let Some(return_clause) = &body.return_clause {
+        add_handler_arm_type_symbols(index, uri, line_index, source, return_clause, check);
+    }
+}
+
+fn add_handler_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    handler: &ast::Handler,
+    check: &typechecker::CheckResult,
+) {
+    match handler {
+        ast::Handler::Named(_) => {}
+        ast::Handler::Inline { items, .. } => {
+            for item in items {
+                match &item.node {
+                    ast::HandlerItem::Named(_) => {}
+                    ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
+                        add_handler_arm_type_symbols(index, uri, line_index, source, arm, check);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn add_handler_arm_type_symbols(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    arm: &ast::HandlerArm,
+    check: &typechecker::CheckResult,
+) {
+    for param in &arm.params {
+        add_pat_type_symbols(index, uri, line_index, source, param, check);
+    }
+    add_expr_type_symbols(index, uri, line_index, source, &arm.body, check);
+    if let Some(finally_block) = &arm.finally_block {
+        add_expr_type_symbols(index, uri, line_index, source, finally_block, check);
+    }
+}
+
+fn semantic_value_references_for_program(
+    check: &typechecker::CheckResult,
+    program: &[ast::Decl],
+) -> HashMap<ast::NodeId, ast::NodeId> {
+    let local_definitions = collect_local_value_binding_definitions(program);
+    let mut references = check.references.clone();
+    for (usage_id, binding_id) in check.local_value_references() {
+        if let Some(definition_id) = local_definitions.get(&binding_id) {
+            references.insert(usage_id, *definition_id);
+        }
+    }
+    references
+}
+
+fn collect_local_value_binding_definitions(program: &[ast::Decl]) -> HashMap<u32, ast::NodeId> {
+    let mut collector = LocalBindingDefinitionCollector::default();
+    collector.collect_program(program);
+    collector.definitions
+}
+
+#[derive(Default)]
+struct LocalBindingDefinitionCollector {
+    next_binding_id: u32,
+    definitions: HashMap<u32, ast::NodeId>,
+}
+
+impl LocalBindingDefinitionCollector {
+    fn collect_program(&mut self, program: &[ast::Decl]) {
+        for decl in program {
+            self.collect_decl(decl);
+        }
+    }
+
+    fn bind_node(&mut self, node_id: ast::NodeId) {
+        self.definitions.insert(self.next_binding_id, node_id);
+        self.next_binding_id += 1;
+    }
+
+    fn collect_decl(&mut self, decl: &ast::Decl) {
+        match decl {
+            ast::Decl::FunSignature {
+                params,
+                return_type,
+                effects,
+                where_clause,
+                ..
+            } => {
+                let _ = (params, return_type, effects, where_clause);
+            }
+            ast::Decl::FunBinding {
+                params,
+                body,
+                guard,
+                ..
+            } => {
+                for param in params {
+                    self.bind_pattern(param);
+                }
+                self.collect_expr(body);
+                if let Some(guard) = guard {
+                    self.collect_expr(guard);
+                }
+            }
+            ast::Decl::Let { value, .. } => self.collect_expr(value),
+            ast::Decl::HandlerDef { body, .. } => self.collect_handler_body(body),
+            ast::Decl::ImplDef { methods, .. } => {
+                for method in methods {
+                    for param in &method.node.params {
+                        self.bind_pattern(param);
+                    }
+                    self.collect_expr(&method.node.body);
+                }
+            }
+            ast::Decl::DictConstructor { methods, .. } => {
+                for method in methods {
+                    self.collect_expr(method);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_pattern(&mut self, pat: &ast::Pat) {
+        match pat {
+            ast::Pat::Var { id, .. } => self.bind_node(*id),
+            ast::Pat::Constructor { args, .. } => {
+                for arg in args {
+                    self.bind_pattern(arg);
+                }
+            }
+            ast::Pat::Record {
+                fields, as_name, ..
+            } => {
+                for (_, alias) in fields {
+                    if let Some(alias) = alias {
+                        self.bind_pattern(alias);
+                    } else {
+                        self.bind_node(pat.id());
+                    }
+                }
+                if as_name.is_some() {
+                    self.bind_node(pat.id());
+                }
+            }
+            ast::Pat::AnonRecord { fields, .. } => {
+                for (_, alias) in fields {
+                    if let Some(alias) = alias {
+                        self.bind_pattern(alias);
+                    } else {
+                        self.bind_node(pat.id());
+                    }
+                }
+            }
+            ast::Pat::Tuple { elements, .. } | ast::Pat::ListPat { elements, .. } => {
+                for element in elements {
+                    self.bind_pattern(element);
+                }
+            }
+            ast::Pat::StringPrefix { rest, .. } => self.bind_pattern(rest),
+            ast::Pat::BitStringPat { segments, .. } => {
+                for segment in segments {
+                    self.bind_pattern(&segment.value);
+                }
+            }
+            ast::Pat::ConsPat { head, tail, .. } => {
+                self.bind_pattern(head);
+                self.bind_pattern(tail);
+            }
+            ast::Pat::Or { patterns, .. } => {
+                if let Some(first) = patterns.first() {
+                    self.bind_pattern(first);
+                }
+            }
+            ast::Pat::Wildcard { .. } | ast::Pat::Lit { .. } => {}
+        }
+    }
+
+    fn collect_stmt(&mut self, stmt: &ast::Stmt) {
+        match stmt {
+            ast::Stmt::Expr(expr) => self.collect_expr(expr),
+            ast::Stmt::Let { pattern, value, .. } => {
+                self.collect_expr(value);
+                self.bind_pattern(pattern);
+            }
+            ast::Stmt::LetFun {
+                id,
+                params,
+                guard,
+                body,
+                ..
+            } => {
+                self.bind_node(*id);
+                for param in params {
+                    self.bind_pattern(param);
+                }
+                if let Some(guard) = guard {
+                    self.collect_expr(guard);
+                }
+                self.collect_expr(body);
+            }
+        }
+    }
+
+    fn collect_expr(&mut self, expr: &ast::Expr) {
+        match &expr.kind {
+            ast::ExprKind::Lit { .. }
+            | ast::ExprKind::Var { .. }
+            | ast::ExprKind::Constructor { .. }
+            | ast::ExprKind::QualifiedName { .. }
+            | ast::ExprKind::DictRef { .. }
+            | ast::ExprKind::SymbolIntrinsic { .. } => {}
+            ast::ExprKind::App { func, arg } => {
+                self.collect_expr(func);
+                self.collect_expr(arg);
+            }
+            ast::ExprKind::BinOp { left, right, .. } => {
+                self.collect_expr(left);
+                self.collect_expr(right);
+            }
+            ast::ExprKind::UnaryMinus { expr } => self.collect_expr(expr),
+            ast::ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_expr(cond);
+                self.collect_expr(then_branch);
+                self.collect_expr(else_branch);
+            }
+            ast::ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.collect_expr(scrutinee);
+                for arm in arms {
+                    self.bind_pattern(&arm.node.pattern);
+                    if let Some(guard) = &arm.node.guard {
+                        self.collect_expr(guard);
+                    }
+                    self.collect_expr(&arm.node.body);
+                }
+            }
+            ast::ExprKind::Block { stmts, .. } => {
+                for stmt in stmts {
+                    self.collect_stmt(&stmt.node);
+                }
+            }
+            ast::ExprKind::Lambda { params, body } => {
+                for param in params {
+                    self.bind_pattern(param);
+                }
+                self.collect_expr(body);
+            }
+            ast::ExprKind::FieldAccess { expr, .. } => self.collect_expr(expr),
+            ast::ExprKind::RecordCreate { fields, .. }
+            | ast::ExprKind::AnonRecordCreate { fields, .. } => {
+                for (_, _, value) in fields {
+                    self.collect_expr(value);
+                }
+            }
+            ast::ExprKind::RecordUpdate { record, fields, .. } => {
+                self.collect_expr(record);
+                for (_, _, value) in fields {
+                    self.collect_expr(value);
+                }
+            }
+            ast::ExprKind::EffectCall { args, .. } => {
+                for arg in args {
+                    self.collect_expr(arg);
+                }
+            }
+            ast::ExprKind::With { expr, handler } => {
+                self.collect_expr(expr);
+                self.collect_handler(handler);
+            }
+            ast::ExprKind::Resume { value } => self.collect_expr(value),
+            ast::ExprKind::Tuple { elements } | ast::ExprKind::ListLit { elements } => {
+                for element in elements {
+                    self.collect_expr(element);
+                }
+            }
+            ast::ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                for (pattern, value) in bindings {
+                    self.collect_expr(value);
+                    self.bind_pattern(pattern);
+                }
+                self.collect_expr(success);
+                for arm in else_arms {
+                    self.bind_pattern(&arm.node.pattern);
+                    if let Some(guard) = &arm.node.guard {
+                        self.collect_expr(guard);
+                    }
+                    self.collect_expr(&arm.node.body);
+                }
+            }
+            ast::ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                for arm in arms {
+                    self.bind_pattern(&arm.node.pattern);
+                    if let Some(guard) = &arm.node.guard {
+                        self.collect_expr(guard);
+                    }
+                    self.collect_expr(&arm.node.body);
+                }
+                if let Some((timeout, body)) = after_clause {
+                    self.collect_expr(timeout);
+                    self.collect_expr(body);
+                }
+            }
+            ast::ExprKind::BitString { segments } => {
+                for segment in segments {
+                    self.collect_expr(&segment.value);
+                    if let Some(size) = &segment.size {
+                        self.collect_expr(size);
+                    }
+                }
+            }
+            ast::ExprKind::Ascription { expr, .. } => self.collect_expr(expr),
+            ast::ExprKind::HandlerExpr { body } => self.collect_handler_body(body),
+            ast::ExprKind::Pipe { segments, .. }
+            | ast::ExprKind::BinOpChain { segments, .. }
+            | ast::ExprKind::PipeBack { segments }
+            | ast::ExprKind::ComposeForward { segments } => {
+                for segment in segments {
+                    self.collect_expr(&segment.node);
+                }
+            }
+            ast::ExprKind::Cons { head, tail } => {
+                self.collect_expr(head);
+                self.collect_expr(tail);
+            }
+            ast::ExprKind::StringInterp { parts, .. } => {
+                for part in parts {
+                    if let ast::StringPart::Expr(expr) = part {
+                        self.collect_expr(expr);
+                    }
+                }
+            }
+            ast::ExprKind::ListComprehension { body, qualifiers } => {
+                self.collect_expr(body);
+                for qualifier in qualifiers {
+                    match qualifier {
+                        ast::ComprehensionQualifier::Generator(pattern, value)
+                        | ast::ComprehensionQualifier::Let(pattern, value) => {
+                            self.collect_expr(value);
+                            self.bind_pattern(pattern);
+                        }
+                        ast::ComprehensionQualifier::Guard(value) => self.collect_expr(value),
+                    }
+                }
+            }
+            ast::ExprKind::DictMethodAccess { dict, .. }
+            | ast::ExprKind::DictSuperAccess { dict, .. } => self.collect_expr(dict),
+            ast::ExprKind::ForeignCall { args, .. } => {
+                for arg in args {
+                    self.collect_expr(arg);
+                }
+            }
+        }
+    }
+
+    fn collect_handler_body(&mut self, body: &ast::HandlerBody) {
+        for arm in &body.arms {
+            self.collect_handler_arm(&arm.node);
+        }
+        if let Some(return_clause) = &body.return_clause {
+            for param in &return_clause.params {
+                self.bind_pattern(param);
+            }
+            self.collect_expr(&return_clause.body);
+        }
+    }
+
+    fn collect_handler(&mut self, handler: &ast::Handler) {
+        match handler {
+            ast::Handler::Named(_) => {}
+            ast::Handler::Inline { items, .. } => {
+                for item in items {
+                    match &item.node {
+                        ast::HandlerItem::Named(_) => {}
+                        ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
+                            self.collect_handler_arm(arm);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_handler_arm(&mut self, arm: &ast::HandlerArm) {
+        for param in &arm.params {
+            self.bind_pattern(param);
+        }
+        self.collect_expr(&arm.body);
+        if let Some(finally_block) = &arm.finally_block {
+            self.collect_expr(finally_block);
+        }
+    }
+}
+
+fn collect_value_definition_nodes(program: &[ast::Decl]) -> HashSet<ast::NodeId> {
+    let mut definition_nodes = HashSet::new();
+    collect_value_definition_nodes_into(program, &mut definition_nodes);
+    definition_nodes
+}
+
+fn collect_value_definition_nodes_into(program: &[ast::Decl], out: &mut HashSet<ast::NodeId>) {
+    for decl in program {
+        collect_decl_value_definition_nodes(decl, out);
+    }
+}
+
+fn collect_decl_value_definition_nodes(decl: &ast::Decl, out: &mut HashSet<ast::NodeId>) {
+    match decl {
+        ast::Decl::FunSignature { id, .. }
+        | ast::Decl::FunBinding { id, .. }
+        | ast::Decl::Let { id, .. }
+        | ast::Decl::HandlerDef { id, .. }
+        | ast::Decl::DictConstructor { id, .. } => {
+            out.insert(*id);
+        }
+        _ => {}
+    }
+
+    match decl {
+        ast::Decl::FunBinding {
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            for param in params {
+                collect_pat_value_definition_nodes(param, out);
+            }
+            if let Some(guard) = guard {
+                collect_expr_value_definition_nodes(guard, out);
+            }
+            collect_expr_value_definition_nodes(body, out);
+        }
+        ast::Decl::Let { value, .. } => collect_expr_value_definition_nodes(value, out),
+        ast::Decl::HandlerDef { body, .. } => {
+            collect_handler_body_value_definition_nodes(body, out);
+        }
+        ast::Decl::ImplDef { methods, .. } => {
+            for method in methods {
+                for param in &method.node.params {
+                    collect_pat_value_definition_nodes(param, out);
+                }
+                collect_expr_value_definition_nodes(&method.node.body, out);
+            }
+        }
+        ast::Decl::DictConstructor { methods, .. } => {
+            for method in methods {
+                collect_expr_value_definition_nodes(method, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_pat_value_definition_nodes(pat: &ast::Pat, out: &mut HashSet<ast::NodeId>) {
+    match pat {
+        ast::Pat::Var { id, .. } => {
+            out.insert(*id);
+        }
+        ast::Pat::Constructor { args, .. } | ast::Pat::Tuple { elements: args, .. } => {
+            for arg in args {
+                collect_pat_value_definition_nodes(arg, out);
+            }
+        }
+        ast::Pat::Record {
+            fields, as_name, ..
+        } => {
+            for (_, field_pat) in fields {
+                if let Some(field_pat) = field_pat {
+                    collect_pat_value_definition_nodes(field_pat, out);
+                }
+            }
+            if as_name.is_some() {
+                out.insert(pat.id());
+            }
+        }
+        ast::Pat::AnonRecord { fields, .. } => {
+            for (_, field_pat) in fields {
+                if let Some(field_pat) = field_pat {
+                    collect_pat_value_definition_nodes(field_pat, out);
+                }
+            }
+        }
+        ast::Pat::StringPrefix { rest, .. } => collect_pat_value_definition_nodes(rest, out),
+        ast::Pat::BitStringPat { segments, .. } => {
+            for segment in segments {
+                collect_pat_value_definition_nodes(&segment.value, out);
+            }
+        }
+        ast::Pat::ListPat { elements, .. }
+        | ast::Pat::Or {
+            patterns: elements, ..
+        } => {
+            for element in elements {
+                collect_pat_value_definition_nodes(element, out);
+            }
+        }
+        ast::Pat::ConsPat { head, tail, .. } => {
+            collect_pat_value_definition_nodes(head, out);
+            collect_pat_value_definition_nodes(tail, out);
+        }
+        ast::Pat::Wildcard { .. } | ast::Pat::Lit { .. } => {}
+    }
+}
+
+fn collect_stmt_value_definition_nodes(stmt: &ast::Stmt, out: &mut HashSet<ast::NodeId>) {
+    match stmt {
+        ast::Stmt::Let { pattern, value, .. } => {
+            collect_pat_value_definition_nodes(pattern, out);
+            collect_expr_value_definition_nodes(value, out);
+        }
+        ast::Stmt::LetFun {
+            id,
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            out.insert(*id);
+            for param in params {
+                collect_pat_value_definition_nodes(param, out);
+            }
+            if let Some(guard) = guard {
+                collect_expr_value_definition_nodes(guard, out);
+            }
+            collect_expr_value_definition_nodes(body, out);
+        }
+        ast::Stmt::Expr(expr) => collect_expr_value_definition_nodes(expr, out),
+    }
+}
+
+fn collect_expr_value_definition_nodes(expr: &ast::Expr, out: &mut HashSet<ast::NodeId>) {
+    match &expr.kind {
+        ast::ExprKind::Lit { .. }
+        | ast::ExprKind::Var { .. }
+        | ast::ExprKind::Constructor { .. }
+        | ast::ExprKind::QualifiedName { .. }
+        | ast::ExprKind::DictRef { .. }
+        | ast::ExprKind::SymbolIntrinsic { .. } => {}
+        ast::ExprKind::App { func, arg } => {
+            collect_expr_value_definition_nodes(func, out);
+            collect_expr_value_definition_nodes(arg, out);
+        }
+        ast::ExprKind::BinOp { left, right, .. } => {
+            collect_expr_value_definition_nodes(left, out);
+            collect_expr_value_definition_nodes(right, out);
+        }
+        ast::ExprKind::UnaryMinus { expr } => collect_expr_value_definition_nodes(expr, out),
+        ast::ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_expr_value_definition_nodes(cond, out);
+            collect_expr_value_definition_nodes(then_branch, out);
+            collect_expr_value_definition_nodes(else_branch, out);
+        }
+        ast::ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_expr_value_definition_nodes(scrutinee, out);
+            for arm in arms {
+                collect_pat_value_definition_nodes(&arm.node.pattern, out);
+                if let Some(guard) = &arm.node.guard {
+                    collect_expr_value_definition_nodes(guard, out);
+                }
+                collect_expr_value_definition_nodes(&arm.node.body, out);
+            }
+        }
+        ast::ExprKind::Block { stmts, .. } => {
+            for stmt in stmts {
+                collect_stmt_value_definition_nodes(&stmt.node, out);
+            }
+        }
+        ast::ExprKind::Lambda { params, body } => {
+            for param in params {
+                collect_pat_value_definition_nodes(param, out);
+            }
+            collect_expr_value_definition_nodes(body, out);
+        }
+        ast::ExprKind::FieldAccess { expr, .. } => {
+            collect_expr_value_definition_nodes(expr, out);
+        }
+        ast::ExprKind::RecordCreate { fields, .. }
+        | ast::ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, value) in fields {
+                collect_expr_value_definition_nodes(value, out);
+            }
+        }
+        ast::ExprKind::RecordUpdate { record, fields, .. } => {
+            collect_expr_value_definition_nodes(record, out);
+            for (_, _, value) in fields {
+                collect_expr_value_definition_nodes(value, out);
+            }
+        }
+        ast::ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                collect_expr_value_definition_nodes(arg, out);
+            }
+        }
+        ast::ExprKind::With { expr, handler } => {
+            collect_expr_value_definition_nodes(expr, out);
+            collect_handler_value_definition_nodes(handler, out);
+        }
+        ast::ExprKind::Resume { value } => collect_expr_value_definition_nodes(value, out),
+        ast::ExprKind::Tuple { elements } | ast::ExprKind::ListLit { elements } => {
+            for element in elements {
+                collect_expr_value_definition_nodes(element, out);
+            }
+        }
+        ast::ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (pattern, value) in bindings {
+                collect_pat_value_definition_nodes(pattern, out);
+                collect_expr_value_definition_nodes(value, out);
+            }
+            collect_expr_value_definition_nodes(success, out);
+            for arm in else_arms {
+                collect_pat_value_definition_nodes(&arm.node.pattern, out);
+                if let Some(guard) = &arm.node.guard {
+                    collect_expr_value_definition_nodes(guard, out);
+                }
+                collect_expr_value_definition_nodes(&arm.node.body, out);
+            }
+        }
+        ast::ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for arm in arms {
+                collect_pat_value_definition_nodes(&arm.node.pattern, out);
+                if let Some(guard) = &arm.node.guard {
+                    collect_expr_value_definition_nodes(guard, out);
+                }
+                collect_expr_value_definition_nodes(&arm.node.body, out);
+            }
+            if let Some((timeout, body)) = after_clause {
+                collect_expr_value_definition_nodes(timeout, out);
+                collect_expr_value_definition_nodes(body, out);
+            }
+        }
+        ast::ExprKind::BitString { segments } => {
+            for segment in segments {
+                collect_expr_value_definition_nodes(&segment.value, out);
+                if let Some(size) = &segment.size {
+                    collect_expr_value_definition_nodes(size, out);
+                }
+            }
+        }
+        ast::ExprKind::Ascription { expr, .. } => {
+            collect_expr_value_definition_nodes(expr, out);
+        }
+        ast::ExprKind::HandlerExpr { body } => {
+            collect_handler_body_value_definition_nodes(body, out);
+        }
+        ast::ExprKind::Pipe { segments, .. }
+        | ast::ExprKind::BinOpChain { segments, .. }
+        | ast::ExprKind::PipeBack { segments }
+        | ast::ExprKind::ComposeForward { segments } => {
+            for segment in segments {
+                collect_expr_value_definition_nodes(&segment.node, out);
+            }
+        }
+        ast::ExprKind::Cons { head, tail } => {
+            collect_expr_value_definition_nodes(head, out);
+            collect_expr_value_definition_nodes(tail, out);
+        }
+        ast::ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let ast::StringPart::Expr(expr) = part {
+                    collect_expr_value_definition_nodes(expr, out);
+                }
+            }
+        }
+        ast::ExprKind::ListComprehension { body, qualifiers } => {
+            collect_expr_value_definition_nodes(body, out);
+            for qualifier in qualifiers {
+                match qualifier {
+                    ast::ComprehensionQualifier::Generator(pattern, value)
+                    | ast::ComprehensionQualifier::Let(pattern, value) => {
+                        collect_pat_value_definition_nodes(pattern, out);
+                        collect_expr_value_definition_nodes(value, out);
+                    }
+                    ast::ComprehensionQualifier::Guard(value) => {
+                        collect_expr_value_definition_nodes(value, out);
+                    }
+                }
+            }
+        }
+        ast::ExprKind::DictMethodAccess { dict, .. }
+        | ast::ExprKind::DictSuperAccess { dict, .. } => {
+            collect_expr_value_definition_nodes(dict, out);
+        }
+        ast::ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                collect_expr_value_definition_nodes(arg, out);
+            }
+        }
+    }
+}
+
+fn collect_handler_body_value_definition_nodes(
+    body: &ast::HandlerBody,
+    out: &mut HashSet<ast::NodeId>,
+) {
+    for arm in &body.arms {
+        collect_handler_arm_value_definition_nodes(&arm.node, out);
+    }
+    if let Some(return_clause) = &body.return_clause {
+        collect_handler_arm_value_definition_nodes(return_clause, out);
+    }
+}
+
+fn collect_handler_value_definition_nodes(handler: &ast::Handler, out: &mut HashSet<ast::NodeId>) {
+    match handler {
+        ast::Handler::Named(_) => {}
+        ast::Handler::Inline { items, .. } => {
+            for item in items {
+                match &item.node {
+                    ast::HandlerItem::Named(_) => {}
+                    ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
+                        collect_handler_arm_value_definition_nodes(arm, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_handler_arm_value_definition_nodes(
+    arm: &ast::HandlerArm,
+    out: &mut HashSet<ast::NodeId>,
+) {
+    for param in &arm.params {
+        collect_pat_value_definition_nodes(param, out);
+    }
+    collect_expr_value_definition_nodes(&arm.body, out);
+    if let Some(finally_block) = &arm.finally_block {
+        collect_expr_value_definition_nodes(finally_block, out);
+    }
 }
 
 fn store_document(shared: &SharedState, uri: Url, version: i32, text: String) {
@@ -1793,6 +3361,23 @@ fn span_to_range(span: &saga::token::Span, line_index: &LineIndex, source: &str)
         start: line_index.offset_to_position(span.start, source),
         end: line_index.offset_to_position(span.end, source),
     }
+}
+
+fn position_leq(a: Position, b: Position) -> bool {
+    a.line < b.line || (a.line == b.line && a.character <= b.character)
+}
+
+fn range_contains_position(range: &Range, position: Position) -> bool {
+    position_leq(range.start, position) && position_leq(position, range.end)
+}
+
+fn range_width(range: &Range) -> u32 {
+    range
+        .end
+        .line
+        .saturating_sub(range.start.line)
+        .saturating_mul(u32::MAX / 2)
+        .saturating_add(range.end.character.saturating_sub(range.start.character))
 }
 
 fn sort_and_dedup_locations(locations: &mut Vec<Location>) {
@@ -2081,6 +3666,13 @@ fn local_definition_at(
     semantic: &SemanticSnapshot,
     position: Position,
 ) -> Option<Location> {
+    if let Some(location) = semantic
+        .semantic_index
+        .type_definition_location_at(uri, position)
+    {
+        return Some(location);
+    }
+
     let offset = semantic
         .line_index
         .position_to_offset(position, &semantic.source);
@@ -2099,10 +3691,19 @@ fn local_definition_at(
 }
 
 fn references_at(
+    uri: &Url,
     semantic: &SemanticSnapshot,
     position: Position,
     include_declaration: bool,
 ) -> Vec<Location> {
+    if let Some(locations) =
+        semantic
+            .semantic_index
+            .type_reference_locations_at(uri, position, include_declaration)
+    {
+        return locations;
+    }
+
     let offset = semantic
         .line_index
         .position_to_offset(position, &semantic.source);
@@ -2304,7 +3905,12 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let locations = references_at(&semantic, position, params.context.include_declaration);
+        let locations = references_at(
+            &uri,
+            &semantic,
+            position,
+            params.context.include_declaration,
+        );
         if locations.is_empty() {
             Ok(None)
         } else {
@@ -2756,8 +4362,8 @@ main () = id (id ())
         let outer_position = semantic.line_index.offset_to_position(outer_offset, source);
         let inner_position = semantic.line_index.offset_to_position(inner_offset, source);
 
-        let outer_refs = references_at(&semantic, outer_position, true);
-        let inner_refs = references_at(&semantic, inner_position, true);
+        let outer_refs = references_at(&uri, &semantic, outer_position, true);
+        let inner_refs = references_at(&uri, &semantic, inner_position, true);
 
         assert_eq!(outer_refs, inner_refs);
         assert!(
@@ -2779,7 +4385,7 @@ main () = id (id ())
             "expected both call sites, got {outer_refs:?}"
         );
 
-        let usage_refs = references_at(&semantic, outer_position, false);
+        let usage_refs = references_at(&uri, &semantic, outer_position, false);
         assert!(
             usage_refs
                 .iter()
@@ -2787,6 +4393,145 @@ main () = id (id ())
                 .count()
                 >= 2,
             "expected both call sites without requiring declarations: {usage_refs:?}"
+        );
+        assert!(
+            usage_refs
+                .iter()
+                .all(|location| location.range.start.line != 2 && location.range.start.line != 3),
+            "declarations should be omitted when include_declaration is false: {usage_refs:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_index_keeps_shadowed_local_references_separate() {
+        let uri = uri();
+        let source = "\
+module Main
+
+fun main : Unit -> Int
+main () = {
+  let x = 1
+  let y = {
+    let x = 2
+    x
+  }
+  x
+}
+";
+        let shared = SharedState::default();
+        let result = analyze_document(&shared, Some(&uri), 1, source, None);
+        let semantic = result.semantic.expect("semantic snapshot");
+
+        let inner_offset = source.find("    x\n").expect("inner x") + 4;
+        let outer_offset = source.rfind("  x\n").expect("outer x") + 2;
+        let inner_position = semantic.line_index.offset_to_position(inner_offset, source);
+        let outer_position = semantic.line_index.offset_to_position(outer_offset, source);
+
+        let inner_refs = references_at(&uri, &semantic, inner_position, false);
+        let outer_refs = references_at(&uri, &semantic, outer_position, false);
+
+        assert_ne!(inner_refs, outer_refs);
+        assert_eq!(inner_refs.len(), 1, "inner references: {inner_refs:?}");
+        assert_eq!(outer_refs.len(), 1, "outer references: {outer_refs:?}");
+        assert_eq!(inner_refs[0].range.start.line, 7);
+        assert_eq!(outer_refs[0].range.start.line, 9);
+    }
+
+    #[test]
+    fn semantic_index_resolves_type_names_before_value_fallback() {
+        let uri = uri();
+        let source = "\
+module Main
+
+type SeshType =
+  | Spot
+  | Downwinder
+
+type BoardType =
+  | Twintip
+  | Hydrofoil
+
+record Normalized {
+  sesh_type: SeshType,
+  board_type: BoardType,
+}
+
+fun parse_board_type : String -> BoardType
+parse_board_type s = Twintip
+
+fun from_row : Unit -> Normalized
+from_row () = Normalized {
+  sesh_type: Downwinder,
+  board_type: Twintip,
+}
+";
+        let shared = SharedState::default();
+        let result = analyze_document(&shared, Some(&uri), 1, source, None);
+        let semantic = result.semantic.expect("semantic snapshot");
+
+        let sesh_usage = source
+            .find("sesh_type: SeshType")
+            .expect("SeshType field usage")
+            + "sesh_type: ".len();
+        let sesh_location = local_definition_at(
+            &uri,
+            &semantic,
+            semantic.line_index.offset_to_position(sesh_usage, source),
+        )
+        .expect("SeshType definition");
+        assert_eq!(sesh_location.range.start.line, 2);
+
+        let board_usage = source
+            .find("board_type: BoardType")
+            .expect("BoardType field usage")
+            + "board_type: ".len();
+        let board_location = local_definition_at(
+            &uri,
+            &semantic,
+            semantic.line_index.offset_to_position(board_usage, source),
+        )
+        .expect("BoardType definition");
+        assert_eq!(board_location.range.start.line, 6);
+
+        let normalized_constructor = source
+            .rfind("Normalized {")
+            .expect("Normalized constructor");
+        let normalized_location = local_definition_at(
+            &uri,
+            &semantic,
+            semantic
+                .line_index
+                .offset_to_position(normalized_constructor, source),
+        )
+        .expect("Normalized definition");
+        assert_eq!(normalized_location.range.start.line, 10);
+
+        let board_definition = source.find("BoardType\n").expect("BoardType definition");
+        let board_refs = references_at(
+            &uri,
+            &semantic,
+            semantic
+                .line_index
+                .offset_to_position(board_definition, source),
+            false,
+        );
+        assert!(
+            board_refs
+                .iter()
+                .all(|location| location.range.start.line != 6),
+            "definition should be omitted: {board_refs:?}"
+        );
+        assert!(
+            board_refs
+                .iter()
+                .any(|location| location.range.start.line == 12),
+            "expected record field type reference: {board_refs:?}"
+        );
+        assert!(
+            board_refs
+                .iter()
+                .any(|location| location.range.start.line == 15),
+            "expected function return type reference: {board_refs:?}"
         );
     }
 

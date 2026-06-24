@@ -255,7 +255,9 @@ explicitly deferred until project typechecking is solid and fast.
   - [x] value definition id -> location
   - [x] value usage id -> definition id
   - [x] value definition id -> reference locations
-  - [ ] type/effect/trait/handler references
+  - [x] type/record definition name -> location
+  - [x] type/record reference spans -> definition name
+  - [ ] effect/trait/handler references
   - [ ] module name -> file
   - [ ] docs by semantic key
 - [x] Port local go-to-definition to use `CheckResult.references` and
@@ -263,8 +265,10 @@ explicitly deferred until project typechecking is solid and fast.
 - [x] Port cross-module go-to-definition to use cached semantic definition
   locations built during analysis, not request-time file reads.
 - [x] Port value find-references to query this index.
-- [ ] Add occurrence kinds before rename so binding declarations, definitions,
+- [x] Add occurrence kinds before rename so binding declarations, definitions,
   and ordinary references can be filtered precisely.
+- [x] Correct local value references with resolver lexical binding identity so
+  shadowed locals stay separate.
 - Port rename only after references are trustworthy.
 
 Avoid copying the old "search AST by name, then guess module" approach.

@@ -161,6 +161,30 @@ impl CheckResult {
         &self.modules.check_results
     }
 
+    /// Local value references as `(usage_node, lexical_binding_id)`.
+    ///
+    /// The concrete resolver identity type stays private to the typechecker;
+    /// LSP consumers use this to correct value references that would otherwise
+    /// collapse same-named shadowed locals through the flat type environment.
+    pub fn local_value_references(&self) -> Vec<(crate::ast::NodeId, u32)> {
+        self.resolution
+            .values
+            .iter()
+            .filter_map(|(node_id, resolved)| match resolved {
+                super::ResolvedValue::Local { binding_id, .. } => Some((*node_id, binding_id.0)),
+                super::ResolvedValue::Global { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Resolved source type/record identity for a source AST node.
+    pub fn resolved_type_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.resolution
+            .type_ref(node_id)
+            .or_else(|| self.resolution.record_type(node_id))
+            .or_else(|| self.resolution.impl_target_type_ref(node_id))
+    }
+
     /// Module map (module name -> file path).
     pub fn module_map(&self) -> Option<&super::check_module::ModuleMap> {
         self.modules.map.as_ref()
