@@ -60,6 +60,24 @@ struct SemanticIndex {
     type_definition_locations: HashMap<String, Location>,
     type_occurrences_by_name: HashMap<String, Vec<SemanticOccurrence>>,
     type_occurrences: Vec<NamedLocation>,
+    symbol_definition_locations: HashMap<SemanticSymbolKey, Location>,
+    symbol_occurrences_by_key: HashMap<SemanticSymbolKey, Vec<SemanticOccurrence>>,
+    symbol_occurrences: Vec<SemanticSymbolLocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SemanticSymbolKind {
+    Trait,
+    TraitMethod,
+    Effect,
+    EffectOperation,
+    Handler,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SemanticSymbolKey {
+    kind: SemanticSymbolKind,
+    name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +98,12 @@ struct NamedLocation {
     location: Location,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SemanticSymbolLocation {
+    key: SemanticSymbolKey,
+    location: Location,
+}
+
 impl SemanticIndex {
     fn new(definition_locations: HashMap<ast::NodeId, Location>) -> Self {
         Self {
@@ -89,6 +113,9 @@ impl SemanticIndex {
             type_definition_locations: HashMap::new(),
             type_occurrences_by_name: HashMap::new(),
             type_occurrences: Vec::new(),
+            symbol_definition_locations: HashMap::new(),
+            symbol_occurrences_by_key: HashMap::new(),
+            symbol_occurrences: Vec::new(),
         }
     }
 
@@ -141,6 +168,40 @@ impl SemanticIndex {
         self.type_occurrences.push(NamedLocation { name, location });
     }
 
+    fn add_symbol_definition(
+        &mut self,
+        kind: SemanticSymbolKind,
+        name: String,
+        location: Location,
+    ) {
+        let key = SemanticSymbolKey { kind, name };
+        self.symbol_definition_locations
+            .entry(key.clone())
+            .or_insert_with(|| location.clone());
+        self.symbol_occurrences_by_key
+            .entry(key.clone())
+            .or_default()
+            .push(SemanticOccurrence {
+                kind: OccurrenceKind::Definition,
+                location: location.clone(),
+            });
+        self.symbol_occurrences
+            .push(SemanticSymbolLocation { key, location });
+    }
+
+    fn add_symbol_reference(&mut self, kind: SemanticSymbolKind, name: String, location: Location) {
+        let key = SemanticSymbolKey { kind, name };
+        self.symbol_occurrences_by_key
+            .entry(key.clone())
+            .or_default()
+            .push(SemanticOccurrence {
+                kind: OccurrenceKind::Reference,
+                location: location.clone(),
+            });
+        self.symbol_occurrences
+            .push(SemanticSymbolLocation { key, location });
+    }
+
     fn type_name_at_position(&self, uri: &Url, position: Position) -> Option<&str> {
         self.type_occurrences
             .iter()
@@ -175,6 +236,59 @@ impl SemanticIndex {
         let mut locations: Vec<Location> = self
             .type_occurrences_by_name
             .get(name)
+            .into_iter()
+            .flat_map(|occurrences| occurrences.iter())
+            .filter(|occurrence| {
+                include_declaration || occurrence.kind == OccurrenceKind::Reference
+            })
+            .map(|occurrence| occurrence.location.clone())
+            .collect();
+        sort_and_dedup_locations(&mut locations);
+        locations
+    }
+
+    fn symbol_key_at_position(&self, uri: &Url, position: Position) -> Option<&SemanticSymbolKey> {
+        self.symbol_location_at_position(uri, position)
+            .map(|occurrence| &occurrence.key)
+    }
+
+    fn symbol_location_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<&SemanticSymbolLocation> {
+        self.symbol_occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.location.uri == *uri
+                    && range_contains_position(&occurrence.location.range, position)
+            })
+            .min_by_key(|occurrence| range_width(&occurrence.location.range))
+    }
+
+    fn symbol_definition_location_at(&self, uri: &Url, position: Position) -> Option<Location> {
+        let key = self.symbol_key_at_position(uri, position)?;
+        self.symbol_definition_locations.get(key).cloned()
+    }
+
+    fn symbol_reference_locations_at(
+        &self,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let key = self.symbol_key_at_position(uri, position)?;
+        Some(self.symbol_reference_locations_for_key(key, include_declaration))
+    }
+
+    fn symbol_reference_locations_for_key(
+        &self,
+        key: &SemanticSymbolKey,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let mut locations: Vec<Location> = self
+            .symbol_occurrences_by_key
+            .get(key)
             .into_iter()
             .flat_map(|occurrences| occurrences.iter())
             .filter(|occurrence| {
@@ -373,6 +487,27 @@ impl ProjectSemanticStore {
                 cached
                     .index
                     .type_reference_locations_for_name(type_name, include_declaration),
+            );
+        }
+        sort_and_dedup_locations(&mut locations);
+        locations
+    }
+
+    fn project_symbol_reference_locations(
+        &self,
+        project_root: &Option<PathBuf>,
+        key: &SemanticSymbolKey,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let Some(project) = self.projects.get(project_root) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        for cached in project.semantic_indexes.values() {
+            locations.extend(
+                cached
+                    .index
+                    .symbol_reference_locations_for_key(key, include_declaration),
             );
         }
         sort_and_dedup_locations(&mut locations);
@@ -1935,6 +2070,20 @@ fn name_range(start: usize, name: &str, line_index: &LineIndex, source: &str) ->
     )
 }
 
+fn final_segment_name_range(
+    span: saga::token::Span,
+    name: &str,
+    line_index: &LineIndex,
+    source: &str,
+) -> Range {
+    let haystack = source.get(span.start..span.end).unwrap_or_default();
+    if let Some(relative_start) = haystack.rfind(name) {
+        name_range(span.start + relative_start, name, line_index, source)
+    } else {
+        name_range(span.start, name, line_index, source)
+    }
+}
+
 fn add_type_definition_symbol(
     index: &mut SemanticIndex,
     uri: &Url,
@@ -1963,6 +2112,204 @@ fn add_type_reference_symbol(index: &mut SemanticIndex, uri: &Url, name: String,
     );
 }
 
+fn add_semantic_symbol_definition(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    kind: SemanticSymbolKind,
+    name: String,
+    name_span: saga::token::Span,
+) {
+    index.add_symbol_definition(
+        kind,
+        name,
+        Location {
+            uri: uri.clone(),
+            range: span_to_range(&name_span, line_index, source),
+        },
+    );
+}
+
+fn add_semantic_symbol_reference(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    kind: SemanticSymbolKind,
+    name: String,
+    range: Range,
+) {
+    index.add_symbol_reference(
+        kind,
+        name,
+        Location {
+            uri: uri.clone(),
+            range,
+        },
+    );
+}
+
+fn member_symbol_name(owner: &str, member: &str) -> String {
+    format!("{owner}.{member}")
+}
+
+fn add_trait_method_definition_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    trait_name: &str,
+    method: &ast::TraitMethod,
+) {
+    index.add_symbol_definition(
+        SemanticSymbolKind::TraitMethod,
+        member_symbol_name(trait_name, &method.name),
+        Location {
+            uri: uri.clone(),
+            range: final_segment_name_range(method.span, &method.name, line_index, source),
+        },
+    );
+}
+
+fn add_effect_operation_definition_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    effect_name: &str,
+    op: &ast::EffectOp,
+) {
+    index.add_symbol_definition(
+        SemanticSymbolKind::EffectOperation,
+        member_symbol_name(effect_name, &op.name),
+        Location {
+            uri: uri.clone(),
+            range: final_segment_name_range(op.span, &op.name, line_index, source),
+        },
+    );
+}
+
+fn add_trait_method_reference_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    trait_name: &str,
+    method_name: &str,
+    range: Range,
+) {
+    add_semantic_symbol_reference(
+        index,
+        uri,
+        SemanticSymbolKind::TraitMethod,
+        member_symbol_name(trait_name, method_name),
+        range,
+    );
+}
+
+fn add_effect_operation_reference_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    effect_name: &str,
+    op_name: &str,
+    range: Range,
+) {
+    add_semantic_symbol_reference(
+        index,
+        uri,
+        SemanticSymbolKind::EffectOperation,
+        member_symbol_name(effect_name, op_name),
+        range,
+    );
+}
+
+fn add_trait_ref_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    trait_ref: &ast::TraitRef,
+    check: &typechecker::CheckResult,
+) {
+    if let Some(resolved) = check.resolved_trait_name_for_node(trait_ref.id) {
+        add_semantic_symbol_reference(
+            index,
+            uri,
+            SemanticSymbolKind::Trait,
+            resolved.to_string(),
+            name_range(trait_ref.span.start, &trait_ref.name, line_index, source),
+        );
+    }
+    for type_expr in &trait_ref.type_args {
+        add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+    }
+}
+
+fn add_trait_app_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    app: &ast::TraitApp,
+    check: &typechecker::CheckResult,
+) {
+    if let Some(resolved) = check.resolved_trait_name_for_node(app.id) {
+        add_semantic_symbol_reference(
+            index,
+            uri,
+            SemanticSymbolKind::Trait,
+            resolved.to_string(),
+            name_range(app.span.start, &app.trait_name, line_index, source),
+        );
+    }
+    for type_expr in &app.type_args {
+        add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+    }
+}
+
+fn add_effect_ref_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    effect_ref: &ast::EffectRef,
+    check: &typechecker::CheckResult,
+) {
+    if let Some(resolved) = check.resolved_effect_name_for_node(effect_ref.id) {
+        add_semantic_symbol_reference(
+            index,
+            uri,
+            SemanticSymbolKind::Effect,
+            resolved.to_string(),
+            name_range(effect_ref.span.start, &effect_ref.name, line_index, source),
+        );
+    }
+    for type_expr in &effect_ref.type_args {
+        add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
+    }
+}
+
+fn add_handler_ref_symbol(
+    index: &mut SemanticIndex,
+    uri: &Url,
+    line_index: &LineIndex,
+    source: &str,
+    handler_ref: &ast::NamedHandlerRef,
+    check: &typechecker::CheckResult,
+) {
+    if let Some(resolved) = check.resolved_handler_name_for_node(handler_ref.id) {
+        add_semantic_symbol_reference(
+            index,
+            uri,
+            SemanticSymbolKind::Handler,
+            resolved,
+            name_range(
+                handler_ref.span.start,
+                &handler_ref.name,
+                line_index,
+                source,
+            ),
+        );
+    }
+}
+
 fn add_decl_type_symbols(
     index: &mut SemanticIndex,
     uri: &Url,
@@ -1976,7 +2323,7 @@ fn add_decl_type_symbols(
         ast::Decl::FunSignature {
             params,
             return_type,
-            effects: _,
+            effects,
             where_clause,
             ..
         } => {
@@ -1984,6 +2331,9 @@ fn add_decl_type_symbols(
                 add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
             }
             add_type_expr_symbols(index, uri, line_index, source, return_type, check);
+            for effect_ref in effects {
+                add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
+            }
             add_where_clause_type_symbols(index, uri, line_index, source, where_clause, check);
         }
         ast::Decl::FunBinding {
@@ -2065,12 +2415,38 @@ fn add_decl_type_symbols(
                 add_type_expr_symbols(index, uri, line_index, source, &field.node.1, check);
             }
         }
-        ast::Decl::EffectDef { operations, .. } => {
+        ast::Decl::EffectDef {
+            name,
+            name_span,
+            operations,
+            ..
+        } => {
+            let effect_name = type_definition_name(module_name, name);
+            add_semantic_symbol_definition(
+                index,
+                uri,
+                line_index,
+                source,
+                SemanticSymbolKind::Effect,
+                effect_name.clone(),
+                *name_span,
+            );
             for op in operations {
+                add_effect_operation_definition_symbol(
+                    index,
+                    uri,
+                    line_index,
+                    source,
+                    &effect_name,
+                    &op.node,
+                );
                 for (_, type_expr) in &op.node.params {
                     add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
                 }
                 add_type_expr_symbols(index, uri, line_index, source, &op.node.return_type, check);
+                for effect_ref in &op.node.effects {
+                    add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
+                }
                 add_where_clause_type_symbols(
                     index,
                     uri,
@@ -2081,16 +2457,52 @@ fn add_decl_type_symbols(
                 );
             }
         }
-        ast::Decl::HandlerDef { body, .. } => {
+        ast::Decl::HandlerDef {
+            name,
+            name_span,
+            body,
+            ..
+        } => {
+            add_semantic_symbol_definition(
+                index,
+                uri,
+                line_index,
+                source,
+                SemanticSymbolKind::Handler,
+                type_definition_name(module_name, name),
+                *name_span,
+            );
             add_handler_body_type_symbols(index, uri, line_index, source, body, check);
         }
         ast::Decl::TraitDef {
+            name,
+            name_span,
             supertraits,
             methods,
             ..
         } => {
-            let _ = supertraits;
+            let trait_name = type_definition_name(module_name, name);
+            add_semantic_symbol_definition(
+                index,
+                uri,
+                line_index,
+                source,
+                SemanticSymbolKind::Trait,
+                trait_name.clone(),
+                *name_span,
+            );
+            for trait_ref in supertraits {
+                add_trait_ref_symbol(index, uri, line_index, source, trait_ref, check);
+            }
             for method in methods {
+                add_trait_method_definition_symbol(
+                    index,
+                    uri,
+                    line_index,
+                    source,
+                    &trait_name,
+                    &method.node,
+                );
                 for (_, type_expr) in &method.node.params {
                     add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
                 }
@@ -2102,6 +2514,9 @@ fn add_decl_type_symbols(
                     &method.node.return_type,
                     check,
                 );
+                for effect_ref in &method.node.effects {
+                    add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
+                }
             }
         }
         ast::Decl::ImplDef {
@@ -2109,12 +2524,27 @@ fn add_decl_type_symbols(
             target_type,
             target_type_span,
             target_type_expr,
+            trait_name,
+            trait_name_span,
             trait_type_args,
             where_clause,
             where_apps,
+            needs,
             methods,
             ..
         } => {
+            let resolved_trait = check.resolved_trait_name_for_node(*id);
+            if let Some(resolved) = resolved_trait {
+                add_semantic_symbol_reference(
+                    index,
+                    uri,
+                    SemanticSymbolKind::Trait,
+                    resolved.to_string(),
+                    span_to_range(trait_name_span, line_index, source),
+                );
+            } else {
+                let _ = trait_name;
+            }
             if let Some(name) = check.resolved_type_name_for_node(*id) {
                 add_type_reference_symbol(
                     index,
@@ -2133,11 +2563,21 @@ fn add_decl_type_symbols(
             }
             add_where_clause_type_symbols(index, uri, line_index, source, where_clause, check);
             for app in where_apps {
-                for type_expr in &app.type_args {
-                    add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
-                }
+                add_trait_app_symbol(index, uri, line_index, source, app, check);
+            }
+            for effect_ref in needs {
+                add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
             }
             for method in methods {
+                if let Some(resolved_trait) = resolved_trait {
+                    add_trait_method_reference_symbol(
+                        index,
+                        uri,
+                        resolved_trait,
+                        &method.node.name,
+                        span_to_range(&method.node.name_span, line_index, source),
+                    );
+                }
                 for param in &method.node.params {
                     add_pat_type_symbols(index, uri, line_index, source, param, check);
                 }
@@ -2163,9 +2603,7 @@ fn add_where_clause_type_symbols(
 ) {
     for bound in where_clause {
         for trait_ref in &bound.traits {
-            for type_expr in &trait_ref.type_args {
-                add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
-            }
+            add_trait_ref_symbol(index, uri, line_index, source, trait_ref, check);
         }
     }
 }
@@ -2201,9 +2639,7 @@ fn add_type_expr_symbols(
             add_type_expr_symbols(index, uri, line_index, source, from, check);
             add_type_expr_symbols(index, uri, line_index, source, to, check);
             for effect in effects {
-                for type_arg in &effect.type_args {
-                    add_type_expr_symbols(index, uri, line_index, source, type_arg, check);
-                }
+                add_effect_ref_symbol(index, uri, line_index, source, effect, check);
             }
         }
         ast::TypeExpr::Record { fields, .. } => {
@@ -2332,11 +2768,31 @@ fn add_expr_type_symbols(
 ) {
     match &expr.kind {
         ast::ExprKind::Lit { .. }
-        | ast::ExprKind::Var { .. }
         | ast::ExprKind::Constructor { .. }
-        | ast::ExprKind::QualifiedName { .. }
         | ast::ExprKind::DictRef { .. }
         | ast::ExprKind::SymbolIntrinsic { .. } => {}
+        ast::ExprKind::Var { name } => {
+            if let Some((trait_name, method_name)) = check.resolved_trait_method_for_node(expr.id) {
+                add_trait_method_reference_symbol(
+                    index,
+                    uri,
+                    trait_name,
+                    method_name,
+                    final_segment_name_range(expr.span, name, line_index, source),
+                );
+            }
+        }
+        ast::ExprKind::QualifiedName { name, .. } => {
+            if let Some((trait_name, method_name)) = check.resolved_trait_method_for_node(expr.id) {
+                add_trait_method_reference_symbol(
+                    index,
+                    uri,
+                    trait_name,
+                    method_name,
+                    final_segment_name_range(expr.span, name, line_index, source),
+                );
+            }
+        }
         ast::ExprKind::App { func, arg } => {
             add_expr_type_symbols(index, uri, line_index, source, func, check);
             add_expr_type_symbols(index, uri, line_index, source, arg, check);
@@ -2408,7 +2864,33 @@ fn add_expr_type_symbols(
                 add_expr_type_symbols(index, uri, line_index, source, value, check);
             }
         }
-        ast::ExprKind::EffectCall { args, .. } => {
+        ast::ExprKind::EffectCall {
+            name,
+            qualifier,
+            args,
+        } => {
+            if let Some((effect_name, op_name)) =
+                check.resolved_effect_operation_for_call_node(expr.id)
+            {
+                add_effect_operation_reference_symbol(
+                    index,
+                    uri,
+                    effect_name,
+                    op_name,
+                    final_segment_name_range(expr.span, name, line_index, source),
+                );
+            }
+            if let Some(qualifier) = qualifier
+                && let Some(resolved) = check.resolved_effect_call_effect_name_for_node(expr.id)
+            {
+                add_semantic_symbol_reference(
+                    index,
+                    uri,
+                    SemanticSymbolKind::Effect,
+                    resolved.to_string(),
+                    name_range(expr.span.start, qualifier, line_index, source),
+                );
+            }
             for arg in args {
                 add_expr_type_symbols(index, uri, line_index, source, arg, check);
             }
@@ -2528,6 +3010,12 @@ fn add_handler_body_type_symbols(
     body: &ast::HandlerBody,
     check: &typechecker::CheckResult,
 ) {
+    for effect_ref in &body.effects {
+        add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
+    }
+    for effect_ref in &body.needs {
+        add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
+    }
     add_where_clause_type_symbols(index, uri, line_index, source, &body.where_clause, check);
     for arm in &body.arms {
         add_handler_arm_type_symbols(index, uri, line_index, source, &arm.node, check);
@@ -2546,11 +3034,15 @@ fn add_handler_type_symbols(
     check: &typechecker::CheckResult,
 ) {
     match handler {
-        ast::Handler::Named(_) => {}
+        ast::Handler::Named(named) => {
+            add_handler_ref_symbol(index, uri, line_index, source, named, check);
+        }
         ast::Handler::Inline { items, .. } => {
             for item in items {
                 match &item.node {
-                    ast::HandlerItem::Named(_) => {}
+                    ast::HandlerItem::Named(named) => {
+                        add_handler_ref_symbol(index, uri, line_index, source, named, check);
+                    }
                     ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
                         add_handler_arm_type_symbols(index, uri, line_index, source, arm, check);
                     }
@@ -2568,6 +3060,28 @@ fn add_handler_arm_type_symbols(
     arm: &ast::HandlerArm,
     check: &typechecker::CheckResult,
 ) {
+    if let Some(qualifier) = &arm.qualifier
+        && let Some(resolved) = check.resolved_handler_arm_effect_name_for_node(arm.id)
+    {
+        add_semantic_symbol_reference(
+            index,
+            uri,
+            SemanticSymbolKind::Effect,
+            resolved.to_string(),
+            name_range(arm.span.start, qualifier, line_index, source),
+        );
+    }
+    if let Some((effect_name, op_name)) =
+        check.resolved_effect_operation_for_handler_arm_node(arm.id)
+    {
+        add_effect_operation_reference_symbol(
+            index,
+            uri,
+            effect_name,
+            op_name,
+            final_segment_name_range(arm.span, &arm.op_name, line_index, source),
+        );
+    }
     for param in &arm.params {
         add_pat_type_symbols(index, uri, line_index, source, param, check);
     }
@@ -3689,7 +4203,11 @@ fn source_text_at(source: &str, span: saga::token::Span) -> &str {
     }
 }
 
-fn hover_type_at(semantic: &SemanticSnapshot, position: Position) -> Option<Hover> {
+fn hover_type_at(uri: &Url, semantic: &SemanticSnapshot, position: Position) -> Option<Hover> {
+    if let Some(hover) = hover_semantic_symbol_at(uri, semantic, position) {
+        return Some(hover);
+    }
+
     let offset = semantic
         .line_index
         .position_to_offset(position, &semantic.source);
@@ -3740,6 +4258,34 @@ fn hover_type_at(semantic: &SemanticSnapshot, position: Position) -> Option<Hove
     })
 }
 
+fn hover_semantic_symbol_at(
+    uri: &Url,
+    semantic: &SemanticSnapshot,
+    position: Position,
+) -> Option<Hover> {
+    let occurrence = semantic
+        .semantic_index
+        .symbol_location_at_position(uri, position)?;
+    let (owner, member) = occurrence.key.name.rsplit_once('.')?;
+    let signature = match occurrence.key.kind {
+        SemanticSymbolKind::TraitMethod => semantic.check.trait_method_signature(owner, member),
+        SemanticSymbolKind::EffectOperation => {
+            semantic.check.effect_operation_signature(owner, member)
+        }
+        SemanticSymbolKind::Trait | SemanticSymbolKind::Effect | SemanticSymbolKind::Handler => {
+            None
+        }
+    }?;
+
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format!("```saga\n{signature}\n```"),
+        }),
+        range: Some(occurrence.location.range),
+    })
+}
+
 fn smallest_node_at_offset(
     node_spans: &HashMap<ast::NodeId, saga::token::Span>,
     offset: usize,
@@ -3759,6 +4305,12 @@ fn local_definition_at(
     if let Some(location) = semantic
         .semantic_index
         .type_definition_location_at(uri, position)
+    {
+        return Some(location);
+    }
+    if let Some(location) = semantic
+        .semantic_index
+        .symbol_definition_location_at(uri, position)
     {
         return Some(location);
     }
@@ -3790,6 +4342,13 @@ fn references_at(
         semantic
             .semantic_index
             .type_reference_locations_at(uri, position, include_declaration)
+    {
+        return locations;
+    }
+    if let Some(locations) =
+        semantic
+            .semantic_index
+            .symbol_reference_locations_at(uri, position, include_declaration)
     {
         return locations;
     }
@@ -3958,7 +4517,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        Ok(hover_type_at(&semantic, position))
+        Ok(hover_type_at(&uri, &semantic, position))
     }
 
     async fn goto_definition(
@@ -4014,6 +4573,23 @@ impl LanguageServer for Backend {
             locations.extend(projects.project_type_reference_locations(
                 &project_root,
                 type_name,
+                params.context.include_declaration,
+            ));
+            sort_and_dedup_locations(&mut locations);
+        }
+        if let Some(key) = semantic
+            .semantic_index
+            .symbol_key_at_position(&uri, position)
+        {
+            let project_root = project_root_for_uri(&uri);
+            let projects = self
+                .shared
+                .projects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            locations.extend(projects.project_symbol_reference_locations(
+                &project_root,
+                key,
                 params.context.include_declaration,
             ));
             sort_and_dedup_locations(&mut locations);
@@ -4410,7 +4986,7 @@ main () = id ()
         let shared = SharedState::default();
         let result = analyze_document(&shared, Some(&uri), 1, source, None);
         let semantic = result.semantic.expect("semantic snapshot");
-        let hover = hover_type_at(&semantic, Position::new(6, 10)).expect("hover");
+        let hover = hover_type_at(&uri, &semantic, Position::new(6, 10)).expect("hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup hover");
         };

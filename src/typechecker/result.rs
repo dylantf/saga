@@ -185,6 +185,164 @@ impl CheckResult {
             .or_else(|| self.resolution.impl_target_type_ref(node_id))
     }
 
+    /// Resolved source trait identity for a source AST node.
+    pub fn resolved_trait_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.resolution
+            .trait_ref(node_id)
+            .or_else(|| self.resolution.impl_trait_ref(node_id))
+    }
+
+    /// Resolved source trait method identity for a source expression node.
+    pub fn resolved_trait_method_for_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(&str, &str)> {
+        self.resolution
+            .trait_method(node_id)
+            .map(|resolved| (resolved.trait_name.as_str(), resolved.method.as_str()))
+    }
+
+    /// Resolved source effect identity for a source AST node.
+    pub fn resolved_effect_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.resolution.effect_ref(node_id)
+    }
+
+    /// Resolved source effect-operation identity for an effect-call expression node.
+    pub fn resolved_effect_operation_for_call_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(&str, &str)> {
+        self.resolution
+            .effect_call(node_id)
+            .map(|resolved| (resolved.effect.as_str(), resolved.op.as_str()))
+    }
+
+    /// Resolved source effect-operation identity for a handler-arm node.
+    pub fn resolved_effect_operation_for_handler_arm_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(&str, &str)> {
+        self.resolution
+            .handler_arm(node_id)
+            .map(|resolved| (resolved.effect.as_str(), resolved.op.as_str()))
+    }
+
+    /// Resolved effect identity for an effect-call expression node.
+    pub fn resolved_effect_call_effect_name_for_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&str> {
+        self.resolution
+            .effect_call(node_id)
+            .map(|resolved| resolved.effect.as_str())
+    }
+
+    /// Resolved effect identity for a handler-arm node.
+    pub fn resolved_handler_arm_effect_name_for_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&str> {
+        self.resolution
+            .handler_arm(node_id)
+            .map(|resolved| resolved.effect.as_str())
+    }
+
+    /// Resolved source handler identity for a source AST node.
+    pub fn resolved_handler_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<String> {
+        self.resolution
+            .handler_ref(node_id)
+            .map(|resolved| match resolved {
+                super::ResolvedValue::Local { name, .. } => name.clone(),
+                super::ResolvedValue::Global { lookup_name } => lookup_name.clone(),
+            })
+    }
+
+    /// Pretty Saga-ish signature for a resolved trait method.
+    pub fn trait_method_signature(&self, trait_name: &str, method_name: &str) -> Option<String> {
+        let info = self.traits.get(trait_name)?;
+        let method = info
+            .methods
+            .iter()
+            .find(|method| method.name == method_name)?;
+        let mut parts: Vec<String> = method
+            .param_types
+            .iter()
+            .map(|ty| format!("{}", self.prettify(ty)))
+            .collect();
+        parts.push(format!("{}", self.prettify(&method.return_type)));
+        let mut signature = format!(
+            "{}.{} : {}",
+            super::bare_type_name(trait_name),
+            method_name,
+            parts.join(" -> ")
+        );
+        let effects = self.display_effect_names(&method.effect_sig.effects);
+        if method.effect_sig.is_open_row || !effects.is_empty() {
+            let mut row = effects;
+            if method.effect_sig.is_open_row {
+                row.push("..e".to_string());
+            }
+            signature.push_str(&format!(" needs {{{}}}", row.join(", ")));
+        }
+        Some(signature)
+    }
+
+    /// Pretty Saga-ish signature for a resolved effect operation.
+    pub fn effect_operation_signature(&self, effect_name: &str, op_name: &str) -> Option<String> {
+        let info = self.effects.get(effect_name)?;
+        let op = info.ops.iter().find(|op| op.name == op_name)?;
+        let mut parts: Vec<String> = op
+            .params
+            .iter()
+            .map(|(_, ty)| format!("{}", self.prettify(ty)))
+            .collect();
+        parts.push(format!("{}", self.prettify(&op.return_type)));
+        let mut signature = format!(
+            "{}.{} : {}",
+            super::bare_type_name(effect_name),
+            op_name,
+            parts.join(" -> ")
+        );
+        let effects = self.display_effect_row(&op.needs);
+        if !effects.is_empty() {
+            signature.push_str(&format!(" needs {{{}}}", effects.join(", ")));
+        }
+        Some(signature)
+    }
+
+    fn display_effect_names(&self, effects: &[String]) -> Vec<String> {
+        effects
+            .iter()
+            .map(|effect| super::bare_type_name(effect).to_string())
+            .collect()
+    }
+
+    fn display_effect_row(&self, row: &super::EffectRow) -> Vec<String> {
+        let mut effects: Vec<String> = row
+            .effects
+            .iter()
+            .map(|effect| {
+                let mut text = super::bare_type_name(&effect.name).to_string();
+                let args: Vec<String> = effect
+                    .args
+                    .iter()
+                    .map(|arg| format!("{}", self.prettify(arg)))
+                    .collect();
+                if !args.is_empty() {
+                    text.push(' ');
+                    text.push_str(&args.join(" "));
+                }
+                text
+            })
+            .collect();
+        effects.extend(
+            row.tails
+                .iter()
+                .map(|tail| format!("..{}", self.prettify(tail))),
+        );
+        effects
+    }
+
     /// Module map (module name -> file path).
     pub fn module_map(&self) -> Option<&super::check_module::ModuleMap> {
         self.modules.map.as_ref()

@@ -257,7 +257,7 @@ explicitly deferred until project typechecking is solid and fast.
   - [x] value definition id -> reference locations
   - [x] type/record definition name -> location
   - [x] type/record reference spans -> definition name
-  - [ ] effect/trait/handler references
+  - [x] effect/trait/handler references
   - [ ] module name -> file
   - [ ] docs by semantic key
 - [x] Port local go-to-definition to use `CheckResult.references` and
@@ -280,6 +280,29 @@ Done when:
 - shadowed locals navigate correctly
 - imported aliases navigate correctly
 - trait/effect/type references use the same identity model as the compiler
+
+### Interlude: Prelude Import Hygiene
+
+Goal: make LSP project checking treat the prelude as a single shared semantic
+surface, not as a module that can be reloaded or re-registered through multiple
+paths during dependency/workspace analysis.
+
+- [ ] Audit how the LSP cached base checker, dependency module interface seeding,
+  and workspace module checks each carry `Std.*` modules.
+- [ ] Reproduce the real-project failure:
+  `type error in module 'Kraken.Core': type error in module 'Std.Base': duplicate impl: Std.Base.Semigroup is already implemented for String`.
+- [ ] Ensure prelude/std modules are loaded exactly once per project semantic
+  generation, then reused as immutable compiler state by imported workspace and
+  dependency checks.
+- [ ] Add a protocol or checker-level regression that opens a project importing
+  dependency modules that themselves rely on stdlib/prelude impls.
+
+Done when:
+
+- opening/checking dependency-heavy projects does not re-register stdlib impls
+- prelude/std diagnostics do not leak into unrelated workspace modules
+- fixing ordinary project files never requires restarting the LSP to clear
+  stale stdlib state
 
 ### Phase 6: Completion and Code Actions
 

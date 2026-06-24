@@ -1107,6 +1107,433 @@ id_board board = board
 }
 
 #[test]
+fn semantic_symbol_references_include_importing_modules() {
+    let root = temp_project("project-semantic-symbol-references");
+    let lib_path = root.join("src/Lib.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let lib_source = "\
+module Lib
+
+pub trait Label a {
+  fun label : a -> String
+}
+
+pub effect Log {
+  fun write : String -> Unit
+}
+
+pub handler ignore for Log {
+  write _ = resume ()
+}
+";
+    std::fs::write(&lib_path, lib_source).expect("write lib module");
+
+    let main_source = "\
+module Main
+
+import Lib (Label, Log, ignore)
+
+impl Label for Int {
+  label _ = \"n\"
+}
+
+fun use_label : Int -> String
+use_label n = label n
+
+fun use_log : Unit -> Unit needs {Log}
+use_log () = write! \"x\"
+
+fun run : Unit -> Unit
+run () = use_log () with ignore
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let main_uri = file_uri(&main_path);
+        let lib_uri = file_uri(&lib_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let main_params = wait_for_diagnostics(&lsp, &main_uri, 1, 2);
+        assert_eq!(
+            main_params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "main fixture must typecheck before references request, got {main_params:?}"
+        );
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": lib_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": lib_source
+                }
+            }),
+        );
+        let lib_params = wait_for_diagnostics(&lsp, &lib_uri, 1, 2);
+        assert_eq!(
+            lib_params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "lib fixture must typecheck before references request, got {lib_params:?}"
+        );
+
+        let label_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&lib_path)
+                },
+                "position": {
+                    "line": 2,
+                    "character": 10
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        let label_refs = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(label_id)
+            })
+            .expect("trait references response");
+
+        let log_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&lib_path)
+                },
+                "position": {
+                    "line": 6,
+                    "character": 11
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        let log_refs = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(log_id)
+            })
+            .expect("effect references response");
+
+        let label_method_definition_id = lsp.send_request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 9,
+                    "character": 15
+                }
+            }),
+        );
+        let label_method_definition = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(label_method_definition_id)
+            })
+            .expect("trait method definition response");
+
+        let label_method_refs_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&lib_path)
+                },
+                "position": {
+                    "line": 3,
+                    "character": 7
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        let label_method_refs = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(label_method_refs_id)
+            })
+            .expect("trait method references response");
+
+        let label_method_hover_id = lsp.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 9,
+                    "character": 15
+                }
+            }),
+        );
+        let label_method_hover = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(label_method_hover_id)
+            })
+            .expect("trait method hover response");
+
+        let write_definition_id = lsp.send_request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 12,
+                    "character": 15
+                }
+            }),
+        );
+        let write_definition = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(write_definition_id)
+            })
+            .expect("effect operation definition response");
+
+        let write_refs_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&lib_path)
+                },
+                "position": {
+                    "line": 7,
+                    "character": 7
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        let write_refs = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(write_refs_id)
+            })
+            .expect("effect operation references response");
+
+        let write_hover_id = lsp.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 12,
+                    "character": 15
+                }
+            }),
+        );
+        let write_hover = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(write_hover_id)
+            })
+            .expect("effect operation hover response");
+
+        let ignore_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&lib_path)
+                },
+                "position": {
+                    "line": 10,
+                    "character": 12
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        let ignore_refs = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(ignore_id)
+            })
+            .expect("handler references response");
+
+        (
+            label_refs,
+            log_refs,
+            label_method_definition,
+            label_method_refs,
+            label_method_hover,
+            write_definition,
+            write_refs,
+            write_hover,
+            ignore_refs,
+        )
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (
+        label_refs,
+        log_refs,
+        label_method_definition,
+        label_method_refs,
+        label_method_hover,
+        write_definition,
+        write_refs,
+        write_hover,
+        ignore_refs,
+    ) = result;
+    let label_refs = label_refs["result"]
+        .as_array()
+        .expect("trait references result array");
+    assert!(
+        label_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&lib_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(2)
+        }),
+        "expected trait declaration location: {label_refs:?}"
+    );
+    assert!(
+        label_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(4)
+        }),
+        "expected importing module trait impl reference: {label_refs:?}"
+    );
+
+    let log_refs = log_refs["result"]
+        .as_array()
+        .expect("effect references result array");
+    assert!(
+        log_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&lib_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(6)
+        }),
+        "expected effect declaration location: {log_refs:?}"
+    );
+    assert!(
+        log_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(11)
+        }),
+        "expected importing module effect reference: {log_refs:?}"
+    );
+
+    assert_eq!(
+        label_method_definition["result"]["uri"].as_str(),
+        Some(file_uri(&lib_path).as_str()),
+        "expected trait method definition: {label_method_definition:?}"
+    );
+    assert_eq!(
+        label_method_definition["result"]["range"]["start"]["line"].as_u64(),
+        Some(3),
+        "expected trait method name span: {label_method_definition:?}"
+    );
+
+    let label_method_refs = label_method_refs["result"]
+        .as_array()
+        .expect("trait method references result array");
+    assert!(
+        label_method_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&lib_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(3)
+        }),
+        "expected trait method declaration location: {label_method_refs:?}"
+    );
+    assert!(
+        label_method_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(5)
+        }),
+        "expected impl method reference: {label_method_refs:?}"
+    );
+    assert!(
+        label_method_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(9)
+        }),
+        "expected trait method call reference: {label_method_refs:?}"
+    );
+    assert!(
+        label_method_hover["result"]["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Label.label : a -> String")),
+        "expected trait method hover signature: {label_method_hover:?}"
+    );
+
+    assert_eq!(
+        write_definition["result"]["uri"].as_str(),
+        Some(file_uri(&lib_path).as_str()),
+        "expected effect operation definition: {write_definition:?}"
+    );
+    assert_eq!(
+        write_definition["result"]["range"]["start"]["line"].as_u64(),
+        Some(7),
+        "expected effect operation name span: {write_definition:?}"
+    );
+
+    let write_refs = write_refs["result"]
+        .as_array()
+        .expect("effect operation references result array");
+    assert!(
+        write_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&lib_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(7)
+        }),
+        "expected effect operation declaration location: {write_refs:?}"
+    );
+    assert!(
+        write_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&lib_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(11)
+        }),
+        "expected handler arm operation reference: {write_refs:?}"
+    );
+    assert!(
+        write_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(12)
+        }),
+        "expected effect operation call reference: {write_refs:?}"
+    );
+    assert!(
+        write_hover["result"]["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Log.write : String -> Unit")),
+        "expected effect operation hover signature: {write_hover:?}"
+    );
+
+    let ignore_refs = ignore_refs["result"]
+        .as_array()
+        .expect("handler references result array");
+    assert!(
+        ignore_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&lib_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(10)
+        }),
+        "expected handler declaration location: {ignore_refs:?}"
+    );
+    assert!(
+        ignore_refs.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(15)
+        }),
+        "expected importing module handler reference: {ignore_refs:?}"
+    );
+}
+
+#[test]
 fn changing_imported_open_module_rechecks_open_dependents() {
     let root = temp_project("dependent-recheck");
     let helper_path = root.join("src/Helper.saga");
