@@ -766,7 +766,7 @@ impl ProjectSemanticStore {
                 entry.exports.clone(),
                 entry.codegen_info.clone(),
                 None,
-                None,
+                entry.check_result.clone(),
             );
             seeded += 1;
         }

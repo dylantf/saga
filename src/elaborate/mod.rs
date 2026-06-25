@@ -234,6 +234,10 @@ pub(crate) struct Elaborator {
     pub(crate) evidence_by_node: HashMap<crate::ast::NodeId, Vec<TraitEvidence>>,
     /// The name of the function currently being elaborated (for dict param lookup)
     pub(crate) current_fun: Option<String>,
+    /// The canonical trait whose impl method body is currently being elaborated.
+    /// Synthetic routed derives may call their own trait method even when that
+    /// method is not imported as a bare value in the user's module.
+    pub(crate) current_impl_trait: Option<String>,
     /// Current function's dict param names: trait_name -> param_name
     pub(crate) current_dict_params: HashMap<String, String>,
     /// Current function's dict params keyed by (trait_name, type_var_suffix):

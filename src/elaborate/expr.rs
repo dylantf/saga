@@ -972,7 +972,7 @@ impl Elaborator {
     ///
     pub(crate) fn resolve_trait_method(
         &self,
-        _name: &str,
+        name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<(String, usize)> {
         if let Some(resolved) = self.resolution.trait_method(node_id)
@@ -987,6 +987,13 @@ impl Elaborator {
             && let Some(idx) = info.methods.iter().position(|m| m.name == method)
         {
             return Some((trait_name.to_string(), idx));
+        }
+        if self.resolution.value(node_id).is_none()
+            && let Some(trait_name) = &self.current_impl_trait
+            && let Some(info) = self.traits.get(trait_name)
+            && let Some(idx) = info.methods.iter().position(|m| m.name == name)
+        {
+            return Some((trait_name.clone(), idx));
         }
         None
     }

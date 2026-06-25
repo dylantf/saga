@@ -232,6 +232,7 @@ impl Elaborator {
                     let mut ordered_methods = Vec::new();
                     let mut method_effects = Vec::new();
                     let mut method_open_rows = Vec::new();
+                    let saved_impl_trait = self.current_impl_trait.replace(canonical_trait.clone());
                     if let Some(ref info) = trait_info {
                         for trait_method in &info.methods {
                             if let Some(ann) = methods
@@ -252,6 +253,7 @@ impl Elaborator {
                             }
                         }
                     }
+                    self.current_impl_trait = saved_impl_trait;
 
                     self.restore_dict_params(saved);
 

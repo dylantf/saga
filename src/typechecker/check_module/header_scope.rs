@@ -70,7 +70,7 @@ pub(crate) fn resolve_header_import(
 
     insert_header_qualified_entries(&mut scope, &surface, module_name, prefix);
     match exposing {
-        None => insert_header_default_bare_entries(&mut scope, &surface),
+        None => {}
         Some(HeaderExposing::All { .. }) => {
             for item in exposed_items_for_surface(&surface) {
                 insert_header_exposed_item(headers, module_name, &mut scope, &item)?;
@@ -143,15 +143,6 @@ fn insert_qualified(
     if prefix != module_name {
         map.entry(canonical_join(prefix, surface_name))
             .or_insert_with(|| canonical.to_string());
-    }
-}
-
-fn insert_header_default_bare_entries(scope: &mut ScopeMap, surface: &HeaderSurface) {
-    for (name, info) in &surface.types {
-        scope
-            .types
-            .entry(name.clone())
-            .or_insert_with(|| info.canonical.clone());
     }
 }
 

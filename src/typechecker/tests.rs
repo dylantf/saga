@@ -7596,6 +7596,32 @@ main () = ()
 }
 
 #[test]
+fn type_reexport_carries_origin_trait_impls() {
+    let query = r#"
+module Kraken.Query
+
+pub type DbError = DbError deriving (Debug)
+"#;
+    let db = r#"
+module Kraken.Db
+import Kraken.Query (pub DbError)
+"#;
+    let main = r#"
+module Main
+import Kraken.Db
+
+fun render : Kraken.Db.DbError -> String
+render e = debug e
+"#;
+
+    check_with_project_files(
+        &[("src/Kraken/Query.saga", query), ("src/Kraken/Db.saga", db)],
+        main,
+    )
+    .expect("type re-export should carry Debug impl from the origin module");
+}
+
+#[test]
 fn cyclic_import_of_unannotated_function_requests_annotation() {
     let a = r#"
 module A
@@ -7819,6 +7845,86 @@ fn auto_load_does_not_inject_bare_name_into_scope() {
         result.is_err(),
         "bare 'print_stdout' must not resolve without an exposing import"
     );
+}
+
+#[test]
+fn restricted_import_does_not_expose_unlisted_type_bare() {
+    let lib = r#"
+module Lib
+
+pub type HiddenErr = HiddenErr
+
+pub type Visible = Visible
+
+pub fun make_visible : Unit -> Visible
+make_visible () = Visible
+"#;
+    let main = r#"
+module Main
+import Lib (make_visible)
+
+fun bad : HiddenErr -> Unit
+bad _ = ()
+"#;
+
+    let err = check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .err()
+        .expect("unlisted imported type must not be bare-visible");
+    assert!(
+        err.to_string().contains("unknown type 'HiddenErr'"),
+        "expected unknown type diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
+fn qualified_import_does_not_expose_type_bare() {
+    let lib = r#"
+module Lib
+
+pub type HiddenErr = HiddenErr
+
+pub fun make_unit : Unit -> Unit
+make_unit () = ()
+"#;
+    let main = r#"
+module Main
+import Lib
+
+fun bad : HiddenErr -> Unit
+bad _ = ()
+"#;
+
+    let err = check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .err()
+        .expect("plain import must not make imported types bare-visible");
+    assert!(
+        err.to_string().contains("unknown type 'HiddenErr'"),
+        "expected unknown type diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
+fn restricted_import_keeps_unlisted_type_available_qualified() {
+    let lib = r#"
+module Lib
+
+pub type HiddenErr = HiddenErr
+
+pub fun make_visible : Unit -> Unit
+make_visible () = ()
+"#;
+    let main = r#"
+module Main
+import Lib (make_visible)
+
+fun ok : Lib.HiddenErr -> Unit
+ok _ = ()
+"#;
+
+    check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .expect("unlisted imported type should remain available via module qualification");
 }
 
 #[test]

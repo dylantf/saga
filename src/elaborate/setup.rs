@@ -267,6 +267,7 @@ impl Elaborator {
             traits: result.traits.clone(),
             evidence_by_node,
             current_fun: None,
+            current_impl_trait: None,
             current_dict_params: HashMap::new(),
             current_dict_params_by_var: HashMap::new(),
             erlang_module,

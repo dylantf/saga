@@ -886,6 +886,252 @@ main () = forty_two ()
 }
 
 #[test]
+fn diagnostics_include_missing_imported_trait_impl_constraint() {
+    let root = temp_project("missing-trait-impl-diagnostic");
+    let db_path = root.join("src/Db.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &db_path,
+        "\
+module Db
+
+pub type DbError = DbError
+",
+    )
+    .expect("write db module");
+
+    let main_source = r#"
+module Main
+
+import Db
+
+fun render : Db.DbError -> String
+render e = panic $"insert_records failed: {debug e}"
+"#;
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let messages: Vec<_> = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Debug") && message.contains("DbError")),
+        "expected missing Debug DbError diagnostic, got {messages:?}"
+    );
+}
+
+#[test]
+fn diagnostics_include_missing_dependency_trait_impl_constraint() {
+    let root = temp_project("missing-dependency-trait-impl-diagnostic");
+    let dep_root = root.join("deps/kraken");
+    let dep_src = dep_root.join("src/Kraken");
+    let main_path = root.join("src/Main.saga");
+    std::fs::create_dir_all(&dep_src).expect("create dependency src");
+    std::fs::write(
+        root.join("project.toml"),
+        "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+    )
+    .expect("write app project.toml");
+    std::fs::write(
+        dep_root.join("project.toml"),
+        "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Db\"]
+",
+    )
+    .expect("write dependency project.toml");
+    std::fs::write(
+        dep_src.join("Db.saga"),
+        "\
+module Kraken.Db
+
+pub type DbError = DbError
+
+pub fun insert : Unit -> Result Unit DbError
+insert () = Err DbError
+",
+    )
+    .expect("write dependency db module");
+
+    let main_source = r#"
+module Main
+
+import Kraken.Db
+
+fun render : Unit -> Unit
+render () = case Kraken.Db.insert () {
+  Ok _ -> ()
+  Err e -> panic $"insert_records failed: {debug e}"
+}
+"#;
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let messages: Vec<_> = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Debug") && message.contains("DbError")),
+        "expected missing Debug DbError diagnostic, got {messages:?}"
+    );
+}
+
+#[test]
+fn diagnostics_accept_barrel_reexported_trait_impl_constraint() {
+    let root = temp_project("barrel-reexported-trait-impl-diagnostic");
+    let dep_root = root.join("deps/kraken");
+    let dep_src = dep_root.join("src/Kraken");
+    let main_path = root.join("src/Main.saga");
+    std::fs::create_dir_all(&dep_src).expect("create dependency src");
+    std::fs::write(
+        root.join("project.toml"),
+        "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+    )
+    .expect("write app project.toml");
+    std::fs::write(
+        dep_root.join("project.toml"),
+        "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Db\"]
+",
+    )
+    .expect("write dependency project.toml");
+    std::fs::write(
+        dep_src.join("Query.saga"),
+        "\
+module Kraken.Query
+
+pub type DbError = DbError deriving (Debug)
+
+pub fun insert : Unit -> Result Unit DbError
+insert () = Err DbError
+",
+    )
+    .expect("write dependency query module");
+    std::fs::write(
+        dep_src.join("Db.saga"),
+        "\
+module Kraken.Db
+import Kraken.Query (pub DbError, insert)
+
+pub fun insert : Unit -> Result Unit DbError
+insert () = Kraken.Query.insert ()
+",
+    )
+    .expect("write dependency db module");
+
+    let main_source = r#"
+module Main
+
+import Kraken.Db
+
+fun render : Unit -> Unit
+render () = case Kraken.Db.insert () {
+  Ok _ -> ()
+  Err e -> panic $"insert_records failed: {debug e}"
+}
+"#;
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let errors = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter(|diagnostic| diagnostic["severity"].as_i64() == Some(1))
+        .collect::<Vec<_>>();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        errors.is_empty(),
+        "expected no LSP errors for barrel-reexported Debug impl, got {errors:?}"
+    );
+}
+
+#[test]
 fn goto_definition_uses_cached_cross_module_locations() {
     let root = temp_project("cross-module-definition");
     let helper_path = root.join("src/Helper.saga");

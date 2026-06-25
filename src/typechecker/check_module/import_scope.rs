@@ -246,10 +246,8 @@ pub(super) fn resolve_import(
         }
     }
 
-    // Type names: qualified and aliased -> canonical (always available)
-    // Bare entries are only added when there is no exposing clause
-    // (i.e. `import Foo` makes all types available, but `import Foo (Bar)`
-    // only makes `Bar` available as a bare name).
+    // Type names: qualified and aliased -> canonical (always available).
+    // Bare entries are added only by an explicit exposing list below.
     for name in exports.type_arity.keys() {
         let type_canonical = type_origin(name);
         scope
@@ -268,12 +266,6 @@ pub(super) fn resolve_import(
                 .entry(aliased)
                 .or_insert_with(|| type_canonical.clone());
         }
-        if exposing.is_none() {
-            scope
-                .types
-                .entry(name.clone())
-                .or_insert_with(|| type_canonical);
-        }
     }
 
     // Builtin types (Dict, Set, List, ...) are compiler builtins, not declared
@@ -283,9 +275,10 @@ pub(super) fn resolve_import(
     // catch-all, minting a phantom `Type::Con("Dict.Dict", ..)` that is nominally
     // distinct from the real builtin `Std.Dict.Dict` yet prints identically —
     // producing the self-contradictory `expected Dict Int Int, got Dict Int Int`.
-    // Register the qualified/aliased (and, when not restricted by an exposing
-    // list, bare) forms for any builtin whose canonical home is this module so
-    // they resolve to the one true builtin canonical.
+    // Register the qualified/aliased forms for any builtin whose canonical
+    // home is this module so they resolve to the one true builtin canonical.
+    // Bare builtin type entries are added only by an explicit exposing list
+    // below, matching normal import visibility rules.
     for (bare, canonical) in crate::typechecker::BUILTIN_TYPE_CANONICAL {
         let Some((owner, _)) = canonical.rsplit_once('.') else {
             continue;
@@ -305,14 +298,6 @@ pub(super) fn resolve_import(
             scope
                 .types
                 .entry(aliased)
-                .or_insert_with(|| canonical.clone());
-        }
-        // Bare form is unrestricted only without an exposing list; an explicit
-        // exposing list adds the bare entry below if the builtin is named.
-        if exposing.is_none() {
-            scope
-                .types
-                .entry((*bare).to_string())
                 .or_insert_with(|| canonical.clone());
         }
     }
