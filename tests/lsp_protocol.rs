@@ -1368,7 +1368,7 @@ impl Label for Int {
 }
 
 fun use_label : Int -> String
-use_label n = label n
+use_label n = n |> label
 
 fun use_log : Unit -> Unit needs {Log}
 use_log () = write! \"x\"
@@ -1401,6 +1401,43 @@ run () = use_log () with ignore
             Some(0),
             "main fixture must typecheck before references request, got {main_params:?}"
         );
+
+        let label_method_definition_before_lib_open_id = lsp.send_request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 9,
+                    "character": 20
+                }
+            }),
+        );
+        let label_method_definition_before_lib_open = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64)
+                    == Some(label_method_definition_before_lib_open_id)
+            })
+            .expect("trait method definition response before lib open");
+
+        let label_impl_hover_id = lsp.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 5,
+                    "character": 3
+                }
+            }),
+        );
+        let label_impl_hover = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(label_impl_hover_id)
+            })
+            .expect("trait impl method hover response");
 
         lsp.send_notification(
             "textDocument/didOpen",
@@ -1470,7 +1507,7 @@ run () = use_log () with ignore
                 },
                 "position": {
                     "line": 9,
-                    "character": 15
+                    "character": 20
                 }
             }),
         );
@@ -1509,7 +1546,7 @@ run () = use_log () with ignore
                 },
                 "position": {
                     "line": 9,
-                    "character": 15
+                    "character": 20
                 }
             }),
         );
@@ -1600,6 +1637,8 @@ run () = use_log () with ignore
         (
             label_refs,
             log_refs,
+            label_method_definition_before_lib_open,
+            label_impl_hover,
             label_method_definition,
             label_method_refs,
             label_method_hover,
@@ -1615,6 +1654,8 @@ run () = use_log () with ignore
     let (
         label_refs,
         log_refs,
+        label_method_definition_before_lib_open,
+        label_impl_hover,
         label_method_definition,
         label_method_refs,
         label_method_hover,
@@ -1657,6 +1698,23 @@ run () = use_log () with ignore
                 && location["range"]["start"]["line"].as_u64() == Some(11)
         }),
         "expected importing module effect reference: {log_refs:?}"
+    );
+
+    assert_eq!(
+        label_method_definition_before_lib_open["result"]["uri"].as_str(),
+        Some(file_uri(&lib_path).as_str()),
+        "expected trait method definition before opening defining module: {label_method_definition_before_lib_open:?}"
+    );
+    assert_eq!(
+        label_method_definition_before_lib_open["result"]["range"]["start"]["line"].as_u64(),
+        Some(3),
+        "expected trait method name span before opening defining module: {label_method_definition_before_lib_open:?}"
+    );
+    assert!(
+        label_impl_hover["result"]["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Label.label : a -> String")),
+        "expected impl method hover signature: {label_impl_hover:?}"
     );
 
     assert_eq!(
@@ -1852,6 +1910,71 @@ q () = {
             |value| value.contains("prepared: Prepared { post_title: String, user_id: Int }")
         ),
         "expected concrete Prepared row hover: {hover:?}"
+    );
+}
+
+#[test]
+fn hover_trait_method_signature_uses_trait_definition_shape() {
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = saga_uri("trait-method-hover-shape");
+    let source = "\
+module Main
+
+pub trait Describe a {
+  fun describe_it : a -> String
+}
+
+pub record Person {
+  name: String
+}
+
+impl Describe for Person {
+  describe_it p = $\"Name is: {p.name}\"
+}
+";
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &saga_uri("trait-method-hover-shape"), 1, 2);
+    assert_eq!(
+        params["diagnostics"].as_array().map(Vec::len),
+        Some(0),
+        "fixture must typecheck before hover request, got {params:?}"
+    );
+
+    let hover_id = lsp.send_request(
+        "textDocument/hover",
+        json!({
+            "textDocument": {
+                "uri": saga_uri("trait-method-hover-shape")
+            },
+            "position": {
+                "line": 11,
+                "character": 4
+            }
+        }),
+    );
+    let hover = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(hover_id)
+        })
+        .expect("hover response");
+
+    assert!(
+        hover["result"]["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Describe.describe_it : a -> String")),
+        "expected trait method hover to use trait method shape: {hover:?}"
     );
 }
 

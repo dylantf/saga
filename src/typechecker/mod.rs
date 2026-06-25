@@ -24,7 +24,10 @@ mod unify;
 pub use check_module::{EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict};
 pub use core::*;
 pub(crate) use resolve::{ResolutionResult, ResolvedValue};
-pub use result::{CheckResult, LetDictInfo};
+pub use result::{
+    CheckResult, LetDictInfo, effect_operation_signature_from_info,
+    trait_method_signature_from_info,
+};
 pub use state::*;
 
 #[cfg(test)]

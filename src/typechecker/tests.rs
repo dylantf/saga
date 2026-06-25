@@ -6872,6 +6872,22 @@ fn trait_method_needs_survives_in_scheme() {
 }
 
 #[test]
+fn trait_method_signature_displays_user_method_type() {
+    let checker = check(
+        "trait Describe a {\n  fun describe_it : a -> String\n}\n\
+         record Person { name: String }\n\
+         impl Describe for Person {\n  describe_it p = $\"Name is: {p.name}\"\n}",
+    )
+    .unwrap();
+    let result = checker.to_result();
+
+    assert_eq!(
+        result.trait_method_signature("Describe", "describe_it"),
+        Some("Describe.describe_it : a -> String".to_string())
+    );
+}
+
+#[test]
 fn no_unnecessary_handler_warning_for_where_bound_effectful_trait_method() {
     let checker = check(
         "effect Fail e {\n  fun fail : e -> a\n}\n\

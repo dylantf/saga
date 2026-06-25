@@ -331,13 +331,6 @@ impl SemanticIndex {
         self.symbol_definition_locations.get(key).cloned()
     }
 
-    fn symbol_doc_at_position(&self, uri: &Url, position: Position) -> Option<&[String]> {
-        let key = self.symbol_key_at_position(uri, position)?;
-        self.docs_by_key
-            .get(&SemanticDocKey::Symbol(key.clone()))
-            .map(Vec::as_slice)
-    }
-
     fn module_name_at_position(&self, uri: &Url, position: Position) -> Option<&str> {
         self.module_occurrence_at_position(uri, position)
             .map(|occurrence| occurrence.name.as_str())
@@ -620,6 +613,21 @@ impl ProjectSemanticStore {
         locations
     }
 
+    fn project_type_definition_location(
+        &self,
+        project_root: &Option<PathBuf>,
+        type_name: &str,
+    ) -> Option<Location> {
+        let project = self.projects.get(project_root)?;
+        project.semantic_indexes.values().find_map(|cached| {
+            cached
+                .index
+                .type_definition_locations
+                .get(type_name)
+                .cloned()
+        })
+    }
+
     fn project_symbol_reference_locations(
         &self,
         project_root: &Option<PathBuf>,
@@ -641,6 +649,56 @@ impl ProjectSemanticStore {
         locations
     }
 
+    fn project_symbol_definition_location(
+        &self,
+        project_root: &Option<PathBuf>,
+        key: &SemanticSymbolKey,
+    ) -> Option<Location> {
+        let project = self.projects.get(project_root)?;
+        project
+            .semantic_indexes
+            .values()
+            .find_map(|cached| cached.index.symbol_definition_locations.get(key).cloned())
+    }
+
+    fn project_trait_method_signature(
+        &self,
+        project_root: &Option<PathBuf>,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<String> {
+        let project = self.projects.get(project_root)?;
+        project
+            .module_interfaces
+            .values()
+            .filter_map(|entry| entry.check_result.as_ref())
+            .find_map(|check| trait_method_signature_in_check(check, trait_name, method_name))
+            .or_else(|| {
+                project.module_interfaces.values().find_map(|entry| {
+                    trait_method_signature_in_exports(&entry.exports, trait_name, method_name)
+                })
+            })
+    }
+
+    fn project_effect_operation_signature(
+        &self,
+        project_root: &Option<PathBuf>,
+        effect_name: &str,
+        op_name: &str,
+    ) -> Option<String> {
+        let project = self.projects.get(project_root)?;
+        project
+            .module_interfaces
+            .values()
+            .filter_map(|entry| entry.check_result.as_ref())
+            .find_map(|check| effect_operation_signature_in_check(check, effect_name, op_name))
+            .or_else(|| {
+                project.module_interfaces.values().find_map(|entry| {
+                    effect_operation_signature_in_exports(&entry.exports, effect_name, op_name)
+                })
+            })
+    }
+
     fn project_module_reference_locations(
         &self,
         project_root: &Option<PathBuf>,
@@ -660,6 +718,21 @@ impl ProjectSemanticStore {
         }
         sort_and_dedup_locations(&mut locations);
         locations
+    }
+
+    fn project_module_definition_location(
+        &self,
+        project_root: &Option<PathBuf>,
+        module_name: &str,
+    ) -> Option<Location> {
+        let project = self.projects.get(project_root)?;
+        project.semantic_indexes.values().find_map(|cached| {
+            cached
+                .index
+                .module_definition_locations
+                .get(module_name)
+                .cloned()
+        })
     }
 
     fn seed_module_interfaces(
@@ -4459,8 +4532,81 @@ fn hover_markdown(docs: Option<&[String]>, code: Option<String>) -> String {
     }
 }
 
-fn hover_type_at(uri: &Url, semantic: &SemanticSnapshot, position: Position) -> Option<Hover> {
-    if let Some(hover) = hover_semantic_symbol_at(uri, semantic, position) {
+fn trait_method_signature_in_check(
+    check: &typechecker::CheckResult,
+    trait_name: &str,
+    method_name: &str,
+) -> Option<String> {
+    check
+        .trait_method_signature(trait_name, method_name)
+        .or_else(|| {
+            check
+                .module_check_results()
+                .values()
+                .find_map(|module_result| {
+                    trait_method_signature_in_check(module_result, trait_name, method_name)
+                })
+        })
+}
+
+fn trait_method_signature_in_exports(
+    exports: &typechecker::ModuleExports,
+    trait_name: &str,
+    method_name: &str,
+) -> Option<String> {
+    exports.traits.iter().find_map(|(surface_name, info)| {
+        let origin = exports
+            .trait_origins
+            .get(surface_name)
+            .map(String::as_str)
+            .unwrap_or(surface_name);
+        (origin == trait_name || surface_name == trait_name)
+            .then(|| typechecker::trait_method_signature_from_info(origin, info, method_name))
+            .flatten()
+    })
+}
+
+fn effect_operation_signature_in_check(
+    check: &typechecker::CheckResult,
+    effect_name: &str,
+    op_name: &str,
+) -> Option<String> {
+    check
+        .effect_operation_signature(effect_name, op_name)
+        .or_else(|| {
+            check
+                .module_check_results()
+                .values()
+                .find_map(|module_result| {
+                    effect_operation_signature_in_check(module_result, effect_name, op_name)
+                })
+        })
+}
+
+fn effect_operation_signature_in_exports(
+    exports: &typechecker::ModuleExports,
+    effect_name: &str,
+    op_name: &str,
+) -> Option<String> {
+    exports.effects.iter().find_map(|(surface_name, info)| {
+        let origin = exports
+            .effect_origins
+            .get(surface_name)
+            .map(String::as_str)
+            .unwrap_or(surface_name);
+        (origin == effect_name || surface_name == effect_name)
+            .then(|| typechecker::effect_operation_signature_from_info(origin, info, op_name))
+            .flatten()
+    })
+}
+
+fn hover_type_at(
+    uri: &Url,
+    semantic: &SemanticSnapshot,
+    position: Position,
+    project_signatures: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) -> Option<Hover> {
+    if let Some(hover) = hover_semantic_symbol_at(uri, semantic, position, project_signatures) {
         return Some(hover);
     }
     if let Some(docs) = semantic.semantic_index.type_doc_at_position(uri, position) {
@@ -4528,24 +4674,49 @@ fn hover_semantic_symbol_at(
     uri: &Url,
     semantic: &SemanticSnapshot,
     position: Position,
+    project_signatures: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
 ) -> Option<Hover> {
-    let occurrence = semantic
+    let (key, range) = if let Some(occurrence) = semantic
         .semantic_index
-        .symbol_location_at_position(uri, position)?;
+        .symbol_location_at_position(uri, position)
+    {
+        (occurrence.key.clone(), occurrence.location.range)
+    } else {
+        let offset = semantic
+            .line_index
+            .position_to_offset(position, &semantic.source);
+        let (node_id, span) = smallest_node_at_offset(&semantic.check.node_spans, offset)?;
+        let (trait_name, method_name) = semantic.check.resolved_trait_method_for_node(node_id)?;
+        (
+            SemanticSymbolKey {
+                kind: SemanticSymbolKind::TraitMethod,
+                name: member_symbol_name(trait_name, method_name),
+            },
+            span_to_range(&span, &semantic.line_index, &semantic.source),
+        )
+    };
     let docs = semantic
         .semantic_index
-        .symbol_doc_at_position(uri, position);
-    let signature = match occurrence.key.kind {
-        SemanticSymbolKind::TraitMethod => occurrence
-            .key
-            .name
-            .rsplit_once('.')
-            .and_then(|(owner, member)| semantic.check.trait_method_signature(owner, member)),
-        SemanticSymbolKind::EffectOperation => occurrence
-            .key
-            .name
-            .rsplit_once('.')
-            .and_then(|(owner, member)| semantic.check.effect_operation_signature(owner, member)),
+        .docs_by_key
+        .get(&SemanticDocKey::Symbol(key.clone()))
+        .map(Vec::as_slice);
+    let signature = match key.kind {
+        SemanticSymbolKind::TraitMethod => key.name.rsplit_once('.').and_then(|(owner, member)| {
+            trait_method_signature_in_check(&semantic.check, owner, member).or_else(|| {
+                project_signatures.and_then(|(projects, project_root)| {
+                    projects.project_trait_method_signature(project_root, owner, member)
+                })
+            })
+        }),
+        SemanticSymbolKind::EffectOperation => {
+            key.name.rsplit_once('.').and_then(|(owner, member)| {
+                effect_operation_signature_in_check(&semantic.check, owner, member).or_else(|| {
+                    project_signatures.and_then(|(projects, project_root)| {
+                        projects.project_effect_operation_signature(project_root, owner, member)
+                    })
+                })
+            })
+        }
         SemanticSymbolKind::Module
         | SemanticSymbolKind::Trait
         | SemanticSymbolKind::Effect
@@ -4561,7 +4732,7 @@ fn hover_semantic_symbol_at(
             kind: MarkupKind::Markdown,
             value,
         }),
-        range: Some(occurrence.location.range),
+        range: Some(range),
     })
 }
 
@@ -4913,7 +5084,18 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        Ok(hover_type_at(&uri, &semantic, position))
+        let project_root = project_root_for_uri(&uri);
+        let projects = self
+            .shared
+            .projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(hover_type_at(
+            &uri,
+            &semantic,
+            position,
+            Some((&projects, &project_root)),
+        ))
     }
 
     async fn goto_definition(
@@ -4933,7 +5115,37 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        Ok(local_definition_at(&uri, &semantic, position).map(GotoDefinitionResponse::Scalar))
+        let mut location = local_definition_at(&uri, &semantic, position);
+        if location.is_none() {
+            let project_root = project_root_for_uri(&uri);
+            let projects = self
+                .shared
+                .projects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(module_name) = semantic
+                .semantic_index
+                .module_name_at_position(&uri, position)
+            {
+                location = projects.project_module_definition_location(&project_root, module_name);
+            }
+            if location.is_none()
+                && let Some(type_name) = semantic
+                    .semantic_index
+                    .type_name_at_position(&uri, position)
+            {
+                location = projects.project_type_definition_location(&project_root, type_name);
+            }
+            if location.is_none()
+                && let Some(key) = semantic
+                    .semantic_index
+                    .symbol_key_at_position(&uri, position)
+            {
+                location = projects.project_symbol_definition_location(&project_root, key);
+            }
+        }
+
+        Ok(location.map(GotoDefinitionResponse::Scalar))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -5501,7 +5713,7 @@ main () = id ()
         let shared = SharedState::default();
         let result = analyze_document(&shared, Some(&uri), 1, source, None);
         let semantic = result.semantic.expect("semantic snapshot");
-        let hover = hover_type_at(&uri, &semantic, Position::new(6, 10)).expect("hover");
+        let hover = hover_type_at(&uri, &semantic, Position::new(6, 10), None).expect("hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup hover");
         };

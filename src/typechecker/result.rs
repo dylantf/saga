@@ -14,6 +14,131 @@ use super::{
 /// Prettified effect op: (op_name, [(label, type)], return_type).
 pub type PrettifiedOp = (String, Vec<(String, Type)>, Type);
 
+/// Pretty Saga-ish signature for a trait method from exported trait metadata.
+pub fn trait_method_signature_from_info(
+    trait_name: &str,
+    info: &TraitInfo,
+    method_name: &str,
+) -> Option<String> {
+    trait_method_signature_from_info_with_sub(trait_name, info, method_name, &Substitution::new())
+}
+
+fn trait_method_signature_from_info_with_sub(
+    trait_name: &str,
+    info: &TraitInfo,
+    method_name: &str,
+    sub: &Substitution,
+) -> Option<String> {
+    let method = info
+        .methods
+        .iter()
+        .find(|method| method.name == method_name)?;
+    let mut parts: Vec<String> = method
+        .param_types
+        .iter()
+        .map(|ty| format!("{}", prettify_with_sub(ty, sub)))
+        .collect();
+    parts.push(format!("{}", prettify_with_sub(&method.return_type, sub)));
+    let mut signature = format!(
+        "{}.{} : {}",
+        super::bare_type_name(trait_name),
+        method_name,
+        parts.join(" -> ")
+    );
+    let effects = display_effect_names(&method.effect_sig.effects);
+    if method.effect_sig.is_open_row || !effects.is_empty() {
+        let mut row = effects;
+        if method.effect_sig.is_open_row {
+            row.push("..e".to_string());
+        }
+        signature.push_str(&format!(" needs {{{}}}", row.join(", ")));
+    }
+    Some(signature)
+}
+
+/// Pretty Saga-ish signature for an effect operation from exported effect metadata.
+pub fn effect_operation_signature_from_info(
+    effect_name: &str,
+    info: &EffectDefInfo,
+    op_name: &str,
+) -> Option<String> {
+    effect_operation_signature_from_info_with_sub(effect_name, info, op_name, &Substitution::new())
+}
+
+fn effect_operation_signature_from_info_with_sub(
+    effect_name: &str,
+    info: &EffectDefInfo,
+    op_name: &str,
+    sub: &Substitution,
+) -> Option<String> {
+    let op = info.ops.iter().find(|op| op.name == op_name)?;
+    let mut parts: Vec<String> = op
+        .params
+        .iter()
+        .map(|(_, ty)| format!("{}", prettify_with_sub(ty, sub)))
+        .collect();
+    parts.push(format!("{}", prettify_with_sub(&op.return_type, sub)));
+    let mut signature = format!(
+        "{}.{} : {}",
+        super::bare_type_name(effect_name),
+        op_name,
+        parts.join(" -> ")
+    );
+    let effects = display_effect_row_with_sub(&op.needs, sub);
+    if !effects.is_empty() {
+        signature.push_str(&format!(" needs {{{}}}", effects.join(", ")));
+    }
+    Some(signature)
+}
+
+fn prettify_with_sub(ty: &Type, sub: &Substitution) -> Type {
+    let resolved = sub.apply(ty);
+    let mut vars = Vec::new();
+    super::collect_free_vars(&resolved, &mut vars);
+    if vars.is_empty() {
+        return resolved;
+    }
+    let names: HashMap<u32, String> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, ((b'a' + i as u8) as char).to_string()))
+        .collect();
+    super::rename_vars(&resolved, &names)
+}
+
+fn display_effect_names(effects: &[String]) -> Vec<String> {
+    effects
+        .iter()
+        .map(|effect| super::bare_type_name(effect).to_string())
+        .collect()
+}
+
+fn display_effect_row_with_sub(row: &super::EffectRow, sub: &Substitution) -> Vec<String> {
+    let mut effects: Vec<String> = row
+        .effects
+        .iter()
+        .map(|effect| {
+            let mut text = super::bare_type_name(&effect.name).to_string();
+            let args: Vec<String> = effect
+                .args
+                .iter()
+                .map(|arg| format!("{}", prettify_with_sub(arg, sub)))
+                .collect();
+            if !args.is_empty() {
+                text.push(' ');
+                text.push_str(&args.join(" "));
+            }
+            text
+        })
+        .collect();
+    effects.extend(
+        row.tails
+            .iter()
+            .map(|tail| format!("..{}", prettify_with_sub(tail, sub))),
+    );
+    effects
+}
+
 /// Dictionary-passing info for a let binding with trait constraints.
 #[derive(Debug, Clone)]
 pub struct LetDictInfo {
@@ -260,87 +385,13 @@ impl CheckResult {
     /// Pretty Saga-ish signature for a resolved trait method.
     pub fn trait_method_signature(&self, trait_name: &str, method_name: &str) -> Option<String> {
         let info = self.traits.get(trait_name)?;
-        let method = info
-            .methods
-            .iter()
-            .find(|method| method.name == method_name)?;
-        let mut parts: Vec<String> = method
-            .param_types
-            .iter()
-            .map(|ty| format!("{}", self.prettify(ty)))
-            .collect();
-        parts.push(format!("{}", self.prettify(&method.return_type)));
-        let mut signature = format!(
-            "{}.{} : {}",
-            super::bare_type_name(trait_name),
-            method_name,
-            parts.join(" -> ")
-        );
-        let effects = self.display_effect_names(&method.effect_sig.effects);
-        if method.effect_sig.is_open_row || !effects.is_empty() {
-            let mut row = effects;
-            if method.effect_sig.is_open_row {
-                row.push("..e".to_string());
-            }
-            signature.push_str(&format!(" needs {{{}}}", row.join(", ")));
-        }
-        Some(signature)
+        trait_method_signature_from_info_with_sub(trait_name, info, method_name, &self.sub)
     }
 
     /// Pretty Saga-ish signature for a resolved effect operation.
     pub fn effect_operation_signature(&self, effect_name: &str, op_name: &str) -> Option<String> {
         let info = self.effects.get(effect_name)?;
-        let op = info.ops.iter().find(|op| op.name == op_name)?;
-        let mut parts: Vec<String> = op
-            .params
-            .iter()
-            .map(|(_, ty)| format!("{}", self.prettify(ty)))
-            .collect();
-        parts.push(format!("{}", self.prettify(&op.return_type)));
-        let mut signature = format!(
-            "{}.{} : {}",
-            super::bare_type_name(effect_name),
-            op_name,
-            parts.join(" -> ")
-        );
-        let effects = self.display_effect_row(&op.needs);
-        if !effects.is_empty() {
-            signature.push_str(&format!(" needs {{{}}}", effects.join(", ")));
-        }
-        Some(signature)
-    }
-
-    fn display_effect_names(&self, effects: &[String]) -> Vec<String> {
-        effects
-            .iter()
-            .map(|effect| super::bare_type_name(effect).to_string())
-            .collect()
-    }
-
-    fn display_effect_row(&self, row: &super::EffectRow) -> Vec<String> {
-        let mut effects: Vec<String> = row
-            .effects
-            .iter()
-            .map(|effect| {
-                let mut text = super::bare_type_name(&effect.name).to_string();
-                let args: Vec<String> = effect
-                    .args
-                    .iter()
-                    .map(|arg| format!("{}", self.prettify(arg)))
-                    .collect();
-                if !args.is_empty() {
-                    text.push(' ');
-                    text.push_str(&args.join(" "));
-                }
-                text
-            })
-            .collect();
-        effects.extend(
-            row.tails
-                .iter()
-                .map(|tail| format!("..{}", self.prettify(tail))),
-        );
-        effects
+        effect_operation_signature_from_info_with_sub(effect_name, info, op_name, &self.sub)
     }
 
     /// Module map (module name -> file path).
