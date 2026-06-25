@@ -169,6 +169,32 @@ fn wait_for_diagnostics(lsp: &LspHarness, uri: &str, version: i64, ordinal: usiz
     .expect("publish diagnostics notification")
 }
 
+fn completion_labels(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) -> Vec<String> {
+    let id = lsp.send_request(
+        "textDocument/completion",
+        json!({
+            "textDocument": {
+                "uri": uri
+            },
+            "position": {
+                "line": line,
+                "character": character
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("completion response");
+    response["result"]
+        .as_array()
+        .expect("completion item array")
+        .iter()
+        .filter_map(|item| item["label"].as_str().map(ToString::to_string))
+        .collect()
+}
+
 fn saga_uri(name: &str) -> String {
     format!("file:///tmp/{name}.saga")
 }
@@ -382,6 +408,169 @@ fn completion_uses_current_text_and_preserved_parse_snapshot() {
     assert!(
         labels.contains(&"module"),
         "missing keyword completion: {labels:?}"
+    );
+}
+
+#[test]
+fn completion_uses_context_and_semantic_project_data() {
+    let root = temp_project("completion-contexts");
+    let lib_path = root.join("src/Lib.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let lib_source = "\
+module Lib
+
+pub record Person {
+  name: String,
+  age: Int,
+}
+
+pub trait Describe a {
+  fun describe : a -> String
+}
+
+pub effect Log {
+  fun write : String -> Unit
+}
+
+pub handler ignore for Log {
+  write _ = resume ()
+}
+";
+    std::fs::write(&lib_path, lib_source).expect("write lib module");
+
+    let main_source = "\
+module Main
+
+import Lib (Person, Describe, Log, ignore)
+
+impl Describe for Person {
+  describe p = p.name
+}
+
+fun make : Person -> String needs {Log}
+make p = {
+  let q = Person { name: \"Dylan\", age: 1 }
+  let field = p.name
+  Log.write! \"x\"
+  p |> describe
+} with ignore
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let import_source = "\
+module Main
+
+import L
+";
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let main_uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &file_uri(&main_path), 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(|diagnostics| {
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic["severity"].as_i64() == Some(1))
+                    .count()
+            }),
+            Some(0),
+            "fixture must typecheck before completion request, got {params:?}"
+        );
+
+        let trait_labels = completion_labels(&mut lsp, &file_uri(&main_path), 4, 8);
+        let type_labels = completion_labels(&mut lsp, &file_uri(&main_path), 8, 13);
+        let effect_labels = completion_labels(&mut lsp, &file_uri(&main_path), 8, 38);
+        let record_literal_labels = completion_labels(&mut lsp, &file_uri(&main_path), 10, 24);
+        let record_dot_labels = completion_labels(&mut lsp, &file_uri(&main_path), 11, 20);
+        let effect_op_labels = completion_labels(&mut lsp, &file_uri(&main_path), 12, 8);
+        let handler_labels = completion_labels(&mut lsp, &file_uri(&main_path), 14, 10);
+
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "text": import_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 2, 1);
+        let import_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 8);
+
+        (
+            trait_labels,
+            type_labels,
+            effect_labels,
+            record_literal_labels,
+            record_dot_labels,
+            effect_op_labels,
+            handler_labels,
+            import_labels,
+        )
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (
+        trait_labels,
+        type_labels,
+        effect_labels,
+        record_literal_labels,
+        record_dot_labels,
+        effect_op_labels,
+        handler_labels,
+        import_labels,
+    ) = result;
+
+    assert!(
+        trait_labels.iter().any(|label| label == "Describe"),
+        "missing trait completion: {trait_labels:?}"
+    );
+    assert!(
+        type_labels.iter().any(|label| label == "Person"),
+        "missing type completion: {type_labels:?}"
+    );
+    assert!(
+        effect_labels.iter().any(|label| label == "Log"),
+        "missing effect completion: {effect_labels:?}"
+    );
+    assert!(
+        record_literal_labels.iter().any(|label| label == "name"),
+        "missing record literal field completion: {record_literal_labels:?}"
+    );
+    assert!(
+        record_dot_labels.iter().any(|label| label == "name"),
+        "missing record dot field completion: {record_dot_labels:?}"
+    );
+    assert!(
+        effect_op_labels.iter().any(|label| label == "write"),
+        "missing effect operation completion: {effect_op_labels:?}"
+    );
+    assert!(
+        handler_labels.iter().any(|label| label == "ignore"),
+        "missing handler completion: {handler_labels:?}"
+    );
+    assert!(
+        import_labels.iter().any(|label| label == "Lib"),
+        "missing import module completion after syntax error: {import_labels:?}"
     );
 }
 

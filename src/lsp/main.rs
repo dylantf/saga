@@ -4419,6 +4419,114 @@ fn extract_prefix(source: &str, offset: usize) -> &str {
     &before[start..]
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CompletionContext {
+    ImportModule,
+    DotAccess { chain: Vec<String>, prefix: String },
+    RecordFields { record_name: String },
+    Type,
+    Trait,
+    Effect,
+    Handler,
+    Expression,
+}
+
+fn completion_context(source: &str, offset: usize) -> CompletionContext {
+    if let Some((chain, prefix)) = dot_completion_context(source, offset) {
+        return CompletionContext::DotAccess { chain, prefix };
+    }
+    if let Some(record_name) = record_field_completion_context(source, offset) {
+        return CompletionContext::RecordFields { record_name };
+    }
+
+    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_before = &source[line_start..offset];
+    let trimmed = line_before.trim_start();
+
+    if trimmed.starts_with("import ") {
+        return CompletionContext::ImportModule;
+    }
+    if recently_opened_row(line_before, "needs") {
+        return CompletionContext::Effect;
+    }
+    if recently_opened_row(line_before, "with") || trimmed.starts_with("with ") {
+        return CompletionContext::Handler;
+    }
+    if trimmed.starts_with("impl ")
+        || line_before.rsplit_once(':').is_some_and(|(left, _)| {
+            left.rsplit_once('{').is_some_and(|(_, row)| {
+                row.contains("where")
+                    || row
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c.is_whitespace())
+            })
+        })
+    {
+        return CompletionContext::Trait;
+    }
+    if line_before.contains(':') || line_before.contains("->") {
+        return CompletionContext::Type;
+    }
+
+    CompletionContext::Expression
+}
+
+fn recently_opened_row(line_before: &str, keyword: &str) -> bool {
+    let Some(keyword_pos) = line_before.rfind(keyword) else {
+        return false;
+    };
+    let after_keyword = &line_before[keyword_pos + keyword.len()..];
+    after_keyword.contains('{') && !after_keyword.contains('}')
+}
+
+fn dot_completion_context(source: &str, offset: usize) -> Option<(Vec<String>, String)> {
+    let before = &source[..offset];
+    let start = before
+        .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '\'' && c != '.')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let token = &before[start..];
+    let dot = token.rfind('.')?;
+    let chain: Vec<String> = token[..dot]
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if chain.is_empty() {
+        return None;
+    }
+    Some((chain, token[dot + 1..].to_string()))
+}
+
+fn record_field_completion_context(source: &str, offset: usize) -> Option<String> {
+    let prefix = extract_prefix(source, offset);
+    let mut depth = 0usize;
+    let mut brace_pos = None;
+    for (idx, ch) in source[..offset - prefix.len()].char_indices().rev() {
+        match ch {
+            '}' => depth = depth.saturating_add(1),
+            '{' if depth == 0 => {
+                brace_pos = Some(idx);
+                break;
+            }
+            '{' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let brace_pos = brace_pos?;
+    let before_brace = source[..brace_pos].trim_end();
+    let name_end = before_brace.len();
+    let name_start = before_brace
+        .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let name = &before_brace[name_start..name_end];
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_uppercase())
+        .then(|| name.to_string())
+}
+
 fn top_level_completion_names(parse: Option<&ParseSnapshot>) -> Vec<(&str, CompletionItemKind)> {
     let Some(parse) = parse else {
         return Vec::new();
@@ -4461,48 +4569,732 @@ fn top_level_completion_names(parse: Option<&ParseSnapshot>) -> Vec<(&str, Compl
     names
 }
 
-fn collect_completion_items(document: &DocumentState, position: Position) -> Vec<CompletionItem> {
+fn completion_prefix_for_context<'a>(
+    source: &'a str,
+    offset: usize,
+    context: &'a CompletionContext,
+) -> &'a str {
+    match context {
+        CompletionContext::DotAccess { prefix, .. } => prefix.as_str(),
+        _ => extract_prefix(source, offset),
+    }
+}
+
+fn push_completion(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    label: impl Into<String>,
+    kind: CompletionItemKind,
+    detail: Option<String>,
+    prefix: &str,
+) {
+    let label = label.into();
+    if !prefix.is_empty() && !label.to_lowercase().starts_with(&prefix.to_lowercase()) {
+        return;
+    }
+    if seen.insert(label.clone()) {
+        items.push(CompletionItem {
+            label,
+            kind: Some(kind),
+            detail,
+            ..Default::default()
+        });
+    }
+}
+
+fn collect_completion_items(
+    document: &DocumentState,
+    position: Position,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) -> Vec<CompletionItem> {
     let line_index = LineIndex::new(&document.text);
     let offset = line_index.position_to_offset(position, &document.text);
-    let prefix = extract_prefix(&document.text, offset);
-    let prefix_lower = prefix.to_lowercase();
+    let context = completion_context(&document.text, offset);
+    let prefix = completion_prefix_for_context(&document.text, offset, &context);
     let mut items = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
 
-    let keywords = [
-        "if", "then", "else", "case", "let", "fun", "type", "record", "effect", "handler", "with",
-        "import", "module", "pub", "opaque", "trait", "impl", "where", "needs", "receive", "do",
-        "assert",
-    ];
+    let semantic = document
+        .semantic
+        .as_deref()
+        .filter(|semantic| semantic.version == document.version);
 
-    for keyword in keywords {
-        if !prefix.is_empty() && !keyword.starts_with(&prefix_lower) {
-            continue;
+    match &context {
+        CompletionContext::ImportModule => {
+            collect_module_name_completions(&mut items, &mut seen, prefix, semantic, projects);
         }
-        if seen.insert(keyword.to_string()) {
-            items.push(CompletionItem {
-                label: keyword.to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                ..Default::default()
-            });
+        CompletionContext::DotAccess { chain, .. } => {
+            if let Some(semantic) = semantic
+                && let Some(fields) =
+                    record_fields_for_chain(&semantic.check, chain, &semantic.source)
+            {
+                push_record_field_completions(&mut items, &mut seen, prefix, fields);
+            }
+            collect_qualified_completions(&mut items, &mut seen, prefix, chain, semantic, projects);
         }
-    }
-
-    for (name, kind) in top_level_completion_names(document.parse.as_deref()) {
-        if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
-            continue;
+        CompletionContext::RecordFields { record_name } => {
+            if let Some(semantic) = semantic
+                && let Some(fields) = record_fields_for_name(&semantic.check, record_name)
+            {
+                push_record_field_completions(&mut items, &mut seen, prefix, fields);
+            }
         }
-        if seen.insert(name.to_string()) {
-            items.push(CompletionItem {
-                label: name.to_string(),
-                kind: Some(kind),
-                ..Default::default()
-            });
+        CompletionContext::Type => {
+            collect_type_completions(&mut items, &mut seen, prefix, semantic, projects);
+        }
+        CompletionContext::Trait => {
+            collect_trait_completions(&mut items, &mut seen, prefix, semantic, projects);
+        }
+        CompletionContext::Effect => {
+            collect_effect_completions(&mut items, &mut seen, prefix, semantic, projects);
+        }
+        CompletionContext::Handler => {
+            collect_handler_completions(&mut items, &mut seen, prefix, semantic, projects);
+        }
+        CompletionContext::Expression => {
+            collect_keyword_completions(&mut items, &mut seen, prefix);
+            collect_syntax_completion_items(&mut items, &mut seen, prefix, document);
+            if let Some(semantic) = semantic {
+                collect_expression_semantic_completions(
+                    &mut items, &mut seen, prefix, semantic, projects,
+                );
+            }
         }
     }
 
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+fn collect_keyword_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+) {
+    let keywords = [
+        "if", "then", "else", "case", "let", "fun", "type", "record", "effect", "handler", "with",
+        "import", "module", "pub", "opaque", "trait", "impl", "where", "needs", "receive", "do",
+        "assert",
+    ];
+    for keyword in keywords {
+        push_completion(
+            items,
+            seen,
+            keyword,
+            CompletionItemKind::KEYWORD,
+            None,
+            prefix,
+        );
+    }
+}
+
+fn collect_syntax_completion_items(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    document: &DocumentState,
+) {
+    for (name, kind) in top_level_completion_names(document.parse.as_deref()) {
+        push_completion(items, seen, name, kind, None, prefix);
+    }
+}
+
+fn collect_expression_semantic_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    semantic: &SemanticSnapshot,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    for (name, scheme) in semantic.check.env.iter() {
+        if name.starts_with("__") || name.contains('.') {
+            continue;
+        }
+        push_completion(
+            items,
+            seen,
+            name,
+            CompletionItemKind::FUNCTION,
+            Some(scheme.display_with_constraints(&semantic.check.sub)),
+            prefix,
+        );
+    }
+    for (name, scheme) in &semantic.check.constructors {
+        if name.contains('.') || matches!(name.as_str(), "Cons" | "Nil") {
+            continue;
+        }
+        push_completion(
+            items,
+            seen,
+            name,
+            CompletionItemKind::CONSTRUCTOR,
+            Some(scheme.display_with_constraints(&semantic.check.sub)),
+            prefix,
+        );
+    }
+    collect_handler_completions(items, seen, prefix, Some(semantic), projects);
+    collect_module_name_completions(items, seen, prefix, Some(semantic), projects);
+}
+
+fn collect_type_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    for builtin in [
+        "Int",
+        "Float",
+        "String",
+        "Bool",
+        "Unit",
+        "List",
+        "Maybe",
+        "Result",
+        "Tuple",
+        "Pid",
+        "Dict",
+        "Set",
+        "BitString",
+    ] {
+        push_completion(
+            items,
+            seen,
+            builtin,
+            CompletionItemKind::CLASS,
+            Some("type".to_string()),
+            prefix,
+        );
+    }
+    if let Some(semantic) = semantic {
+        for name in semantic.check.scope_map.types.keys() {
+            if name.contains('.') {
+                continue;
+            }
+            push_completion(
+                items,
+                seen,
+                name,
+                CompletionItemKind::CLASS,
+                Some("type".to_string()),
+                prefix,
+            );
+        }
+        for name in semantic.check.records.keys() {
+            push_completion(
+                items,
+                seen,
+                typechecker::bare_type_name(name),
+                CompletionItemKind::CLASS,
+                Some("record".to_string()),
+                prefix,
+            );
+        }
+    }
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+    {
+        for entry in project.module_interfaces.values() {
+            for name in entry.exports.type_origins.keys() {
+                push_completion(
+                    items,
+                    seen,
+                    name,
+                    CompletionItemKind::CLASS,
+                    Some("type".to_string()),
+                    prefix,
+                );
+            }
+        }
+    }
+}
+
+fn collect_trait_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    if let Some(semantic) = semantic {
+        for name in semantic.check.scope_map.traits.keys() {
+            if name.contains('.') {
+                continue;
+            }
+            push_completion(
+                items,
+                seen,
+                name,
+                CompletionItemKind::INTERFACE,
+                Some("trait".to_string()),
+                prefix,
+            );
+        }
+    }
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+    {
+        for entry in project.module_interfaces.values() {
+            for name in entry.exports.trait_origins.keys() {
+                push_completion(
+                    items,
+                    seen,
+                    name,
+                    CompletionItemKind::INTERFACE,
+                    Some("trait".to_string()),
+                    prefix,
+                );
+            }
+        }
+    }
+}
+
+fn collect_effect_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    if let Some(semantic) = semantic {
+        for name in semantic.check.scope_map.effects.keys() {
+            if name.contains('.') {
+                continue;
+            }
+            push_completion(
+                items,
+                seen,
+                name,
+                CompletionItemKind::INTERFACE,
+                Some("effect".to_string()),
+                prefix,
+            );
+        }
+    }
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+    {
+        for entry in project.module_interfaces.values() {
+            for name in entry.exports.effect_origins.keys() {
+                push_completion(
+                    items,
+                    seen,
+                    name,
+                    CompletionItemKind::INTERFACE,
+                    Some("effect".to_string()),
+                    prefix,
+                );
+            }
+        }
+    }
+}
+
+fn collect_handler_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    if let Some(semantic) = semantic {
+        for name in semantic.check.scope_map.handlers.keys() {
+            if name.contains('.') {
+                continue;
+            }
+            push_completion(
+                items,
+                seen,
+                name,
+                CompletionItemKind::EVENT,
+                Some("handler".to_string()),
+                prefix,
+            );
+        }
+    }
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+    {
+        for entry in project.module_interfaces.values() {
+            for name in entry.exports.handler_origins.keys() {
+                push_completion(
+                    items,
+                    seen,
+                    name,
+                    CompletionItemKind::EVENT,
+                    Some("handler".to_string()),
+                    prefix,
+                );
+            }
+        }
+    }
+}
+
+fn collect_module_name_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    if let Some(semantic) = semantic {
+        for module in semantic.check.module_exports().keys() {
+            push_completion(
+                items,
+                seen,
+                module,
+                CompletionItemKind::MODULE,
+                Some("module".to_string()),
+                prefix,
+            );
+        }
+        for name in semantic
+            .check
+            .scope_map
+            .values
+            .keys()
+            .chain(semantic.check.scope_map.types.keys())
+            .chain(semantic.check.scope_map.constructors.keys())
+            .chain(semantic.check.scope_map.traits.keys())
+            .chain(semantic.check.scope_map.effects.keys())
+            .chain(semantic.check.scope_map.handlers.keys())
+        {
+            if let Some(module) = name.split('.').next()
+                && module != name
+            {
+                push_completion(
+                    items,
+                    seen,
+                    module,
+                    CompletionItemKind::MODULE,
+                    Some("module".to_string()),
+                    prefix,
+                );
+            }
+        }
+    }
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+    {
+        for module in project
+            .module_interfaces
+            .keys()
+            .chain(project.semantic_indexes.keys())
+        {
+            push_completion(
+                items,
+                seen,
+                module,
+                CompletionItemKind::MODULE,
+                Some("module".to_string()),
+                prefix,
+            );
+        }
+    }
+}
+
+fn collect_qualified_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    chain: &[String],
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    let qualifier = chain.join(".");
+    let qualified_prefix = format!("{qualifier}.");
+    if let Some(semantic) = semantic {
+        for (name, scheme) in semantic.check.env.iter() {
+            if let Some(remainder) = name.strip_prefix(&qualified_prefix) {
+                let next = remainder.split('.').next().unwrap_or(remainder);
+                let is_module = remainder.contains('.');
+                push_completion(
+                    items,
+                    seen,
+                    next,
+                    if is_module {
+                        CompletionItemKind::MODULE
+                    } else {
+                        CompletionItemKind::FUNCTION
+                    },
+                    if is_module {
+                        Some("module".to_string())
+                    } else {
+                        Some(scheme.display_with_constraints(&semantic.check.sub))
+                    },
+                    prefix,
+                );
+            }
+        }
+        for (visible, canonical) in semantic
+            .check
+            .scope_map
+            .values
+            .iter()
+            .chain(semantic.check.scope_map.constructors.iter())
+            .chain(semantic.check.scope_map.types.iter())
+            .chain(semantic.check.scope_map.traits.iter())
+            .chain(semantic.check.scope_map.effects.iter())
+            .chain(semantic.check.scope_map.handlers.iter())
+        {
+            if let Some(remainder) = visible.strip_prefix(&qualified_prefix) {
+                let next = remainder.split('.').next().unwrap_or(remainder);
+                let is_module = remainder.contains('.');
+                let kind = if is_module {
+                    CompletionItemKind::MODULE
+                } else if semantic.check.scope_map.types.contains_key(visible) {
+                    CompletionItemKind::CLASS
+                } else if semantic.check.scope_map.constructors.contains_key(visible) {
+                    CompletionItemKind::CONSTRUCTOR
+                } else if semantic.check.scope_map.traits.contains_key(visible)
+                    || semantic.check.scope_map.effects.contains_key(visible)
+                {
+                    CompletionItemKind::INTERFACE
+                } else if semantic.check.scope_map.handlers.contains_key(visible) {
+                    CompletionItemKind::EVENT
+                } else {
+                    CompletionItemKind::FUNCTION
+                };
+                push_completion(items, seen, next, kind, Some(canonical.clone()), prefix);
+            }
+        }
+        if let Some(effect_name) = semantic.check.scope_map.resolve_effect(&qualifier)
+            && let Some(effect) = semantic.check.effects.get(effect_name)
+        {
+            for op in &effect.ops {
+                push_completion(
+                    items,
+                    seen,
+                    &op.name,
+                    CompletionItemKind::METHOD,
+                    typechecker::effect_operation_signature_from_info(
+                        effect_name,
+                        effect,
+                        &op.name,
+                    ),
+                    prefix,
+                );
+            }
+        }
+    }
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+    {
+        for (module, entry) in &project.module_interfaces {
+            if let Some(remainder) = module.strip_prefix(&qualified_prefix) {
+                let next = remainder.split('.').next().unwrap_or(remainder);
+                push_completion(
+                    items,
+                    seen,
+                    next,
+                    CompletionItemKind::MODULE,
+                    Some("module".to_string()),
+                    prefix,
+                );
+            }
+            if module == &qualifier {
+                for name in entry.exports.binding_origins.keys() {
+                    push_completion(
+                        items,
+                        seen,
+                        name,
+                        CompletionItemKind::FUNCTION,
+                        Some("function".to_string()),
+                        prefix,
+                    );
+                }
+                for name in entry.exports.type_origins.keys() {
+                    push_completion(
+                        items,
+                        seen,
+                        name,
+                        CompletionItemKind::CLASS,
+                        Some("type".to_string()),
+                        prefix,
+                    );
+                }
+                for name in entry.exports.trait_origins.keys() {
+                    push_completion(
+                        items,
+                        seen,
+                        name,
+                        CompletionItemKind::INTERFACE,
+                        Some("trait".to_string()),
+                        prefix,
+                    );
+                }
+                for name in entry.exports.effect_origins.keys() {
+                    push_completion(
+                        items,
+                        seen,
+                        name,
+                        CompletionItemKind::INTERFACE,
+                        Some("effect".to_string()),
+                        prefix,
+                    );
+                }
+                for name in entry.exports.handler_origins.keys() {
+                    push_completion(
+                        items,
+                        seen,
+                        name,
+                        CompletionItemKind::EVENT,
+                        Some("handler".to_string()),
+                        prefix,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn push_record_field_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    fields: Vec<(String, typechecker::Type)>,
+) {
+    for (field_name, field_type) in fields {
+        push_completion(
+            items,
+            seen,
+            field_name,
+            CompletionItemKind::FIELD,
+            Some(format!("{field_type}")),
+            prefix,
+        );
+    }
+}
+
+fn record_fields_for_chain(
+    check: &typechecker::CheckResult,
+    chain: &[String],
+    source: &str,
+) -> Option<Vec<(String, typechecker::Type)>> {
+    let mut fields = record_fields_for_receiver(check, chain.first()?, source)?;
+    for segment in &chain[1..] {
+        let (_, field_ty) = fields.iter().find(|(name, _)| name == segment)?;
+        fields = record_fields_for_type(check, &check.sub.apply(field_ty))?;
+    }
+    Some(fields)
+}
+
+fn record_fields_for_receiver(
+    check: &typechecker::CheckResult,
+    receiver: &str,
+    source: &str,
+) -> Option<Vec<(String, typechecker::Type)>> {
+    for (span, ty) in &check.type_at_span {
+        if source_text_at(source, *span) == receiver
+            && let Some(fields) = record_fields_for_type(check, &check.sub.apply(ty))
+        {
+            return Some(fields);
+        }
+    }
+    for (node_id, span) in &check.node_spans {
+        if source_text_at(source, *span) == receiver
+            && let Some(ty) = check.resolved_type_for_node(*node_id)
+            && let Some(fields) = record_fields_for_type(check, &check.sub.apply(&ty))
+        {
+            return Some(fields);
+        }
+    }
+    None
+}
+
+fn record_fields_for_name(
+    check: &typechecker::CheckResult,
+    record_name: &str,
+) -> Option<Vec<(String, typechecker::Type)>> {
+    let canonical = check
+        .scope_map
+        .resolve_type(record_name)
+        .unwrap_or(record_name);
+    check
+        .records
+        .get(canonical)
+        .or_else(|| {
+            check
+                .records
+                .iter()
+                .find(|(name, _)| typechecker::bare_type_name(name) == record_name)
+                .map(|(_, info)| info)
+        })
+        .map(|info| info.fields.clone())
+}
+
+fn record_fields_for_type(
+    check: &typechecker::CheckResult,
+    ty: &typechecker::Type,
+) -> Option<Vec<(String, typechecker::Type)>> {
+    match ty {
+        typechecker::Type::Record(fields) => Some(fields.clone()),
+        typechecker::Type::Con(name, args) => {
+            let info = check.records.get(name)?;
+            let replacements: HashMap<u32, typechecker::Type> = info
+                .type_params
+                .iter()
+                .copied()
+                .zip(args.iter().cloned())
+                .collect();
+            Some(
+                info.fields
+                    .iter()
+                    .map(|(field, ty)| (field.clone(), replace_type_vars(ty, &replacements)))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn replace_type_vars(
+    ty: &typechecker::Type,
+    replacements: &HashMap<u32, typechecker::Type>,
+) -> typechecker::Type {
+    match ty {
+        typechecker::Type::Var(id) => replacements
+            .get(id)
+            .cloned()
+            .unwrap_or(typechecker::Type::Var(*id)),
+        typechecker::Type::Fun(a, b, row) => typechecker::Type::Fun(
+            Box::new(replace_type_vars(a, replacements)),
+            Box::new(replace_type_vars(b, replacements)),
+            typechecker::EffectRow {
+                effects: row
+                    .effects
+                    .iter()
+                    .map(|effect| typechecker::EffectEntry {
+                        name: effect.name.clone(),
+                        args: effect
+                            .args
+                            .iter()
+                            .map(|arg| replace_type_vars(arg, replacements))
+                            .collect(),
+                    })
+                    .collect(),
+                tails: row
+                    .tails
+                    .iter()
+                    .map(|tail| replace_type_vars(tail, replacements))
+                    .collect(),
+            },
+        ),
+        typechecker::Type::Con(name, args) => typechecker::Type::Con(
+            name.clone(),
+            args.iter()
+                .map(|arg| replace_type_vars(arg, replacements))
+                .collect(),
+        ),
+        typechecker::Type::Record(fields) => typechecker::Type::Record(
+            fields
+                .iter()
+                .map(|(field, ty)| (field.clone(), replace_type_vars(ty, replacements)))
+                .collect(),
+        ),
+        typechecker::Type::Symbol(name) => typechecker::Type::Symbol(name.clone()),
+        typechecker::Type::Error => typechecker::Type::Error,
+    }
 }
 
 fn source_text_at(source: &str, span: saga::token::Span) -> &str {
@@ -5062,7 +5854,13 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let items = collect_completion_items(&document, position);
+        let project_root = project_root_for_uri(&uri);
+        let projects = self
+            .shared
+            .projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let items = collect_completion_items(&document, position, Some((&projects, &project_root)));
         if items.is_empty() {
             Ok(None)
         } else {
@@ -5689,7 +6487,7 @@ mod tests {
         store_document(&shared, uri.clone(), 2, "module Main\n\nm".to_string());
 
         let document = current_document(&shared, &uri).expect("document");
-        let labels: Vec<_> = collect_completion_items(&document, Position::new(2, 1))
+        let labels: Vec<_> = collect_completion_items(&document, Position::new(2, 1), None)
             .into_iter()
             .map(|item| item.label)
             .collect();

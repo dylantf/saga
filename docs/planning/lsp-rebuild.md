@@ -308,10 +308,13 @@ Done when:
 
 Goal: make interactive features fast and context-aware.
 
-- Split completion into syntax fallback and semantic enrichment.
-- Add context detection: expression position, type position, import position,
+- [x] Split completion into syntax fallback and semantic enrichment.
+- [x] Add context detection: expression position, type position, import position,
   record field position, handler body, effect `needs`, etc.
-- Port record/module completions only after their data source is explicit.
+- [x] Port module/import completions from project semantic state.
+- [x] Port record field completions from explicit record metadata.
+- [x] Add semantic completions for values, constructors, types, traits, effects,
+  handlers, and effect operations from indexed/cache-backed semantic data.
 - Port code actions one at a time, each with tests or fixtures.
 
 Done when:
@@ -429,32 +432,18 @@ Manual smoke tests:
 
 ## Current Next Step
 
-Scope and implement the first incremental project-checking slice from
-`docs/planning/incremental-checking.md`:
+Implement the first Phase 6 completion slice:
 
-1. [x] add timing instrumentation around the current rebuilt LSP pipeline
-2. [x] introduce an LSP-owned project semantic state without changing behavior
-3. [x] move parse/import graph/source overlay data into that state
-4. [x] cache dependency module interfaces outside a single cloned `Checker`
-5. [x] cache workspace module interfaces outside a single cloned `Checker`
-6. [x] invalidate reverse dependents only when a dependency's public interface
-   fingerprint changes
-7. [x] coalesce scheduling so slow checks cannot overlap per file
-8. [x] use trace output on a real Generic-heavy project to identify the
-   remaining slow compiler phase
-9. [x] reduce repeated cache/update/base-clone overhead found from that trace
-10. [x] avoid recursively cloning imported module `CheckResult`s for LSP
-    snapshots
-11. [x] seed import caches with exports only and read cross-module definition
-    spans from the project cache
-12. [x] lower semantic debounce after per-file in-flight coalescing proved
-    stable
-13. [x] cache pathless builtin module interfaces using embedded-source
-    fingerprints
-14. [x] publish syntax diagnostics and parse snapshots before cold semantic
-    warmup completes
-15. [x] replace the temporary interface fingerprint with a stable sorted
-   projection
+1. [x] add completion context detection for import, type, expression, record
+   field, handler/effect positions
+2. [x] use syntax fallback completions during parse/type errors
+3. [x] add module/import completions from project module maps and cached module
+   interfaces
+4. [x] add record field completions from semantic record metadata
+5. [x] add semantic completions for values, constructors, types, traits,
+   effects, handlers, and effect operations
+6. [x] add protocol regressions for each context
 
-Richer completion, references, and rename stay behind this work. Typechecking
-correctness and edit-time performance are the priority.
+Code actions remain behind completion. Typechecking correctness and edit-time
+performance stay the priority: completion handlers must read snapshots only and
+must not perform request-time project scans or typechecking.
