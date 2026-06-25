@@ -420,6 +420,8 @@ fn completion_uses_current_text_and_preserved_parse_snapshot() {
 fn completion_uses_context_and_semantic_project_data() {
     let root = temp_project("completion-contexts");
     let lib_path = root.join("src/Lib.saga");
+    let other_dir = root.join("src/Other");
+    let other_path = other_dir.join("Thing.saga");
     let main_path = root.join("src/Main.saga");
 
     let lib_source = "\
@@ -446,6 +448,17 @@ pub fun greet : Person -> String
 greet p = p.name
 ";
     std::fs::write(&lib_path, lib_source).expect("write lib module");
+    std::fs::create_dir_all(&other_dir).expect("create other module dir");
+    std::fs::write(
+        &other_path,
+        "\
+module Other.Thing
+
+pub fun value : Unit -> Int
+value () = 1
+",
+    )
+    .expect("write other module");
 
     let main_source = "\
 module Main
@@ -471,6 +484,21 @@ make p = {
 module Main
 
 import L
+";
+    let dotted_import_source = "\
+module Main
+
+import Other.
+";
+    let import_exposing_source = "\
+module Main
+
+import Lib (g
+";
+    let import_exposing_all_source = "\
+module Main
+
+import Lib (
 ";
 
     let result = {
@@ -526,6 +554,51 @@ import L
         let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 2, 1);
         let import_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 8);
 
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 3
+                },
+                "contentChanges": [{
+                    "text": dotted_import_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 3, 1);
+        let dotted_import_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 13);
+
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 4
+                },
+                "contentChanges": [{
+                    "text": import_exposing_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 4, 1);
+        let import_exposing_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 13);
+
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 5
+                },
+                "contentChanges": [{
+                    "text": import_exposing_all_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 5, 1);
+        let import_exposing_all_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 12);
+
         (
             trait_labels,
             type_labels,
@@ -537,6 +610,9 @@ import L
             local_labels,
             handler_labels,
             import_labels,
+            dotted_import_labels,
+            import_exposing_labels,
+            import_exposing_all_labels,
         )
     };
 
@@ -553,6 +629,9 @@ import L
         local_labels,
         handler_labels,
         import_labels,
+        dotted_import_labels,
+        import_exposing_labels,
+        import_exposing_all_labels,
     ) = result;
 
     assert!(
@@ -610,6 +689,35 @@ import L
     assert!(
         import_labels.iter().any(|label| label == "Lib"),
         "missing import module completion after syntax error: {import_labels:?}"
+    );
+    assert!(
+        dotted_import_labels
+            .iter()
+            .any(|label| label == "Other.Thing"),
+        "missing dotted project module completion: {dotted_import_labels:?}"
+    );
+    assert!(
+        import_exposing_labels.iter().any(|label| label == "greet"),
+        "missing import exposing value completion: {import_exposing_labels:?}"
+    );
+    assert!(
+        !import_exposing_labels.iter().any(|label| label == "Lib"),
+        "import exposing completion should list module exports, not modules: {import_exposing_labels:?}"
+    );
+    assert!(
+        import_exposing_all_labels
+            .iter()
+            .any(|label| label == "Person")
+            && import_exposing_all_labels
+                .iter()
+                .any(|label| label == "Describe")
+            && import_exposing_all_labels
+                .iter()
+                .any(|label| label == "Log")
+            && import_exposing_all_labels
+                .iter()
+                .any(|label| label == "ignore"),
+        "missing import exposing exported type/trait/effect/handler completions: {import_exposing_all_labels:?}"
     );
 }
 

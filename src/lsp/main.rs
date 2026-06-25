@@ -471,6 +471,7 @@ struct ProjectSemanticState {
     generation: u64,
     dep_graph: DependencyGraph,
     base_checker: Option<typechecker::Checker>,
+    module_names: BTreeSet<String>,
     module_interfaces: HashMap<String, CachedModuleInterface>,
     semantic_indexes: HashMap<String, CachedSemanticIndex>,
 }
@@ -513,6 +514,7 @@ impl ProjectSemanticState {
             generation: 0,
             dep_graph: DependencyGraph::default(),
             base_checker: None,
+            module_names: BTreeSet::new(),
             module_interfaces: HashMap::new(),
             semantic_indexes: HashMap::new(),
         }
@@ -590,6 +592,15 @@ impl ProjectSemanticStore {
                 index: update.index,
             },
         );
+    }
+
+    fn update_module_names(
+        &mut self,
+        project_root: Option<PathBuf>,
+        module_names: impl IntoIterator<Item = String>,
+    ) {
+        let project = self.project_mut(project_root);
+        project.module_names.extend(module_names);
     }
 
     fn project_type_reference_locations(
@@ -1529,6 +1540,7 @@ fn checker_for_analysis(
             source_overlay.clone(),
             open_modules,
         );
+        cache_checker_module_names(shared, project_root.clone(), &checker);
         trace_elapsed("checker prep prepare-checker", prepare_start);
         trace(format!(
             "checker prep prepared root={}",
@@ -1604,6 +1616,7 @@ fn checker_for_analysis(
         source_overlay.clone(),
         open_modules,
     );
+    cache_checker_module_names(shared, project_root.clone(), &checker);
     trace(format!(
         "checker prep prepared root={}",
         display_project_root(project_root.as_ref())
@@ -1629,6 +1642,22 @@ fn checker_for_analysis(
         display_project_root(project_root.as_ref())
     ));
     Ok(checker)
+}
+
+fn cache_checker_module_names(
+    shared: &SharedState,
+    project_root: Option<PathBuf>,
+    checker: &typechecker::Checker,
+) {
+    let Some(module_map) = checker.module_map() else {
+        return;
+    };
+    let module_names = module_map.keys().cloned().collect::<Vec<_>>();
+    if module_names.is_empty() {
+        return;
+    }
+    let mut projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
+    projects.update_module_names(project_root, module_names);
 }
 
 fn checker_base_for_project(
@@ -4422,6 +4451,7 @@ fn extract_prefix(source: &str, offset: usize) -> &str {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CompletionContext {
     ImportModule,
+    ImportExposing { module_name: String },
     DotAccess { chain: Vec<String>, prefix: String },
     RecordFields { record_name: String },
     Type,
@@ -4432,19 +4462,21 @@ enum CompletionContext {
 }
 
 fn completion_context(source: &str, offset: usize) -> CompletionContext {
-    if let Some((chain, prefix)) = dot_completion_context(source, offset) {
-        return CompletionContext::DotAccess { chain, prefix };
-    }
-    if let Some(record_name) = record_field_completion_context(source, offset) {
-        return CompletionContext::RecordFields { record_name };
-    }
-
     let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let line_before = &source[line_start..offset];
     let trimmed = line_before.trim_start();
 
     if trimmed.starts_with("import ") {
+        if let Some(module_name) = import_exposing_context(line_before) {
+            return CompletionContext::ImportExposing { module_name };
+        }
         return CompletionContext::ImportModule;
+    }
+    if let Some((chain, prefix)) = dot_completion_context(source, offset) {
+        return CompletionContext::DotAccess { chain, prefix };
+    }
+    if let Some(record_name) = record_field_completion_context(source, offset) {
+        return CompletionContext::RecordFields { record_name };
     }
     if recently_opened_row(line_before, "needs") {
         return CompletionContext::Effect;
@@ -4576,8 +4608,35 @@ fn completion_prefix_for_context<'a>(
 ) -> &'a str {
     match context {
         CompletionContext::DotAccess { prefix, .. } => prefix.as_str(),
+        CompletionContext::ImportModule => import_completion_prefix(source, offset),
+        CompletionContext::ImportExposing { .. } => extract_prefix(source, offset),
         _ => extract_prefix(source, offset),
     }
+}
+
+fn import_exposing_context(line_before: &str) -> Option<String> {
+    let trimmed = line_before.trim_start();
+    let rest = trimmed.strip_prefix("import ")?;
+    let lparen = rest.rfind('(')?;
+    let after_lparen = &rest[lparen + 1..];
+    if after_lparen.contains(')') {
+        return None;
+    }
+    let before_lparen = rest[..lparen].trim_end();
+    let module_name = before_lparen.split_whitespace().next()?;
+    (!module_name.is_empty()).then(|| module_name.to_string())
+}
+
+fn import_completion_prefix(source: &str, offset: usize) -> &str {
+    let offset = clamp_to_char_boundary(source, offset.min(source.len()));
+    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_before = &source[line_start..offset];
+    let trimmed_start_len = line_before.len() - line_before.trim_start().len();
+    let trimmed = &line_before[trimmed_start_len..];
+    let Some(rest) = trimmed.strip_prefix("import ") else {
+        return extract_prefix(source, offset);
+    };
+    rest.trim_start()
 }
 
 fn push_completion(
@@ -4622,6 +4681,16 @@ fn collect_completion_items(
     match &context {
         CompletionContext::ImportModule => {
             collect_module_name_completions(&mut items, &mut seen, prefix, semantic, projects);
+        }
+        CompletionContext::ImportExposing { module_name } => {
+            collect_import_exposing_completions(
+                &mut items,
+                &mut seen,
+                prefix,
+                module_name,
+                semantic,
+                projects,
+            );
         }
         CompletionContext::DotAccess { chain, .. } => {
             if let Some(semantic) = semantic
@@ -4673,6 +4742,34 @@ fn collect_completion_items(
 
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+fn collect_import_exposing_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    module_name: &str,
+    semantic: Option<&SemanticSnapshot>,
+    projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+) {
+    if let Some((projects, project_root)) = projects
+        && let Some(project) = projects.projects.get(project_root)
+        && let Some(entry) = project.module_interfaces.get(module_name)
+    {
+        push_module_export_completions(items, seen, prefix, entry, None);
+        return;
+    }
+    if let Some(semantic) = semantic
+        && let Some(exports) = semantic.check.module_exports().get(module_name)
+    {
+        push_exports_completion_items(
+            items,
+            seen,
+            prefix,
+            exports,
+            Some((&semantic.check.sub, None)),
+        );
+    }
 }
 
 fn collect_local_semantic_completions(
@@ -5046,6 +5143,16 @@ fn collect_module_name_completions(
     if let Some((projects, project_root)) = projects
         && let Some(project) = projects.projects.get(project_root)
     {
+        for module in project.module_names.iter() {
+            push_completion(
+                items,
+                seen,
+                module,
+                CompletionItemKind::MODULE,
+                Some("module".to_string()),
+                prefix,
+            );
+        }
         for module in project
             .module_interfaces
             .keys()
@@ -5063,19 +5170,124 @@ fn collect_module_name_completions(
     }
 }
 
-fn exported_binding_detail(entry: &CachedModuleInterface, name: &str) -> Option<String> {
-    let (_, scheme) = entry
-        .exports
-        .bindings
-        .iter()
-        .find(|(binding_name, _)| binding_name == name)?;
+fn push_module_export_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    entry: &CachedModuleInterface,
+    label_prefix: Option<&str>,
+) {
     let fallback_sub = typechecker::Substitution::new();
     let sub = entry
         .check_result
         .as_ref()
         .map(|check| &check.sub)
         .unwrap_or(&fallback_sub);
-    Some(scheme.display_with_constraints(sub))
+    push_exports_completion_items(
+        items,
+        seen,
+        prefix,
+        &entry.exports,
+        Some((sub, label_prefix)),
+    );
+}
+
+fn push_exports_completion_items(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    exports: &typechecker::ModuleExports,
+    detail_context: Option<(&typechecker::Substitution, Option<&str>)>,
+) {
+    let constructor_names: HashSet<&str> = exports
+        .type_constructors
+        .values()
+        .flat_map(|ctors| ctors.iter().map(String::as_str))
+        .collect();
+    for name in exports.binding_origins.keys() {
+        let is_constructor = constructor_names.contains(name.as_str());
+        let is_handler = exports.handler_origins.contains_key(name);
+        let detail = detail_context
+            .and_then(|(sub, _)| {
+                exports
+                    .bindings
+                    .iter()
+                    .find(|(binding_name, _)| binding_name == name)
+                    .map(|(_, scheme)| scheme.display_with_constraints(sub))
+            })
+            .or_else(|| {
+                Some(
+                    if is_constructor {
+                        "constructor"
+                    } else if is_handler {
+                        "handler"
+                    } else {
+                        "function"
+                    }
+                    .to_string(),
+                )
+            });
+        push_completion(
+            items,
+            seen,
+            completion_export_label(name, detail_context.and_then(|(_, prefix)| prefix)),
+            if is_constructor {
+                CompletionItemKind::CONSTRUCTOR
+            } else if is_handler {
+                CompletionItemKind::EVENT
+            } else {
+                CompletionItemKind::FUNCTION
+            },
+            detail,
+            prefix,
+        );
+    }
+    for name in exports.type_origins.keys() {
+        push_completion(
+            items,
+            seen,
+            completion_export_label(name, detail_context.and_then(|(_, prefix)| prefix)),
+            CompletionItemKind::CLASS,
+            Some("type".to_string()),
+            prefix,
+        );
+    }
+    for name in exports.trait_origins.keys() {
+        push_completion(
+            items,
+            seen,
+            completion_export_label(name, detail_context.and_then(|(_, prefix)| prefix)),
+            CompletionItemKind::INTERFACE,
+            Some("trait".to_string()),
+            prefix,
+        );
+    }
+    for name in exports.effect_origins.keys() {
+        push_completion(
+            items,
+            seen,
+            completion_export_label(name, detail_context.and_then(|(_, prefix)| prefix)),
+            CompletionItemKind::INTERFACE,
+            Some("effect".to_string()),
+            prefix,
+        );
+    }
+    for name in exports.handler_origins.keys() {
+        push_completion(
+            items,
+            seen,
+            completion_export_label(name, detail_context.and_then(|(_, prefix)| prefix)),
+            CompletionItemKind::EVENT,
+            Some("handler".to_string()),
+            prefix,
+        );
+    }
+}
+
+fn completion_export_label(name: &str, label_prefix: Option<&str>) -> String {
+    label_prefix
+        .map(|prefix| format!("{prefix}{name}"))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn collect_qualified_completions(
@@ -5187,81 +5399,7 @@ fn collect_qualified_completions(
                 );
             }
             if module == &qualifier {
-                let constructor_names: HashSet<&str> = entry
-                    .exports
-                    .type_constructors
-                    .values()
-                    .flat_map(|ctors| ctors.iter().map(String::as_str))
-                    .collect();
-                for name in entry.exports.binding_origins.keys() {
-                    let is_constructor = constructor_names.contains(name.as_str());
-                    let is_handler = entry.exports.handler_origins.contains_key(name);
-                    push_completion(
-                        items,
-                        seen,
-                        name,
-                        if is_constructor {
-                            CompletionItemKind::CONSTRUCTOR
-                        } else if is_handler {
-                            CompletionItemKind::EVENT
-                        } else {
-                            CompletionItemKind::FUNCTION
-                        },
-                        exported_binding_detail(entry, name).or_else(|| {
-                            Some(
-                                if is_constructor {
-                                    "constructor"
-                                } else if is_handler {
-                                    "handler"
-                                } else {
-                                    "function"
-                                }
-                                .to_string(),
-                            )
-                        }),
-                        prefix,
-                    );
-                }
-                for name in entry.exports.type_origins.keys() {
-                    push_completion(
-                        items,
-                        seen,
-                        name,
-                        CompletionItemKind::CLASS,
-                        Some("type".to_string()),
-                        prefix,
-                    );
-                }
-                for name in entry.exports.trait_origins.keys() {
-                    push_completion(
-                        items,
-                        seen,
-                        name,
-                        CompletionItemKind::INTERFACE,
-                        Some("trait".to_string()),
-                        prefix,
-                    );
-                }
-                for name in entry.exports.effect_origins.keys() {
-                    push_completion(
-                        items,
-                        seen,
-                        name,
-                        CompletionItemKind::INTERFACE,
-                        Some("effect".to_string()),
-                        prefix,
-                    );
-                }
-                for name in entry.exports.handler_origins.keys() {
-                    push_completion(
-                        items,
-                        seen,
-                        name,
-                        CompletionItemKind::EVENT,
-                        Some("handler".to_string()),
-                        prefix,
-                    );
-                }
+                push_module_export_completions(items, seen, prefix, entry, None);
             }
         }
     }
@@ -5847,7 +5985,16 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                completion_provider: Some(CompletionOptions::default()),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![
+                        ".".into(),
+                        "{".into(),
+                        ":".into(),
+                        "(".into(),
+                        ",".into(),
+                    ]),
+                    ..Default::default()
+                }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),

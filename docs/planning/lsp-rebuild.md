@@ -312,6 +312,7 @@ Goal: make interactive features fast and context-aware.
 - [x] Add context detection: expression position, type position, import position,
   record field position, handler body, effect `needs`, etc.
 - [x] Port module/import completions from project semantic state.
+- [x] Add import exposing-list completions from cached module exports.
 - [x] Port record field completions from explicit record metadata.
 - [x] Add semantic completions for values, constructors, types, traits, effects,
   handlers, and effect operations from indexed/cache-backed semantic data.
@@ -445,7 +446,11 @@ Implement the first Phase 6 completion slice:
 6. [x] add local parameter/let completions from the semantic definition index
 7. [x] show qualified exported function signatures and classify qualified
    constructors/handlers accurately
-8. [x] add protocol regressions for each context
+8. [x] back import-module completions with the project module map, including
+   dotted partial imports like `import Foo.`
+9. [x] complete import exposing lists like `import Foo (bar, Baz)` from cached
+   module exports
+10. [x] add protocol regressions for each context
 
 Completion is ready to be treated as functionally complete for the rebuild.
 Next: port code actions one at a time. Typechecking correctness and edit-time
