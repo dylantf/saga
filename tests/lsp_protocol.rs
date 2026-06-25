@@ -169,7 +169,7 @@ fn wait_for_diagnostics(lsp: &LspHarness, uri: &str, version: i64, ordinal: usiz
     .expect("publish diagnostics notification")
 }
 
-fn completion_labels(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) -> Vec<String> {
+fn completion_items(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) -> Vec<Value> {
     let id = lsp.send_request(
         "textDocument/completion",
         json!({
@@ -190,6 +190,11 @@ fn completion_labels(lsp: &mut LspHarness, uri: &str, line: u32, character: u32)
     response["result"]
         .as_array()
         .expect("completion item array")
+        .clone()
+}
+
+fn completion_labels(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) -> Vec<String> {
+    completion_items(lsp, uri, line, character)
         .iter()
         .filter_map(|item| item["label"].as_str().map(ToString::to_string))
         .collect()
@@ -436,6 +441,9 @@ pub effect Log {
 pub handler ignore for Log {
   write _ = resume ()
 }
+
+pub fun greet : Person -> String
+greet p = p.name
 ";
     std::fs::write(&lib_path, lib_source).expect("write lib module");
 
@@ -452,6 +460,7 @@ fun make : Person -> String needs {Log}
 make p = {
   let q = Person { name: \"Dylan\", age: 1 }
   let field = p.name
+  let qualified = Lib.greet q
   Log.write! \"x\"
   p |> describe
 } with ignore
@@ -497,8 +506,10 @@ import L
         let effect_labels = completion_labels(&mut lsp, &file_uri(&main_path), 8, 38);
         let record_literal_labels = completion_labels(&mut lsp, &file_uri(&main_path), 10, 24);
         let record_dot_labels = completion_labels(&mut lsp, &file_uri(&main_path), 11, 20);
-        let effect_op_labels = completion_labels(&mut lsp, &file_uri(&main_path), 12, 8);
-        let handler_labels = completion_labels(&mut lsp, &file_uri(&main_path), 14, 10);
+        let qualified_items = completion_items(&mut lsp, &file_uri(&main_path), 12, 22);
+        let effect_op_labels = completion_labels(&mut lsp, &file_uri(&main_path), 13, 8);
+        let local_labels = completion_labels(&mut lsp, &file_uri(&main_path), 14, 2);
+        let handler_labels = completion_labels(&mut lsp, &file_uri(&main_path), 15, 10);
 
         lsp.send_notification(
             "textDocument/didChange",
@@ -521,7 +532,9 @@ import L
             effect_labels,
             record_literal_labels,
             record_dot_labels,
+            qualified_items,
             effect_op_labels,
+            local_labels,
             handler_labels,
             import_labels,
         )
@@ -535,7 +548,9 @@ import L
         effect_labels,
         record_literal_labels,
         record_dot_labels,
+        qualified_items,
         effect_op_labels,
+        local_labels,
         handler_labels,
         import_labels,
     ) = result;
@@ -560,9 +575,33 @@ import L
         record_dot_labels.iter().any(|label| label == "name"),
         "missing record dot field completion: {record_dot_labels:?}"
     );
+    let greet = qualified_items
+        .iter()
+        .find(|item| item["label"].as_str() == Some("greet"))
+        .unwrap_or_else(|| panic!("missing qualified function completion: {qualified_items:?}"));
+    assert_eq!(
+        greet["detail"].as_str(),
+        Some("Person -> String"),
+        "qualified function completion should show signature: {qualified_items:?}"
+    );
+    let person_ctor = qualified_items
+        .iter()
+        .find(|item| item["label"].as_str() == Some("Person"))
+        .unwrap_or_else(|| panic!("missing qualified constructor completion: {qualified_items:?}"));
+    assert_eq!(
+        person_ctor["kind"].as_u64(),
+        Some(4),
+        "qualified record constructor should be classified as constructor: {qualified_items:?}"
+    );
     assert!(
         effect_op_labels.iter().any(|label| label == "write"),
         "missing effect operation completion: {effect_op_labels:?}"
+    );
+    assert!(
+        local_labels.iter().any(|label| label == "p")
+            && local_labels.iter().any(|label| label == "q")
+            && local_labels.iter().any(|label| label == "field"),
+        "missing local semantic completions: {local_labels:?}"
     );
     assert!(
         handler_labels.iter().any(|label| label == "ignore"),

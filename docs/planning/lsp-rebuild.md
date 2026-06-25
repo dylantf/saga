@@ -442,8 +442,12 @@ Implement the first Phase 6 completion slice:
 4. [x] add record field completions from semantic record metadata
 5. [x] add semantic completions for values, constructors, types, traits,
    effects, handlers, and effect operations
-6. [x] add protocol regressions for each context
+6. [x] add local parameter/let completions from the semantic definition index
+7. [x] show qualified exported function signatures and classify qualified
+   constructors/handlers accurately
+8. [x] add protocol regressions for each context
 
-Code actions remain behind completion. Typechecking correctness and edit-time
-performance stay the priority: completion handlers must read snapshots only and
+Completion is ready to be treated as functionally complete for the rebuild.
+Next: port code actions one at a time. Typechecking correctness and edit-time
+performance stay the priority: interactive handlers must read snapshots only and
 must not perform request-time project scans or typechecking.

@@ -4655,6 +4655,15 @@ fn collect_completion_items(
             collect_keyword_completions(&mut items, &mut seen, prefix);
             collect_syntax_completion_items(&mut items, &mut seen, prefix, document);
             if let Some(semantic) = semantic {
+                if let Some(parse) = document
+                    .parse
+                    .as_deref()
+                    .filter(|parse| parse.version == document.version)
+                {
+                    collect_local_semantic_completions(
+                        &mut items, &mut seen, prefix, parse, semantic, offset,
+                    );
+                }
                 collect_expression_semantic_completions(
                     &mut items, &mut seen, prefix, semantic, projects,
                 );
@@ -4664,6 +4673,67 @@ fn collect_completion_items(
 
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+fn collect_local_semantic_completions(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    prefix: &str,
+    parse: &ParseSnapshot,
+    semantic: &SemanticSnapshot,
+    offset: usize,
+) {
+    let Some((decl_span, excluded_name_span)) = containing_value_decl(&parse.program, offset)
+    else {
+        return;
+    };
+    for node_id in semantic.semantic_index.definition_locations.keys() {
+        let Some(span) = semantic.check.node_spans.get(node_id) else {
+            continue;
+        };
+        if span.start < decl_span.start
+            || span.end > decl_span.end
+            || span.start >= offset
+            || excluded_name_span
+                .as_ref()
+                .is_some_and(|excluded| excluded.start == span.start && excluded.end == span.end)
+        {
+            continue;
+        }
+        let name = source_text_at(&semantic.source, *span);
+        if name.is_empty()
+            || name.contains('.')
+            || name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_uppercase() || ch == '_')
+        {
+            continue;
+        }
+        push_completion(
+            items,
+            seen,
+            name,
+            CompletionItemKind::VARIABLE,
+            semantic.check.type_at_node(node_id),
+            prefix,
+        );
+    }
+}
+
+fn containing_value_decl(
+    program: &ast::Program,
+    offset: usize,
+) -> Option<(saga::token::Span, Option<saga::token::Span>)> {
+    program.iter().find_map(|decl| match decl {
+        ast::Decl::FunBinding {
+            name_span, span, ..
+        }
+        | ast::Decl::Let {
+            name_span, span, ..
+        } if span.start <= offset && offset <= span.end => Some((*span, Some(*name_span))),
+        _ => None,
+    })
 }
 
 fn collect_keyword_completions(
@@ -4993,6 +5063,21 @@ fn collect_module_name_completions(
     }
 }
 
+fn exported_binding_detail(entry: &CachedModuleInterface, name: &str) -> Option<String> {
+    let (_, scheme) = entry
+        .exports
+        .bindings
+        .iter()
+        .find(|(binding_name, _)| binding_name == name)?;
+    let fallback_sub = typechecker::Substitution::new();
+    let sub = entry
+        .check_result
+        .as_ref()
+        .map(|check| &check.sub)
+        .unwrap_or(&fallback_sub);
+    Some(scheme.display_with_constraints(sub))
+}
+
 fn collect_qualified_completions(
     items: &mut Vec<CompletionItem>,
     seen: &mut HashSet<String>,
@@ -5008,6 +5093,15 @@ fn collect_qualified_completions(
             if let Some(remainder) = name.strip_prefix(&qualified_prefix) {
                 let next = remainder.split('.').next().unwrap_or(remainder);
                 let is_module = remainder.contains('.');
+                let value_kind = if semantic.check.scope_map.constructors.contains_key(name)
+                    || semantic.check.constructors.contains_key(name)
+                {
+                    CompletionItemKind::CONSTRUCTOR
+                } else if semantic.check.scope_map.handlers.contains_key(name) {
+                    CompletionItemKind::EVENT
+                } else {
+                    CompletionItemKind::FUNCTION
+                };
                 push_completion(
                     items,
                     seen,
@@ -5015,7 +5109,7 @@ fn collect_qualified_completions(
                     if is_module {
                         CompletionItemKind::MODULE
                     } else {
-                        CompletionItemKind::FUNCTION
+                        value_kind
                     },
                     if is_module {
                         Some("module".to_string())
@@ -5093,13 +5187,38 @@ fn collect_qualified_completions(
                 );
             }
             if module == &qualifier {
+                let constructor_names: HashSet<&str> = entry
+                    .exports
+                    .type_constructors
+                    .values()
+                    .flat_map(|ctors| ctors.iter().map(String::as_str))
+                    .collect();
                 for name in entry.exports.binding_origins.keys() {
+                    let is_constructor = constructor_names.contains(name.as_str());
+                    let is_handler = entry.exports.handler_origins.contains_key(name);
                     push_completion(
                         items,
                         seen,
                         name,
-                        CompletionItemKind::FUNCTION,
-                        Some("function".to_string()),
+                        if is_constructor {
+                            CompletionItemKind::CONSTRUCTOR
+                        } else if is_handler {
+                            CompletionItemKind::EVENT
+                        } else {
+                            CompletionItemKind::FUNCTION
+                        },
+                        exported_binding_detail(entry, name).or_else(|| {
+                            Some(
+                                if is_constructor {
+                                    "constructor"
+                                } else if is_handler {
+                                    "handler"
+                                } else {
+                                    "function"
+                                }
+                                .to_string(),
+                            )
+                        }),
                         prefix,
                     );
                 }
