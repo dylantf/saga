@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 
-use saga::{ast, derive, desugar, lexer, parser, project_config, typechecker};
+use saga::{ast, derive, desugar, formatter, lexer, parser, project_config, typechecker};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -5976,6 +5976,31 @@ fn workspace_edit_from_locations(
     Some(WorkspaceEdit::new(changes))
 }
 
+fn formatting_edits(uri: &Url, source: &str) -> Option<Vec<TextEdit>> {
+    let tokens = lexer::Lexer::new(source).lex().ok()?;
+    let mut parser = parser::Parser::new(tokens);
+    let program = parser.parse_program_annotated().ok()?;
+    let width = project_root_for_uri(uri)
+        .map(|root| project_config::ProjectConfig::load(&root).formatter.width)
+        .unwrap_or(formatter::DEFAULT_WIDTH);
+    let formatted = formatter::format(&program, width);
+    if formatted == source {
+        return Some(Vec::new());
+    }
+    Some(vec![TextEdit {
+        range: full_document_range(source),
+        new_text: formatted,
+    }])
+}
+
+fn full_document_range(source: &str) -> Range {
+    let line_index = LineIndex::new(source);
+    Range {
+        start: Position::new(0, 0),
+        end: line_index.offset_to_position(source.len(), source),
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
@@ -5998,6 +6023,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: WorkDoneProgressOptions::default(),
@@ -6111,6 +6137,15 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(DocumentSymbolResponse::Flat(symbols)))
         }
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let Some(document) = current_document(&self.shared, &uri) else {
+            return Ok(None);
+        };
+
+        Ok(formatting_edits(&uri, &document.text))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

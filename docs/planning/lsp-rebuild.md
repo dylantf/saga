@@ -328,7 +328,7 @@ Done when:
 
 Goal: retire the old server.
 
-- Formatter.
+- [x] Formatter request handler.
 - Signature help.
 - Missing-arm/missing-import/missing-impl code actions.
 - Semantic tokens.

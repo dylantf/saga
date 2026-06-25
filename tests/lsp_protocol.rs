@@ -200,6 +200,27 @@ fn completion_labels(lsp: &mut LspHarness, uri: &str, line: u32, character: u32)
         .collect()
 }
 
+fn formatting_edits(lsp: &mut LspHarness, uri: &str) -> Option<Vec<Value>> {
+    let id = lsp.send_request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": {
+                "uri": uri
+            },
+            "options": {
+                "tabSize": 2,
+                "insertSpaces": true
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("formatting response");
+    response["result"].as_array().cloned()
+}
+
 fn saga_uri(name: &str) -> String {
     format!("file:///tmp/{name}.saga")
 }
@@ -414,6 +435,39 @@ fn completion_uses_current_text_and_preserved_parse_snapshot() {
         labels.contains(&"module"),
         "missing keyword completion: {labels:?}"
     );
+}
+
+#[test]
+fn formatting_uses_current_document_text() {
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = saga_uri("formatting");
+    let source = "main () = {\nlet x = 1\nprintln x\n}";
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+
+    let edits = formatting_edits(&mut lsp, &saga_uri("formatting"))
+        .expect("formatting should return an edit list");
+    assert_eq!(edits.len(), 1, "expected whole-document edit: {edits:?}");
+    let edit = &edits[0];
+    assert_eq!(
+        edit["newText"].as_str(),
+        Some("main () = {\n  let x = 1\n  println x\n}\n")
+    );
+    assert_eq!(edit["range"]["start"]["line"].as_u64(), Some(0));
+    assert_eq!(edit["range"]["start"]["character"].as_u64(), Some(0));
+    assert_eq!(edit["range"]["end"]["line"].as_u64(), Some(3));
+    assert_eq!(edit["range"]["end"]["character"].as_u64(), Some(1));
 }
 
 #[test]
