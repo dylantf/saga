@@ -348,7 +348,7 @@ fn warm_dependency_modules(checker: &mut typechecker::Checker, root: &Path) {
     dependency_modules.sort();
 
     for module in dependency_modules {
-        if let Err(e) = checker.try_typecheck_import_by_name(&module) {
+        if let Err(e) = checker.try_load_module_by_name(&module) {
             eprintln!("[LSP] Warning: failed to warm dependency module '{module}': {e}");
         }
     }

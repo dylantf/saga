@@ -499,6 +499,18 @@ impl Checker {
         self.typecheck_import(&parts, None, None, span)
     }
 
+    /// Load and cache a module by name without injecting its import scope.
+    /// Used by the LSP to warm dependency module interfaces without making
+    /// their bare names visible in user modules.
+    pub fn try_load_module_by_name(
+        &mut self,
+        module_name: &str,
+    ) -> std::result::Result<(), Diagnostic> {
+        let parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
+        let span = crate::token::Span { start: 0, end: 0 };
+        self.load_module(&parts, span).map(|_| ())
+    }
+
     /// Typecheck a module by name, triggering the full dependency walk.
     /// Used for library builds where there is no Main.saga entry point.
     pub fn typecheck_import_by_name(&mut self, module_name: &str) {

@@ -24,10 +24,11 @@ mod state;
 mod text;
 
 use analysis_pipeline::{
-    analyze_syntax_document, display_project_root, project_root_for_uri, trace,
+    analyze_syntax_document, checker_base_for_project, display_project_root, project_root_for_uri,
+    trace,
 };
 use code_action::collect_code_actions;
-use completion::collect_completion_items;
+use completion::{collect_completion_items, import_exposing_module_at};
 use document_symbol::collect_document_symbols;
 use hover::hover_type_at;
 use navigation::{
@@ -227,6 +228,53 @@ fn apply_parse_result(
 fn current_document(shared: &SharedState, uri: &Url) -> Option<DocumentState> {
     let documents = shared.documents.lock().ok()?;
     documents.get(uri).cloned()
+}
+
+fn ensure_module_interface_for_completion(
+    shared: &SharedState,
+    project_root: Option<PathBuf>,
+    module_name: &str,
+) {
+    {
+        let projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
+        if projects
+            .projects
+            .get(&project_root)
+            .is_some_and(|project| project.module_interfaces.contains_key(module_name))
+        {
+            return;
+        }
+    }
+
+    let Ok(mut checker) = checker_base_for_project(project_root.clone()) else {
+        return;
+    };
+    if checker.try_load_module_by_name(module_name).is_err() {
+        return;
+    }
+    let check = checker.to_lsp_result();
+    let cached_source_fingerprints = shared
+        .projects
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cached_module_source_fingerprints(&project_root);
+    let updates = analysis::collect_module_interface_updates(
+        None,
+        &Vec::new(),
+        &checker,
+        &check,
+        &HashMap::new(),
+        &cached_source_fingerprints,
+        false,
+    );
+    if updates.is_empty() {
+        return;
+    }
+    shared
+        .projects
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .apply_module_interface_updates(project_root, updates);
 }
 
 async fn publish_syntax_snapshot(
@@ -569,6 +617,13 @@ impl LanguageServer for Backend {
         };
 
         let project_root = project_root_for_uri(&uri);
+        if let Some(module_name) = import_exposing_module_at(&document, position) {
+            ensure_module_interface_for_completion(
+                &self.shared,
+                project_root.clone(),
+                &module_name,
+            );
+        }
         let projects = self
             .shared
             .projects

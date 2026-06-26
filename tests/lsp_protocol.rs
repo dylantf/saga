@@ -189,7 +189,7 @@ fn completion_items(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) 
         .expect("completion response");
     response["result"]
         .as_array()
-        .expect("completion item array")
+        .unwrap_or_else(|| panic!("completion item array, got response: {response:?}"))
         .clone()
 }
 
@@ -1860,6 +1860,287 @@ render () = case Kraken.Db.insert () {
             .iter()
             .any(|message| message.contains("Debug") && message.contains("DbError")),
         "expected missing Debug DbError diagnostic, got {messages:?}"
+    );
+}
+
+#[test]
+fn diagnostics_forward_undefined_trait_errors_from_imported_modules() {
+    let root = temp_project("imported-undefined-trait-diagnostic");
+    let main_path = root.join("src/Main.saga");
+    let database_path = root.join("src/Database.saga");
+    let db_dir = root.join("src/Db");
+    let sesh_path = db_dir.join("Sesh.saga");
+    std::fs::create_dir_all(&db_dir).expect("create db module dir");
+
+    std::fs::write(
+        &sesh_path,
+        "\
+module SeshImporter.Db.Sesh
+
+pub record Sesh {
+  id: Int
+}
+
+impl PgType for Sesh {}
+",
+    )
+    .expect("write sesh module");
+    std::fs::write(
+        &database_path,
+        "\
+module SeshImporter.Database
+
+import SeshImporter.Db.Sesh
+
+pub fun touch : Unit -> Unit
+touch () = ()
+",
+    )
+    .expect("write database module");
+    let main_source = "\
+module Main
+
+import SeshImporter.Database
+
+main () = ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let messages: Vec<_> = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        messages.iter().any(|message| message.contains(
+            "type error in module 'SeshImporter.Database': type error in module 'SeshImporter.Db.Sesh': impl for undefined trait: PgType"
+        )),
+        "expected imported undefined trait diagnostic, got {messages:?}"
+    );
+}
+
+#[test]
+fn diagnostics_report_undefined_trait_in_open_module() {
+    let root = temp_project("open-undefined-trait-diagnostic");
+    let main_path = root.join("src/Main.saga");
+    let source = "\
+module Main
+
+pub record Sesh {
+  id: Int
+}
+
+impl PgType for Sesh {}
+";
+    std::fs::write(&main_path, source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let messages: Vec<_> = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("impl for undefined trait: PgType")),
+        "expected undefined trait diagnostic, got {messages:?}"
+    );
+}
+
+#[test]
+fn diagnostics_do_not_treat_warmed_dependency_as_bare_trait_scope() {
+    let root = temp_project("dependency-warmed-trait-scope-diagnostic");
+    let dep_root = root.join("deps/kraken");
+    let dep_src = dep_root.join("src/Kraken");
+    let main_path = root.join("src/Main.saga");
+    std::fs::create_dir_all(&dep_src).expect("create dependency src");
+    std::fs::write(
+        root.join("project.toml"),
+        "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+    )
+    .expect("write app project.toml");
+    std::fs::write(
+        dep_root.join("project.toml"),
+        "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Core\"]
+",
+    )
+    .expect("write dependency project.toml");
+    std::fs::write(
+        dep_src.join("Core.saga"),
+        "\
+module Kraken.Core
+
+pub trait PgType a {}
+",
+    )
+    .expect("write dependency module");
+
+    let main_source = "\
+module Main
+
+pub record Sesh {
+  id: Int
+}
+
+impl PgType for Sesh {}
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let messages: Vec<_> = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("impl for undefined trait: PgType")),
+        "expected warmed dependency not to expose bare trait, got {messages:?}"
+    );
+}
+
+#[test]
+fn dependency_import_exposing_completion_uses_warmed_exports() {
+    let root = temp_project("dependency-import-exposing-completion");
+    let dep_root = root.join("deps/kraken");
+    let dep_src = dep_root.join("src/Kraken");
+    let main_path = root.join("src/Main.saga");
+    std::fs::create_dir_all(&dep_src).expect("create dependency src");
+    std::fs::write(
+        root.join("project.toml"),
+        "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+    )
+    .expect("write app project.toml");
+    std::fs::write(
+        dep_root.join("project.toml"),
+        "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Core\"]
+",
+    )
+    .expect("write dependency project.toml");
+    std::fs::write(
+        dep_src.join("Core.saga"),
+        "\
+module Kraken.Core
+
+pub type ColumnSet = ColumnSet
+",
+    )
+    .expect("write dependency module");
+
+    let main_source = "\
+module Main
+
+import Kraken.Core (C
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    );
+    let _ = wait_for_diagnostics(&lsp, &uri, 1, 1);
+    let labels = completion_labels(&mut lsp, &uri, 2, 21);
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        labels.iter().any(|label| label == "ColumnSet"),
+        "missing dependency import exposing completion: {labels:?}"
     );
 }
 

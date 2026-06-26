@@ -72,6 +72,18 @@ fn completion_context(source: &str, offset: usize) -> CompletionContext {
     CompletionContext::Expression
 }
 
+pub(super) fn import_exposing_module_at(
+    document: &DocumentState,
+    position: Position,
+) -> Option<String> {
+    let line_index = LineIndex::new(&document.text);
+    let offset = line_index.position_to_offset(position, &document.text);
+    match completion_context(&document.text, offset) {
+        CompletionContext::ImportExposing { module_name } => Some(module_name),
+        _ => None,
+    }
+}
+
 fn recently_opened_row(line_before: &str, keyword: &str) -> bool {
     let Some(keyword_pos) = line_before.rfind(keyword) else {
         return false;
