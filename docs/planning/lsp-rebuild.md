@@ -61,10 +61,10 @@ the salvage yard.
 Chosen placement:
 
 - new server: `src/lsp/`
-- old server: `src/lsp_legacy/`
 
-The normal `saga-lsp` binary points at the rebuild. The old implementation stays
-buildable as `saga-lsp-legacy` while we port behavior across deliberately.
+The normal `saga-lsp` binary points at the rebuild. The old implementation was
+kept temporarily as a legacy fallback; it was removed once the rebuilt server
+covered the core editing loop.
 
 ## Design Principles
 
@@ -431,9 +431,10 @@ Manual smoke tests:
 - 2026-06-24: Prefer a fresh LSP skeleton over incremental surgery on the
   current server. The current implementation remains as reference and salvage
   source.
-- 2026-06-24: Use `src/lsp/` for the new server and move the old implementation
-  to `src/lsp_legacy/`. Keep the normal binary name `saga-lsp` for the rebuild
-  and add `saga-lsp-legacy` as an escape hatch.
+- 2026-06-24: Use `src/lsp/` for the new server and keep the old
+  implementation available temporarily as an escape hatch.
+- 2026-06-26: Retire the legacy implementation. `saga-lsp` now points only at
+  the rebuilt server.
 
 ## Current Next Step
 
