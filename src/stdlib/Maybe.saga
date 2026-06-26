@@ -34,7 +34,7 @@ is_nothing m = case m {
 }
 
 #@ Applies a function to the inner value if Just, otherwise returns Nothing.
-pub fun map : (f: a -> b) -> (m: Maybe a) -> Maybe b
+pub fun map : (f: a -> b needs {..e}) -> (m: Maybe a) -> Maybe b needs {..e}
 map f m = case m {
   Nothing -> Nothing
   Just x -> Just (f x)
@@ -55,7 +55,8 @@ unwrap m = case m {
 }
 
 #@ Chains a function that returns Maybe. Returns Nothing if the input is Nothing.
-pub fun and_then : (f: a -> Maybe b) -> (m: Maybe a) -> Maybe b
+pub fun and_then : (f: a -> Maybe b needs {..e}) -> (m: Maybe a) -> Maybe b
+  needs {..e}
 and_then f m = case m {
   Nothing -> Nothing
   Just x -> f x
