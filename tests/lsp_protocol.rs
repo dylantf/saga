@@ -215,6 +215,27 @@ fn code_actions(lsp: &mut LspHarness, uri: &str, diagnostic: &Value) -> Vec<Valu
     response["result"].as_array().cloned().unwrap_or_default()
 }
 
+fn signature_help(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) -> Option<Value> {
+    let id = lsp.send_request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": {
+                "uri": uri
+            },
+            "position": {
+                "line": line,
+                "character": character
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("signatureHelp response");
+    (!response["result"].is_null()).then(|| response["result"].clone())
+}
+
 fn synthetic_diagnostic(
     message: &str,
     start_line: u32,
@@ -714,6 +735,202 @@ main () = Lib.greet ()
         "missing qualified-prefix import action: {qualified_titles:?}"
     );
     assert_eq!(qualified_edit.as_deref(), Some("\nimport Lib\n\n"));
+}
+
+#[test]
+fn signature_help_uses_local_labels_and_imported_schemes() {
+    let root = temp_project("signature-help");
+    let lib_path = root.join("src/Lib.saga");
+    let main_path = root.join("src/Main.saga");
+    let lib_source = "\
+module Lib
+
+pub fun join : (left: String) -> (right: String) -> String
+join left right = left <> right
+";
+    let main_source = "\
+module Main
+
+import Lib
+
+fun add : (x: Int) -> (y: Int) -> Int
+add x y = x + y
+
+main () = {
+  let sum = add 1 2
+  Lib.join \"a\" \"b\"
+}
+";
+    std::fs::write(&lib_path, lib_source).expect("write lib module");
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let (local_help, imported_help) = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&lib_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": lib_source
+                }
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&lib_path), 1, 2);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &file_uri(&main_path), 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(|diagnostics| {
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic["severity"].as_i64() == Some(1))
+                    .count()
+            }),
+            Some(0),
+            "fixture must typecheck before signature help request, got {params:?}"
+        );
+
+        let local_help =
+            signature_help(&mut lsp, &file_uri(&main_path), 8, 18).expect("local signature help");
+        let imported_help = signature_help(&mut lsp, &file_uri(&main_path), 9, 17)
+            .expect("imported signature help");
+        (local_help, imported_help)
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        local_help["signatures"][0]["label"].as_str(),
+        Some("(x: Int) -> (y: Int) -> Int")
+    );
+    assert_eq!(
+        local_help["signatures"][0]["activeParameter"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        local_help["signatures"][0]["parameters"][0]["label"].as_str(),
+        Some("x: Int")
+    );
+    assert_eq!(
+        local_help["signatures"][0]["parameters"][1]["label"].as_str(),
+        Some("y: Int")
+    );
+
+    assert_eq!(
+        imported_help["signatures"][0]["label"].as_str(),
+        Some("String -> String -> String")
+    );
+    assert_eq!(
+        imported_help["signatures"][0]["activeParameter"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn signature_help_covers_trait_methods_and_effect_ops() {
+    let root = temp_project("signature-help-traits-effects");
+    let main_path = root.join("src/Main.saga");
+    let source = "\
+module Main
+
+pub trait Describe a {
+  fun describe_it : a -> String
+}
+
+pub effect Log {
+  fun write : String -> Unit
+}
+
+pub handler ignore for Log {
+  write _ = resume ()
+}
+
+impl Describe for String {
+  describe_it s = s
+}
+
+main () = {
+  let a = describe_it \"Dylan\"
+  let b = Log.write! \"hello\"
+  ()
+} with ignore
+";
+    std::fs::write(&main_path, source).expect("write main module");
+
+    let (trait_help, effect_help) = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &file_uri(&main_path), 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(|diagnostics| {
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic["severity"].as_i64() == Some(1))
+                    .count()
+            }),
+            Some(0),
+            "fixture must typecheck before signature help request, got {params:?}"
+        );
+
+        let trait_help =
+            signature_help(&mut lsp, &file_uri(&main_path), 19, 24).expect("trait signature help");
+        let effect_help =
+            signature_help(&mut lsp, &file_uri(&main_path), 20, 23).expect("effect signature help");
+        (trait_help, effect_help)
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        trait_help["signatures"][0]["label"].as_str(),
+        Some("Describe.describe_it : a -> String")
+    );
+    assert_eq!(
+        trait_help["signatures"][0]["parameters"][0]["label"].as_str(),
+        Some("a")
+    );
+    assert_eq!(
+        trait_help["signatures"][0]["activeParameter"].as_u64(),
+        Some(0)
+    );
+
+    assert_eq!(
+        effect_help["signatures"][0]["label"].as_str(),
+        Some("Log.write : String -> Unit")
+    );
+    assert_eq!(
+        effect_help["signatures"][0]["parameters"][0]["label"].as_str(),
+        Some("String")
+    );
+    assert_eq!(
+        effect_help["signatures"][0]["activeParameter"].as_u64(),
+        Some(0)
+    );
 }
 
 fn action_titles(actions: &[Value]) -> Vec<String> {

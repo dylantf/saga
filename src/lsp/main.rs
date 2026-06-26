@@ -19,6 +19,7 @@ mod semantic;
 mod semantic_builder;
 mod semantic_symbols;
 mod semantic_values;
+mod signature_help;
 mod state;
 mod text;
 
@@ -35,6 +36,7 @@ use navigation::{
 };
 use scheduler::debounce_loop;
 use semantic::{SemanticIndex, SemanticSymbolKey};
+use signature_help::signature_help_at;
 use state::{
     CachedModuleInterface, ModuleInterfaceUpdate, ProjectSemanticIndexUpdate, ProjectSemanticStore,
 };
@@ -344,6 +346,11 @@ impl LanguageServer for Backend {
                     ]),
                     ..Default::default()
                 }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec![" ".into(), "(".into(), ",".into()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
@@ -598,6 +605,33 @@ impl LanguageServer for Backend {
         Ok(hover_type_at(
             &uri,
             &semantic,
+            position,
+            Some((&projects, &project_root)),
+        ))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(document) = current_document(&self.shared, &uri) else {
+            return Ok(None);
+        };
+        let Some(semantic) = &document.semantic else {
+            return Ok(None);
+        };
+        if semantic.version != document.version {
+            return Ok(None);
+        }
+
+        let project_root = project_root_for_uri(&uri);
+        let projects = self
+            .shared
+            .projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(signature_help_at(
+            &document,
+            semantic,
             position,
             Some((&projects, &project_root)),
         ))
