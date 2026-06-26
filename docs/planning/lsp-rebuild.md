@@ -216,8 +216,12 @@ Goal: stop treating each file as an island.
   analysis clones do not repeatedly typecheck unchanged dependency packages.
 - [x] Refresh the project module map for each semantic analysis clone, so added
   or removed modules do not require restarting the server.
-- Watch project files so added/removed modules can trigger affected open files
-  without waiting for the user to edit one of them.
+- [x] Keep dirty/unsaved module declarations out of project-wide module caches;
+  module discovery trusts saved files and file-watch events.
+- [x] Allow empty/new `.saga` files to enter the document cache without crashing
+  the syntax snapshot path.
+- [x] Watch project files so added/removed modules can trigger affected open
+  files without waiting for the user to edit one of them.
 - [x] Track import edges from parse snapshots.
 - [x] Recheck changed open files plus reverse open dependents.
 - [x] Add an open-document source overlay so unsaved edits in imported modules are

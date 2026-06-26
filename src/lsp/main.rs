@@ -15,6 +15,7 @@ const SEMANTIC_DEBOUNCE_MS: u64 = 100;
 struct DocumentState {
     version: i32,
     text: String,
+    dirty: bool,
     parse: Option<Arc<ParseSnapshot>>,
     semantic: Option<Arc<SemanticSnapshot>>,
     diagnostics: Vec<Diagnostic>,
@@ -567,11 +568,21 @@ impl ProjectSemanticStore {
     }
 
     fn remove_file_from_all_projects(&mut self, uri: &Url) {
+        let path = uri.to_file_path().ok();
         for project in self.projects.values_mut() {
-            project.dep_graph.remove_file(uri);
+            if let Some(module_name) = project.dep_graph.remove_file(uri) {
+                project.module_names.remove(&module_name);
+                project.module_interfaces.remove(&module_name);
+                project.semantic_indexes.remove(&module_name);
+            }
             project
                 .semantic_indexes
                 .retain(|_, cached| cached.uri != *uri);
+            if let Some(path) = &path {
+                project
+                    .module_interfaces
+                    .retain(|_, cached| cached.path.as_deref() != Some(path.as_path()));
+            }
             project.generation = project.generation.saturating_add(1);
         }
     }
@@ -594,13 +605,13 @@ impl ProjectSemanticStore {
         );
     }
 
-    fn update_module_names(
+    fn replace_module_names(
         &mut self,
         project_root: Option<PathBuf>,
         module_names: impl IntoIterator<Item = String>,
     ) {
         let project = self.project_mut(project_root);
-        project.module_names.extend(module_names);
+        project.module_names = module_names.into_iter().collect();
     }
 
     fn project_type_reference_locations(
@@ -795,6 +806,22 @@ impl ProjectSemanticStore {
         let mut saw_current = false;
 
         for update in updates {
+            if let Some(path) = &update.path {
+                let stale_modules = project
+                    .module_interfaces
+                    .iter()
+                    .filter(|(module_name, entry)| {
+                        *module_name != &update.module_name
+                            && entry.path.as_deref() == Some(path.as_path())
+                    })
+                    .map(|(module_name, _)| module_name.clone())
+                    .collect::<Vec<_>>();
+                for module_name in stale_modules {
+                    project.module_names.remove(&module_name);
+                    project.module_interfaces.remove(&module_name);
+                    project.semantic_indexes.remove(&module_name);
+                }
+            }
             let previous_fingerprint = project
                 .module_interfaces
                 .get(&update.module_name)
@@ -914,7 +941,7 @@ impl DependencyGraph {
             .unwrap_or_default()
     }
 
-    fn remove_file(&mut self, uri: &Url) {
+    fn remove_file(&mut self, uri: &Url) -> Option<String> {
         if let Some(old_imports) = self.imports.remove(uri) {
             for module in old_imports {
                 if let Some(dependents) = self.dependents.get_mut(&module) {
@@ -925,7 +952,7 @@ impl DependencyGraph {
                 }
             }
         }
-        self.module_of.remove(uri);
+        self.module_of.remove(uri)
     }
 }
 
@@ -1657,7 +1684,7 @@ fn cache_checker_module_names(
         return;
     }
     let mut projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
-    projects.update_module_names(project_root, module_names);
+    projects.replace_module_names(project_root, module_names);
 }
 
 fn checker_base_for_project(
@@ -1732,6 +1759,9 @@ fn open_module_map(shared: &SharedState, project_root: Option<&Path>) -> typeche
     documents
         .iter()
         .filter_map(|(uri, document)| {
+            if document.dirty {
+                return None;
+            }
             let path = uri.to_file_path().ok()?;
             if let Some(root) = project_root
                 && !path.starts_with(root)
@@ -4152,7 +4182,7 @@ fn collect_handler_arm_value_definition_nodes(
     }
 }
 
-fn store_document(shared: &SharedState, uri: Url, version: i32, text: String) {
+fn store_document(shared: &SharedState, uri: Url, version: i32, text: String, dirty: bool) {
     let mut documents = shared.documents.lock().unwrap_or_else(|e| e.into_inner());
     let previous_parse = documents.get(&uri).and_then(|doc| doc.parse.clone());
     let previous_semantic = documents.get(&uri).and_then(|doc| doc.semantic.clone());
@@ -4161,6 +4191,7 @@ fn store_document(shared: &SharedState, uri: Url, version: i32, text: String) {
         DocumentState {
             version,
             text,
+            dirty,
             parse: previous_parse,
             semantic: previous_semantic,
             diagnostics: Vec::new(),
@@ -4184,10 +4215,10 @@ fn apply_parse_result(
     }
 
     let mut parsed_program = None;
+    let document_is_dirty = document.dirty;
     let had_semantic = result.semantic.is_some();
     if let Some(parse) = result.parse {
         debug_assert_eq!(parse.version, result.version);
-        debug_assert!(!parse.program.is_empty());
         parsed_program = Some(parse.program.clone());
         document.parse = Some(Arc::new(parse));
     }
@@ -4201,9 +4232,18 @@ fn apply_parse_result(
     let project_root = project_root_for_uri(uri);
     let interface_apply = {
         let mut projects = shared.projects.lock().ok()?;
-        projects.apply_module_interface_updates(project_root.clone(), result.module_interfaces)
+        let module_interfaces = if document_is_dirty {
+            result
+                .module_interfaces
+                .into_iter()
+                .filter(|update| !update.is_current)
+                .collect()
+        } else {
+            result.module_interfaces
+        };
+        projects.apply_module_interface_updates(project_root.clone(), module_interfaces)
     };
-    if let Some(update) = result.semantic_index_update {
+    if let Some(update) = result.semantic_index_update.filter(|_| !document_is_dirty) {
         let module_name = update.module_name.clone();
         let mut projects = shared.projects.lock().ok()?;
         projects.update_semantic_index(project_root.clone(), update);
@@ -4222,7 +4262,7 @@ fn apply_parse_result(
         ));
     }
 
-    if let Some(program) = parsed_program {
+    if let Some(program) = parsed_program.filter(|_| !document_is_dirty) {
         let (module_name, imports) = extract_module_info(&program);
         let generation = {
             let mut projects = shared.projects.lock().ok()?;
@@ -4639,6 +4679,31 @@ fn import_completion_prefix(source: &str, offset: usize) -> &str {
     rest.trim_start()
 }
 
+fn import_completion_replacement_range(
+    source: &str,
+    offset: usize,
+    line_index: &LineIndex,
+) -> Range {
+    let offset = clamp_to_char_boundary(source, offset.min(source.len()));
+    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_before = &source[line_start..offset];
+    let trimmed_start_len = line_before.len() - line_before.trim_start().len();
+    let trimmed = &line_before[trimmed_start_len..];
+    let prefix_start = trimmed
+        .strip_prefix("import ")
+        .map(|rest| {
+            line_start
+                + trimmed_start_len
+                + "import ".len()
+                + (rest.len() - rest.trim_start().len())
+        })
+        .unwrap_or_else(|| offset.saturating_sub(extract_prefix(source, offset).len()));
+    Range {
+        start: line_index.offset_to_position(prefix_start, source),
+        end: line_index.offset_to_position(offset, source),
+    }
+}
+
 fn push_completion(
     items: &mut Vec<CompletionItem>,
     seen: &mut HashSet<String>,
@@ -4661,6 +4726,15 @@ fn push_completion(
     }
 }
 
+fn apply_completion_text_edit(items: &mut [CompletionItem], range: Range) {
+    for item in items {
+        item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: item.label.clone(),
+        }));
+    }
+}
+
 fn collect_completion_items(
     document: &DocumentState,
     position: Position,
@@ -4670,6 +4744,10 @@ fn collect_completion_items(
     let offset = line_index.position_to_offset(position, &document.text);
     let context = completion_context(&document.text, offset);
     let prefix = completion_prefix_for_context(&document.text, offset, &context);
+    let current_module = document
+        .parse
+        .as_deref()
+        .and_then(|parse| extract_module_info(&parse.program).0);
     let mut items = Vec::new();
     let mut seen = HashSet::new();
 
@@ -4680,7 +4758,17 @@ fn collect_completion_items(
 
     match &context {
         CompletionContext::ImportModule => {
-            collect_module_name_completions(&mut items, &mut seen, prefix, semantic, projects);
+            collect_module_name_completions(
+                &mut items,
+                &mut seen,
+                prefix,
+                semantic,
+                projects,
+                current_module.as_deref(),
+            );
+            let replace_range =
+                import_completion_replacement_range(&document.text, offset, &line_index);
+            apply_completion_text_edit(&mut items, replace_range);
         }
         CompletionContext::ImportExposing { module_name } => {
             collect_import_exposing_completions(
@@ -4900,7 +4988,7 @@ fn collect_expression_semantic_completions(
         );
     }
     collect_handler_completions(items, seen, prefix, Some(semantic), projects);
-    collect_module_name_completions(items, seen, prefix, Some(semantic), projects);
+    collect_module_name_completions(items, seen, prefix, Some(semantic), projects, None);
 }
 
 fn collect_type_completions(
@@ -5103,9 +5191,13 @@ fn collect_module_name_completions(
     prefix: &str,
     semantic: Option<&SemanticSnapshot>,
     projects: Option<(&ProjectSemanticStore, &Option<PathBuf>)>,
+    excluded_module: Option<&str>,
 ) {
     if let Some(semantic) = semantic {
         for module in semantic.check.module_exports().keys() {
+            if excluded_module == Some(module.as_str()) {
+                continue;
+            }
             push_completion(
                 items,
                 seen,
@@ -5129,6 +5221,9 @@ fn collect_module_name_completions(
             if let Some(module) = name.split('.').next()
                 && module != name
             {
+                if excluded_module == Some(module) {
+                    continue;
+                }
                 push_completion(
                     items,
                     seen,
@@ -5144,6 +5239,9 @@ fn collect_module_name_completions(
         && let Some(project) = projects.projects.get(project_root)
     {
         for module in project.module_names.iter() {
+            if excluded_module == Some(module.as_str()) {
+                continue;
+            }
             push_completion(
                 items,
                 seen,
@@ -5158,6 +5256,9 @@ fn collect_module_name_completions(
             .keys()
             .chain(project.semantic_indexes.keys())
         {
+            if excluded_module == Some(module.as_str()) {
+                continue;
+            }
             push_completion(
                 items,
                 seen,
@@ -6001,6 +6102,42 @@ fn full_document_range(source: &str) -> Range {
     }
 }
 
+fn is_saga_file_uri(uri: &Url) -> bool {
+    uri.to_file_path()
+        .ok()
+        .and_then(|path| path.extension().map(|ext| ext == "saga"))
+        .unwrap_or(false)
+}
+
+fn recheck_open_documents_in_project(
+    shared: &SharedState,
+    check_tx: &tokio::sync::mpsc::UnboundedSender<CheckRequest>,
+    project_root: Option<PathBuf>,
+) {
+    let documents = {
+        let documents = shared.documents.lock().unwrap_or_else(|e| e.into_inner());
+        documents
+            .iter()
+            .filter_map(|(uri, document)| {
+                if project_root_for_uri(uri) != project_root {
+                    return None;
+                }
+                Some((uri.clone(), document.version, document.text.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (uri, version, text) in documents {
+        let _ = check_tx.send(CheckRequest {
+            uri,
+            version,
+            text,
+            project_root: project_root.clone(),
+            is_primary: true,
+        });
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
@@ -6035,6 +6172,28 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let options = DidChangeWatchedFilesRegistrationOptions {
+                watchers: vec![FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/*.saga".to_string()),
+                    kind: Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
+                }],
+            };
+            let registration = Registration {
+                id: "saga-watch-saga-files".to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                register_options: serde_json::to_value(options).ok(),
+            };
+            if let Err(err) = client.register_capability(vec![registration]).await {
+                client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("failed to register saga file watcher: {err}"),
+                    )
+                    .await;
+            }
+        });
         self.client
             .log_message(MessageType::INFO, "saga LSP next initialized")
             .await;
@@ -6049,7 +6208,7 @@ impl LanguageServer for Backend {
         let version = params.text_document.version;
         let text = params.text_document.text;
         let project_root = project_root_for_uri(&uri);
-        store_document(&self.shared, uri.clone(), version, text.clone());
+        store_document(&self.shared, uri.clone(), version, text.clone(), false);
         publish_syntax_snapshot(&self.client, &self.shared, &uri, version, &text).await;
         let _ = self.check_tx.send(CheckRequest {
             uri,
@@ -6068,7 +6227,7 @@ impl LanguageServer for Backend {
             return;
         };
         let text = change.text;
-        store_document(&self.shared, uri.clone(), version, text.clone());
+        store_document(&self.shared, uri.clone(), version, text.clone(), true);
         publish_syntax_snapshot(&self.client, &self.shared, &uri, version, &text).await;
         let _ = self.check_tx.send(CheckRequest {
             uri,
@@ -6087,7 +6246,7 @@ impl LanguageServer for Backend {
         };
         let text = params.text.unwrap_or(doc.text);
         let version = doc.version;
-        store_document(&self.shared, uri.clone(), version, text.clone());
+        store_document(&self.shared, uri.clone(), version, text.clone(), false);
         publish_syntax_snapshot(&self.client, &self.shared, &uri, version, &text).await;
         let _ = self.check_tx.send(CheckRequest {
             uri,
@@ -6117,6 +6276,31 @@ impl LanguageServer for Backend {
             projects.remove_file_from_all_projects(&uri);
         }
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let mut affected_roots = HashSet::new();
+        for change in params.changes {
+            if !is_saga_file_uri(&change.uri) {
+                continue;
+            }
+            let project_root = project_root_for_uri(&change.uri);
+            affected_roots.insert(project_root.clone());
+            if change.typ == FileChangeType::DELETED
+                && current_document(&self.shared, &change.uri).is_none()
+            {
+                let mut projects = self
+                    .shared
+                    .projects
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                projects.remove_file_from_all_projects(&change.uri);
+            }
+        }
+
+        for project_root in affected_roots {
+            recheck_open_documents_in_project(&self.shared, &self.check_tx, project_root);
+        }
     }
 
     async fn document_symbol(
@@ -6711,7 +6895,7 @@ mod tests {
         let shared = SharedState::default();
         let uri = uri();
 
-        store_document(&shared, uri.clone(), 1, valid_source());
+        store_document(&shared, uri.clone(), 1, valid_source(), false);
         let applied = apply_parse_result(
             &shared,
             &uri,
@@ -6725,6 +6909,7 @@ mod tests {
             uri.clone(),
             2,
             "module Main\n\nfun main : Unit -> Unit\nmain () = ".to_string(),
+            true,
         );
         let applied = apply_parse_result(
             &shared,
@@ -6751,7 +6936,7 @@ mod tests {
         let shared = SharedState::default();
         let uri = uri();
 
-        store_document(&shared, uri.clone(), 2, valid_source());
+        store_document(&shared, uri.clone(), 2, valid_source(), false);
         let result = apply_parse_result(
             &shared,
             &uri,
@@ -6778,14 +6963,20 @@ mod tests {
         let shared = SharedState::default();
         let uri = uri();
 
-        store_document(&shared, uri.clone(), 1, valid_source());
+        store_document(&shared, uri.clone(), 1, valid_source(), false);
         apply_parse_result(
             &shared,
             &uri,
             analyze_document(&shared, Some(&uri), 1, &valid_source(), None),
         )
         .expect("apply valid parse");
-        store_document(&shared, uri.clone(), 2, "module Main\n\nm".to_string());
+        store_document(
+            &shared,
+            uri.clone(),
+            2,
+            "module Main\n\nm".to_string(),
+            true,
+        );
 
         let document = current_document(&shared, &uri).expect("document");
         let labels: Vec<_> = collect_completion_items(&document, Position::new(2, 1), None)

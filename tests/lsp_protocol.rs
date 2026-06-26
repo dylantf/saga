@@ -471,6 +471,152 @@ fn formatting_uses_current_document_text() {
 }
 
 #[test]
+fn opening_empty_new_file_does_not_crash() {
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = saga_uri("empty-new-file");
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": ""
+            }
+        }),
+    );
+
+    let id = lsp.send_request(
+        "textDocument/documentSymbol",
+        json!({
+            "textDocument": {
+                "uri": saga_uri("empty-new-file")
+            }
+        }),
+    );
+    lsp.recv_until(Duration::from_secs(5), |message| {
+        message.get("id").and_then(Value::as_i64) == Some(id)
+    })
+    .expect("document symbol response proves server stayed alive");
+}
+
+#[test]
+fn dirty_module_declaration_does_not_pollute_import_completions() {
+    let root = temp_project("dirty-module-name-completion");
+    let db_schema_path = root.join("src/DbSchema.saga");
+    let database_path = root.join("src/Database.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let db_schema_source = "\
+module SeshImporter.DbSchema
+
+pub fun schema : Unit -> Int
+schema () = 1
+";
+    std::fs::write(&db_schema_path, db_schema_source).expect("write db schema module");
+    std::fs::write(
+        &database_path,
+        "\
+module SeshImporter.Database
+
+pub fun value : Unit -> Int
+value () = 1
+",
+    )
+    .expect("write database module");
+    let main_source = "\
+module Main
+
+import SeshImporter.D
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&db_schema_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": db_schema_source
+                }
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&db_schema_path), 1, 2);
+
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&db_schema_path),
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "text": "module SeshImporter.D\n"
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&db_schema_path), 2, 1);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 1, 1);
+        completion_items(&mut lsp, &file_uri(&main_path), 2, 21)
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let labels: Vec<_> = result
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        labels.iter().any(|label| *label == "SeshImporter.DbSchema"),
+        "saved module should still complete: {result:?}"
+    );
+    assert!(
+        labels.iter().any(|label| *label == "SeshImporter.Database"),
+        "other saved module should complete: {result:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| *label == "SeshImporter.D"),
+        "dirty partial module name should not complete: {result:?}"
+    );
+    let database = result
+        .iter()
+        .find(|item| item["label"].as_str() == Some("SeshImporter.Database"))
+        .unwrap_or_else(|| panic!("missing database completion: {result:?}"));
+    assert_eq!(
+        database["textEdit"]["newText"].as_str(),
+        Some("SeshImporter.Database"),
+        "module completion should replace with the full module name: {database:?}"
+    );
+    assert_eq!(
+        database["textEdit"]["range"]["start"]["character"].as_u64(),
+        Some(7)
+    );
+    assert_eq!(
+        database["textEdit"]["range"]["end"]["character"].as_u64(),
+        Some(21)
+    );
+}
+
+#[test]
 fn completion_uses_context_and_semantic_project_data() {
     let root = temp_project("completion-contexts");
     let lib_path = root.join("src/Lib.saga");
@@ -538,6 +684,11 @@ make p = {
 module Main
 
 import L
+";
+    let current_module_import_source = "\
+module Main
+
+import 
 ";
     let dotted_import_source = "\
 module Main
@@ -616,12 +767,12 @@ import Lib (
                     "version": 3
                 },
                 "contentChanges": [{
-                    "text": dotted_import_source
+                    "text": current_module_import_source
                 }]
             }),
         );
         let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 3, 1);
-        let dotted_import_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 13);
+        let current_module_import_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 7);
 
         lsp.send_notification(
             "textDocument/didChange",
@@ -631,12 +782,12 @@ import Lib (
                     "version": 4
                 },
                 "contentChanges": [{
-                    "text": import_exposing_source
+                    "text": dotted_import_source
                 }]
             }),
         );
         let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 4, 1);
-        let import_exposing_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 13);
+        let dotted_import_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 13);
 
         lsp.send_notification(
             "textDocument/didChange",
@@ -646,11 +797,26 @@ import Lib (
                     "version": 5
                 },
                 "contentChanges": [{
-                    "text": import_exposing_all_source
+                    "text": import_exposing_source
                 }]
             }),
         );
         let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 5, 1);
+        let import_exposing_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 13);
+
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 6
+                },
+                "contentChanges": [{
+                    "text": import_exposing_all_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 6, 1);
         let import_exposing_all_labels = completion_labels(&mut lsp, &file_uri(&main_path), 2, 12);
 
         (
@@ -664,6 +830,7 @@ import Lib (
             local_labels,
             handler_labels,
             import_labels,
+            current_module_import_labels,
             dotted_import_labels,
             import_exposing_labels,
             import_exposing_all_labels,
@@ -683,6 +850,7 @@ import Lib (
         local_labels,
         handler_labels,
         import_labels,
+        current_module_import_labels,
         dotted_import_labels,
         import_exposing_labels,
         import_exposing_all_labels,
@@ -743,6 +911,12 @@ import Lib (
     assert!(
         import_labels.iter().any(|label| label == "Lib"),
         "missing import module completion after syntax error: {import_labels:?}"
+    );
+    assert!(
+        !current_module_import_labels
+            .iter()
+            .any(|label| label == "Main"),
+        "import module completion should not suggest the current module: {current_module_import_labels:?}"
     );
     assert!(
         dotted_import_labels
@@ -2788,6 +2962,154 @@ forty_two () = 42
             })
         })
         .expect("diagnostics to clear after module map refresh")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(publish_diagnostics(&result).is_some());
+}
+
+#[test]
+fn watched_created_module_rechecks_open_importers_without_restart() {
+    let root = temp_project("watched-module-map-refresh");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let main_uri = file_uri(&main_path);
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"]
+                        .as_array()
+                        .is_some_and(|diagnostics| !diagnostics.is_empty())
+            })
+        })
+        .expect("missing import diagnostics");
+
+        std::fs::write(
+            &helper_path,
+            "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+",
+        )
+        .expect("write helper module");
+
+        lsp.send_notification(
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [{
+                    "uri": file_uri(&helper_path),
+                    "type": 1
+                }]
+            }),
+        );
+
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"].as_array().map(Vec::len) == Some(0)
+            })
+        })
+        .expect("diagnostics to clear after watched file creation")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(publish_diagnostics(&result).is_some());
+}
+
+#[test]
+fn watched_deleted_module_invalidates_cached_import_without_restart() {
+    let root = temp_project("watched-module-delete");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &helper_path,
+        "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+",
+    )
+    .expect("write helper module");
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let main_uri = file_uri(&main_path);
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        wait_for_diagnostics(&lsp, &file_uri(&main_path), 1, 2);
+
+        std::fs::remove_file(&helper_path).expect("delete helper module");
+        lsp.send_notification(
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [{
+                    "uri": file_uri(&helper_path),
+                    "type": 3
+                }]
+            }),
+        );
+
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"]
+                        .as_array()
+                        .is_some_and(|diagnostics| !diagnostics.is_empty())
+            })
+        })
+        .expect("diagnostics after watched file deletion")
     };
 
     let _ = std::fs::remove_dir_all(&root);
