@@ -3,3 +3,6 @@ name = "module-test"
 
 [bin]
 main = "lib/Main.saga"
+
+[deps]
+saga_json = { path = "/home/dylan/projects/saga_json" }

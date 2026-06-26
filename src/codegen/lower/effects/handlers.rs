@@ -1,9 +1,9 @@
 use super::*;
 use crate::ast::{Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use std::collections::HashMap;
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
     /// Lower a handler expression to a tuple of per-op handler lambdas.
@@ -53,7 +53,6 @@ impl<'a> Lowerer<'a> {
         CExpr::Tuple(tuple_elements)
     }
 
-
     /// Lower a named handler definition to a tuple-of-lambdas.
     /// Used when a handler name appears as a value (e.g. returned from a function,
     /// passed as an argument) rather than in a `with` block.
@@ -93,7 +92,6 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Tuple(tuple_elements))
     }
 
-
     pub(crate) fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
         match handler {
             Handler::Named(named) => WithHandlerLayer::Named {
@@ -125,7 +123,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn pre_register_local_with_binding(&mut self, expr: &Expr, named_ref: &str) {
         let mut current = expr;
         let stmts = loop {
@@ -148,7 +145,6 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
-
 
     pub(crate) fn resolve_named_handler_item(
         &self,
@@ -217,7 +213,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn effect_for_handler_arm(
         &self,
         arm: &HandlerArm,
@@ -226,7 +221,6 @@ impl<'a> Lowerer<'a> {
         let module_name = source_module.unwrap_or_else(|| self.current_semantic_module_name());
         self.resolved_handler_arm_effect_for_module(arm, module_name)
     }
-
 
     pub(crate) fn static_arm_for_effect_op(
         &self,
@@ -247,7 +241,6 @@ impl<'a> Lowerer<'a> {
             .cloned()
             .map(|arm| (arm, info.source_module.clone()))
     }
-
 
     pub(crate) fn dynamic_tuple_element_expr(
         &self,
@@ -275,7 +268,6 @@ impl<'a> Lowerer<'a> {
             ],
         )
     }
-
 
     pub(crate) fn plan_named_op_handler(
         &self,
@@ -330,7 +322,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn plan_inline_op_handler(
         &self,
         eff: &str,
@@ -347,7 +338,6 @@ impl<'a> Lowerer<'a> {
         OpHandlerPlan::Passthrough
     }
 
-
     pub(crate) fn build_passthrough_handler_fun(&mut self) -> CExpr {
         let k_param = self.fresh();
         CExpr::Fun(
@@ -358,7 +348,6 @@ impl<'a> Lowerer<'a> {
             )),
         )
     }
-
 
     pub(crate) fn build_conditional_handler_fun(
         &mut self,
@@ -407,10 +396,8 @@ impl<'a> Lowerer<'a> {
         CExpr::Fun(wrapper_params, Box::new(case_expr))
     }
 
-
     pub(crate) fn identity_return_lambda(&mut self) -> CExpr {
         let param = self.fresh();
         CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
     }
-
 }

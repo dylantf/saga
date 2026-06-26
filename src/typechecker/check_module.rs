@@ -27,6 +27,45 @@ use codegen_info::{collect_codegen_info, ctor_arity};
 use header_scope::resolve_header_import;
 use import_scope::{resolve_import, synthesize_all_exposed};
 
+fn import_trace_enabled() -> bool {
+    std::env::var_os("SAGA_TYPECHECK_TRACE").is_some()
+}
+
+fn trace_import_phase(module_name: &str, phase: &str, duration: std::time::Duration) {
+    if !import_trace_enabled() {
+        return;
+    }
+
+    let line = format!(
+        "[saga-typecheck] import={} phase={} elapsed={:.1}ms",
+        module_name,
+        phase,
+        duration.as_secs_f64() * 1000.0,
+    );
+    if let Some(path) = std::env::var_os("SAGA_TYPECHECK_TRACE_FILE") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+fn timed_import_phase<T>(module_name: &str, phase: &str, f: impl FnOnce() -> T) -> T {
+    if !import_trace_enabled() {
+        return f();
+    }
+    let start = std::time::Instant::now();
+    let result = f();
+    trace_import_phase(module_name, phase, start.elapsed());
+    result
+}
+
 impl Checker {
     // --- Module import typechecking ---
 
@@ -54,7 +93,9 @@ impl Checker {
             return Ok(());
         }
 
-        let exports = self.load_module(module_path, span)?;
+        let exports = timed_import_phase(&module_name, "load_module", || {
+            self.load_module(module_path, span)
+        })?;
         // Expand `(..)` to an explicit list of every public export so the rest
         // of the import pipeline can treat all-exposing imports as if they had
         // listed every name. This makes `(..)` equivalent by construction.
@@ -172,6 +213,15 @@ impl Checker {
         if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
             return Ok(exports);
         }
+        if is_builtin_resolved
+            && let Some(exports) = self
+                .modules
+                .prelude_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.modules.exports.get(&module_name).cloned())
+        {
+            return Ok(exports);
+        }
 
         if !is_builtin
             && self.modules.active_scc_headers.is_none()
@@ -199,7 +249,7 @@ impl Checker {
             src.to_string()
         } else {
             let file_path = resolved_path.expect("non-builtin path resolved above");
-            std::fs::read_to_string(&file_path).map_err(|e| {
+            self.module_source(&file_path).map_err(|e| {
                 Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
             })?
         };
@@ -218,7 +268,11 @@ impl Checker {
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
             })?;
-        let imported = crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+        let imported = crate::derive::collect_imported_decls_with_sources(
+            &program,
+            self.modules.map.as_ref(),
+            &self.modules.source_overlay,
+        );
         crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
 
@@ -243,12 +297,27 @@ impl Checker {
             self.seed_builtin_checker(&mut mc);
             mc
         };
-        // Share the module cache so transitive imports benefit from caching
-        mod_checker.modules.exports = self.modules.exports.clone();
-        mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
-        mod_checker.modules.programs = self.modules.programs.clone();
+        // Share the module cache so transitive imports benefit from caching.
+        // Non-builtin module checkers start from the prelude snapshot, whose
+        // trait impl registry already includes stdlib impls. Keep its cached
+        // Std.* exports too; replacing them would let an explicit stdlib import
+        // recheck that module and trip duplicate-impl detection against the
+        // prelude's own impls.
+        mod_checker
+            .modules
+            .exports
+            .extend(self.modules.exports.clone());
+        mod_checker
+            .modules
+            .codegen_info
+            .extend(self.modules.codegen_info.clone());
+        mod_checker
+            .modules
+            .programs
+            .extend(self.modules.programs.clone());
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.modules.module_graph = self.modules.module_graph.clone();
+        mod_checker.modules.source_overlay = self.modules.source_overlay.clone();
         mod_checker.modules.visibility = self.modules.visibility.clone();
         mod_checker.modules.private_modules = self.modules.private_modules.clone();
         mod_checker.modules.loading = self.modules.loading.clone();
@@ -350,6 +419,7 @@ impl Checker {
         };
         snapshot.modules.map = self.modules.map.clone();
         snapshot.modules.module_graph = self.modules.module_graph.clone();
+        snapshot.modules.source_overlay = self.modules.source_overlay.clone();
         snapshot.modules.visibility = self.modules.visibility.clone();
         snapshot.modules.private_modules = self.modules.private_modules.clone();
         let prelude_src = include_str!("../stdlib/prelude.saga");
@@ -387,7 +457,7 @@ impl Checker {
                     format!("unknown module '{}' in import cycle", module_name),
                 )
             })?;
-            let source = std::fs::read_to_string(path).map_err(|e| {
+            let source = self.module_source(path).map_err(|e| {
                 Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
             })?;
             let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
@@ -404,8 +474,11 @@ impl Checker {
                         format!("parse error in module '{}': {}", module_name, e.message),
                     )
                 })?;
-            let imported =
-                crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+            let imported = crate::derive::collect_imported_decls_with_sources(
+                &program,
+                self.modules.map.as_ref(),
+                &self.modules.source_overlay,
+            );
             crate::derive::expand_derives(&mut program, &imported);
             crate::desugar::desugar_program(&mut program);
             self.modules
@@ -593,15 +666,27 @@ impl Checker {
         };
         mc.allow_bodyless_annotations = is_builtin;
         mc.next_var = self.next_var;
-        mc.modules.exports = self.modules.exports.clone();
-        mc.modules.codegen_info = self.modules.codegen_info.clone();
-        mc.modules.programs = self.modules.programs.clone();
+        mc.modules.exports.extend(self.modules.exports.clone());
+        mc.modules
+            .codegen_info
+            .extend(self.modules.codegen_info.clone());
+        mc.modules.programs.extend(self.modules.programs.clone());
         mc.modules.map = self.modules.map.clone();
         mc.modules.module_graph = self.modules.module_graph.clone();
+        mc.modules.source_overlay = self.modules.source_overlay.clone();
         mc.modules.visibility = self.modules.visibility.clone();
         mc.modules.private_modules = self.modules.private_modules.clone();
         mc.modules.base_trait_impls = self.modules.base_trait_impls.clone();
         mc
+    }
+
+    fn module_source(&self, path: &std::path::Path) -> std::io::Result<String> {
+        self.modules
+            .source_overlay
+            .get(path)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| std::fs::read_to_string(path))
     }
 
     /// Inject all exports from a module into this checker.
@@ -614,8 +699,12 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        self.register_module_canonical_exports(exports, module_name, Some(prefix), exposing);
-        self.merge_import_scope(exports, module_name, prefix, exposing, span)
+        timed_import_phase(module_name, "register_canonical_exports", || {
+            self.register_module_canonical_exports(exports, module_name, Some(prefix), exposing)
+        });
+        timed_import_phase(module_name, "merge_import_scope", || {
+            self.merge_import_scope(exports, module_name, prefix, exposing, span)
+        })
     }
 
     /// Merge an import's scope_map entries (and exposing-list LSP/records side

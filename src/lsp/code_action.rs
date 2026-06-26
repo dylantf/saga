@@ -1,210 +1,444 @@
 use std::collections::{HashMap, HashSet};
 
+use saga::ast::{self, Exposing};
+use saga::typechecker::{self, ModuleExports};
 use tower_lsp::lsp_types::*;
 
-use saga::ast::{Decl, Exposing};
-use saga::typechecker::{CheckResult, ModuleExports};
+use super::state::ProjectSemanticStore;
+use super::text::LineIndex;
+use super::{DocumentState, SemanticSnapshot};
 
-use crate::line_index::LineIndex;
-
-/// Generate code actions for the given diagnostics range.
-/// Handles: adding missing handler arms, adding missing imports.
-pub fn collect_code_actions(
-    tc_result: &CheckResult,
-    program: &[Decl],
-    line_index: &LineIndex,
-    source: &str,
+pub(super) fn collect_code_actions(
     uri: &Url,
-    range: Range,
+    document: &DocumentState,
+    semantic: &SemanticSnapshot,
+    project: Option<(&ProjectSemanticStore, &Option<std::path::PathBuf>)>,
+    request_range: Range,
+    diagnostics: &[Diagnostic],
 ) -> Vec<CodeActionOrCommand> {
+    let Some(parse) = &document.parse else {
+        return Vec::new();
+    };
+    let mut module_exports = semantic.check.module_exports().clone();
+    if let Some((projects, project_root)) = project {
+        for (module, exports) in projects.module_exports_for_project(project_root) {
+            module_exports.entry(module).or_insert(exports);
+        }
+    }
+    if module_exports.is_empty() {
+        return Vec::new();
+    }
+
+    let current_module = current_module_name(&parse.program);
+    let symbol_index = build_symbol_index(&module_exports);
+    let module_prefix_index =
+        build_module_prefix_index(&module_exports, semantic.check.module_map());
+    let (existing_imports, insert_pos, insert_context) =
+        analyze_imports(&parse.program, &parse.line_index, &parse.source);
+    let explicit_imports: HashSet<String> = existing_imports
+        .iter()
+        .map(|import| import.module_name.clone())
+        .collect();
+    let implicit_imports = semantic
+        .check
+        .prelude_imports
+        .iter()
+        .filter_map(|decl| match decl {
+            ast::Decl::Import { module_path, .. } => Some(module_path.join(".")),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
     let mut actions = Vec::new();
-
-    collect_missing_handler_arms(
-        tc_result,
-        program,
-        line_index,
-        source,
-        uri,
-        range,
-        &mut actions,
-    );
-    collect_missing_import_actions(tc_result, program, line_index, source, uri, &mut actions);
-
+    let mut suggested = HashSet::new();
+    for diagnostic in diagnostics {
+        if !ranges_overlap(&request_range, &diagnostic.range) {
+            continue;
+        }
+        let Some(unresolved) = parse_unresolved_name(&diagnostic.message) else {
+            continue;
+        };
+        match unresolved {
+            UnresolvedName::Bare(name) => collect_bare_import_actions(
+                BareImportActionInput {
+                    name: &name,
+                    diagnostic_range: diagnostic.range,
+                    current_module: current_module.as_deref(),
+                    uri,
+                    source: &parse.source,
+                    line_index: &parse.line_index,
+                    symbol_index: &symbol_index,
+                    existing_imports: &existing_imports,
+                    explicit_imports: &explicit_imports,
+                    implicit_imports: &implicit_imports,
+                    insert_pos,
+                    insert_context,
+                },
+                &mut suggested,
+                &mut actions,
+            ),
+            UnresolvedName::Qualified { module, name } => collect_qualified_import_actions(
+                QualifiedImportActionInput {
+                    module: &module,
+                    name: &name,
+                    current_module: current_module.as_deref(),
+                    uri,
+                    module_exports: &module_exports,
+                    module_prefix_index: &module_prefix_index,
+                    explicit_imports: &explicit_imports,
+                    implicit_imports: &implicit_imports,
+                    insert_pos,
+                    insert_context,
+                },
+                &mut suggested,
+                &mut actions,
+            ),
+        }
+    }
     actions
 }
 
-// ---------------------------------------------------------------------------
-// Missing handler arms
-// ---------------------------------------------------------------------------
+struct BareImportActionInput<'a> {
+    name: &'a str,
+    diagnostic_range: Range,
+    current_module: Option<&'a str>,
+    uri: &'a Url,
+    source: &'a str,
+    line_index: &'a LineIndex,
+    symbol_index: &'a HashMap<String, Vec<SymbolSource>>,
+    existing_imports: &'a [ExistingImport],
+    explicit_imports: &'a HashSet<String>,
+    implicit_imports: &'a HashSet<String>,
+    insert_pos: Position,
+    insert_context: InsertContext,
+}
 
-fn collect_missing_handler_arms(
-    tc_result: &CheckResult,
-    program: &[Decl],
-    line_index: &LineIndex,
-    source: &str,
-    uri: &Url,
-    range: Range,
+fn collect_bare_import_actions(
+    input: BareImportActionInput<'_>,
+    suggested: &mut HashSet<String>,
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
-    for decl in program {
-        if let Decl::HandlerDef {
-            name,
-            body,
-            recovered_arms,
-            span,
-            ..
-        } = decl
+    let Some(sources) = input.symbol_index.get(input.name) else {
+        return;
+    };
+    for source in sources {
+        if input.current_module == Some(source.module_name.as_str()) {
+            continue;
+        }
+        let already_imported = input.explicit_imports.contains(&source.module_name);
+        let implicitly_imported = input.implicit_imports.contains(&source.module_name);
+        if let Some(existing) = input
+            .existing_imports
+            .iter()
+            .find(|import| import.module_name == source.module_name)
         {
-            let effects = &body.effects;
-            let arms = &body.arms;
-            let handler_start = line_index.offset_to_line_col(span.start, source);
-            let handler_end = line_index.offset_to_line_col(span.end, source);
-            let handler_range = Range {
-                start: Position::new(handler_start.0 as u32, handler_start.1 as u32),
-                end: Position::new(handler_end.0 as u32, handler_end.1 as u32),
-            };
-
-            if !ranges_overlap(&range, &handler_range) {
-                continue;
-            }
-
-            let handled: HashSet<&str> = arms
-                .iter()
-                .chain(recovered_arms.iter())
-                .map(|a| a.node.op_name.as_str())
-                .collect();
-
-            let mut all_missing: Vec<(String, String)> = Vec::new();
-            for effect_ref in effects {
-                if let Some(info) = tc_result.resolve_effect(&effect_ref.name) {
-                    for op in &info.ops {
-                        if handled.contains(op.name.as_str()) {
-                            continue;
-                        }
-                        let arm_text = format_arm(op);
-                        all_missing.push((effect_ref.name.clone(), arm_text));
+            match &existing.exposing {
+                Some(Exposing::All { .. }) => {}
+                Some(Exposing::Items(items)) => {
+                    if !items.iter().any(|item| {
+                        item.name == source.import_item || item.surface_name() == input.name
+                    }) {
+                        add_to_exposing_action(
+                            existing,
+                            &source.import_item,
+                            input.source,
+                            input.line_index,
+                            input.uri,
+                            suggested,
+                            actions,
+                        );
                     }
                 }
+                None => add_expose_to_existing_action(
+                    existing,
+                    &source.import_item,
+                    input.source,
+                    input.line_index,
+                    input.uri,
+                    suggested,
+                    actions,
+                ),
             }
-
-            if all_missing.is_empty() {
-                continue;
-            }
-
-            let insert_offset = span.end;
-            let (insert_line, _) = line_index.offset_to_line_col(insert_offset, source);
-            let insert_pos = Position::new(insert_line as u32, 0);
-
-            let indent = if let Some(first_arm) = arms.first() {
-                let (_, col) = line_index.offset_to_line_col(first_arm.node.span.start, source);
-                " ".repeat(col)
-            } else {
-                "  ".to_string()
-            };
-
-            if all_missing.len() > 1 {
-                let all_text: String = all_missing
-                    .iter()
-                    .map(|(_, arm)| format!("{}{}\n", indent, arm))
-                    .collect();
-
-                let edit = TextEdit {
-                    range: Range {
-                        start: insert_pos,
-                        end: insert_pos,
-                    },
-                    new_text: all_text,
-                };
-
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!("Add all missing arms to '{}'", name),
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
-                        ..Default::default()
-                    }),
-                    diagnostics: None,
-                    is_preferred: Some(true),
-                    ..Default::default()
-                }));
-            }
-
-            for (effect_name, arm_text) in &all_missing {
-                let op_name = arm_text.split_whitespace().next().unwrap_or("?");
-                let text = format!("{}{}\n", indent, arm_text);
-
-                let edit = TextEdit {
-                    range: Range {
-                        start: insert_pos,
-                        end: insert_pos,
-                    },
-                    new_text: text,
-                };
-
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!("Add missing arm: {} ({})", op_name, effect_name),
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
-                        ..Default::default()
-                    }),
-                    diagnostics: None,
-                    is_preferred: Some(false),
-                    ..Default::default()
-                }));
+            qualify_name_action(
+                input.name,
+                existing.qualifier(),
+                input.diagnostic_range,
+                input.uri,
+                suggested,
+                actions,
+            );
+        } else {
+            add_new_import_action(
+                &source.module_name,
+                Some(&source.import_item),
+                input.insert_pos,
+                input.insert_context,
+                input.uri,
+                suggested,
+                actions,
+            );
+            if implicitly_imported && !already_imported {
+                qualify_name_action(
+                    input.name,
+                    module_qualifier(&source.module_name),
+                    input.diagnostic_range,
+                    input.uri,
+                    suggested,
+                    actions,
+                );
             }
         }
     }
 }
 
-/// Format a handler arm from an effect op signature.
-/// Produces: `op_name arg1 arg2 = todo`
-fn format_arm(op: &saga::typechecker::EffectOpSig) -> String {
-    if op.params.is_empty() {
-        format!("{} () = todo", op.name)
-    } else {
-        let params: Vec<String> = op
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, (label, _))| {
-                if label.starts_with('_') {
-                    format!("arg{}", i + 1)
-                } else {
-                    label.clone()
-                }
-            })
-            .collect();
-        format!("{} {} = todo", op.name, params.join(" "))
+struct QualifiedImportActionInput<'a> {
+    module: &'a str,
+    name: &'a str,
+    current_module: Option<&'a str>,
+    uri: &'a Url,
+    module_exports: &'a HashMap<String, ModuleExports>,
+    module_prefix_index: &'a HashMap<String, Vec<String>>,
+    explicit_imports: &'a HashSet<String>,
+    implicit_imports: &'a HashSet<String>,
+    insert_pos: Position,
+    insert_context: InsertContext,
+}
+
+fn collect_qualified_import_actions(
+    input: QualifiedImportActionInput<'_>,
+    suggested: &mut HashSet<String>,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    let Some(candidate_modules) = input.module_prefix_index.get(input.module) else {
+        return;
+    };
+    for module_name in candidate_modules {
+        if input.current_module == Some(module_name.as_str())
+            || input.explicit_imports.contains(module_name)
+            || input.implicit_imports.contains(module_name)
+        {
+            continue;
+        }
+        let Some(exports) = input.module_exports.get(module_name) else {
+            continue;
+        };
+        if !exports_name(exports, input.name) {
+            continue;
+        }
+        add_new_import_action(
+            module_name,
+            None,
+            input.insert_pos,
+            input.insert_context,
+            input.uri,
+            suggested,
+            actions,
+        );
     }
 }
 
-fn ranges_overlap(a: &Range, b: &Range) -> bool {
-    a.start <= b.end && b.start <= a.end
+#[derive(Clone)]
+struct SymbolSource {
+    module_name: String,
+    import_item: String,
 }
 
-// ---------------------------------------------------------------------------
-// Missing import code actions
-// ---------------------------------------------------------------------------
+fn build_symbol_index(
+    module_exports: &HashMap<String, ModuleExports>,
+) -> HashMap<String, Vec<SymbolSource>> {
+    let mut index: HashMap<String, Vec<SymbolSource>> = HashMap::new();
+    for (module_name, exports) in module_exports {
+        let mut add = |symbol: &str, import_item: &str| {
+            let source = SymbolSource {
+                module_name: module_name.clone(),
+                import_item: import_item.to_string(),
+            };
+            let entry = index.entry(symbol.to_string()).or_default();
+            if !entry.iter().any(|existing: &SymbolSource| {
+                existing.module_name == source.module_name
+                    && existing.import_item == source.import_item
+            }) {
+                entry.push(source);
+            }
+        };
 
-/// What kind of unresolved name did the diagnostic report?
+        for (name, _) in &exports.bindings {
+            add(name, name);
+        }
+        for (type_name, constructors) in &exports.type_constructors {
+            add(type_name, type_name);
+            for constructor in constructors {
+                add(constructor, type_name);
+            }
+        }
+        for name in exports.type_aliases.keys() {
+            add(name, name);
+        }
+        for (trait_name, info) in &exports.traits {
+            add(trait_name, trait_name);
+            for method in &info.methods {
+                add(&method.name, trait_name);
+            }
+        }
+        for (effect_name, info) in &exports.effects {
+            add(effect_name, effect_name);
+            for op in &info.ops {
+                add(&op.name, effect_name);
+            }
+        }
+        for name in exports.handlers.keys() {
+            add(name, name);
+        }
+    }
+    index
+}
+
+fn build_module_prefix_index(
+    module_exports: &HashMap<String, ModuleExports>,
+    module_map: Option<&typechecker::ModuleMap>,
+) -> HashMap<String, Vec<String>> {
+    let mut index: HashMap<String, Vec<String>> = HashMap::new();
+    let mut add = |key: &str, module_name: &str| {
+        let entry = index.entry(key.to_string()).or_default();
+        if !entry.iter().any(|existing| existing == module_name) {
+            entry.push(module_name.to_string());
+        }
+    };
+    for module_name in module_exports.keys() {
+        add(module_name, module_name);
+        if let Some(last) = module_name.rsplit('.').next() {
+            add(last, module_name);
+        }
+    }
+    if let Some(module_map) = module_map {
+        for module_name in module_map.keys() {
+            add(module_name, module_name);
+            if let Some(last) = module_name.rsplit('.').next() {
+                add(last, module_name);
+            }
+        }
+    }
+    for &(module_name, _) in typechecker::BUILTIN_MODULES {
+        add(module_name, module_name);
+        if let Some(last) = module_name.rsplit('.').next() {
+            add(last, module_name);
+        }
+    }
+    index
+}
+
+fn exports_name(exports: &ModuleExports, name: &str) -> bool {
+    exports.bindings.iter().any(|(binding, _)| binding == name)
+        || exports
+            .type_constructors
+            .values()
+            .any(|constructors| constructors.iter().any(|ctor| ctor == name))
+        || exports.type_constructors.contains_key(name)
+        || exports.type_aliases.contains_key(name)
+        || exports.traits.contains_key(name)
+        || exports
+            .traits
+            .values()
+            .any(|info| info.methods.iter().any(|method| method.name == name))
+        || exports.effects.contains_key(name)
+        || exports
+            .effects
+            .values()
+            .any(|info| info.ops.iter().any(|op| op.name == name))
+        || exports.handlers.contains_key(name)
+}
+
+struct ExistingImport {
+    module_name: String,
+    alias: Option<String>,
+    exposing: Option<Exposing>,
+    span_end: usize,
+}
+
+impl ExistingImport {
+    fn qualifier(&self) -> &str {
+        self.alias
+            .as_deref()
+            .unwrap_or_else(|| module_qualifier(&self.module_name))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InsertContext {
+    AfterImports,
+    AfterModuleDecl,
+    TopOfFile,
+}
+
+fn analyze_imports(
+    program: &[ast::Decl],
+    line_index: &LineIndex,
+    source: &str,
+) -> (Vec<ExistingImport>, Position, InsertContext) {
+    let mut imports = Vec::new();
+    let mut last_import_end = None;
+    let mut module_decl_end = None;
+    for decl in program {
+        match decl {
+            ast::Decl::Import {
+                module_path,
+                alias,
+                exposing,
+                span,
+                ..
+            } => {
+                imports.push(ExistingImport {
+                    module_name: module_path.join("."),
+                    alias: alias.clone(),
+                    exposing: exposing.clone(),
+                    span_end: span.end,
+                });
+                last_import_end = Some(span.end);
+            }
+            ast::Decl::ModuleDecl { span, .. } => {
+                module_decl_end = Some(span.end);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(offset) = last_import_end {
+        let mut pos = line_index.offset_to_position(offset, source);
+        pos.line += 1;
+        pos.character = 0;
+        (imports, pos, InsertContext::AfterImports)
+    } else if let Some(offset) = module_decl_end {
+        let mut pos = line_index.offset_to_position(offset, source);
+        pos.line += 1;
+        pos.character = 0;
+        (imports, pos, InsertContext::AfterModuleDecl)
+    } else {
+        (imports, Position::new(0, 0), InsertContext::TopOfFile)
+    }
+}
+
+fn current_module_name(program: &[ast::Decl]) -> Option<String> {
+    program.iter().find_map(|decl| match decl {
+        ast::Decl::ModuleDecl { path, .. } => Some(path.join(".")),
+        _ => None,
+    })
+}
+
 enum UnresolvedName {
-    /// `undefined variable: foo` or `undefined constructor: Foo`
     Bare(String),
-    /// `unknown qualified name 'Module.name'`
     Qualified { module: String, name: String },
 }
 
-/// Try to extract an unresolved name from a typechecker diagnostic message.
 fn parse_unresolved_name(message: &str) -> Option<UnresolvedName> {
-    if let Some(name) = message.strip_prefix("undefined variable: ") {
-        Some(UnresolvedName::Bare(name.to_string()))
-    } else if let Some(name) = message.strip_prefix("undefined constructor: ") {
-        Some(UnresolvedName::Bare(name.to_string()))
-    } else if let Some(name) = message.strip_prefix("undefined constructor in pattern: ") {
-        Some(UnresolvedName::Bare(name.to_string()))
-    } else if let Some(rest) = message.strip_prefix("unknown qualified name '") {
-        let rest = rest.strip_suffix('\'')?;
+    if let Some(name) = suffix_after(message, "undefined variable: ") {
+        Some(UnresolvedName::Bare(name))
+    } else if let Some(name) = suffix_after(message, "undefined constructor: ") {
+        Some(UnresolvedName::Bare(name))
+    } else if let Some(name) = suffix_after(message, "undefined constructor in pattern: ") {
+        Some(UnresolvedName::Bare(name))
+    } else if let Some(name) = suffix_after(message, "undefined effect operation: ") {
+        Some(UnresolvedName::Bare(name))
+    } else if let Some(rest) = quoted_after(message, "unknown qualified name '") {
         let dot = rest.rfind('.')?;
         Some(UnresolvedName::Qualified {
             module: rest[..dot].to_string(),
@@ -215,459 +449,150 @@ fn parse_unresolved_name(message: &str) -> Option<UnresolvedName> {
     }
 }
 
-/// Whether a symbol needs an explicit `exposing` clause or is auto-exposed by `import Module`.
-#[derive(Clone, PartialEq)]
-enum ExposureKind {
-    /// Needs `import Module (name)` to use as a bare name.
-    NeedsExposing,
-    /// Auto-exposed by `import Module` (handlers, effects, trait methods).
-    AutoExposed,
+fn suffix_after(message: &str, prefix: &str) -> Option<String> {
+    let start = message.find(prefix)? + prefix.len();
+    let rest = &message[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, ',' | ')' | '}'))
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim_matches('`').to_string())
 }
 
-/// An entry in the symbol index: which module, and how it's exposed.
-#[derive(Clone)]
-struct SymbolSource {
-    module_name: String,
-    exposure: ExposureKind,
+fn quoted_after(message: &str, prefix: &str) -> Option<String> {
+    let start = message.find(prefix)? + prefix.len();
+    let rest = &message[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
 }
 
-/// Build a reverse index: name -> list of (module, exposure kind).
-/// Searches bindings, constructors, effects, and handlers.
-fn build_symbol_index(
-    module_exports: &HashMap<String, ModuleExports>,
-) -> HashMap<String, Vec<SymbolSource>> {
-    let mut index: HashMap<String, Vec<SymbolSource>> = HashMap::new();
-    for (module_name, exports) in module_exports {
-        // Function/value bindings — need exposing
-        for (name, _) in &exports.bindings {
-            index.entry(name.clone()).or_default().push(SymbolSource {
-                module_name: module_name.clone(),
-                exposure: ExposureKind::NeedsExposing,
-            });
-        }
-        // Type constructors — need exposing
-        for ctors in exports.type_constructors.values() {
-            for ctor in ctors {
-                index.entry(ctor.clone()).or_default().push(SymbolSource {
-                    module_name: module_name.clone(),
-                    exposure: ExposureKind::NeedsExposing,
-                });
-            }
-        }
-        // Effects — auto-exposed
-        for name in exports.effects.keys() {
-            index.entry(name.clone()).or_default().push(SymbolSource {
-                module_name: module_name.clone(),
-                exposure: ExposureKind::AutoExposed,
-            });
-        }
-        // Handlers — auto-exposed
-        for name in exports.handlers.keys() {
-            index.entry(name.clone()).or_default().push(SymbolSource {
-                module_name: module_name.clone(),
-                exposure: ExposureKind::AutoExposed,
-            });
-        }
-    }
-    index
-}
-
-/// Build an index from short module prefix (last segment) to full module names.
-/// e.g. "Time" -> ["Std.Time"], "List" -> ["Std.List"]
-/// Combines the module map (all discoverable modules) with already-cached exports.
-fn build_module_prefix_index(
-    module_exports: &HashMap<String, ModuleExports>,
-    module_map: Option<&saga::typechecker::ModuleMap>,
-) -> HashMap<String, Vec<String>> {
-    let mut index: HashMap<String, Vec<String>> = HashMap::new();
-    let mut add = |module_name: &str| {
-        if let Some(last) = module_name.rsplit('.').next() {
-            let entry = index.entry(last.to_string()).or_default();
-            if !entry.contains(&module_name.to_string()) {
-                entry.push(module_name.to_string());
-            }
-        }
-    };
-    for module_name in module_exports.keys() {
-        add(module_name);
-    }
-    if let Some(map) = module_map {
-        for module_name in map.keys() {
-            add(module_name);
-        }
-    }
-    // Include all builtin stdlib modules (may not be in exports cache or module map)
-    for &(module_name, _) in saga::typechecker::BUILTIN_MODULES {
-        add(module_name);
-    }
-    index
-}
-
-/// Information about an existing import in the source file.
-struct ExistingImport {
-    /// The full module name, e.g. "Std.List"
-    module_name: String,
-    /// The alias, if any
-    _alias: Option<String>,
-    /// Names in the exposing list (None = no exposing clause)
-    exposing: Option<saga::ast::Exposing>,
-    /// Span end offset (for finding insertion position)
-    span_end: usize,
-}
-
-/// Where in the file the new import will be inserted, relative to existing structure.
-#[derive(Clone, Copy)]
-enum InsertContext {
-    /// After existing imports — just a newline.
-    AfterImports,
-    /// After module decl, no existing imports — needs blank line before and after.
-    AfterModuleDecl,
-    /// Top of file, nothing above — needs blank line after.
-    TopOfFile,
-}
-
-/// Gather info about existing imports and find the insertion line.
-fn analyze_imports(
-    program: &[Decl],
-    line_index: &LineIndex,
-    source: &str,
-) -> (Vec<ExistingImport>, Position, InsertContext) {
-    let mut imports = Vec::new();
-    let mut last_import_end: Option<usize> = None;
-    let mut module_decl_end: Option<usize> = None;
-
-    for decl in program {
-        match decl {
-            Decl::Import {
-                module_path,
-                alias,
-                exposing,
-                span,
-                ..
-            } => {
-                let module_name = module_path.join(".");
-                imports.push(ExistingImport {
-                    module_name,
-                    _alias: alias.clone(),
-                    exposing: exposing.clone(),
-                    span_end: span.end,
-                });
-                last_import_end = Some(span.end);
-            }
-            Decl::ModuleDecl { span, .. } => {
-                module_decl_end = Some(span.end);
-            }
-            _ => {}
-        }
-    }
-
-    let (insert_pos, ctx) = if let Some(offset) = last_import_end {
-        let (line, _) = line_index.offset_to_line_col(offset, source);
-        (
-            Position::new(line as u32 + 1, 0),
-            InsertContext::AfterImports,
-        )
-    } else if let Some(offset) = module_decl_end {
-        let (line, _) = line_index.offset_to_line_col(offset, source);
-        (
-            Position::new(line as u32 + 1, 0),
-            InsertContext::AfterModuleDecl,
-        )
-    } else {
-        (Position::new(0, 0), InsertContext::TopOfFile)
-    };
-
-    (imports, insert_pos, ctx)
-}
-
-/// Generate "add missing import" code actions for all unresolved-name diagnostics.
-fn collect_missing_import_actions(
-    tc_result: &CheckResult,
-    program: &[Decl],
-    line_index: &LineIndex,
-    source: &str,
-    uri: &Url,
-    actions: &mut Vec<CodeActionOrCommand>,
-) {
-    let module_exports = tc_result.module_exports();
-    if module_exports.is_empty() {
-        return;
-    }
-
-    let symbol_index = build_symbol_index(module_exports);
-    let prefix_index = build_module_prefix_index(module_exports, tc_result.module_map());
-    let (existing_imports, insert_pos, insert_ctx) = analyze_imports(program, line_index, source);
-
-    // Set of already-imported module names: explicit user imports + prelude imports
-    let mut imported_modules: HashSet<String> = existing_imports
-        .iter()
-        .map(|i| i.module_name.clone())
-        .collect();
-    for prelude_import in &tc_result.prelude_imports {
-        if let Decl::Import { module_path, .. } = prelude_import {
-            imported_modules.insert(module_path.join("."));
-        }
-    }
-
-    // Track suggested imports to avoid duplicates across diagnostics
-    let mut suggested: HashSet<String> = HashSet::new();
-
-    for diag in &tc_result.diagnostics {
-        let unresolved = match parse_unresolved_name(&diag.message) {
-            Some(u) => u,
-            None => continue,
-        };
-
-        match unresolved {
-            UnresolvedName::Bare(name) => {
-                // Find which modules export this name
-                let Some(sources) = symbol_index.get(&name) else {
-                    continue;
-                };
-                for source_info in sources {
-                    let module_name = &source_info.module_name;
-                    let auto = source_info.exposure == ExposureKind::AutoExposed;
-
-                    if auto {
-                        // Handlers/effects/traits: just `import Module` is enough
-                        if imported_modules.contains(module_name) {
-                            continue;
-                        }
-                        let key = format!("import:{}", module_name);
-                        if !suggested.insert(key) {
-                            continue;
-                        }
-                        new_import_action(module_name, None, insert_pos, insert_ctx, uri, actions);
-                    } else if let Some(existing) = existing_imports
-                        .iter()
-                        .find(|i| i.module_name == *module_name)
-                    {
-                        // Module explicitly imported by user — suggest adding to exposing
-                        // list AND qualifying the name inline
-                        let key = format!("expose:{}:{}", module_name, name);
-                        if !suggested.insert(key) {
-                            continue;
-                        }
-                        match &existing.exposing {
-                            Some(Exposing::All { .. }) => {
-                                // Already exposes everything — nothing to suggest.
-                            }
-                            Some(Exposing::Items(exposed)) => {
-                                if !exposed.iter().any(|item| item.surface_name() == name) {
-                                    add_to_exposing_action(
-                                        existing, &name, source, line_index, uri, actions,
-                                    );
-                                }
-                            }
-                            None => {
-                                add_expose_to_existing_action(
-                                    existing, &name, source, line_index, uri, actions,
-                                );
-                            }
-                        }
-                        if let Some(span) = diag.span {
-                            let prefix = module_name.rsplit('.').next().unwrap_or(module_name);
-                            qualify_name_action(
-                                &name, prefix, span, source, line_index, uri, actions,
-                            );
-                        }
-                    } else if imported_modules.contains(module_name) {
-                        // Module imported via prelude (no explicit import to modify) —
-                        // offer two choices:
-                        // 1. Add an explicit `import Module (name)` to expose it
-                        // 2. Replace bare `name` with `Module.name` (qualified use)
-                        let key = format!("import:{}:{}", module_name, name);
-                        if !suggested.insert(key) {
-                            continue;
-                        }
-                        new_import_action(
-                            module_name,
-                            Some(&name),
-                            insert_pos,
-                            insert_ctx,
-                            uri,
-                            actions,
-                        );
-                        if let Some(span) = diag.span {
-                            let prefix = module_name.rsplit('.').next().unwrap_or(module_name);
-                            qualify_name_action(
-                                &name, prefix, span, source, line_index, uri, actions,
-                            );
-                        }
-                    } else {
-                        // Module not imported at all — suggest new import with exposing
-                        let key = format!("import:{}:{}", module_name, name);
-                        if !suggested.insert(key) {
-                            continue;
-                        }
-                        new_import_action(
-                            module_name,
-                            Some(&name),
-                            insert_pos,
-                            insert_ctx,
-                            uri,
-                            actions,
-                        );
-                    }
-                }
-            }
-            UnresolvedName::Qualified { module, name } => {
-                // "Module.name" failed — the module prefix isn't imported.
-                // Find full module names whose last segment matches the prefix.
-                let Some(candidate_modules) = prefix_index.get(&module) else {
-                    continue;
-                };
-                for module_name in candidate_modules {
-                    if imported_modules.contains(module_name) {
-                        // Already imported (the name just doesn't exist in it) — skip
-                        continue;
-                    }
-                    // Verify the module actually exports this name (if we have its exports)
-                    if let Some(exports) = module_exports.get(module_name) {
-                        let has_name = exports.bindings.iter().any(|(n, _)| n == &name)
-                            || exports
-                                .type_constructors
-                                .values()
-                                .any(|ctors| ctors.contains(&name))
-                            || exports.effects.contains_key(&name)
-                            || exports.handlers.contains_key(&name);
-                        if !has_name {
-                            continue;
-                        }
-                    }
-                    let key = format!("import:{}", module_name);
-                    if !suggested.insert(key) {
-                        continue;
-                    }
-                    // Suggest `import Std.Time` (no exposing — qualified use is intended)
-                    new_import_action(module_name, None, insert_pos, insert_ctx, uri, actions);
-                }
-            }
-        }
-    }
-}
-
-/// Create a code action to add a brand new import line.
-fn new_import_action(
+fn add_new_import_action(
     module_name: &str,
     expose_name: Option<&str>,
     insert_pos: Position,
-    insert_ctx: InsertContext,
+    insert_context: InsertContext,
     uri: &Url,
+    suggested: &mut HashSet<String>,
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
+    let key = format!("new:{module_name}:{expose_name:?}");
+    if !suggested.insert(key) {
+        return;
+    }
     let import_stmt = match expose_name {
-        Some(name) => format!("import {} ({})", module_name, name),
-        None => format!("import {}", module_name),
+        Some(name) => format!("import {module_name} ({name})"),
+        None => format!("import {module_name}"),
     };
-    // Wrap with blank lines based on where we're inserting:
-    // - AfterImports: just append a newline
-    // - AfterModuleDecl: blank line before (to separate from module decl) + blank line after (to separate from code)
-    // - TopOfFile: blank line after (to separate from code)
-    let import_text = match insert_ctx {
-        InsertContext::AfterImports => format!("{}\n", import_stmt),
-        InsertContext::AfterModuleDecl => format!("\n{}\n\n", import_stmt),
-        InsertContext::TopOfFile => format!("{}\n\n", import_stmt),
+    let new_text = match insert_context {
+        InsertContext::AfterImports => format!("{import_stmt}\n"),
+        InsertContext::AfterModuleDecl => format!("\n{import_stmt}\n\n"),
+        InsertContext::TopOfFile => format!("{import_stmt}\n\n"),
     };
     let title = match expose_name {
-        Some(name) => format!("Add `import {} ({})`", module_name, name),
-        None => format!("Add `import {}`", module_name),
+        Some(name) => format!("Add `import {module_name} ({name})`"),
+        None => format!("Add `import {module_name}`"),
     };
-
-    let edit = TextEdit {
-        range: Range {
-            start: insert_pos,
-            end: insert_pos,
-        },
-        new_text: import_text,
-    };
-
-    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-        title,
-        kind: Some(CodeActionKind::QUICKFIX),
-        edit: Some(WorkspaceEdit {
-            changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
-            ..Default::default()
-        }),
-        diagnostics: None,
-        is_preferred: Some(false),
-        ..Default::default()
-    }));
+    push_edit_action(title, uri, insert_pos..insert_pos, new_text, actions);
 }
 
-/// Create a code action to add a name to an existing import's exposing list.
-/// e.g. `import Std.List (map)` -> `import Std.List (map, reverse)`
 fn add_to_exposing_action(
     existing: &ExistingImport,
     name: &str,
     source: &str,
     line_index: &LineIndex,
     uri: &Url,
+    suggested: &mut HashSet<String>,
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
-    // Find the closing `)` of the exposing list by scanning backwards from span end
-    let before_end = &source[..existing.span_end];
+    let key = format!("expose-item:{}:{name}", existing.module_name);
+    if !suggested.insert(key) {
+        return;
+    }
+    let before_end = &source[..existing.span_end.min(source.len())];
     let Some(close_paren) = before_end.rfind(')') else {
         return;
     };
-
-    let (line, col) = line_index.offset_to_line_col(close_paren, source);
-    let insert_pos = Position::new(line as u32, col as u32);
-
-    let new_text = format!(", {}", name);
-    let title = format!("Add `{}` to import {}", name, existing.module_name);
-
-    let edit = TextEdit {
-        range: Range {
-            start: insert_pos,
-            end: insert_pos,
-        },
-        new_text,
-    };
-
-    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-        title,
-        kind: Some(CodeActionKind::QUICKFIX),
-        edit: Some(WorkspaceEdit {
-            changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
-            ..Default::default()
-        }),
-        diagnostics: None,
-        is_preferred: Some(false),
-        ..Default::default()
-    }));
+    let pos = line_index.offset_to_position(close_paren, source);
+    push_edit_action(
+        format!("Add `{name}` to import {}", existing.module_name),
+        uri,
+        pos..pos,
+        format!(", {name}"),
+        actions,
+    );
 }
 
-/// Create a code action to add an exposing clause to an import that has none.
-/// e.g. `import Std.List` -> `import Std.List (reverse)`
 fn add_expose_to_existing_action(
     existing: &ExistingImport,
     name: &str,
     source: &str,
     line_index: &LineIndex,
     uri: &Url,
+    suggested: &mut HashSet<String>,
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
-    // Insert ` (name)` at the end of the import line (at span_end)
-    let (line, col) = line_index.offset_to_line_col(existing.span_end, source);
-    let insert_pos = Position::new(line as u32, col as u32);
+    let key = format!("expose-clause:{}:{name}", existing.module_name);
+    if !suggested.insert(key) {
+        return;
+    }
+    let pos = line_index.offset_to_position(existing.span_end, source);
+    push_edit_action(
+        format!("Expose `{name}` from import {}", existing.module_name),
+        uri,
+        pos..pos,
+        format!(" ({name})"),
+        actions,
+    );
+}
 
-    let new_text = format!(" ({})", name);
-    let title = format!("Expose `{}` from import {}", name, existing.module_name);
+fn qualify_name_action(
+    name: &str,
+    prefix: &str,
+    range: Range,
+    uri: &Url,
+    suggested: &mut HashSet<String>,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    let key = format!(
+        "qualify:{prefix}:{name}:{}:{}",
+        range.start.line, range.start.character
+    );
+    if !suggested.insert(key) {
+        return;
+    }
+    push_edit_action(
+        format!("Use `{prefix}.{name}`"),
+        uri,
+        range.start..range.end,
+        format!("{prefix}.{name}"),
+        actions,
+    );
+}
 
-    let edit = TextEdit {
-        range: Range {
-            start: insert_pos,
-            end: insert_pos,
-        },
-        new_text,
-    };
-
+fn push_edit_action(
+    title: String,
+    uri: &Url,
+    range: std::ops::Range<Position>,
+    new_text: String,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
     actions.push(CodeActionOrCommand::CodeAction(CodeAction {
         title,
         kind: Some(CodeActionKind::QUICKFIX),
         edit: Some(WorkspaceEdit {
-            changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
+            changes: Some(
+                [(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: Range {
+                            start: range.start,
+                            end: range.end,
+                        },
+                        new_text,
+                    }],
+                )]
+                .into_iter()
+                .collect(),
+            ),
             ..Default::default()
         }),
         diagnostics: None,
@@ -676,37 +601,10 @@ fn add_expose_to_existing_action(
     }));
 }
 
-/// Create a code action to replace a bare name with its qualified form.
-/// e.g. `reverse` -> `List.reverse`
-fn qualify_name_action(
-    name: &str,
-    prefix: &str,
-    span: saga::token::Span,
-    source: &str,
-    line_index: &LineIndex,
-    uri: &Url,
-    actions: &mut Vec<CodeActionOrCommand>,
-) {
-    let (start_line, start_col) = line_index.offset_to_line_col(span.start, source);
-    let (end_line, end_col) = line_index.offset_to_line_col(span.end, source);
+fn module_qualifier(module_name: &str) -> &str {
+    module_name.rsplit('.').next().unwrap_or(module_name)
+}
 
-    let edit = TextEdit {
-        range: Range {
-            start: Position::new(start_line as u32, start_col as u32),
-            end: Position::new(end_line as u32, end_col as u32),
-        },
-        new_text: format!("{}.{}", prefix, name),
-    };
-
-    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-        title: format!("Use `{}.{}`", prefix, name),
-        kind: Some(CodeActionKind::QUICKFIX),
-        edit: Some(WorkspaceEdit {
-            changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
-            ..Default::default()
-        }),
-        diagnostics: None,
-        is_preferred: Some(false),
-        ..Default::default()
-    }));
+fn ranges_overlap(a: &Range, b: &Range) -> bool {
+    a.start <= b.end && b.start <= a.end
 }

@@ -1,8 +1,8 @@
 use crate::ast::{Expr, ExprKind, Pat, Stmt};
-use crate::codegen::cerl::{CExpr};
-use crate::token::Span;
+use crate::codegen::cerl::CExpr;
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use crate::token::Span;
 
 impl<'a> Lowerer<'a> {
     /// Lower an expression in an explicit lowering mode.
@@ -16,7 +16,6 @@ impl<'a> Lowerer<'a> {
             LowerMode::Tail(k) => self.lower_expr_tail_compat(expr, k),
         }
     }
-
 
     /// Lower a block in an explicit lowering mode.
     pub(crate) fn lower_block_in(&mut self, stmts: &[Stmt], mode: LowerMode) -> CExpr {
@@ -43,7 +42,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Lower an expression as a value-producing subexpression.
     ///
     /// This temporarily clears the ambient return continuation so nested
@@ -54,12 +52,10 @@ impl<'a> Lowerer<'a> {
         self.lower_expr_in(expr, LowerMode::Value)
     }
 
-
     /// Lower an expression in terminal position with an explicit continuation.
     pub(crate) fn lower_expr_tail(&mut self, expr: &Expr, k: CExpr) -> CExpr {
         self.lower_expr_in(expr, LowerMode::Tail(k))
     }
-
 
     pub(crate) fn lower_expr_with_call_return_k(
         &mut self,
@@ -67,30 +63,34 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> CExpr {
         if self.expr_is_effectful_call(expr) {
-            if let Some((module, func_name, head, args)) = crate::codegen::lower::util::collect_qualified_call(expr)
-                && let Some(call) = self.lower_qualified_call(crate::codegen::lower::QualifiedCallSite {
-                    app_id: expr.id,
-                    module,
-                    func_name,
-                    head,
-                    args: &args,
-                    return_k: return_k.clone(),
-                    call_span: Some(&expr.span),
-                })
+            if let Some((module, func_name, head, args)) =
+                crate::codegen::lower::util::collect_qualified_call(expr)
+                && let Some(call) =
+                    self.lower_qualified_call(crate::codegen::lower::QualifiedCallSite {
+                        app_id: expr.id,
+                        module,
+                        func_name,
+                        head,
+                        args: &args,
+                        return_k: return_k.clone(),
+                        call_span: Some(&expr.span),
+                    })
             {
                 return call;
             }
             if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-                if let Some(call) = self.lower_resolved_fun_call(crate::codegen::lower::ResolvedCallSite {
-                    app_id: expr.id,
-                    lookup_name: func_name,
-                    emit_name: func_name,
-                    head: head_expr,
-                    args: &args,
-                    return_k: return_k.clone(),
-                    call_span: Some(&expr.span),
-                    fallback_erlang_module: None,
-                }) {
+                if let Some(call) =
+                    self.lower_resolved_fun_call(crate::codegen::lower::ResolvedCallSite {
+                        app_id: expr.id,
+                        lookup_name: func_name,
+                        emit_name: func_name,
+                        head: head_expr,
+                        args: &args,
+                        return_k: return_k.clone(),
+                        call_span: Some(&expr.span),
+                        fallback_erlang_module: None,
+                    })
+                {
                     return call;
                 }
                 if let Some(call) =
@@ -112,14 +112,17 @@ impl<'a> Lowerer<'a> {
             {
                 return call;
             }
-            if let Some((lambda, args)) = crate::codegen::lower::util::collect_lambda_head_call(expr)
-                && let Some(call) = self.lower_lambda_head_call(expr.id, lambda, &args, return_k.clone())
+            if let Some((lambda, args)) =
+                crate::codegen::lower::util::collect_lambda_head_call(expr)
+                && let Some(call) =
+                    self.lower_lambda_head_call(expr.id, lambda, &args, return_k.clone())
             {
                 return call;
             }
             if let Some((head, args)) =
                 crate::codegen::lower::util::collect_field_access_head_call(expr)
-                && let Some(call) = self.lower_field_access_head_call(expr.id, head, &args, return_k)
+                && let Some(call) =
+                    self.lower_field_access_head_call(expr.id, head, &args, return_k)
             {
                 return call;
             }
@@ -128,7 +131,6 @@ impl<'a> Lowerer<'a> {
 
         self.lower_expr(expr)
     }
-
 
     /// Lower an expression with an explicitly installed return continuation.
     ///
@@ -158,7 +160,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Compatibility implementation for explicit tail-mode lowering.
     ///
     /// We currently preserve the old branch-aware K-threading behavior rather
@@ -170,7 +171,6 @@ impl<'a> Lowerer<'a> {
         let body = self.lower_expr_with_k_inner(expr, &k_var);
         CExpr::Let(k_var, Box::new(k), Box::new(body))
     }
-
 
     /// Lower a non-block expression in a context where `return_k`
     /// should govern terminal effect semantics.
@@ -206,7 +206,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Lower the terminal expression of a block, respecting any enclosing
     /// handled-computation return continuation passed explicitly.
     ///
@@ -239,7 +238,6 @@ impl<'a> Lowerer<'a> {
         self.apply_return_k_with(return_k, val)
     }
 
-
     /// Build the continuation representing the rest of a block after the
     /// current statement, optionally destructuring the result through `pat`.
     pub(crate) fn lower_rest_block_k_with_return_k(
@@ -255,7 +253,6 @@ impl<'a> Lowerer<'a> {
         };
         CExpr::Fun(vec![k_param], Box::new(rest_ce))
     }
-
 
     /// Build the continuation representing the rest of a K-threaded block after
     /// the current statement, optionally destructuring the result through `pat`.
@@ -273,7 +270,6 @@ impl<'a> Lowerer<'a> {
         CExpr::Fun(vec![k_param], Box::new(rest_ce))
     }
 
-
     /// Lower a pure/value expression, then apply the result to `k_var`.
     pub(crate) fn lower_value_to_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
         let v = self.fresh();
@@ -287,7 +283,6 @@ impl<'a> Lowerer<'a> {
             )),
         )
     }
-
 
     /// Lower an expression in a context where successful completion should
     /// flow to the explicit continuation `k_var`.
@@ -311,5 +306,4 @@ impl<'a> Lowerer<'a> {
             self.lower_value_to_k(expr, k_var)
         }
     }
-
 }

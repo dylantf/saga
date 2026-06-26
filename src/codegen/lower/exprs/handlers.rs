@@ -1,9 +1,9 @@
 use crate::ast::{CaseArm, Expr, ExprKind, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CPat};
-use crate::typechecker::Type;
-use std::collections::{HashSet};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use crate::typechecker::Type;
+use std::collections::HashSet;
 
 impl<'a> Lowerer<'a> {
     /// Bind each element to a fresh variable, then build a tuple.
@@ -93,7 +93,6 @@ impl<'a> Lowerer<'a> {
         inner
     }
 
-
     /// Check if an expression produces a handler value.
     pub(crate) fn is_handler_value(&self, expr: &Expr) -> bool {
         match &expr.kind {
@@ -116,7 +115,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn lower_tuple_elems(&mut self, elems: &[Expr]) -> CExpr {
         let mut vars: Vec<String> = Vec::new();
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
@@ -131,7 +129,6 @@ impl<'a> Lowerer<'a> {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })
     }
-
 
     /// Lower a handle binding statement. Routes the binding into one of four
     /// metadata stores depending on the RHS shape; `lower_with` later picks
@@ -253,7 +250,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn recover_handler_factory_binding(&mut self, value: &Expr) -> Option<String> {
         let (factory_name, _head, args) = collect_fun_call(value)?;
         let factory = self.handler_factory_defs.get(factory_name)?.clone();
@@ -299,7 +295,6 @@ impl<'a> Lowerer<'a> {
         Some(synthetic)
     }
 
-
     pub(crate) fn handler_factory_arg_supported(expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Lit { .. }
@@ -316,7 +311,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn handler_factory_capture_collides(
         captures: &[(String, Expr)],
         body: &crate::ast::HandlerBody,
@@ -332,8 +326,10 @@ impl<'a> Lowerer<'a> {
             })
     }
 
-
-    pub(crate) fn dynamic_handler_info_from_expr(&self, expr: &Expr) -> Option<(Vec<String>, bool)> {
+    pub(crate) fn dynamic_handler_info_from_expr(
+        &self,
+        expr: &Expr,
+    ) -> Option<(Vec<String>, bool)> {
         let cr = &self.check_result;
         if let Some(ty) = cr.type_at_node.get(&expr.id)
             && let Some(effects) = self.dynamic_handler_info_from_type(ty)
@@ -369,7 +365,6 @@ impl<'a> Lowerer<'a> {
         None
     }
 
-
     pub(crate) fn dynamic_handler_info_from_type(&self, ty: &Type) -> Option<Vec<String>> {
         if let Type::Con(name, args) = ty
             && name == crate::typechecker::canonicalize_type_name("Handler")
@@ -393,7 +388,6 @@ impl<'a> Lowerer<'a> {
             None
         }
     }
-
 
     /// Resolve a handle binding's RHS to a canonical handler name.
     /// Walks through variable references, if/else branches, and handler expressions.
@@ -419,5 +413,4 @@ impl<'a> Lowerer<'a> {
             _ => None,
         }
     }
-
 }

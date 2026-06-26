@@ -24,7 +24,10 @@ mod unify;
 pub use check_module::{EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict};
 pub use core::*;
 pub(crate) use resolve::{ResolutionResult, ResolvedValue};
-pub use result::{CheckResult, LetDictInfo};
+pub use result::{
+    CheckResult, LetDictInfo, effect_operation_signature_from_info,
+    trait_method_signature_from_info,
+};
 pub use state::*;
 
 #[cfg(test)]
@@ -171,11 +174,21 @@ impl Checker {
     /// Used by the LSP to avoid false "duplicate impl" errors when re-checking
     /// a stdlib file that was already loaded via the prelude.
     pub fn evict_module(&mut self, module_name: &str) {
-        if let Some(exports) = self.modules.exports.remove(module_name) {
+        let exports = self.modules.exports.remove(module_name).or_else(|| {
+            self.modules
+                .prelude_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.modules.exports.get(module_name).cloned())
+        });
+        if let Some(exports) = exports {
             for key in exports.trait_impls.keys() {
                 self.trait_state.impls.remove(key);
             }
         }
+        self.modules.codegen_info.remove(module_name);
+        self.modules.programs.remove(module_name);
+        self.modules.check_results.remove(module_name);
+        self.modules.registered_canonical.remove(module_name);
     }
 
     /// Drain errors from collected_diagnostics, leaving warnings in place.
@@ -403,6 +416,11 @@ impl Checker {
         self.modules.module_graph = None;
     }
 
+    pub fn set_source_overlay(&mut self, overlay: HashMap<std::path::PathBuf, String>) {
+        self.modules.source_overlay = overlay;
+        self.modules.module_graph = None;
+    }
+
     pub fn module_map(&self) -> Option<&check_module::ModuleMap> {
         self.modules.map.as_ref()
     }
@@ -428,12 +446,63 @@ impl Checker {
         self.modules.private_modules.as_ref()
     }
 
+    /// Seed this checker with a previously computed module cache entry.
+    ///
+    /// Project-level drivers such as the LSP use this to reuse clean imported
+    /// module interfaces across fresh checker clones. The caller is responsible
+    /// for validating that the cached entry still matches the current source
+    /// and dependency context.
+    pub fn seed_module_cache(
+        &mut self,
+        module_name: String,
+        exports: ModuleExports,
+        codegen_info: Option<ModuleCodegenInfo>,
+        program: Option<crate::ast::Program>,
+        check_result: Option<CheckResult>,
+    ) {
+        self.modules.exports.insert(module_name.clone(), exports);
+        if let Some(codegen_info) = codegen_info {
+            self.modules
+                .codegen_info
+                .insert(module_name.clone(), codegen_info);
+        }
+        if let Some(program) = program {
+            self.modules.programs.insert(module_name.clone(), program);
+        }
+        if let Some(check_result) = check_result {
+            self.modules.check_results.insert(module_name, check_result);
+        }
+    }
+
+    /// Clear cached module semantic products while preserving project maps,
+    /// visibility metadata, source overlays, and the prelude snapshot.
+    ///
+    /// LSP project state keeps module interfaces separately and seeds fresh
+    /// checker clones as needed. Keeping these large caches inside the base
+    /// checker makes every edit pay a large clone cost.
+    pub fn clear_module_semantic_caches(&mut self) {
+        self.modules.exports.clear();
+        self.modules.codegen_info.clear();
+        self.modules.programs.clear();
+        self.modules.check_results.clear();
+        self.modules.registered_canonical.clear();
+    }
+
+    /// Typecheck a module by name, triggering the full dependency walk.
+    /// Used for library builds where there is no Main.saga entry point.
+    pub fn try_typecheck_import_by_name(
+        &mut self,
+        module_name: &str,
+    ) -> std::result::Result<(), Diagnostic> {
+        let parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
+        let span = crate::token::Span { start: 0, end: 0 };
+        self.typecheck_import(&parts, None, None, span)
+    }
+
     /// Typecheck a module by name, triggering the full dependency walk.
     /// Used for library builds where there is no Main.saga entry point.
     pub fn typecheck_import_by_name(&mut self, module_name: &str) {
-        let parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
-        let span = crate::token::Span { start: 0, end: 0 };
-        if let Err(e) = self.typecheck_import(&parts, None, None, span) {
+        if let Err(e) = self.try_typecheck_import_by_name(module_name) {
             eprintln!("Error typechecking module '{}': {}", module_name, e);
             std::process::exit(1);
         }

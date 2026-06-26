@@ -1,20 +1,16 @@
 module Main
 
-import JsonLib (ToJson)
+import MathLib (Describe)
 
-# Cross-module routed derive (Phase 6.5): the trait + building-block impls
-# live in JsonLib.saga. This module imports `ToJson` and derives it on a
-# local record. Before Phase 6.5, expand_derives couldn't see imported trait
-# definitions, so this failed with "trait `ToJson` is not in scope". Phase
-# 6.5 also exposed a resolver bug (where-app TypeExpr args weren't being
-# walked, so the coherence check couldn't match against canonical impl
-# keys) — fixed alongside.
-record User {
-  name: String,
-  age: Int,
-} deriving (ToJson)
+pub record Person {
+  name: String
+}
+
+impl Describe for Person {
+  describe_it p = $"Name is: {p.name}"
+}
 
 main () = {
-  let u = User { name: "Alice", age: 30 }
-  println (to_json u)
+  let dylan = Person { name: "Dylan" }
+  dylan |> describe_it |> println
 } with {console}

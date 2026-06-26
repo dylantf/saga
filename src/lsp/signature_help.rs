@@ -1,31 +1,77 @@
-use tower_lsp::lsp_types::*;
+use std::collections::HashMap;
 
 use saga::ast::{self, Decl, Expr, ExprKind, Pat, Stmt};
-use saga::typechecker::CheckResult;
+use saga::typechecker::{CheckResult, ModuleExports, Scheme};
+use tower_lsp::lsp_types::*;
 
-use super::hover::format_type_expr;
+use super::hover::{
+    effect_operation_signature_in_check, effect_operation_signature_in_exports,
+    trait_method_signature_in_check, trait_method_signature_in_exports,
+};
+use super::state::ProjectSemanticStore;
+use super::{DocumentState, SemanticSnapshot};
 
-/// Extract an identifier that appears before trailing spaces at the given offset.
-/// E.g., for source `foo ` with offset=4, returns Some("foo").
-pub fn ident_before_spaces(source: &str, offset: usize) -> Option<String> {
+pub(super) fn signature_help_at(
+    document: &DocumentState,
+    semantic: &SemanticSnapshot,
+    position: Position,
+    project: Option<(&ProjectSemanticStore, &Option<std::path::PathBuf>)>,
+) -> Option<SignatureHelp> {
+    let parse = document.parse.as_ref()?;
+    let offset = parse.line_index.position_to_offset(position, &parse.source);
+    if !is_signature_context(&parse.source, offset) {
+        return None;
+    }
+
+    let active_call = find_active_call(&parse.program, offset)
+        .or_else(|| find_call_near(&parse.program, &parse.source, offset))
+        .or_else(|| ident_before_spaces(&parse.source, offset).map(ActiveCall::plain_start))?;
+
+    let module_exports =
+        project.map(|(projects, project_root)| projects.module_exports_for_project(project_root));
+    let mut signature = build_signature(
+        &active_call,
+        &parse.program,
+        &semantic.check,
+        module_exports.as_ref(),
+    )?;
+    signature.active_parameter = Some(active_call.active_parameter as u32);
+
+    Some(SignatureHelp {
+        signatures: vec![signature],
+        active_signature: Some(0),
+        active_parameter: None,
+    })
+}
+
+fn is_signature_context(source: &str, offset: usize) -> bool {
+    if offset == 0 {
+        return false;
+    }
     let bytes = source.as_bytes();
+    let mut pos = offset.min(source.len()).saturating_sub(1);
+    while pos > 0 && bytes[pos].is_ascii_whitespace() {
+        pos -= 1;
+    }
+    let prev = bytes[pos];
+    prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b'\'' | b')' | b',' | b'(')
+}
+
+fn ident_before_spaces(source: &str, offset: usize) -> Option<String> {
     if offset == 0 {
         return None;
     }
-    let mut pos = offset - 1;
-    // Skip spaces
-    while pos > 0 && bytes[pos] == b' ' {
+    let bytes = source.as_bytes();
+    let mut pos = offset.min(source.len()).saturating_sub(1);
+    while pos > 0 && bytes[pos].is_ascii_whitespace() {
         pos -= 1;
     }
-    if bytes[pos] == b' ' {
+    if bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
         return None;
     }
-    // Now pos is at the last char of the identifier
     let end = pos + 1;
     while pos > 0
-        && (bytes[pos - 1].is_ascii_alphanumeric()
-            || bytes[pos - 1] == b'_'
-            || bytes[pos - 1] == b'\'')
+        && (bytes[pos - 1].is_ascii_alphanumeric() || matches!(bytes[pos - 1], b'_' | b'\'' | b'.'))
     {
         pos -= 1;
     }
@@ -36,25 +82,65 @@ pub fn ident_before_spaces(source: &str, offset: usize) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Like `find_active_call`, but handles the case where the cursor is just past
-/// an App expression (user typed a space to start the next argument).
-/// Skips back past whitespace, finds the App chain, and increments the param index.
-pub fn find_call_near(program: &[Decl], source: &str, offset: usize) -> Option<(String, usize)> {
+#[derive(Clone)]
+struct ActiveCall {
+    name: String,
+    node_id: Option<ast::NodeId>,
+    active_parameter: usize,
+    kind: ActiveCallKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveCallKind {
+    Ordinary,
+    EffectOperation,
+}
+
+impl ActiveCall {
+    fn plain_start(name: String) -> Self {
+        Self {
+            name,
+            node_id: None,
+            active_parameter: 0,
+            kind: ActiveCallKind::Ordinary,
+        }
+    }
+
+    fn ordinary(name: String, node_id: Option<ast::NodeId>, active_parameter: usize) -> Self {
+        Self {
+            name,
+            node_id,
+            active_parameter,
+            kind: ActiveCallKind::Ordinary,
+        }
+    }
+
+    fn effect_operation(name: String, node_id: ast::NodeId, active_parameter: usize) -> Self {
+        Self {
+            name,
+            node_id: Some(node_id),
+            active_parameter,
+            kind: ActiveCallKind::EffectOperation,
+        }
+    }
+}
+
+fn find_call_near(program: &[Decl], source: &str, offset: usize) -> Option<ActiveCall> {
     let bytes = source.as_bytes();
-    let mut pos = offset;
-    while pos > 0 && bytes[pos - 1] == b' ' {
+    let mut pos = offset.min(source.len());
+    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
         pos -= 1;
     }
     if pos == offset || pos == 0 {
         return None;
     }
-    // pos is now right after the last non-space char; use pos-1 to be inside the expression
-    find_active_call(program, pos - 1).map(|(name, active)| (name, active + 1))
+    find_active_call(program, pos - 1).map(|mut call| {
+        call.active_parameter += 1;
+        call
+    })
 }
 
-/// Find the function being called at the cursor and which argument is active.
-/// Returns (function_name, active_parameter_index).
-pub fn find_active_call(program: &[Decl], offset: usize) -> Option<(String, usize)> {
+fn find_active_call(program: &[Decl], offset: usize) -> Option<ActiveCall> {
     for decl in program {
         if let Some(result) = find_call_in_decl(decl, offset) {
             return Some(result);
@@ -64,12 +150,10 @@ pub fn find_active_call(program: &[Decl], offset: usize) -> Option<(String, usiz
 }
 
 fn contains(span: &saga::token::Span, offset: usize) -> bool {
-    // End-inclusive: cursor right after the last char of an expression
-    // is still "in" that call context (user may still be typing the arg).
     offset >= span.start && offset <= span.end
 }
 
-fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
+fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<ActiveCall> {
     match decl {
         Decl::FunBinding {
             params, body, span, ..
@@ -78,8 +162,8 @@ fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
                 return None;
             }
             for pat in params {
-                if let Some(r) = find_call_in_pat(pat, offset) {
-                    return Some(r);
+                if let Some(result) = find_call_in_pat(pat, offset) {
+                    return Some(result);
                 }
             }
             find_call_in_expr(body, offset)
@@ -91,12 +175,12 @@ fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
             for method in methods {
                 let ast::ImplMethod { params, body, .. } = &method.node;
                 for pat in params {
-                    if let Some(r) = find_call_in_pat(pat, offset) {
-                        return Some(r);
+                    if let Some(result) = find_call_in_pat(pat, offset) {
+                        return Some(result);
                     }
                 }
-                if let Some(r) = find_call_in_expr(body, offset) {
-                    return Some(r);
+                if let Some(result) = find_call_in_expr(body, offset) {
+                    return Some(result);
                 }
             }
             None
@@ -111,32 +195,26 @@ fn find_call_in_decl(decl: &Decl, offset: usize) -> Option<(String, usize)> {
     }
 }
 
-fn find_call_in_pat(_pat: &Pat, _offset: usize) -> Option<(String, usize)> {
-    // Patterns don't contain function calls
+fn find_call_in_pat(_pat: &Pat, _offset: usize) -> Option<ActiveCall> {
     None
 }
 
-fn find_call_in_stmt(stmt: &Stmt, offset: usize) -> Option<(String, usize)> {
+fn find_call_in_stmt(stmt: &Stmt, offset: usize) -> Option<ActiveCall> {
     match stmt {
         Stmt::Let { value, .. } => find_call_in_expr(value, offset),
         Stmt::LetFun { body, .. } => find_call_in_expr(body, offset),
-
         Stmt::Expr(expr) => find_call_in_expr(expr, offset),
     }
 }
 
-/// Walk the expression tree looking for App chains that contain the cursor.
-/// We want the outermost App chain to count all arguments correctly.
-fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
+fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<ActiveCall> {
     if !contains(&expr.span, offset) {
         return None;
     }
 
     match &expr.kind {
         ExprKind::App { .. } => {
-            // First try to find a call deeper in the arg (nested call takes priority)
-            // e.g., in `foo (bar 1) 2` with cursor on `1`, we want `bar` not `foo`
-            let (func_name, args) = unwrap_app_chain(expr);
+            let (func, args) = unwrap_app_chain(expr);
             for arg in &args {
                 if contains(&arg.span, offset)
                     && let Some(inner) = find_call_in_expr(arg, offset)
@@ -144,24 +222,12 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
                     return Some(inner);
                 }
             }
-
-            // Cursor is in this App chain but not in a nested call.
-            // Determine which argument is active.
-            let name = match &func_name.kind {
-                ExprKind::Var { name } => name.clone(),
-                ExprKind::QualifiedName { module, name, .. } => format!("{}.{}", module, name),
-                _ => return None,
-            };
-
-            // Find which argument the cursor is in or after
-            let active = active_param_index(&args, offset);
-            Some((name, active))
+            Some(callable_call(func, active_param_index(&args, offset))?)
         }
-        // Recurse into subexpressions
         ExprKind::Block { stmts, .. } => {
             for stmt in stmts {
-                if let Some(r) = find_call_in_stmt(&stmt.node, offset) {
-                    return Some(r);
+                if let Some(result) = find_call_in_stmt(&stmt.node, offset) {
+                    return Some(result);
                 }
             }
             None
@@ -176,77 +242,111 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<(String, usize)> {
             .or_else(|| find_call_in_expr(else_branch, offset)),
         ExprKind::Case {
             scrutinee, arms, ..
-        } => {
-            if let Some(r) = find_call_in_expr(scrutinee, offset) {
-                return Some(r);
-            }
-            for arm in arms {
-                if let Some(guard) = &arm.node.guard
-                    && let Some(r) = find_call_in_expr(guard, offset)
-                {
-                    return Some(r);
-                }
-                if let Some(r) = find_call_in_expr(&arm.node.body, offset) {
-                    return Some(r);
-                }
-            }
-            None
-        }
+        } => find_call_in_expr(scrutinee, offset).or_else(|| {
+            arms.iter().find_map(|arm| {
+                arm.node
+                    .guard
+                    .as_ref()
+                    .and_then(|guard| find_call_in_expr(guard, offset))
+                    .or_else(|| find_call_in_expr(&arm.node.body, offset))
+            })
+        }),
         ExprKind::Lambda { body, .. } => find_call_in_expr(body, offset),
-        ExprKind::Tuple { elements, .. } => {
-            for e in elements {
-                if let Some(r) = find_call_in_expr(e, offset) {
-                    return Some(r);
-                }
-            }
-            None
-        }
+        ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+            .iter()
+            .find_map(|expr| find_call_in_expr(expr, offset)),
         ExprKind::BinOp { left, right, .. } => {
             find_call_in_expr(left, offset).or_else(|| find_call_in_expr(right, offset))
         }
+        ExprKind::BinOpChain { segments, .. }
+        | ExprKind::Pipe { segments, .. }
+        | ExprKind::PipeBack { segments }
+        | ExprKind::ComposeForward { segments } => segments
+            .iter()
+            .find_map(|segment| find_call_in_expr(&segment.node, offset)),
         ExprKind::With { expr, .. } => find_call_in_expr(expr, offset),
-        ExprKind::RecordCreate { fields, .. } => {
-            for (_, _, e) in fields {
-                if let Some(r) = find_call_in_expr(e, offset) {
-                    return Some(r);
-                }
-            }
-            None
-        }
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+            .iter()
+            .find_map(|(_, _, expr)| find_call_in_expr(expr, offset)),
         ExprKind::RecordUpdate { record, fields, .. } => {
-            if let Some(r) = find_call_in_expr(record, offset) {
-                return Some(r);
-            }
-            for (_, _, e) in fields {
-                if let Some(r) = find_call_in_expr(e, offset) {
-                    return Some(r);
-                }
-            }
-            None
+            find_call_in_expr(record, offset).or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|(_, _, expr)| find_call_in_expr(expr, offset))
+            })
         }
         ExprKind::FieldAccess { expr, .. } => find_call_in_expr(expr, offset),
         ExprKind::Do {
             bindings, success, ..
+        } => bindings
+            .iter()
+            .find_map(|(_, expr)| find_call_in_expr(expr, offset))
+            .or_else(|| find_call_in_expr(success, offset)),
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => arms
+            .iter()
+            .find_map(|arm| {
+                arm.node
+                    .guard
+                    .as_ref()
+                    .and_then(|guard| find_call_in_expr(guard, offset))
+                    .or_else(|| find_call_in_expr(&arm.node.body, offset))
+            })
+            .or_else(|| {
+                after_clause.as_ref().and_then(|(timeout, body)| {
+                    find_call_in_expr(timeout, offset).or_else(|| find_call_in_expr(body, offset))
+                })
+            }),
+        ExprKind::BitString { segments } => segments
+            .iter()
+            .find_map(|segment| find_call_in_expr(&segment.value, offset)),
+        ExprKind::Ascription { expr, .. }
+        | ExprKind::Resume { value: expr }
+        | ExprKind::UnaryMinus { expr }
+        | ExprKind::Cons { head: expr, .. } => find_call_in_expr(expr, offset),
+        ExprKind::EffectCall {
+            name,
+            qualifier,
+            args,
         } => {
-            for (_, expr) in bindings {
-                if let Some(r) = find_call_in_expr(expr, offset) {
-                    return Some(r);
+            for arg in args {
+                if contains(&arg.span, offset)
+                    && let Some(inner) = find_call_in_expr(arg, offset)
+                {
+                    return Some(inner);
                 }
             }
-            find_call_in_expr(success, offset)
+            let display = qualifier
+                .as_ref()
+                .map(|qualifier| format!("{qualifier}.{name}"))
+                .unwrap_or_else(|| name.clone());
+            Some(ActiveCall::effect_operation(
+                display,
+                expr.id,
+                active_param_index(&args.iter().collect::<Vec<&Expr>>(), offset),
+            ))
         }
-        ExprKind::Resume { value, .. } => find_call_in_expr(value, offset),
-        ExprKind::UnaryMinus { expr, .. } => find_call_in_expr(expr, offset),
+        ExprKind::HandlerExpr { body } => find_call_in_handler_body(body, offset),
         _ => None,
     }
 }
 
-/// Unwrap a left-nested App chain into the root function and a list of arguments.
-/// `App(App(f, a0), a1)` -> (f, [a0, a1])
+fn find_call_in_handler_body(body: &ast::HandlerBody, offset: usize) -> Option<ActiveCall> {
+    body.return_clause
+        .as_ref()
+        .and_then(|clause| find_call_in_expr(&clause.body, offset))
+        .or_else(|| {
+            body.arms
+                .iter()
+                .find_map(|arm| find_call_in_expr(&arm.node.body, offset))
+        })
+}
+
 fn unwrap_app_chain(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     let mut args = Vec::new();
     let mut current = expr;
-    while let ExprKind::App { func, arg, .. } = &current.kind {
+    while let ExprKind::App { func, arg } = &current.kind {
         args.push(arg.as_ref());
         current = func.as_ref();
     }
@@ -254,33 +354,217 @@ fn unwrap_app_chain(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     (current, args)
 }
 
-/// Determine which parameter is active based on cursor offset and argument spans.
+fn callable_call(expr: &Expr, active_parameter: usize) -> Option<ActiveCall> {
+    match &expr.kind {
+        ExprKind::Var { name } | ExprKind::Constructor { name } => Some(ActiveCall::ordinary(
+            name.clone(),
+            Some(expr.id),
+            active_parameter,
+        )),
+        ExprKind::QualifiedName { module, name, .. } => Some(ActiveCall::ordinary(
+            format!("{module}.{name}"),
+            Some(expr.id),
+            active_parameter,
+        )),
+        ExprKind::EffectCall {
+            name,
+            qualifier,
+            args,
+        } => {
+            let display = qualifier
+                .as_ref()
+                .map(|qualifier| format!("{qualifier}.{name}"))
+                .unwrap_or_else(|| name.clone());
+            Some(ActiveCall::effect_operation(
+                display,
+                expr.id,
+                args.len() + active_parameter,
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn active_param_index(args: &[&Expr], offset: usize) -> usize {
-    for (i, arg) in args.iter().enumerate() {
+    for (index, arg) in args.iter().enumerate() {
         if offset <= arg.span.end {
-            return i;
+            return index;
         }
     }
-    // Cursor is past all existing args -- next parameter
     args.len()
 }
 
-/// Build a SignatureInformation for a function, using its annotation if available.
-pub fn build_signature(
-    name: &str,
+fn build_signature(
+    call: &ActiveCall,
     program: &[Decl],
     result: &CheckResult,
+    project_exports: Option<&HashMap<String, ModuleExports>>,
 ) -> Option<SignatureInformation> {
-    // Try annotation first (has labels)
-    if let Some(sig) = build_from_annotation(name, program) {
-        return Some(sig);
+    build_from_semantic_call(call, result, project_exports)
+        .or_else(|| build_from_annotation(&call.name, program))
+        .or_else(|| {
+            scheme_for_name(&call.name, result, project_exports)
+                .and_then(|scheme| build_from_scheme(scheme, result))
+        })
+        .or_else(|| build_from_member_name(&call.name, result, project_exports))
+}
+
+fn build_from_semantic_call(
+    call: &ActiveCall,
+    result: &CheckResult,
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+) -> Option<SignatureInformation> {
+    let node_id = call.node_id?;
+    if call.kind == ActiveCallKind::EffectOperation
+        && let Some((effect_name, op_name)) =
+            result.resolved_effect_operation_for_call_node(node_id)
+    {
+        return signature_from_label(
+            effect_operation_signature_in_check(result, effect_name, op_name).or_else(|| {
+                effect_operation_signature_in_project(project_exports, effect_name, op_name)
+            })?,
+        );
+    }
+    if let Some((trait_name, method_name)) = result.resolved_trait_method_for_node(node_id) {
+        return signature_from_label(
+            trait_method_signature_in_check(result, trait_name, method_name).or_else(|| {
+                trait_method_signature_in_project(project_exports, trait_name, method_name)
+            })?,
+        );
+    }
+    None
+}
+
+fn build_from_member_name(
+    name: &str,
+    result: &CheckResult,
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+) -> Option<SignatureInformation> {
+    if let Some((owner, member)) = name.rsplit_once('.') {
+        return trait_method_signature_in_check(result, owner, member)
+            .or_else(|| trait_method_signature_in_project(project_exports, owner, member))
+            .or_else(|| effect_operation_signature_in_check(result, owner, member))
+            .or_else(|| effect_operation_signature_in_project(project_exports, owner, member))
+            .and_then(signature_from_label);
     }
 
-    // Fall back to env type
-    build_from_env(name, result)
+    trait_method_signature_for_member_in_check(result, name)
+        .or_else(|| trait_method_signature_for_member_in_project(project_exports, name))
+        .or_else(|| effect_operation_signature_for_member_in_check(result, name))
+        .or_else(|| effect_operation_signature_for_member_in_project(project_exports, name))
+        .and_then(signature_from_label)
+}
+
+fn trait_method_signature_for_member_in_check(
+    check: &CheckResult,
+    method_name: &str,
+) -> Option<String> {
+    check
+        .traits
+        .iter()
+        .find_map(|(trait_name, info)| {
+            info.methods
+                .iter()
+                .any(|method| method.name == method_name)
+                .then(|| trait_method_signature_in_check(check, trait_name, method_name))
+                .flatten()
+        })
+        .or_else(|| {
+            check
+                .module_check_results()
+                .values()
+                .find_map(|module| trait_method_signature_for_member_in_check(module, method_name))
+        })
+}
+
+fn effect_operation_signature_for_member_in_check(
+    check: &CheckResult,
+    op_name: &str,
+) -> Option<String> {
+    check
+        .effects
+        .iter()
+        .find_map(|(effect_name, info)| {
+            info.ops
+                .iter()
+                .any(|op| op.name == op_name)
+                .then(|| effect_operation_signature_in_check(check, effect_name, op_name))
+                .flatten()
+        })
+        .or_else(|| {
+            check
+                .module_check_results()
+                .values()
+                .find_map(|module| effect_operation_signature_for_member_in_check(module, op_name))
+        })
+}
+
+fn trait_method_signature_in_project(
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+    trait_name: &str,
+    method_name: &str,
+) -> Option<String> {
+    project_exports?
+        .values()
+        .find_map(|exports| trait_method_signature_in_exports(exports, trait_name, method_name))
+}
+
+fn effect_operation_signature_in_project(
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+    effect_name: &str,
+    op_name: &str,
+) -> Option<String> {
+    project_exports?
+        .values()
+        .find_map(|exports| effect_operation_signature_in_exports(exports, effect_name, op_name))
+}
+
+fn trait_method_signature_for_member_in_project(
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+    method_name: &str,
+) -> Option<String> {
+    project_exports?.values().find_map(|exports| {
+        exports.traits.iter().find_map(|(surface_name, info)| {
+            info.methods
+                .iter()
+                .any(|method| method.name == method_name)
+                .then(|| {
+                    let origin = exports
+                        .trait_origins
+                        .get(surface_name)
+                        .map(String::as_str)
+                        .unwrap_or(surface_name);
+                    trait_method_signature_in_exports(exports, origin, method_name)
+                })
+                .flatten()
+        })
+    })
+}
+
+fn effect_operation_signature_for_member_in_project(
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+    op_name: &str,
+) -> Option<String> {
+    project_exports?.values().find_map(|exports| {
+        exports.effects.iter().find_map(|(surface_name, info)| {
+            info.ops
+                .iter()
+                .any(|op| op.name == op_name)
+                .then(|| {
+                    let origin = exports
+                        .effect_origins
+                        .get(surface_name)
+                        .map(String::as_str)
+                        .unwrap_or(surface_name);
+                    effect_operation_signature_in_exports(exports, origin, op_name)
+                })
+                .flatten()
+        })
+    })
 }
 
 fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInformation> {
+    let bare_name = name.rsplit('.').next().unwrap_or(name);
     for decl in program {
         if let Decl::FunSignature {
             name: fn_name,
@@ -290,26 +574,24 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
             ..
         } = decl
         {
-            if fn_name != name {
+            if fn_name != bare_name {
                 continue;
             }
-
-            let param_infos: Vec<ParameterInformation> = params
+            let param_infos = params
                 .iter()
                 .map(|(label, ty)| {
-                    let label_str = if label.starts_with('_') {
+                    let label = if label.starts_with('_') {
                         format_type_expr(ty)
                     } else {
                         format!("{}: {}", label, format_type_expr(ty))
                     };
                     ParameterInformation {
-                        label: ParameterLabel::Simple(label_str),
+                        label: ParameterLabel::Simple(label),
                         documentation: None,
                     }
                 })
-                .collect();
-
-            let params_display: Vec<String> = params
+                .collect::<Vec<_>>();
+            let params_display = params
                 .iter()
                 .map(|(label, ty)| {
                     if label.starts_with('_') {
@@ -318,8 +600,8 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
                         format!("({}: {})", label, format_type_expr(ty))
                     }
                 })
-                .collect();
-            let mut sig_label = if params_display.is_empty() {
+                .collect::<Vec<_>>();
+            let mut label = if params_display.is_empty() {
                 format_type_expr(return_type)
             } else {
                 format!(
@@ -329,23 +611,15 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
                 )
             };
             if !effects.is_empty() {
-                let effs: Vec<String> = effects
+                let effects = effects
                     .iter()
-                    .map(|e| {
-                        if e.type_args.is_empty() {
-                            e.name.clone()
-                        } else {
-                            let args: Vec<String> =
-                                e.type_args.iter().map(format_type_expr).collect();
-                            format!("{} {}", e.name, args.join(" "))
-                        }
-                    })
-                    .collect();
-                sig_label.push_str(&format!(" needs {{{}}}", effs.join(", ")));
+                    .map(format_effect_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                label.push_str(&format!(" needs {{{effects}}}"));
             }
-
             return Some(SignatureInformation {
-                label: sig_label,
+                label,
                 documentation: None,
                 parameters: Some(param_infos),
                 active_parameter: None,
@@ -355,28 +629,155 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
     None
 }
 
-fn build_from_env(name: &str, result: &CheckResult) -> Option<SignatureInformation> {
-    let scheme = result.env.get(name)?;
-    let ty = scheme.display_with_constraints(&result.sub);
+fn scheme_for_name(
+    name: &str,
+    result: &CheckResult,
+    project_exports: Option<&HashMap<String, ModuleExports>>,
+) -> Option<Scheme> {
+    if let Some(scheme) = result
+        .env
+        .get(name)
+        .or_else(|| result.constructors.get(name))
+    {
+        return Some(scheme.clone());
+    }
+    let (module, member) = name.rsplit_once('.')?;
+    result
+        .module_exports()
+        .get(module)
+        .or_else(|| {
+            result
+                .module_exports()
+                .iter()
+                .find(|(module_name, _)| module_name.rsplit('.').next() == Some(module))
+                .map(|(_, exports)| exports)
+        })
+        .or_else(|| {
+            project_exports.and_then(|exports| {
+                exports.get(module).or_else(|| {
+                    exports
+                        .iter()
+                        .find(|(module_name, _)| module_name.rsplit('.').next() == Some(module))
+                        .map(|(_, exports)| exports)
+                })
+            })
+        })
+        .and_then(|exports| scheme_from_exports(exports, member))
+}
 
-    // Split arrow type into parameter strings: "Int -> String -> Bool" -> ["Int", "String"] + "Bool"
-    let parts: Vec<&str> = ty.split(" -> ").collect();
+fn scheme_from_exports(exports: &ModuleExports, member: &str) -> Option<Scheme> {
+    exports
+        .bindings
+        .iter()
+        .find(|(name, _)| name == member)
+        .map(|(_, scheme)| scheme.clone())
+}
+
+fn build_from_scheme(scheme: Scheme, result: &CheckResult) -> Option<SignatureInformation> {
+    let label = scheme.display_with_constraints(&result.sub);
+    let parts = split_arrow_type(&label);
     if parts.len() < 2 {
         return None;
     }
-
-    let param_infos: Vec<ParameterInformation> = parts[..parts.len() - 1]
+    let parameters = parts[..parts.len() - 1]
         .iter()
-        .map(|p| ParameterInformation {
-            label: ParameterLabel::Simple(p.to_string()),
+        .map(|part| ParameterInformation {
+            label: ParameterLabel::Simple((*part).to_string()),
             documentation: None,
         })
         .collect();
-
     Some(SignatureInformation {
-        label: ty,
+        label,
         documentation: None,
-        parameters: Some(param_infos),
+        parameters: Some(parameters),
         active_parameter: None,
     })
+}
+
+fn signature_from_label(label: String) -> Option<SignatureInformation> {
+    let type_part = label
+        .split_once(" : ")
+        .map(|(_, ty)| ty)
+        .unwrap_or(label.as_str());
+    let parts = split_arrow_type(type_part);
+    if parts.len() < 2 {
+        return None;
+    }
+    let parameters = parts[..parts.len() - 1]
+        .iter()
+        .map(|part| ParameterInformation {
+            label: ParameterLabel::Simple((*part).to_string()),
+            documentation: None,
+        })
+        .collect();
+    Some(SignatureInformation {
+        label,
+        documentation: None,
+        parameters: Some(parameters),
+        active_parameter: None,
+    })
+}
+
+fn split_arrow_type(label: &str) -> Vec<&str> {
+    label.split(" -> ").collect()
+}
+
+fn format_type_expr(ty: &ast::TypeExpr) -> String {
+    match ty {
+        ast::TypeExpr::Var { name, .. }
+        | ast::TypeExpr::Named { name, .. }
+        | ast::TypeExpr::Symbol { name, .. } => name.clone(),
+        ast::TypeExpr::App { .. } => {
+            let mut args = Vec::new();
+            let mut current = ty;
+            while let ast::TypeExpr::App { func, arg, .. } = current {
+                args.push(format_type_expr(arg));
+                current = func;
+            }
+            args.reverse();
+            format!("{} {}", format_type_expr(current), args.join(" "))
+        }
+        ast::TypeExpr::Arrow {
+            from,
+            to,
+            effects,
+            effect_row_var,
+            ..
+        } => {
+            let mut rendered = format!("{} -> {}", format_type_expr(from), format_type_expr(to));
+            if !effects.is_empty() || !effect_row_var.is_empty() {
+                let mut entries = effects.iter().map(format_effect_ref).collect::<Vec<_>>();
+                for (row, _) in effect_row_var {
+                    entries.push(format!("..{row}"));
+                }
+                rendered.push_str(&format!(" needs {{{}}}", entries.join(", ")));
+            }
+            rendered
+        }
+        ast::TypeExpr::Record { fields, .. } => {
+            let fields = fields
+                .iter()
+                .map(|(name, ty)| format!("{name}: {}", format_type_expr(ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{fields}}}")
+        }
+        ast::TypeExpr::Labeled { label, inner, .. } => {
+            format!("({}: {})", label, format_type_expr(inner))
+        }
+    }
+}
+
+fn format_effect_ref(effect: &ast::EffectRef) -> String {
+    if effect.type_args.is_empty() {
+        effect.name.clone()
+    } else {
+        let args = effect
+            .type_args
+            .iter()
+            .map(format_type_expr)
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{} {}", effect.name, args)
+    }
 }

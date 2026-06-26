@@ -1,4 +1,4 @@
-use super::{build_module_graph, build_reachable_module_graph};
+use super::{build_module_graph_with_sources, build_reachable_module_graph_with_sources};
 use crate::typechecker::Checker;
 
 impl Checker {
@@ -13,7 +13,7 @@ impl Checker {
         let graph = if let Some(graph) = self.modules.module_graph.as_ref() {
             graph
         } else {
-            match build_module_graph(map) {
+            match build_module_graph_with_sources(map, &self.modules.source_overlay) {
                 Ok(graph) => {
                     self.modules.module_graph = Some(graph);
                     self.modules
@@ -22,7 +22,11 @@ impl Checker {
                         .expect("cached module graph")
                 }
                 Err(_) => {
-                    reachable_graph = build_reachable_module_graph(map, module_name)?;
+                    reachable_graph = build_reachable_module_graph_with_sources(
+                        map,
+                        module_name,
+                        &self.modules.source_overlay,
+                    )?;
                     &reachable_graph
                 }
             }

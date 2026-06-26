@@ -1,10 +1,10 @@
 use super::*;
 use crate::ast::{Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use crate::codegen::runtime_shape::RuntimeFunctionShape;
-use std::collections::{HashMap};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use crate::codegen::runtime_shape::RuntimeFunctionShape;
+use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_block_with_return_k(
@@ -108,7 +108,9 @@ impl<'a> Lowerer<'a> {
                 if has_effects {
                     self.current_evidence = Some(EvidenceCtx {
                         var: "_Evidence".to_string(),
-                        layout: crate::codegen::lower::evidence::EvidenceLayout::new(effects.iter().cloned()),
+                        layout: crate::codegen::lower::evidence::EvidenceLayout::new(
+                            effects.iter().cloned(),
+                        ),
                         is_open: is_open_row,
                     });
                 }
@@ -346,12 +348,10 @@ impl<'a> Lowerer<'a> {
     // don't call K will skip the rest of the enclosing block, matching the
     // interpreter's semantics.
 
-
     /// Lower an expression with an outer continuation K threaded through branches.
     pub(crate) fn lower_expr_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
         self.lower_expr_tail(expr, CExpr::Var(k_var.to_string()))
     }
-
 
     pub(crate) fn lower_expr_with_k_inner(&mut self, expr: &Expr, k_var: &str) -> CExpr {
         match &expr.kind {
@@ -559,7 +559,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Lower a record-creation expression and apply `k_var` to the constructed
     /// tuple. Effectful field values are CPS-chained so an aborting handler
     /// skips the rest of the construction (and `k_var`) instead of leaking its
@@ -630,14 +629,12 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-
     /// Lower a branch expression with an outer continuation K.
     /// Dispatches based on whether the branch is a direct effect call,
     /// contains nested effects, or is a plain expression.
     pub(crate) fn lower_branch_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
         self.lower_terminal_effectful_expr_to_k(expr, k_var)
     }
-
 
     /// Lower a block with an outer continuation K threaded to the terminal.
     /// Like `lower_block` but applies K at terminal positions instead of return_k.
@@ -723,5 +720,4 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
-
 }

@@ -14,6 +14,131 @@ use super::{
 /// Prettified effect op: (op_name, [(label, type)], return_type).
 pub type PrettifiedOp = (String, Vec<(String, Type)>, Type);
 
+/// Pretty Saga-ish signature for a trait method from exported trait metadata.
+pub fn trait_method_signature_from_info(
+    trait_name: &str,
+    info: &TraitInfo,
+    method_name: &str,
+) -> Option<String> {
+    trait_method_signature_from_info_with_sub(trait_name, info, method_name, &Substitution::new())
+}
+
+fn trait_method_signature_from_info_with_sub(
+    trait_name: &str,
+    info: &TraitInfo,
+    method_name: &str,
+    sub: &Substitution,
+) -> Option<String> {
+    let method = info
+        .methods
+        .iter()
+        .find(|method| method.name == method_name)?;
+    let mut parts: Vec<String> = method
+        .param_types
+        .iter()
+        .map(|ty| format!("{}", prettify_with_sub(ty, sub)))
+        .collect();
+    parts.push(format!("{}", prettify_with_sub(&method.return_type, sub)));
+    let mut signature = format!(
+        "{}.{} : {}",
+        super::bare_type_name(trait_name),
+        method_name,
+        parts.join(" -> ")
+    );
+    let effects = display_effect_names(&method.effect_sig.effects);
+    if method.effect_sig.is_open_row || !effects.is_empty() {
+        let mut row = effects;
+        if method.effect_sig.is_open_row {
+            row.push("..e".to_string());
+        }
+        signature.push_str(&format!(" needs {{{}}}", row.join(", ")));
+    }
+    Some(signature)
+}
+
+/// Pretty Saga-ish signature for an effect operation from exported effect metadata.
+pub fn effect_operation_signature_from_info(
+    effect_name: &str,
+    info: &EffectDefInfo,
+    op_name: &str,
+) -> Option<String> {
+    effect_operation_signature_from_info_with_sub(effect_name, info, op_name, &Substitution::new())
+}
+
+fn effect_operation_signature_from_info_with_sub(
+    effect_name: &str,
+    info: &EffectDefInfo,
+    op_name: &str,
+    sub: &Substitution,
+) -> Option<String> {
+    let op = info.ops.iter().find(|op| op.name == op_name)?;
+    let mut parts: Vec<String> = op
+        .params
+        .iter()
+        .map(|(_, ty)| format!("{}", prettify_with_sub(ty, sub)))
+        .collect();
+    parts.push(format!("{}", prettify_with_sub(&op.return_type, sub)));
+    let mut signature = format!(
+        "{}.{} : {}",
+        super::bare_type_name(effect_name),
+        op_name,
+        parts.join(" -> ")
+    );
+    let effects = display_effect_row_with_sub(&op.needs, sub);
+    if !effects.is_empty() {
+        signature.push_str(&format!(" needs {{{}}}", effects.join(", ")));
+    }
+    Some(signature)
+}
+
+fn prettify_with_sub(ty: &Type, sub: &Substitution) -> Type {
+    let resolved = sub.apply(ty);
+    let mut vars = Vec::new();
+    super::collect_free_vars(&resolved, &mut vars);
+    if vars.is_empty() {
+        return resolved;
+    }
+    let names: HashMap<u32, String> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, ((b'a' + i as u8) as char).to_string()))
+        .collect();
+    super::rename_vars(&resolved, &names)
+}
+
+fn display_effect_names(effects: &[String]) -> Vec<String> {
+    effects
+        .iter()
+        .map(|effect| super::bare_type_name(effect).to_string())
+        .collect()
+}
+
+fn display_effect_row_with_sub(row: &super::EffectRow, sub: &Substitution) -> Vec<String> {
+    let mut effects: Vec<String> = row
+        .effects
+        .iter()
+        .map(|effect| {
+            let mut text = super::bare_type_name(&effect.name).to_string();
+            let args: Vec<String> = effect
+                .args
+                .iter()
+                .map(|arg| format!("{}", prettify_with_sub(arg, sub)))
+                .collect();
+            if !args.is_empty() {
+                text.push(' ');
+                text.push_str(&args.join(" "));
+            }
+            text
+        })
+        .collect();
+    effects.extend(
+        row.tails
+            .iter()
+            .map(|tail| format!("..{}", prettify_with_sub(tail, sub))),
+    );
+    effects
+}
+
 /// Dictionary-passing info for a let binding with trait constraints.
 #[derive(Debug, Clone)]
 pub struct LetDictInfo {
@@ -159,6 +284,114 @@ impl CheckResult {
     /// Cached per-module CheckResults (from typecheck_import, avoids re-typechecking).
     pub fn module_check_results(&self) -> &std::collections::HashMap<String, CheckResult> {
         &self.modules.check_results
+    }
+
+    /// Local value references as `(usage_node, lexical_binding_id)`.
+    ///
+    /// The concrete resolver identity type stays private to the typechecker;
+    /// LSP consumers use this to correct value references that would otherwise
+    /// collapse same-named shadowed locals through the flat type environment.
+    pub fn local_value_references(&self) -> Vec<(crate::ast::NodeId, u32)> {
+        self.resolution
+            .values
+            .iter()
+            .filter_map(|(node_id, resolved)| match resolved {
+                super::ResolvedValue::Local { binding_id, .. } => Some((*node_id, binding_id.0)),
+                super::ResolvedValue::Global { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Resolved source type/record identity for a source AST node.
+    pub fn resolved_type_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.resolution
+            .type_ref(node_id)
+            .or_else(|| self.resolution.record_type(node_id))
+            .or_else(|| self.resolution.impl_target_type_ref(node_id))
+    }
+
+    /// Resolved source trait identity for a source AST node.
+    pub fn resolved_trait_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.resolution
+            .trait_ref(node_id)
+            .or_else(|| self.resolution.impl_trait_ref(node_id))
+    }
+
+    /// Resolved source trait method identity for a source expression node.
+    pub fn resolved_trait_method_for_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(&str, &str)> {
+        self.resolution
+            .trait_method(node_id)
+            .map(|resolved| (resolved.trait_name.as_str(), resolved.method.as_str()))
+    }
+
+    /// Resolved source effect identity for a source AST node.
+    pub fn resolved_effect_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+        self.resolution.effect_ref(node_id)
+    }
+
+    /// Resolved source effect-operation identity for an effect-call expression node.
+    pub fn resolved_effect_operation_for_call_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(&str, &str)> {
+        self.resolution
+            .effect_call(node_id)
+            .map(|resolved| (resolved.effect.as_str(), resolved.op.as_str()))
+    }
+
+    /// Resolved source effect-operation identity for a handler-arm node.
+    pub fn resolved_effect_operation_for_handler_arm_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<(&str, &str)> {
+        self.resolution
+            .handler_arm(node_id)
+            .map(|resolved| (resolved.effect.as_str(), resolved.op.as_str()))
+    }
+
+    /// Resolved effect identity for an effect-call expression node.
+    pub fn resolved_effect_call_effect_name_for_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&str> {
+        self.resolution
+            .effect_call(node_id)
+            .map(|resolved| resolved.effect.as_str())
+    }
+
+    /// Resolved effect identity for a handler-arm node.
+    pub fn resolved_handler_arm_effect_name_for_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&str> {
+        self.resolution
+            .handler_arm(node_id)
+            .map(|resolved| resolved.effect.as_str())
+    }
+
+    /// Resolved source handler identity for a source AST node.
+    pub fn resolved_handler_name_for_node(&self, node_id: crate::ast::NodeId) -> Option<String> {
+        self.resolution
+            .handler_ref(node_id)
+            .map(|resolved| match resolved {
+                super::ResolvedValue::Local { name, .. } => name.clone(),
+                super::ResolvedValue::Global { lookup_name } => lookup_name.clone(),
+            })
+    }
+
+    /// Pretty Saga-ish signature for a resolved trait method.
+    pub fn trait_method_signature(&self, trait_name: &str, method_name: &str) -> Option<String> {
+        let info = self.traits.get(trait_name)?;
+        trait_method_signature_from_info_with_sub(trait_name, info, method_name, &self.sub)
+    }
+
+    /// Pretty Saga-ish signature for a resolved effect operation.
+    pub fn effect_operation_signature(&self, effect_name: &str, op_name: &str) -> Option<String> {
+        let info = self.effects.get(effect_name)?;
+        effect_operation_signature_from_info_with_sub(effect_name, info, op_name, &self.sub)
     }
 
     /// Module map (module name -> file path).
@@ -310,12 +543,107 @@ impl CheckResult {
     }
 }
 
+impl ModuleContext {
+    fn clone_for_result_with_check_results(
+        &self,
+        check_results: HashMap<String, CheckResult>,
+    ) -> Self {
+        Self {
+            project_root: self.project_root.clone(),
+            map: self.map.clone(),
+            source_overlay: self.source_overlay.clone(),
+            module_graph: self.module_graph.clone(),
+            visibility: self.visibility.clone(),
+            private_modules: self.private_modules.clone(),
+            exports: self.exports.clone(),
+            codegen_info: self.codegen_info.clone(),
+            programs: self.programs.clone(),
+            check_results,
+            // CheckResult is a compiler output snapshot. These are live checker
+            // caches and cycle guards, so carrying them here only makes clones
+            // more expensive.
+            prelude_snapshot: None,
+            base_trait_impls: self.base_trait_impls.clone(),
+            loading: HashSet::new(),
+            active_scc_headers: None,
+            registered_canonical: HashSet::new(),
+        }
+    }
+
+    fn clone_for_result(&self) -> Self {
+        self.clone_for_result_with_check_results(self.check_results.clone())
+    }
+
+    fn clone_for_lsp_result(&self) -> Self {
+        let check_results = self
+            .check_results
+            .iter()
+            .map(|(name, result)| (name.clone(), result.clone_without_module_results()))
+            .collect();
+        self.clone_for_result_with_check_results(check_results)
+    }
+
+    fn clone_without_module_results(&self) -> Self {
+        self.clone_for_result_with_check_results(HashMap::new())
+    }
+}
+
+impl CheckResult {
+    fn clone_without_module_results(&self) -> Self {
+        Self {
+            env: self.env.clone(),
+            sub: self.sub.clone(),
+            constructors: self.constructors.clone(),
+            evidence: self.evidence.clone(),
+            where_bound_var_names: self.where_bound_var_names.clone(),
+            diagnostics: self.diagnostics.clone(),
+            modules: self.modules.clone_without_module_results(),
+            traits: self.traits.clone(),
+            trait_impls: self.trait_impls.clone(),
+            effects: self.effects.clone(),
+            handlers: self.handlers.clone(),
+            let_binding_handlers: self.let_binding_handlers.clone(),
+            fun_effects: self.fun_effects.clone(),
+            type_at_node: self.type_at_node.clone(),
+            type_at_span: self.type_at_span.clone(),
+            handler_arm_targets: self.handler_arm_targets.clone(),
+            effect_call_targets: self.effect_call_targets.clone(),
+            let_dict_params: self.let_dict_params.clone(),
+            let_effect_bindings: self.let_effect_bindings.clone(),
+            records: self.records.clone(),
+            references: self.references.clone(),
+            node_spans: self.node_spans.clone(),
+            type_references: self.type_references.clone(),
+            constructor_def_ids: self.constructor_def_ids.clone(),
+            imported_docs: self.imported_docs.clone(),
+            prelude_imports: self.prelude_imports.clone(),
+            scope_map: self.scope_map.clone(),
+            resolution: self.resolution.clone(),
+            needs_ets_ref_table: self.needs_ets_ref_table,
+            needs_vec_table: self.needs_vec_table,
+        }
+    }
+}
+
 impl Checker {
     /// Extract the public-facing result from the current checker state.
     /// Clones the output-relevant fields, leaving the Checker intact
     /// (needed because with_prelude continues using the Checker after
     /// checking the prelude).
     pub fn to_result(&self) -> CheckResult {
+        self.to_result_with_modules(self.modules.clone_for_result())
+    }
+
+    /// Extract a result optimized for LSP snapshots.
+    ///
+    /// The LSP only needs direct imported module facts for navigation and
+    /// hovers. Keeping recursively nested per-module CheckResults makes each
+    /// keystroke clone the transitive project graph.
+    pub fn to_lsp_result(&self) -> CheckResult {
+        self.to_result_with_modules(self.modules.clone_for_lsp_result())
+    }
+
+    fn to_result_with_modules(&self, modules: ModuleContext) -> CheckResult {
         let diagnostics = self.collected_diagnostics.clone();
         let type_at_node = self
             .lsp
@@ -353,7 +681,7 @@ impl Checker {
                 expanded
             },
             diagnostics,
-            modules: self.modules.clone(),
+            modules,
             traits: self.trait_state.traits.clone(),
             trait_impls: self.trait_state.impls.clone(),
             effects: self.effects.clone(),

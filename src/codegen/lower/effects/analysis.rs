@@ -1,7 +1,7 @@
 use super::*;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use std::collections::{HashSet, VecDeque};
 use crate::codegen::lower::*;
+use std::collections::{HashSet, VecDeque};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn collect_top_level_scoped_vars(expr: &CExpr, out: &mut HashSet<String>) {
@@ -16,19 +16,21 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn collect_var_refs(expr: &CExpr, out: &mut HashSet<String>) {
         let mut bound = HashSet::new();
         Self::collect_free_var_refs(expr, &mut bound, out);
     }
-
 
     /// Scope-aware free-variable collector. Tracks which names are locally
     /// bound by `Let`/`Fun`/`LetRec`/`Case` patterns and only records vars
     /// that escape those bindings. Without this, naive walking treats inner
     /// shadowing names (e.g. a handler lambda that rebinds `Conn = _HArg0`)
     /// as references to the outer name, producing spurious dependencies.
-    pub(crate) fn collect_free_var_refs(expr: &CExpr, bound: &mut HashSet<String>, out: &mut HashSet<String>) {
+    pub(crate) fn collect_free_var_refs(
+        expr: &CExpr,
+        bound: &mut HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
         match expr {
             CExpr::Var(v) => {
                 if !bound.contains(v) {
@@ -175,7 +177,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn collect_pat_vars(pat: &CPat, out: &mut Vec<String>) {
         match pat {
             CPat::Var(v) => out.push(v.clone()),
@@ -212,7 +213,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn wrap_ready_pending_lets(
         mut body: CExpr,
         pending: &mut VecDeque<PendingLet>,
@@ -239,7 +239,6 @@ impl<'a> Lowerer<'a> {
         body
     }
 
-
     pub(crate) fn place_pending_lets(
         body: CExpr,
         pending: &mut VecDeque<PendingLet>,
@@ -264,7 +263,6 @@ impl<'a> Lowerer<'a> {
             other => Self::wrap_ready_pending_lets(other, pending, bound),
         }
     }
-
 
     pub(crate) fn attach_scoped_handler_bindings(
         &self,
@@ -309,7 +307,6 @@ impl<'a> Lowerer<'a> {
             );
         }
     }
-
 
     pub(crate) fn named_return_lambda(&mut self, item: &NamedHandlerItem) -> Option<CExpr> {
         match item {
@@ -382,14 +379,14 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn is_beam_native_handler_canonical(&self, canonical: &str) -> bool {
         self.handler_defs
             .get(canonical)
             .and_then(|info| info.source_module.as_deref())
-            .is_some_and(|module| crate::codegen::lower::beam_interop::is_beam_native_handler(module, canonical))
+            .is_some_and(|module| {
+                crate::codegen::lower::beam_interop::is_beam_native_handler(module, canonical)
+            })
     }
-
 
     /// Find a BEAM-native handler that covers the given effect, if any.
     /// Used to satisfy callback-parameter absorbed effects without threading
@@ -408,7 +405,6 @@ impl<'a> Lowerer<'a> {
         }
         None
     }
-
 
     pub(crate) fn use_direct_native_fast_path(&self, _canonical: &str) -> bool {
         false

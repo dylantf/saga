@@ -98,7 +98,6 @@ impl Checker {
         Ok(())
     }
 
-
     pub(crate) fn register_type_alias(
         &mut self,
         name: &str,
@@ -128,7 +127,8 @@ impl Checker {
         // are free type variables in the alias body — reject them, since
         // Saga doesn't implicitly quantify type alias bodies.
         let declared_count = param_vars.len();
-        let body_ty = self.convert_type_expr_kinded(body, &mut param_vars, crate::typechecker::Kind::Star);
+        let body_ty =
+            self.convert_type_expr_kinded(body, &mut param_vars, crate::typechecker::Kind::Star);
         // The kinded entry point bypasses convert_type_expr's wrapper, so
         // run the partial-alias check explicitly so invalid alias bodies
         // (`type alias Bad = Bag` where `Bag` has arity 1) fail at the
@@ -161,7 +161,6 @@ impl Checker {
         self.type_aliases.insert(canonical_name, info);
         Ok(())
     }
-
 
     /// Detect cycles among type aliases declared in this module. A cycle is
     /// any alias whose body transitively references itself. Cross-module
@@ -314,7 +313,6 @@ impl Checker {
         Ok(())
     }
 
-
     pub(crate) fn register_record_def(
         &mut self,
         name: &str,
@@ -397,5 +395,4 @@ impl Checker {
             .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
         Ok(())
     }
-
 }

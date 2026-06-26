@@ -653,6 +653,9 @@ pub struct ModuleContext {
     pub(crate) project_root: Option<std::path::PathBuf>,
     /// Map from declared module name to file path. Built by scanning the project at startup.
     pub map: Option<check_module::ModuleMap>,
+    /// In-memory source text keyed by file path. Used by the LSP so open,
+    /// unsaved modules participate in project-mode typechecking.
+    pub(crate) source_overlay: HashMap<std::path::PathBuf, String>,
     /// Cached import graph for `map`. Invalidated whenever the module map is replaced or mutated.
     pub(crate) module_graph: Option<check_module::ModuleGraph>,
     /// Per-module visibility metadata for dependency modules. Used to identify

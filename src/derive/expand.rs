@@ -53,7 +53,9 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
     let routed_row_heads: std::collections::HashSet<String> = original
         .iter()
         .flat_map(|d| match d {
-            Decl::TypeDef { deriving, .. } | Decl::RecordDef { deriving, .. } => deriving.as_slice(),
+            Decl::TypeDef { deriving, .. } | Decl::RecordDef { deriving, .. } => {
+                deriving.as_slice()
+            }
             _ => &[],
         })
         .filter_map(|spec| spec.type_args.first().and_then(|row| row.head_name()))
@@ -140,7 +142,11 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 ..
             } if trait_type_args.len() == 1 => {
                 scope.local_impls.push(DeriveImplInfo {
-                    trait_bare: trait_name.rsplit('.').next().unwrap_or(trait_name).to_string(),
+                    trait_bare: trait_name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(trait_name)
+                        .to_string(),
                     target: target.clone(),
                     row: trait_type_args[0].clone(),
                 });
@@ -371,7 +377,6 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
     errors
 }
 
-
 /// Walk impl decls and clone any missing default bodies from the impl's trait
 /// into the impl, with fresh NodeIds. The trait may be local or imported;
 /// `scope` already merges both.
@@ -446,7 +451,6 @@ pub(crate) fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'
         }
     }
 }
-
 
 /// Rewrite free `Var` references inside `expr` that name a top-level value
 /// in the trait's defining module to `QualifiedName { module, name }`. Used
@@ -690,7 +694,6 @@ pub(crate) fn qualify_free_vars(
     }
 }
 
-
 pub(crate) fn qualify_stmt_free_vars(
     stmt: &mut Stmt,
     module: &str,
@@ -724,7 +727,6 @@ pub(crate) fn qualify_stmt_free_vars(
         Stmt::Expr(e) => qualify_free_vars(e, module, module_values, trait_methods, bound),
     }
 }
-
 
 /// Rewrite bare data-constructor references inside a cloned default-method
 /// body to their module-qualified canonical name, so they resolve against the
@@ -916,8 +918,7 @@ pub(crate) fn qualify_ctor_refs(
         ExprKind::ListComprehension { body, qualifiers } => {
             for q in qualifiers {
                 match q {
-                    ComprehensionQualifier::Generator(p, e)
-                    | ComprehensionQualifier::Let(p, e) => {
+                    ComprehensionQualifier::Generator(p, e) | ComprehensionQualifier::Let(p, e) => {
                         qualify_ctor_pat(p, module, module_constructors);
                         qualify_ctor_refs(e, module, module_constructors);
                     }
@@ -935,7 +936,6 @@ pub(crate) fn qualify_ctor_refs(
         }
     }
 }
-
 
 /// Companion to `qualify_ctor_refs` for constructor references that appear in
 /// patterns (e.g. a default body that destructures one of the trait module's
@@ -984,7 +984,6 @@ pub(crate) fn qualify_ctor_pat(
         }
     }
 }
-
 
 pub(crate) fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSet<String>) {
     match pat {
@@ -1049,4 +1048,3 @@ pub(crate) fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSe
         }
     }
 }
-

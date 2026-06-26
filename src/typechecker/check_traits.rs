@@ -58,9 +58,7 @@ pub(crate) fn types_disjoint(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Type::Var(_), _) | (_, Type::Var(_)) => false,
         (Type::Con(n1, a1), Type::Con(n2, a2)) => {
-            n1 != n2
-                || a1.len() != a2.len()
-                || a1.iter().zip(a2).any(|(x, y)| types_disjoint(x, y))
+            n1 != n2 || a1.len() != a2.len() || a1.iter().zip(a2).any(|(x, y)| types_disjoint(x, y))
         }
         (Type::Symbol(s1), Type::Symbol(s2)) => s1 != s2,
         _ => false,
@@ -408,13 +406,19 @@ impl Checker {
                 let Some(idx) = param_index(d) else {
                     return Err(Diagnostic::error_at(
                         fd.span,
-                        format!("functional dependency mentions unknown trait parameter `{}`", d),
+                        format!(
+                            "functional dependency mentions unknown trait parameter `{}`",
+                            d
+                        ),
                     ));
                 };
                 if determinant_idx.contains(&idx) {
                     return Err(Diagnostic::error_at(
                         fd.span,
-                        format!("functional dependency repeats determining parameter `{}`", d),
+                        format!(
+                            "functional dependency repeats determining parameter `{}`",
+                            d
+                        ),
                     ));
                 }
                 determinant_idx.push(idx);
@@ -424,16 +428,16 @@ impl Checker {
                 let Some(idx) = param_index(d) else {
                     return Err(Diagnostic::error_at(
                         fd.span,
-                        format!("functional dependency mentions unknown trait parameter `{}`", d),
+                        format!(
+                            "functional dependency mentions unknown trait parameter `{}`",
+                            d
+                        ),
                     ));
                 };
                 if determinant_idx.contains(&idx) {
                     return Err(Diagnostic::error_at(
                         fd.span,
-                        format!(
-                            "functional dependency cannot determine `{}` from itself",
-                            d
-                        ),
+                        format!("functional dependency cannot determine `{}` from itself", d),
                     ));
                 }
                 if determined_idx.contains(&idx) {
@@ -662,9 +666,9 @@ impl Checker {
                 // must match. Differing on a determinant arg means the impls
                 // determine outputs for distinct inputs, so they may coexist.
                 let determinants_agree = existing_target == &target_key
-                    && det_extra_positions.iter().all(|&p| {
-                        existing_args.get(p) == trait_type_args_names.get(p)
-                    });
+                    && det_extra_positions
+                        .iter()
+                        .all(|&p| existing_args.get(p) == trait_type_args_names.get(p));
                 if existing_trait == trait_name
                     && determinants_agree
                     && existing_args != trait_type_args_names
@@ -1343,11 +1347,13 @@ impl Checker {
         let Type::Con(self_name, self_args) = self_type else {
             return;
         };
-        let Some((_, impl_info)) = self
-            .trait_state
-            .impls
-            .iter()
-            .find(|((trait_name, _, target), _)| trait_name == resolved_trait && target == self_name)
+        let Some((_, impl_info)) =
+            self.trait_state
+                .impls
+                .iter()
+                .find(|((trait_name, _, target), _)| {
+                    trait_name == resolved_trait && target == self_name
+                })
         else {
             return;
         };

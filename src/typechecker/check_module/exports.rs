@@ -566,7 +566,14 @@ fn collect_type_and_trait_reexports(
                 .get(origin_name)
                 .cloned()
                 .unwrap_or_else(|| format!("{}.{}", module_name, origin_name));
-            type_origins.insert(surface.to_string(), origin);
+            type_origins.insert(surface.to_string(), origin.clone());
+            for (key, impl_info) in &exports.trait_impls {
+                if key.2 == origin {
+                    trait_impls
+                        .entry(key.clone())
+                        .or_insert_with(|| impl_info.clone());
+                }
+            }
             if let Some(kinds) = exports.type_param_kinds.get(origin_name) {
                 type_param_kinds.insert(surface.to_string(), kinds.clone());
             }

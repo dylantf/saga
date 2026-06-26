@@ -25,7 +25,6 @@ impl<'a> Lowerer<'a> {
         });
     }
 
-
     pub(crate) fn evidence_lookup_trace_shape(&self, effect_name: &str) -> String {
         match &self.current_evidence {
             Some(ctx) if !ctx.is_open && ctx.layout.tags().iter().any(|tag| tag == effect_name) => {
@@ -37,8 +36,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
-    pub(crate) fn effect_op_lowering_plan(&self, effect_key: &str, effect_name: &str) -> EffectOpLoweringPlan {
+    pub(crate) fn effect_op_lowering_plan(
+        &self,
+        effect_key: &str,
+        effect_name: &str,
+    ) -> EffectOpLoweringPlan {
         if let Some(handler_canonical) = self.direct_ops.get(effect_key).cloned() {
             EffectOpLoweringPlan::DirectNative { handler_canonical }
         } else if let Some(plan) = self.static_tail_resume_ops.get(effect_key).cloned() {
@@ -50,8 +52,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
-    pub(crate) fn lower_direct_op_result(&mut self, value: CExpr, continuation: Option<CExpr>) -> CExpr {
+    pub(crate) fn lower_direct_op_result(
+        &mut self,
+        value: CExpr,
+        continuation: Option<CExpr>,
+    ) -> CExpr {
         if let Some(k) = continuation {
             match k {
                 CExpr::Fun(params, body) if params.len() == 1 => {
@@ -70,7 +75,6 @@ impl<'a> Lowerer<'a> {
             value
         }
     }
-
 
     pub(crate) fn static_tail_resume_value_supported(expr: &Expr) -> bool {
         match &expr.kind {
@@ -91,7 +95,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn static_tail_resume_bindings(
         &mut self,
         params: &[Pat],
@@ -106,7 +109,9 @@ impl<'a> Lowerer<'a> {
                 .map(|runtime_idx| CExpr::Var(param_vars[runtime_idx].clone()))
                 .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
             match param {
-                Pat::Var { name, .. } => bindings.push((crate::codegen::lower::core_var(name), value)),
+                Pat::Var { name, .. } => {
+                    bindings.push((crate::codegen::lower::core_var(name), value))
+                }
                 Pat::Wildcard { .. }
                 | Pat::Lit {
                     value: crate::ast::Lit::Unit,
@@ -117,7 +122,6 @@ impl<'a> Lowerer<'a> {
         }
         Some(bindings)
     }
-
 
     pub(crate) fn lower_static_tail_resume_op(
         &mut self,
@@ -152,20 +156,33 @@ impl<'a> Lowerer<'a> {
             .enumerate()
             .filter_map(|(i, name)| {
                 let idx = param_vars.len().checked_sub(dict_names.len())? + i;
-                param_vars
-                    .get(idx)
-                    .map(|var| (crate::codegen::lower::core_var(name), CExpr::Var(var.clone())))
+                param_vars.get(idx).map(|var| {
+                    (
+                        crate::codegen::lower::core_var(name),
+                        CExpr::Var(var.clone()),
+                    )
+                })
             })
             .collect();
         let capture_bindings: Vec<(String, CExpr)> = plan
             .captures
             .iter()
-            .map(|(name, value)| (crate::codegen::lower::core_var(name), self.lower_expr_value(value)))
+            .map(|(name, value)| {
+                (
+                    crate::codegen::lower::core_var(name),
+                    self.lower_expr_value(value),
+                )
+            })
             .collect();
         let variant_capture_bindings: Vec<(String, CExpr)> = self
             .static_helper_variant_capture_bindings
             .iter()
-            .map(|(name, param_var)| (crate::codegen::lower::core_var(name), CExpr::Var(param_var.clone())))
+            .map(|(name, param_var)| {
+                (
+                    crate::codegen::lower::core_var(name),
+                    CExpr::Var(param_var.clone()),
+                )
+            })
             .collect();
 
         let saved_source_module = self.current_handler_source_module.clone();
@@ -194,7 +211,6 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-
     pub(crate) fn static_tail_resume_params_supported(params: &[Pat]) -> bool {
         params.iter().all(|param| {
             matches!(
@@ -209,7 +225,6 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-
     pub(crate) fn static_tail_resume_prefix_stmt_supported(&self, stmt: &Stmt) -> bool {
         let value = match stmt {
             Stmt::Let { value, .. } | Stmt::Expr(value) => value,
@@ -218,8 +233,10 @@ impl<'a> Lowerer<'a> {
         !value.contains_resume() && !self.branch_is_effectful(value)
     }
 
-
-    pub(crate) fn static_tail_resume_direct_body(&self, body: &Expr) -> Option<StaticTailResumeDirectBody> {
+    pub(crate) fn static_tail_resume_direct_body(
+        &self,
+        body: &Expr,
+    ) -> Option<StaticTailResumeDirectBody> {
         match &body.kind {
             ExprKind::Resume { value } if Self::static_tail_resume_value_supported(value) => {
                 Some(StaticTailResumeDirectBody::Expr((**value).clone()))
@@ -250,7 +267,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn static_tail_resume_arm_supported(&self, arm: &HandlerArm) -> bool {
         if arm.finally_block.is_some()
             || self.optimization.handler_analysis.resumption.get(&arm.id)
@@ -262,7 +278,6 @@ impl<'a> Lowerer<'a> {
         self.static_tail_resume_direct_body(&arm.body).is_some()
     }
 
-
     pub(crate) fn static_tail_resume_plan_for_op_handler(
         &self,
         plan: &OpHandlerPlan,
@@ -270,12 +285,13 @@ impl<'a> Lowerer<'a> {
         match plan {
             OpHandlerPlan::Inline { arms } if arms.len() == 1 => {
                 let arm = arms[0].clone();
-                self.static_tail_resume_arm_supported(&arm)
-                    .then_some(crate::codegen::lower::StaticTailResumeOp {
+                self.static_tail_resume_arm_supported(&arm).then_some(
+                    crate::codegen::lower::StaticTailResumeOp {
                         arm,
                         source_module: None,
                         captures: Vec::new(),
-                    })
+                    },
+                )
             }
             OpHandlerPlan::Static {
                 arm,
@@ -289,19 +305,23 @@ impl<'a> Lowerer<'a> {
                 } =>
             {
                 let arm = arm.clone();
-                self.static_tail_resume_arm_supported(&arm)
-                    .then_some(crate::codegen::lower::StaticTailResumeOp {
+                self.static_tail_resume_arm_supported(&arm).then_some(
+                    crate::codegen::lower::StaticTailResumeOp {
                         arm,
                         source_module: source_module.clone(),
                         captures: captures.clone(),
-                    })
+                    },
+                )
             }
             _ => None,
         }
     }
 
-
-    pub(crate) fn compose_return_k(&mut self, inner: Option<CExpr>, outer: Option<CExpr>) -> Option<CExpr> {
+    pub(crate) fn compose_return_k(
+        &mut self,
+        inner: Option<CExpr>,
+        outer: Option<CExpr>,
+    ) -> Option<CExpr> {
         match (inner, outer) {
             (Some(inner), Some(outer)) => {
                 let param = self.fresh();
@@ -320,7 +340,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     pub(crate) fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
         // For abort handler arm bodies inside an effectful host context
         // (e.g. an impl method that has its own `_ReturnK`), the abort
@@ -337,11 +356,13 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
-    pub(crate) fn lower_handled_expr_with_return_k(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
+    pub(crate) fn lower_handled_expr_with_return_k(
+        &mut self,
+        expr: &Expr,
+        return_k: Option<CExpr>,
+    ) -> CExpr {
         self.lower_expr_with_installed_return_k(expr, return_k)
     }
-
 
     pub(crate) fn lower_handled_inner_expr(
         &mut self,
@@ -356,7 +377,6 @@ impl<'a> Lowerer<'a> {
             self.lower_handled_expr_with_return_k(expr, return_k)
         }
     }
-
 
     pub(crate) fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
         let param = self.fresh();
@@ -392,8 +412,11 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-
-    pub(crate) fn build_return_lambda(&mut self, ret: &HandlerArm, source_module: Option<&str>) -> CExpr {
+    pub(crate) fn build_return_lambda(
+        &mut self,
+        ret: &HandlerArm,
+        source_module: Option<&str>,
+    ) -> CExpr {
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = source_module.map(str::to_string);
         // Return-lambda body flows through the lambda's caller (which itself
@@ -411,7 +434,6 @@ impl<'a> Lowerer<'a> {
         CExpr::Fun(vec![param], Box::new(body))
     }
 
-
     /// Read the per-op closure for `effect.op` out of the in-scope evidence
     /// vector. Closed-row callers with the effect statically present in their
     /// layout emit pure `element/2` chains; open-row callers (or callers whose
@@ -426,7 +448,9 @@ impl<'a> Lowerer<'a> {
         let op_index = self.evidence_op_index(effect_name, op_name) as i64;
         let layout_has_tag = ev_ctx.layout.tags().iter().any(|t| t == effect_name);
         let entry_op_tuple: CExpr = if !ev_ctx.is_open && layout_has_tag {
-            let eff_idx = crate::codegen::lower::evidence::evidence_index_of(&ev_ctx.layout, effect_name) as i64;
+            let eff_idx =
+                crate::codegen::lower::evidence::evidence_index_of(&ev_ctx.layout, effect_name)
+                    as i64;
             cerl_call(
                 "erlang",
                 "element",
@@ -443,7 +467,10 @@ impl<'a> Lowerer<'a> {
                 ],
             )
         } else {
-            crate::codegen::lower::evidence::find_evidence(CExpr::Var(ev_ctx.var.clone()), effect_name)
+            crate::codegen::lower::evidence::find_evidence(
+                CExpr::Var(ev_ctx.var.clone()),
+                effect_name,
+            )
         };
         cerl_call(
             "erlang",
@@ -451,7 +478,6 @@ impl<'a> Lowerer<'a> {
             vec![CExpr::Lit(CLit::Int(op_index)), entry_op_tuple],
         )
     }
-
 
     /// 1-based op index inside an effect's op tuple. Op tuples are sorted
     /// alphabetically by op name (matches `effect_handler_ops` ordering for a
@@ -471,5 +497,4 @@ impl<'a> Lowerer<'a> {
             ),
         }
     }
-
 }

@@ -6,7 +6,6 @@ pub(crate) fn var_expr(name: &str, span: Span) -> Expr {
     Expr::synth(span, ExprKind::Var { name: name.into() })
 }
 
-
 pub(crate) fn value_expr(name: &str, span: Span) -> Expr {
     if let Some((module, name)) = name.rsplit_once('.') {
         Expr::synth(
@@ -22,11 +21,9 @@ pub(crate) fn value_expr(name: &str, span: Span) -> Expr {
     }
 }
 
-
 pub(crate) fn ctor_expr(name: &str, span: Span) -> Expr {
     Expr::synth(span, ExprKind::Constructor { name: name.into() })
 }
-
 
 pub(crate) fn app_expr(func: Expr, arg: Expr, span: Span) -> Expr {
     Expr::synth(
@@ -38,7 +35,6 @@ pub(crate) fn app_expr(func: Expr, arg: Expr, span: Span) -> Expr {
     )
 }
 
-
 pub(crate) fn type_named(name: &str) -> TypeExpr {
     TypeExpr::Named {
         id: NodeId::fresh(),
@@ -47,11 +43,9 @@ pub(crate) fn type_named(name: &str) -> TypeExpr {
     }
 }
 
-
 pub(crate) fn generic_name(name: &str) -> String {
     format!("Std.Generic.{name}")
 }
-
 
 pub(crate) fn type_app(func: TypeExpr, arg: TypeExpr) -> TypeExpr {
     TypeExpr::App {
@@ -61,7 +55,6 @@ pub(crate) fn type_app(func: TypeExpr, arg: TypeExpr) -> TypeExpr {
         span: Span { start: 0, end: 0 },
     }
 }
-
 
 /// Build a type-level symbol literal `TypeExpr::Symbol`. Used by the Generic
 /// synthesizer to put constructor/field names at the type level rather than
@@ -73,7 +66,6 @@ pub(crate) fn type_symbol(name: &str) -> TypeExpr {
         span: Span { start: 0, end: 0 },
     }
 }
-
 
 pub(crate) fn apply_ctor(name: &str, arg: Expr, span: Span) -> Expr {
     Expr::synth(
@@ -87,7 +79,6 @@ pub(crate) fn apply_ctor(name: &str, arg: Expr, span: Span) -> Expr {
         },
     )
 }
-
 
 pub(crate) fn apply2(func: &str, a: Expr, b: Expr, span: Span) -> Expr {
     Expr::synth(
@@ -108,7 +99,6 @@ pub(crate) fn apply2(func: &str, a: Expr, b: Expr, span: Span) -> Expr {
     )
 }
 
-
 pub(crate) fn string_lit(s: &str, span: Span) -> Expr {
     Expr::synth(
         span,
@@ -117,4 +107,3 @@ pub(crate) fn string_lit(s: &str, span: Span) -> Expr {
         },
     )
 }
-

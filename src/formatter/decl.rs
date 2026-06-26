@@ -494,7 +494,12 @@ pub fn format_trait_def(
     if let Some(s) = synthesis {
         let mut clause = format!("synthesizes via {}", s.via_trait);
         if !s.attach_derives.is_empty() {
-            write!(clause, " deriving ({})", format_deriving_clause(&s.attach_derives)).unwrap();
+            write!(
+                clause,
+                " deriving ({})",
+                format_deriving_clause(&s.attach_derives)
+            )
+            .unwrap();
         }
         parts.push(Doc::hardline());
         parts.push(Doc::text(format!("  {clause}")));

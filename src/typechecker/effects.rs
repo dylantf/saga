@@ -504,9 +504,7 @@ impl Checker {
                 continue;
             };
             if let Some(Type::Var(fresh)) = mapping.get(var_id) {
-                self.trait_state
-                    .where_bound_var_names
-                    .insert(*fresh, name);
+                self.trait_state.where_bound_var_names.insert(*fresh, name);
             }
         }
     }

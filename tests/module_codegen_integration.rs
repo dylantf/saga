@@ -381,7 +381,11 @@ fun run : Unit -> User
 run () = project (mk_users ())
 "#;
 
-    with_temp_project_files(&[("lib/Core.saga", core)], main_src, |_checker, _program| {});
+    with_temp_project_files(
+        &[("lib/Core.saga", core)],
+        main_src,
+        |_checker, _program| {},
+    );
 }
 
 fn emitted_function(out: &str, name: &str, arity: usize) -> String {
@@ -3270,7 +3274,7 @@ db_select selection =
 
     let main_src = r#"module Main
 
-import Db (Column, Projection, db_select)
+import Db (Column, Projection, Selectable, db_select)
 
 type Users = Users
 type Posts = Posts
@@ -5180,6 +5184,54 @@ main () = {
             );
         },
     );
+}
+
+#[test]
+fn qualified_impl_trait_method_call_elaborates_without_bare_method_import() {
+    // Regression for the same shape emitted by routed derives: an impl for an
+    // imported qualified trait calls the trait method recursively, but the
+    // method itself is not imported as a bare value in this module. The call must
+    // elaborate through the current impl trait instead of lowering as a free
+    // Core Erlang variable (`Encode`/`Insert_row`/`Column_name_map_rep`).
+    let db = r#"module Schema.Db
+
+pub trait Encode a {
+  fun encode : a -> String
+}
+
+impl Encode for Int { encode _ = "ok" }
+
+pub fun run_encode : a -> String where {a: Encode}
+run_encode x = encode x
+"#;
+
+    let main = r#"module Main
+
+import Schema.Db
+
+type Box a = Box a
+
+impl Db.Encode for Box a where {a: Db.Encode} {
+  encode box = case box { Box x -> encode x }
+}
+
+main () = Db.run_encode (Box 1)
+"#;
+
+    with_temp_project_files(&[("src/Schema/Db.saga", db)], main, |checker, program| {
+        let result = checker.to_result();
+        let db_program = result
+            .programs()
+            .get("Schema.Db")
+            .expect("Schema.Db module not found");
+        let db_core = emit_from_program(db_program, "schema_db", checker);
+        let main_core = emit_from_program(program, "main", checker);
+        assert_project_modules_run(
+            &[("schema_db", &db_core), ("main", &main_core)],
+            "io:format(\"~s~n\", [main:main(unit)]), init:stop().",
+            &["ok"],
+        );
+    });
 }
 
 #[test]

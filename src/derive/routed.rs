@@ -200,7 +200,6 @@ pub(crate) fn derive_routed(
     Ok(vec![bridge_impl, delegating_impl])
 }
 
-
 /// Direction of a single routed-derive method. `To` carries a per-parameter
 /// flag vector identifying which params are `a`-typed (need `to`/Rep__T
 /// wrapping) vs. passthrough. `From` carries a `FromShape` describing the
@@ -210,7 +209,6 @@ pub(crate) enum MethodDirection {
     To { a_params: Vec<Option<SplicePath>> },
     From(FromShape),
 }
-
 
 /// Validate a method's shape for routed deriving and decide which direction it
 /// runs. Returns a human-readable reason on failure for use in the surrounding
@@ -261,7 +259,6 @@ pub(crate) fn classify_method_direction(
         )),
     }
 }
-
 
 /// Build the bridge-impl ImplMethod and delegating-impl ImplMethod for a
 /// single trait method.
@@ -424,7 +421,6 @@ pub(crate) fn synth_method_pair(
     }
 }
 
-
 /// Structural description of a from-direction method's return wrapper. The
 /// general shape is: either bare `a`, or a sum/record wrapper where every
 /// `a` position has been located by walking the wrapper's variants/fields
@@ -443,7 +439,6 @@ pub(crate) enum FromShape {
     },
 }
 
-
 #[derive(Clone)]
 pub(crate) struct VariantShape {
     ctor_name: String,
@@ -453,14 +448,12 @@ pub(crate) struct VariantShape {
     field_a_positions: Vec<Option<SplicePath>>,
 }
 
-
 #[derive(Clone)]
 pub(crate) struct FieldShape {
     label: String,
     /// `None` = passthrough, `Some(path)` = splice `a` at the path's leaves.
     path: Option<SplicePath>,
 }
-
 
 /// A lens locating every occurrence of the trait's self type `a` inside a
 /// (possibly nested) product type, so codegen can splice the `Generic` iso
@@ -482,7 +475,6 @@ pub(crate) enum SplicePath {
         fields: Vec<(String, Option<SplicePath>)>,
     },
 }
-
 
 /// Classify a from-direction method's return type by structural inspection.
 /// Walks the trait method's return TypeExpr to find the wrapper head and its
@@ -541,7 +533,6 @@ pub(crate) fn classify_from_return(
         head
     ))
 }
-
 
 /// Walk a sum wrapper's declared variants and identify a-positions. The
 /// wrapper's local type params that bind to the trait's self at the call
@@ -609,7 +600,6 @@ pub(crate) fn classify_sum_wrapper(
     Ok(FromShape::Sum { variants })
 }
 
-
 pub(crate) fn classify_record_wrapper(
     name: &str,
     rd: &WrapperRecordInfo,
@@ -663,7 +653,6 @@ pub(crate) fn classify_record_wrapper(
         fields,
     })
 }
-
 
 /// Locate every occurrence of the trait's self type `a` inside `te` as a
 /// `SplicePath`, or return:
@@ -749,7 +738,6 @@ pub(crate) fn classify_splice_path(
     ))
 }
 
-
 /// Transform a value expression by applying `leaf_op` (the `Generic` iso —
 /// `to`/`from`/`Rep__T`) at every `a`-leaf the path locates. Products are
 /// destructured with a single-arm `case` and rebuilt, threading `leaf_op` into
@@ -834,7 +822,6 @@ pub(crate) fn apply_splice_path(
     }
 }
 
-
 pub(crate) fn single_arm_case(scrutinee: Expr, pattern: Pat, body: Expr, span: Span) -> Expr {
     Expr::synth(
         span,
@@ -850,7 +837,6 @@ pub(crate) fn single_arm_case(scrutinee: Expr, pattern: Pat, body: Expr, span: S
         },
     )
 }
-
 
 /// Build a destructuring pattern + matching rebuild expression for the
 /// To-direction *bridge*, which unwraps `Rep__T` at each `a`-leaf in the
@@ -945,7 +931,6 @@ pub(crate) fn build_splice_pattern(
     }
 }
 
-
 /// A single product element/field for the To-bridge: either recurse (it carries
 /// `a`) or bind a fresh passthrough var.
 pub(crate) fn build_splice_pattern_field(
@@ -970,7 +955,6 @@ pub(crate) fn build_splice_pattern_field(
         }
     }
 }
-
 
 /// Build the body of a from-direction method. The body has the shape
 /// `case method input { <reconstruction arms> }` where each arm matches one
@@ -1033,12 +1017,15 @@ pub(crate) fn build_from_body(
     }
 }
 
-
 /// One case arm reconstructing a single variant. Zero-field variants
 /// destructure-and-reconstruct trivially; multi-field variants bind each
 /// field to `__f<i>` and rebuild via positional constructor application,
 /// applying `wrap` at marked a-positions.
-pub(crate) fn build_variant_arm(v: &VariantShape, wrap: &dyn Fn(Expr, Span) -> Expr, span: Span) -> CaseArm {
+pub(crate) fn build_variant_arm(
+    v: &VariantShape,
+    wrap: &dyn Fn(Expr, Span) -> Expr,
+    span: Span,
+) -> CaseArm {
     let field_vars: Vec<String> = (0..v.field_a_positions.len())
         .map(|i| format!("__f{i}"))
         .collect();
@@ -1088,7 +1075,6 @@ pub(crate) fn build_variant_arm(v: &VariantShape, wrap: &dyn Fn(Expr, Span) -> E
     }
 }
 
-
 /// One case arm destructuring a record wrapper. Pattern is
 /// `Wrap { f1, f2, ... }`, body reconstructs via `Wrap { f1: wrap?(f1), ... }`.
 pub(crate) fn build_record_arm(
@@ -1137,4 +1123,3 @@ pub(crate) fn build_record_arm(
         span,
     }
 }
-

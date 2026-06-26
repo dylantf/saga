@@ -10,19 +10,19 @@ A functional programming language (ML/Elm-inspired) with algebraic effects and h
 
 Pick the row that matches the task. Read `docs/compiler-overview.md` first for any compiler work — it's the phase map everything else hangs off of.
 
-| Task | Read first |
-| --- | --- |
-| Any compiler change (Rust side) | `docs/compiler-overview.md` |
-| Typechecker / inference / traits | `docs/compiler-overview.md` → `docs/typechecking.md` |
-| Name resolution, scoping, NodeIds | `docs/compiler-overview.md` → `docs/name-resolution.md` |
-| Effects, handlers, CPS | `docs/compiler-overview.md` → `docs/effect-implementation.md` |
-| Trait elaboration / dictionary passing | `docs/compiler-overview.md` → `docs/trait-dict-passing.md` |
-| Codegen / Core Erlang lowering | `docs/compiler-overview.md` (lowering section) |
-| Writing non-trivial Saga code | `~/projects/saga-website/public/llms-full.txt` (full language guide, ~70k tokens) |
-| Quick Saga syntax lookup | `~/projects/saga-website/public/syntax-reference.md` |
-| Idiomatic Saga examples | `./examples/` |
-| Stdlib changes | browse `src/stdlib/*.saga`; `prelude.saga` is auto-loaded |
-| Project status / what's planned | `docs/roadmap.md` |
+| Task                                   | Read first                                                                        |
+| -------------------------------------- | --------------------------------------------------------------------------------- |
+| Any compiler change (Rust side)        | `docs/compiler-overview.md`                                                       |
+| Typechecker / inference / traits       | `docs/compiler-overview.md` → `docs/typechecking.md`                              |
+| Name resolution, scoping, NodeIds      | `docs/compiler-overview.md` → `docs/name-resolution.md`                           |
+| Effects, handlers, CPS                 | `docs/compiler-overview.md` → `docs/effect-implementation.md`                     |
+| Trait elaboration / dictionary passing | `docs/compiler-overview.md` → `docs/trait-dict-passing.md`                        |
+| Codegen / Core Erlang lowering         | `docs/compiler-overview.md` (lowering section)                                    |
+| Writing non-trivial Saga code          | `~/projects/saga-website/public/llms-full.txt` (full language guide, ~70k tokens) |
+| Quick Saga syntax lookup               | `~/projects/saga-website/public/syntax-reference.md`                              |
+| Idiomatic Saga examples                | `./examples/`                                                                     |
+| Stdlib changes                         | browse `src/stdlib/*.saga`; `prelude.saga` is auto-loaded                         |
+| Project status / what's planned        | `docs/roadmap.md`                                                                 |
 
 When in doubt about a topic that might have a doc, `ls docs/` first — there are more docs than this table lists.
 
@@ -49,6 +49,8 @@ cargo run --bin saga -- docs --dir <path> # Document every .saga module under <p
 ```
 
 Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands. Hex packages with NIFs require `rebar3` on PATH.
+
+`emit` only works in single-file mode (one `.saga` file, no project/imports). To inspect the Core Erlang for a module in a multi-file project, run `build` and read the generated `_build/<dev|release>/<ModuleName>.core` instead.
 
 ## Architecture
 

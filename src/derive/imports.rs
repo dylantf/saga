@@ -1,7 +1,7 @@
 use super::*;
 use crate::ast::*;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Pre-derive summaries for names visible from imports. This is intentionally
 /// structural, not semantic resolution: derive uses it to emit qualified syntax,
@@ -17,13 +17,11 @@ pub struct ImportedDecls {
     pub(crate) impls: Vec<DeriveImplInfo>,
 }
 
-
 #[derive(Clone)]
 pub struct SummaryEntry<T> {
     pub canonical: String,
     pub info: T,
 }
-
 
 #[derive(Clone)]
 pub struct WrapperTypeInfo {
@@ -33,7 +31,6 @@ pub struct WrapperTypeInfo {
     pub opaque: bool,
 }
 
-
 #[derive(Clone)]
 pub struct WrapperRecordInfo {
     pub type_params: Vec<TypeParam>,
@@ -41,13 +38,11 @@ pub struct WrapperRecordInfo {
     pub derives_generic: bool,
 }
 
-
 impl ImportedDecls {
     pub fn empty() -> Self {
         Self::default()
     }
 }
-
 
 #[derive(Default, Clone)]
 pub(crate) struct ModuleSummary {
@@ -56,7 +51,6 @@ pub(crate) struct ModuleSummary {
     records: HashMap<String, WrapperRecordInfo>,
     impls: Vec<DeriveImplInfo>,
 }
-
 
 /// Walk a program's imports and gather the structural summaries visible to
 /// derive expansion. Stdlib modules are loaded from embedded sources; project
@@ -69,6 +63,14 @@ pub fn collect_imported_decls(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
 ) -> ImportedDecls {
+    collect_imported_decls_with_sources(program, module_map, &HashMap::new())
+}
+
+pub fn collect_imported_decls_with_sources(
+    program: &[Decl],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+    source_overlay: &HashMap<PathBuf, String>,
+) -> ImportedDecls {
     let mut out = ImportedDecls::default();
 
     // Pull in everything the prelude imports first. This makes `Result`,
@@ -78,17 +80,17 @@ pub fn collect_imported_decls(
     if let Ok(prelude_tokens) = crate::lexer::Lexer::new(PRELUDE_SRC).lex()
         && let Ok(prelude_program) = crate::parser::Parser::new(prelude_tokens).parse_program()
     {
-        collect_summaries_from_imports(&prelude_program, module_map, &mut out);
+        collect_summaries_from_imports(&prelude_program, module_map, source_overlay, &mut out);
     }
 
-    collect_summaries_from_imports(program, module_map, &mut out);
+    collect_summaries_from_imports(program, module_map, source_overlay, &mut out);
     out
 }
-
 
 pub(crate) fn collect_summaries_from_imports(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
+    source_overlay: &HashMap<PathBuf, String>,
     out: &mut ImportedDecls,
 ) {
     for decl in program {
@@ -103,10 +105,12 @@ pub(crate) fn collect_summaries_from_imports(
             let source = if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
                 src.to_string()
             } else if let Some(map) = module_map {
-                match map
-                    .get(&module_name)
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                {
+                match map.get(&module_name).and_then(|p| {
+                    source_overlay
+                        .get(p)
+                        .cloned()
+                        .or_else(|| std::fs::read_to_string(p).ok())
+                }) {
                     Some(s) => s,
                     None => continue,
                 }
@@ -137,7 +141,6 @@ pub(crate) fn collect_summaries_from_imports(
         }
     }
 }
-
 
 pub(crate) fn module_summary(program: &[Decl]) -> ModuleSummary {
     let mut summary = ModuleSummary::default();
@@ -238,7 +241,11 @@ pub(crate) fn module_summary(program: &[Decl]) -> ModuleSummary {
             // bindings read off during scope specialization resolve correctly
             // when emitted into the importing module.
             summary.impls.push(DeriveImplInfo {
-                trait_bare: trait_name.rsplit('.').next().unwrap_or(trait_name).to_string(),
+                trait_bare: trait_name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(trait_name)
+                    .to_string(),
                 target: qualify_summary_type_expr(
                     target.clone(),
                     module_name.as_deref(),
@@ -305,7 +312,6 @@ pub(crate) fn module_summary(program: &[Decl]) -> ModuleSummary {
     }
     summary
 }
-
 
 pub(crate) fn qualify_summary_type_expr(
     ty: TypeExpr,
@@ -401,7 +407,6 @@ pub(crate) fn qualify_summary_type_expr(
     }
 }
 
-
 pub(crate) fn merge_summary_import(
     out: &mut ImportedDecls,
     module_name: &str,
@@ -492,7 +497,6 @@ pub(crate) fn merge_summary_import(
     }
 }
 
-
 pub(crate) fn register_summary_entry<T: Clone>(
     map: &mut HashMap<String, Vec<SummaryEntry<T>>>,
     visible: &str,
@@ -511,7 +515,6 @@ pub(crate) fn register_summary_entry<T: Clone>(
     });
 }
 
-
 /// Build an `ImportedDecls` by scanning a project root for `.saga` files.
 /// Convenience wrapper used by integration tests that don't have a checker
 /// handy. Real callers (cli, lsp) should use `collect_imported_decls` with
@@ -520,4 +523,3 @@ pub fn collect_from_project_root(program: &[Decl], root: &Path) -> ImportedDecls
     let map = crate::typechecker::scan_source_dir(root).ok();
     collect_imported_decls(program, map.as_ref())
 }
-

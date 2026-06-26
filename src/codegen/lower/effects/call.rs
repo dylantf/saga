@@ -1,8 +1,8 @@
 use super::*;
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::CpsShape;
 use crate::codegen::lower::*;
+use crate::codegen::runtime_shape::CpsShape;
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.
@@ -293,13 +293,16 @@ impl<'a> Lowerer<'a> {
         result
     }
 
-
     /// Build a per-op handler function for a single BEAM-native operation.
     /// Synthesizes: `fun (Arg0, ..., ArgN, K) -> let R = <native call> in K(R)`
     ///
     /// `handler_canonical` identifies which handler is providing this op,
     /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
-    pub(crate) fn build_beam_native_op_fun(&mut self, op_name: &str, handler_canonical: &str) -> CExpr {
+    pub(crate) fn build_beam_native_op_fun(
+        &mut self,
+        op_name: &str,
+        handler_canonical: &str,
+    ) -> CExpr {
         let (_, _, param_count) = crate::codegen::lower::beam_interop::lookup_native_op(op_name)
             .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
 
@@ -317,12 +320,19 @@ impl<'a> Lowerer<'a> {
                 &mut || self.fresh(),
             )
         } else if crate::codegen::lower::beam_interop::is_vec_op(op_name) {
-            crate::codegen::lower::beam_interop::build_vec_native_call(op_name, &param_vars, &mut || self.fresh())
+            crate::codegen::lower::beam_interop::build_vec_native_call(
+                op_name,
+                &param_vars,
+                &mut || self.fresh(),
+            )
         } else {
             let ctor_atoms = self.constructor_atoms.clone();
-            crate::codegen::lower::beam_interop::build_native_call(op_name, &param_vars, &ctor_atoms, &mut || {
-                self.fresh()
-            })
+            crate::codegen::lower::beam_interop::build_native_call(
+                op_name,
+                &param_vars,
+                &ctor_atoms,
+                &mut || self.fresh(),
+            )
         };
 
         let result_var = self.fresh();
@@ -337,5 +347,4 @@ impl<'a> Lowerer<'a> {
 
         CExpr::Fun(fun_params, Box::new(body))
     }
-
 }

@@ -88,7 +88,9 @@ impl Elaborator {
                                         func: Box::new(result),
                                         arg: Box::new(Expr::synth(
                                             span,
-                                            ExprKind::Var { name: pname.clone() },
+                                            ExprKind::Var {
+                                                name: pname.clone(),
+                                            },
                                         )),
                                     },
                                 );
@@ -913,7 +915,6 @@ impl Elaborator {
         }
     }
 
-
     pub(crate) fn elaborate_handler(&mut self, handler: &Handler) -> Handler {
         match handler {
             Handler::Named(_) => handler.clone(),
@@ -958,7 +959,6 @@ impl Elaborator {
         }
     }
 
-
     /// Check if a node has trait evidence that matches a known trait method name.
     /// Returns (trait_name, method_index) if this is a trait method call.
     ///
@@ -972,7 +972,7 @@ impl Elaborator {
     ///
     pub(crate) fn resolve_trait_method(
         &self,
-        _name: &str,
+        name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<(String, usize)> {
         if let Some(resolved) = self.resolution.trait_method(node_id)
@@ -988,9 +988,15 @@ impl Elaborator {
         {
             return Some((trait_name.to_string(), idx));
         }
+        if self.resolution.value(node_id).is_none()
+            && let Some(trait_name) = &self.current_impl_trait
+            && let Some(info) = self.traits.get(trait_name)
+            && let Some(idx) = info.methods.iter().position(|m| m.name == name)
+        {
+            return Some((trait_name.clone(), idx));
+        }
         None
     }
-
 
     /// Rewrite `a < b` (etc.) into `compare a b == Lt` (etc.) using the Ord dict.
     ///
@@ -1055,7 +1061,6 @@ impl Elaborator {
         ))
     }
 
-
     /// Rewrite `a <> b` into `combine a b` using the Semigroup dict.
     pub(crate) fn desugar_semigroup_concat(
         &mut self,
@@ -1091,7 +1096,6 @@ impl Elaborator {
         ))
     }
 
-
     /// If a `KnownSymbol` evidence record at `node_id` carries a concrete symbol
     /// name, return a lambda `fun _proxy -> SymbolIntrinsic { symbol }`. For
     /// the polymorphic case (where-bound `n : KnownSymbol`), return a lambda
@@ -1101,7 +1105,11 @@ impl Elaborator {
     /// Proxy argument (Proxy is a phantom). This shape preserves the trait-
     /// method calling convention so both bare references (`symbol_name`) and
     /// direct applications (`symbol_name p`) work uniformly.
-    pub(crate) fn try_symbol_intrinsic_lambda(&self, node_id: crate::ast::NodeId, span: Span) -> Option<Expr> {
+    pub(crate) fn try_symbol_intrinsic_lambda(
+        &self,
+        node_id: crate::ast::NodeId,
+        span: Span,
+    ) -> Option<Expr> {
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         let body = evidence_list.iter().find_map(|ev| {
             if ev.trait_name != KNOWN_SYMBOL_TRAIT {
@@ -1134,5 +1142,4 @@ impl Elaborator {
             },
         ))
     }
-
 }

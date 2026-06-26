@@ -6872,6 +6872,22 @@ fn trait_method_needs_survives_in_scheme() {
 }
 
 #[test]
+fn trait_method_signature_displays_user_method_type() {
+    let checker = check(
+        "trait Describe a {\n  fun describe_it : a -> String\n}\n\
+         record Person { name: String }\n\
+         impl Describe for Person {\n  describe_it p = $\"Name is: {p.name}\"\n}",
+    )
+    .unwrap();
+    let result = checker.to_result();
+
+    assert_eq!(
+        result.trait_method_signature("Describe", "describe_it"),
+        Some("Describe.describe_it : a -> String".to_string())
+    );
+}
+
+#[test]
 fn no_unnecessary_handler_warning_for_where_bound_effectful_trait_method() {
     let checker = check(
         "effect Fail e {\n  fun fail : e -> a\n}\n\
@@ -7580,6 +7596,32 @@ main () = ()
 }
 
 #[test]
+fn type_reexport_carries_origin_trait_impls() {
+    let query = r#"
+module Kraken.Query
+
+pub type DbError = DbError deriving (Debug)
+"#;
+    let db = r#"
+module Kraken.Db
+import Kraken.Query (pub DbError)
+"#;
+    let main = r#"
+module Main
+import Kraken.Db
+
+fun render : Kraken.Db.DbError -> String
+render e = debug e
+"#;
+
+    check_with_project_files(
+        &[("src/Kraken/Query.saga", query), ("src/Kraken/Db.saga", db)],
+        main,
+    )
+    .expect("type re-export should carry Debug impl from the origin module");
+}
+
+#[test]
 fn cyclic_import_of_unannotated_function_requests_annotation() {
     let a = r#"
 module A
@@ -7803,6 +7845,86 @@ fn auto_load_does_not_inject_bare_name_into_scope() {
         result.is_err(),
         "bare 'print_stdout' must not resolve without an exposing import"
     );
+}
+
+#[test]
+fn restricted_import_does_not_expose_unlisted_type_bare() {
+    let lib = r#"
+module Lib
+
+pub type HiddenErr = HiddenErr
+
+pub type Visible = Visible
+
+pub fun make_visible : Unit -> Visible
+make_visible () = Visible
+"#;
+    let main = r#"
+module Main
+import Lib (make_visible)
+
+fun bad : HiddenErr -> Unit
+bad _ = ()
+"#;
+
+    let err = check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .err()
+        .expect("unlisted imported type must not be bare-visible");
+    assert!(
+        err.to_string().contains("unknown type 'HiddenErr'"),
+        "expected unknown type diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
+fn qualified_import_does_not_expose_type_bare() {
+    let lib = r#"
+module Lib
+
+pub type HiddenErr = HiddenErr
+
+pub fun make_unit : Unit -> Unit
+make_unit () = ()
+"#;
+    let main = r#"
+module Main
+import Lib
+
+fun bad : HiddenErr -> Unit
+bad _ = ()
+"#;
+
+    let err = check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .err()
+        .expect("plain import must not make imported types bare-visible");
+    assert!(
+        err.to_string().contains("unknown type 'HiddenErr'"),
+        "expected unknown type diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
+fn restricted_import_keeps_unlisted_type_available_qualified() {
+    let lib = r#"
+module Lib
+
+pub type HiddenErr = HiddenErr
+
+pub fun make_visible : Unit -> Unit
+make_visible () = ()
+"#;
+    let main = r#"
+module Main
+import Lib (make_visible)
+
+fun ok : Lib.HiddenErr -> Unit
+ok _ = ()
+"#;
+
+    check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .expect("unlisted imported type should remain available via module qualification");
 }
 
 #[test]
@@ -11338,6 +11460,48 @@ fn inferred_query_result_bubbles_anonymous_select_record_to_prepared() {
     let scheme = checker.env.get("q").expect("q not in env");
     let ty = scheme.display_with_constraints(&checker.sub);
     assert_eq!(ty, "Unit -> Prepared { post_title: String, user_id: Int }");
+}
+
+#[test]
+fn let_hover_preserves_fundep_improved_generic_result() {
+    let source = "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column (n : Symbol) a = Column a\n\
+         type Prepared row = Prepared row\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun selected : selection -> row\n\
+         }\n\
+         impl Selectable (Leaf a) for (Leaf (Column n a)) {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (And lo ro) for (And l r) where {Selectable l lo, Selectable r ro} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         fun db_select : selection -> Prepared row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         db_select selection = Prepared (from (selected (to selection)))\n\
+         fun q : Unit -> Unit\n\
+         q () = {\n\
+           let prepared = db_select {\n\
+             user_id: Column 42,\n\
+             post_title: Column \"title\",\n\
+           }\n\
+           ()\n\
+         }\n";
+    let checker = check(source).unwrap();
+    let result = checker.to_result();
+    let prepared_span = result
+        .type_at_span
+        .keys()
+        .find(|span| source[span.start..span.end] == *"prepared")
+        .expect("prepared span");
+    let ty = result.type_at_span(prepared_span).expect("prepared type");
+    assert_eq!(ty, "Prepared { post_title: String, user_id: Int }");
 }
 
 #[test]

@@ -232,6 +232,7 @@ impl Elaborator {
                     let mut ordered_methods = Vec::new();
                     let mut method_effects = Vec::new();
                     let mut method_open_rows = Vec::new();
+                    let saved_impl_trait = self.current_impl_trait.replace(canonical_trait.clone());
                     if let Some(ref info) = trait_info {
                         for trait_method in &info.methods {
                             if let Some(ann) = methods
@@ -252,6 +253,7 @@ impl Elaborator {
                             }
                         }
                     }
+                    self.current_impl_trait = saved_impl_trait;
 
                     self.restore_dict_params(saved);
 
@@ -442,7 +444,6 @@ impl Elaborator {
         output
     }
 
-
     /// Resolve the record type name from a node's inferred type.
     pub(crate) fn resolve_record_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
         let ty = self.type_at_node.get(&node_id)?;
@@ -455,5 +456,4 @@ impl Elaborator {
             _ => None,
         }
     }
-
 }

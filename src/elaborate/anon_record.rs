@@ -1,7 +1,11 @@
 use super::*;
 
 impl Elaborator {
-    pub(crate) fn build_anon_record_generic_dict(&self, fields: &[(String, Type)], span: Span) -> Expr {
+    pub(crate) fn build_anon_record_generic_dict(
+        &self,
+        fields: &[(String, Type)],
+        span: Span,
+    ) -> Expr {
         Expr::synth(
             span,
             ExprKind::Tuple {
@@ -13,8 +17,11 @@ impl Elaborator {
         )
     }
 
-
-    pub(crate) fn build_anon_record_generic_to(&self, fields: &[(String, Type)], span: Span) -> Expr {
+    pub(crate) fn build_anon_record_generic_to(
+        &self,
+        fields: &[(String, Type)],
+        span: Span,
+    ) -> Expr {
         let record_var_name = "__anon_rec".to_string();
         let record_var = Expr::synth(
             span,
@@ -44,8 +51,11 @@ impl Elaborator {
         )
     }
 
-
-    pub(crate) fn build_anon_record_generic_from(&self, fields: &[(String, Type)], span: Span) -> Expr {
+    pub(crate) fn build_anon_record_generic_from(
+        &self,
+        fields: &[(String, Type)],
+        span: Span,
+    ) -> Expr {
         let field_var_names: Vec<String> = (0..fields.len()).map(|i| format!("__f{i}")).collect();
         let inner_pat = self.build_anon_record_rep_from_inner(&field_var_names, span);
         let record_pat = Pat::Constructor {
@@ -90,7 +100,6 @@ impl Elaborator {
         )
     }
 
-
     pub(crate) fn build_anon_record_rep_to_inner(
         &self,
         fields: &[(String, Type)],
@@ -120,7 +129,6 @@ impl Elaborator {
         acc
     }
 
-
     pub(crate) fn build_anon_record_field_to(
         &self,
         field_name: &str,
@@ -143,8 +151,11 @@ impl Elaborator {
         )
     }
 
-
-    pub(crate) fn build_anon_record_rep_from_inner(&self, field_vars: &[String], span: Span) -> Pat {
+    pub(crate) fn build_anon_record_rep_from_inner(
+        &self,
+        field_vars: &[String],
+        span: Span,
+    ) -> Pat {
         if field_vars.is_empty() {
             return Pat::Constructor {
                 id: NodeId::fresh(),
@@ -167,7 +178,6 @@ impl Elaborator {
         acc
     }
 
-
     pub(crate) fn build_anon_record_field_from(&self, var_name: &str, span: Span) -> Pat {
         Pat::Constructor {
             id: NodeId::fresh(),
@@ -186,7 +196,6 @@ impl Elaborator {
         }
     }
 
-
     pub(crate) fn apply1(&self, func: &str, arg: Expr, span: Span) -> Expr {
         Expr::synth(
             span,
@@ -200,7 +209,6 @@ impl Elaborator {
         )
     }
 
-
     pub(crate) fn apply2(&self, func: &str, a: Expr, b: Expr, span: Span) -> Expr {
         Expr::synth(
             span,
@@ -211,7 +219,6 @@ impl Elaborator {
         )
     }
 
-
     pub(crate) fn string_lit(&self, value: &str, span: Span) -> Expr {
         Expr::synth(
             span,
@@ -220,7 +227,6 @@ impl Elaborator {
             },
         )
     }
-
 
     /// Check if the evidence at a node indicates Show for a Tuple type.
     /// If so, build an inline show expression for the tuple rather than
@@ -246,7 +252,6 @@ impl Elaborator {
         let (_type_name, type_args) = tuple_ev.resolved_type.as_ref()?;
         self.build_tuple_show_lambda(trait_name, type_args, span)
     }
-
 
     /// Build a show/debug lambda for a tuple with the given element types.
     pub(crate) fn build_tuple_show_lambda(

@@ -61,7 +61,8 @@ impl Checker {
                 let Type::Con(self_head, self_args) = &resolved_self else {
                     continue;
                 };
-                let arity_keyed = crate::typechecker::arity_keyed_target_name(self_head, self_args.len());
+                let arity_keyed =
+                    crate::typechecker::arity_keyed_target_name(self_head, self_args.len());
                 let det_positions = fundep.determinant_extra_positions();
                 let determined_positions = fundep.determined_extra_positions();
                 // Every determinant extra must already be concrete, otherwise we
@@ -77,7 +78,10 @@ impl Checker {
                 }
                 // Find the unique impl whose self type and determinant extras
                 // match this constraint.
-                let candidates: Vec<(crate::typechecker::ImplInfo, std::collections::HashMap<u32, Type>)> = self
+                let candidates: Vec<(
+                    crate::typechecker::ImplInfo,
+                    std::collections::HashMap<u32, Type>,
+                )> = self
                     .trait_state
                     .impls
                     .iter()
@@ -101,10 +105,11 @@ impl Checker {
                             else {
                                 continue;
                             };
-                            let expected = crate::typechecker::check_traits::substitute_pattern_vars(
-                                impl_extra,
-                                &pattern_subst,
-                            );
+                            let expected =
+                                crate::typechecker::check_traits::substitute_pattern_vars(
+                                    impl_extra,
+                                    &pattern_subst,
+                                );
                             let actual = self.sub.apply(call_extra);
                             if !crate::typechecker::check_traits::match_type_pattern(
                                 &expected,
@@ -161,8 +166,10 @@ impl Checker {
                     else {
                         continue;
                     };
-                    let pinned =
-                        crate::typechecker::check_traits::substitute_pattern_vars(impl_extra, &pattern_subst);
+                    let pinned = crate::typechecker::check_traits::substitute_pattern_vars(
+                        impl_extra,
+                        &pattern_subst,
+                    );
                     let _ = self.unify(call_extra, &pinned);
                 }
                 // Register the selected impl's fundep-bearing `where`-app
@@ -200,7 +207,6 @@ impl Checker {
             }
         }
     }
-
 
     pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
         // Build resolved where bounds (substitution may have chained var IDs)
@@ -506,7 +512,10 @@ impl Checker {
                                 for (_, _, extra_types) in &info.param_constraints_by_var_with_args
                                 {
                                     for extra in extra_types {
-                                        crate::typechecker::collect_free_vars(extra, &mut impl_vars);
+                                        crate::typechecker::collect_free_vars(
+                                            extra,
+                                            &mut impl_vars,
+                                        );
                                     }
                                 }
                                 for var_id in impl_vars {
@@ -565,10 +574,11 @@ impl Checker {
                             for (actual_extra, pattern_extra) in
                                 trait_type_arg_types.iter().zip(info.trait_type_args.iter())
                             {
-                                let expected_extra = crate::typechecker::check_traits::substitute_pattern_vars(
-                                    pattern_extra,
-                                    &pattern_subst,
-                                );
+                                let expected_extra =
+                                    crate::typechecker::check_traits::substitute_pattern_vars(
+                                        pattern_extra,
+                                        &pattern_subst,
+                                    );
                                 let resolved_actual = self.sub.apply(actual_extra);
                                 if !crate::typechecker::check_traits::match_type_pattern(
                                     &expected_extra,
@@ -730,7 +740,10 @@ impl Checker {
                         if is_generic_trait_name(&trait_name) {
                             let mut extra_vars = Vec::new();
                             for extra in &trait_type_arg_types {
-                                crate::typechecker::collect_free_vars(&self.sub.apply(extra), &mut extra_vars);
+                                crate::typechecker::collect_free_vars(
+                                    &self.sub.apply(extra),
+                                    &mut extra_vars,
+                                );
                             }
                             if !extra_vars.is_empty()
                                 && !self.trait_state.pending_constraints.is_empty()
@@ -767,7 +780,13 @@ impl Checker {
                                 span,
                             );
                             deferred.push((
-                                (trait_name, trait_type_arg_types, Type::Var(*id), span, node_id),
+                                (
+                                    trait_name,
+                                    trait_type_arg_types,
+                                    Type::Var(*id),
+                                    span,
+                                    node_id,
+                                ),
                                 diag,
                             ));
                             continue;
@@ -789,7 +808,10 @@ impl Checker {
                             resolved_type: None,
                             resolved_record_type: None,
                             type_var_name: var_name,
-                            trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
+                            trait_type_args: trait_type_arg_types
+                                .iter()
+                                .map(|t| self.sub.apply(t))
+                                .collect(),
                             resolved_symbol: None,
                         });
                     }
@@ -878,7 +900,6 @@ impl Checker {
     }
 
     // --- Supertrait checking ---
-
 
     /// Verify that every impl's trait has its supertraits also implemented for the same type.
     pub(crate) fn check_supertrait_impls(&self) -> Result<(), Diagnostic> {
