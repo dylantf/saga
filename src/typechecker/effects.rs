@@ -113,7 +113,7 @@ impl Checker {
                     .collect()
             })
             .unwrap_or_default();
-        effect_ref
+        let mut args: Vec<Type> = effect_ref
             .type_args
             .iter()
             .enumerate()
@@ -122,7 +122,19 @@ impl Checker {
                 let ty = self.convert_type_expr_kinded(te, params, kind);
                 self.canonicalize_handler_effect_types(ty)
             })
-            .collect()
+            .collect();
+
+        // A parameterized effect written without (all of) its type arguments
+        // (e.g. `needs {Fail}` for `effect Fail e`) still has those parameters;
+        // fill the omitted positions with fresh type variables so the type
+        // argument is a real, inferrable slot rather than silently absent.
+        // Unification at the function boundary then pins it from the body's
+        // usage and flags conflicting forwarded instantiations. Without this the
+        // arg is dropped and a handler can be handed the wrong payload type.
+        for kind in kinds.iter().skip(args.len()) {
+            args.push(self.fresh_var_of_kind(*kind));
+        }
+        args
     }
 
     /// Resolve an effect name to its canonical form (e.g. "Log" -> "Std.Log.Log").
@@ -159,6 +171,17 @@ impl Checker {
             return Ok(());
         }
         let declared = self.sub.apply_effect_row(declared_row);
+
+        // A parameterized effect (e.g. `Fail e`) has a single runtime handler
+        // slot per family, so every use that reaches the same handler must agree
+        // on its type argument. Unify each body effect's args against the
+        // matching declared entry. This pins an unannotated `needs {Fail}` to
+        // the type the body actually uses (inference), and turns a forwarded mix
+        // like `Fail String` + `Fail Int` into a type error rather than a
+        // runtime payload-type crash. Done before the open-row short-circuit so
+        // named effects still pin even when the row also has a tail.
+        self.unify_effect_args_against_declared(body_effs, &declared, span)?;
+
         // Open row: extras flow through the tail variable(s)
         if declared.is_open() {
             return Ok(());
@@ -205,6 +228,48 @@ impl Checker {
                 ),
             ))
         }
+    }
+
+    /// Unify the type arguments of each body effect against the matching
+    /// declared (`needs`) entry of the same family. See the call site in
+    /// `check_effects_via_row` for the rationale: a parameterized effect maps to
+    /// one runtime handler slot, so all uses reaching it must share a type arg.
+    ///
+    /// A clash (two pinned, incompatible instantiations forwarded together, or a
+    /// body use that disagrees with the annotation) is reported as a single
+    /// effect-conflict error against the declaration's span. Genuinely
+    /// polymorphic uses (a body effect arg that is the function's own type
+    /// variable) unify var-to-var and stay generic.
+    fn unify_effect_args_against_declared(
+        &mut self,
+        body_effs: &EffectRow,
+        declared: &EffectRow,
+        span: crate::token::Span,
+    ) -> Result<(), Diagnostic> {
+        let applied_body = self.sub.apply_effect_row(body_effs);
+        for entry in &applied_body.effects {
+            let Some(decl_entry) = declared.effects.iter().find(|d| d.matches(entry)) else {
+                continue;
+            };
+            let decl_args = decl_entry.args.clone();
+            let body_args = entry.args.clone();
+            for (d, b) in decl_args.iter().zip(body_args.iter()) {
+                if self.unify(d, b).is_err() {
+                    let family = entry.name.rsplit('.').next().unwrap_or(&entry.name);
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "effect `{}` is used at conflicting types in the same scope. \
+A parameterized effect has a single handler, so all of its uses that reach that \
+handler must share one type argument. Handle the differing uses with separate \
+`with` blocks, or make them agree on a type.",
+                            family
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Find which effect an operation belongs to. Returns the canonical

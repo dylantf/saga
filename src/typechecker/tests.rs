@@ -4061,6 +4061,80 @@ main () = call_with (fun n -> risky n) 1 with { boom msg = 0 }",
 }
 
 #[test]
+fn parameterized_effect_pins_type_arg_from_body() {
+    // `needs {Fail}` omits Fail's type argument. The omitted arg is a real
+    // inferable slot, pinned from the body's usage, so a function that only
+    // ever fails with a String is `Fail String` and a consistent program is
+    // accepted.
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun parse : String -> Int needs {Fail}
+parse s = fail! s
+main () = parse \"x\" with { fail msg = String.length msg }",
+    );
+    assert!(
+        result.is_ok(),
+        "consistent single-type use of a parameterized effect should check, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn parameterized_effect_conflicting_instantiations_forwarded_is_error() {
+    // Two functions forward `Fail` at different type arguments (`String` and
+    // `Int`) into one caller. A parameterized effect has a single runtime
+    // handler slot per family, so this must be a type error rather than a
+    // silent runtime payload-type crash.
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun a : Int -> Int needs {Fail}
+a n = fail! \"str\"
+fun b : Int -> Int needs {Fail}
+b n = fail! 99
+fun both : Int -> Int needs {Fail}
+both n = a n + b n
+main () = both 1 with { fail msg = 0 }",
+    );
+    assert!(
+        result.is_err(),
+        "forwarding Fail String and Fail Int together should not type-check"
+    );
+    assert!(
+        result
+            .as_ref()
+            .err()
+            .map(|e| e.message.contains("conflicting types"))
+            .unwrap_or(false),
+        "expected an effect-conflict error, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn parameterized_effect_handler_payload_gets_concrete_type() {
+    // The effect arrives at `main` via a function call (not a direct op call),
+    // so the inline handler arm must still see the concrete payload type
+    // (`String`). Using it at the wrong type (`msg + 1`) is a compile error,
+    // not a runtime `badarith`.
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun parse : String -> Int needs {Fail}
+parse s = fail! s
+main () = parse \"x\" with { fail msg = msg + 1 }",
+    );
+    assert!(
+        result.is_err(),
+        "handler treating a String payload as Int should not type-check"
+    );
+}
+
+#[test]
 fn external_fun_cannot_have_effects() {
     let result = check(
         r#"

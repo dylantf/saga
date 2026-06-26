@@ -370,6 +370,34 @@ impl Checker {
                     let saved_effect_cache = self.effect_meta.type_param_cache.clone();
 
                     if let Some(ref sig) = op_sig {
+                        // Pin the op's effect type parameters (e.g. `e` in
+                        // `Fail e`) to the concrete instantiation actually being
+                        // handled (`Fail String`), so the arm's payload pattern
+                        // gets the real type. The effect can reach this `with`
+                        // through a function call rather than a direct op call,
+                        // in which case the per-scope type-param cache has no
+                        // entry and the op would otherwise instantiate with a
+                        // free var — letting the arm use the payload at the wrong
+                        // type and crash at runtime.
+                        if let Some(effect_info) = self.effects.get(&sig.effect_name).cloned()
+                            && let Some(entry) = handled_entries
+                                .iter()
+                                .find(|e| e.name == sig.effect_name)
+                                .cloned()
+                        {
+                            for (param_id, arg) in
+                                effect_info.type_params.iter().zip(entry.args.iter())
+                            {
+                                let var = self
+                                    .effect_meta
+                                    .type_param_cache
+                                    .get(&sig.effect_name)
+                                    .and_then(|m| m.get(param_id))
+                                    .cloned()
+                                    .unwrap_or(Type::Var(*param_id));
+                                self.unify_at(&var, arg, arm.span)?;
+                            }
+                        }
                         self.resume_type = Some(sig.return_type.clone());
                         self.resume_return_type = Some(answer_ty.clone());
                         for (i, pat) in arm.params.iter().enumerate() {
