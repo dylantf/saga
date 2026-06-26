@@ -487,6 +487,22 @@ impl ProjectSemanticStore {
             })
             .unwrap_or_default()
     }
+
+    pub(super) fn module_exports_for_project(
+        &self,
+        project_root: &Option<PathBuf>,
+    ) -> HashMap<String, typechecker::ModuleExports> {
+        self.projects
+            .get(project_root)
+            .map(|project| {
+                project
+                    .module_interfaces
+                    .iter()
+                    .map(|(module, entry)| (module.clone(), entry.exports.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Default)]

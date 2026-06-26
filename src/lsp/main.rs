@@ -9,6 +9,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 mod analysis;
 mod analysis_pipeline;
+mod code_action;
 mod completion;
 mod document_symbol;
 mod hover;
@@ -24,6 +25,7 @@ mod text;
 use analysis_pipeline::{
     analyze_syntax_document, display_project_root, project_root_for_uri, trace,
 };
+use code_action::collect_code_actions;
 use completion::collect_completion_items;
 use document_symbol::collect_document_symbols;
 use hover::hover_type_at;
@@ -345,6 +347,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -516,6 +519,39 @@ impl LanguageServer for Backend {
         };
 
         Ok(formatting_edits(&uri, &document.text))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let Some(document) = current_document(&self.shared, &uri) else {
+            return Ok(None);
+        };
+        let Some(semantic) = &document.semantic else {
+            return Ok(None);
+        };
+        if semantic.version != document.version {
+            return Ok(None);
+        }
+
+        let project_root = project_root_for_uri(&uri);
+        let projects = self
+            .shared
+            .projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let actions = collect_code_actions(
+            &uri,
+            &document,
+            semantic,
+            Some((&projects, &project_root)),
+            params.range,
+            &params.context.diagnostics,
+        );
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

@@ -193,6 +193,52 @@ fn completion_items(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) 
         .clone()
 }
 
+fn code_actions(lsp: &mut LspHarness, uri: &str, diagnostic: &Value) -> Vec<Value> {
+    let id = lsp.send_request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {
+                "uri": uri
+            },
+            "range": diagnostic["range"].clone(),
+            "context": {
+                "diagnostics": [diagnostic.clone()],
+                "only": ["quickfix"]
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("codeAction response");
+    response["result"].as_array().cloned().unwrap_or_default()
+}
+
+fn synthetic_diagnostic(
+    message: &str,
+    start_line: u32,
+    start_character: u32,
+    end_line: u32,
+    end_character: u32,
+) -> Value {
+    json!({
+        "range": {
+            "start": {
+                "line": start_line,
+                "character": start_character
+            },
+            "end": {
+                "line": end_line,
+                "character": end_character
+            }
+        },
+        "severity": 1,
+        "source": "saga",
+        "message": message
+    })
+}
+
 fn completion_labels(lsp: &mut LspHarness, uri: &str, line: u32, character: u32) -> Vec<String> {
     completion_items(lsp, uri, line, character)
         .iter()
@@ -500,6 +546,198 @@ fn opening_empty_new_file_does_not_crash() {
         message.get("id").and_then(Value::as_i64) == Some(id)
     })
     .expect("document symbol response proves server stayed alive");
+}
+
+#[test]
+fn code_actions_suggest_missing_imports_and_qualified_use() {
+    let root = temp_project("code-actions-imports");
+    let lib_path = root.join("src/Lib.saga");
+    let main_path = root.join("src/Main.saga");
+    let lib_source = "\
+module Lib
+
+pub trait Describe a {
+  fun describe_it : a -> String
+}
+
+pub fun greet : Unit -> String
+greet () = \"hi\"
+";
+    std::fs::write(&lib_path, lib_source).expect("write lib module");
+
+    let imported_without_exposing = "\
+module Main
+
+import Lib
+
+main () = greet ()
+";
+    std::fs::write(&main_path, imported_without_exposing).expect("write main module");
+
+    let (
+        bare_titles,
+        bare_edit,
+        trait_method_titles,
+        trait_method_edit,
+        qualified_titles,
+        qualified_edit,
+    ) = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let lib_uri = file_uri(&lib_path);
+        let main_uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": lib_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": lib_source
+                }
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&lib_path), 1, 2);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": imported_without_exposing
+                }
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 1, 2);
+        let bare_diagnostic = synthetic_diagnostic("undefined variable: greet", 4, 10, 4, 15);
+        let bare_actions = code_actions(&mut lsp, &file_uri(&main_path), &bare_diagnostic);
+        let bare_titles = action_titles(&bare_actions);
+        let bare_edit = action_new_text(&bare_actions, "Expose `greet` from import Lib");
+
+        let trait_method_source = "\
+module Main
+
+import Lib
+
+main () = describe_it ()
+";
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "text": trait_method_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 2, 2);
+        let trait_diagnostic =
+            synthetic_diagnostic("undefined variable: describe_it", 4, 10, 4, 21);
+        let trait_actions = code_actions(&mut lsp, &file_uri(&main_path), &trait_diagnostic);
+        let trait_method_titles = action_titles(&trait_actions);
+        let trait_method_edit =
+            action_new_text(&trait_actions, "Expose `Describe` from import Lib");
+
+        let qualified_source = "\
+module Main
+
+main () = Lib.greet ()
+";
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 3
+                },
+                "contentChanges": [{
+                    "text": qualified_source
+                }]
+            }),
+        );
+        let _ = wait_for_diagnostics(&lsp, &file_uri(&main_path), 3, 2);
+        let qualified_diagnostic =
+            synthetic_diagnostic("unknown qualified name 'Lib.greet'", 2, 10, 2, 19);
+        let qualified_actions =
+            code_actions(&mut lsp, &file_uri(&main_path), &qualified_diagnostic);
+        let qualified_titles = action_titles(&qualified_actions);
+        let qualified_edit = action_new_text(&qualified_actions, "Add `import Lib`");
+
+        (
+            bare_titles,
+            bare_edit,
+            trait_method_titles,
+            trait_method_edit,
+            qualified_titles,
+            qualified_edit,
+        )
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        bare_titles
+            .iter()
+            .any(|title| title == "Expose `greet` from import Lib"),
+        "missing expose-function action: {bare_titles:?}"
+    );
+    assert!(
+        bare_titles.iter().any(|title| title == "Use `Lib.greet`"),
+        "missing qualify-function action: {bare_titles:?}"
+    );
+    assert_eq!(bare_edit.as_deref(), Some(" (greet)"));
+
+    assert!(
+        trait_method_titles
+            .iter()
+            .any(|title| title == "Expose `Describe` from import Lib"),
+        "trait method should import owning trait, not method: {trait_method_titles:?}"
+    );
+    assert_eq!(trait_method_edit.as_deref(), Some(" (Describe)"));
+    assert!(
+        !trait_method_titles
+            .iter()
+            .any(|title| title.contains("describe_it` from import")),
+        "trait method import action should not expose method directly: {trait_method_titles:?}"
+    );
+
+    assert!(
+        qualified_titles
+            .iter()
+            .any(|title| title == "Add `import Lib`"),
+        "missing qualified-prefix import action: {qualified_titles:?}"
+    );
+    assert_eq!(qualified_edit.as_deref(), Some("\nimport Lib\n\n"));
+}
+
+fn action_titles(actions: &[Value]) -> Vec<String> {
+    actions
+        .iter()
+        .filter_map(|action| action["title"].as_str().map(ToString::to_string))
+        .collect()
+}
+
+fn action_new_text(actions: &[Value], title: &str) -> Option<String> {
+    actions
+        .iter()
+        .find(|action| action["title"].as_str() == Some(title))
+        .and_then(|action| {
+            action["edit"]["changes"]
+                .as_object()?
+                .values()
+                .next()?
+                .as_array()?
+                .first()?
+                .get("newText")?
+                .as_str()
+                .map(ToString::to_string)
+        })
 }
 
 #[test]
