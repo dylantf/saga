@@ -4009,6 +4009,58 @@ main () = log! \"hello\"",
 }
 
 #[test]
+fn effect_forwarded_through_open_row_hof_reaches_main() {
+    // Regression: a callback's effects flowing through a HOF's open effect row
+    // (`..e`) must propagate to the caller, even when the saturating argument
+    // comes *after* the callback in the call spine. The callback lambda is
+    // deferred until after the saturating arg is processed, so the saturated
+    // call's effects must be emitted only once the deferred lambda has bound the
+    // row variable -- otherwise `{Boom}` would be silently dropped and `main`
+    // would type-check despite never handling it.
+    let result = check(
+        "effect Boom {
+  fun boom : (msg: String) -> a
+}
+fun risky : Int -> Int needs {Boom}
+risky n = if n > 0 then n else boom! \"bad\"
+fun call_with : (f: Int -> Int needs {..e}) -> (x: Int) -> Int needs {..e}
+call_with f x = f x
+main () = call_with (fun n -> risky n) 1",
+    );
+    assert!(
+        result.is_err(),
+        "main using an unhandled effect via an open-row HOF should not type-check"
+    );
+    let err = result.err().expect("expected error");
+    assert!(
+        err.message.contains("cannot use `needs`"),
+        "expected error about main + needs, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn effect_forwarded_through_open_row_hof_can_be_handled() {
+    // The same forwarding must still allow the caller to discharge the effect
+    // with a `with` handler -- the propagated effect is real, not spurious.
+    let result = check(
+        "effect Boom {
+  fun boom : (msg: String) -> a
+}
+fun risky : Int -> Int needs {Boom}
+risky n = if n > 0 then n else boom! \"bad\"
+fun call_with : (f: Int -> Int needs {..e}) -> (x: Int) -> Int needs {..e}
+call_with f x = f x
+main () = call_with (fun n -> risky n) 1 with { boom msg = 0 }",
+    );
+    assert!(
+        result.is_ok(),
+        "handling the forwarded effect should type-check, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn external_fun_cannot_have_effects() {
     let result = check(
         r#"

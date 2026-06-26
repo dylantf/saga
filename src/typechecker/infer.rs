@@ -780,9 +780,6 @@ impl Checker {
             params: &'a [Pat],
             body: &'a Expr,
             param_ty: Type,
-            callee_ty: Type,
-            ret_ty: Type,
-            is_last: bool,
         }
 
         let mut args = Vec::new();
@@ -791,12 +788,24 @@ impl Checker {
         let mut current_ty = self.infer_expr(head)?;
         let mut deferred = Vec::<DeferredLambda<'_>>::new();
 
+        // Effects performed by the saturated call must be emitted *after* every
+        // deferred lambda argument has been inferred: a deferred lambda binds the
+        // HOF's open effect row (`..e`), and that binding isn't visible until its
+        // body is checked below. Emitting at the saturating arg inside this loop
+        // would read an unbound row and silently drop the callback's effects
+        // (e.g. `flat_map (fun x -> risky x) xs` where the list is the saturating
+        // arg). So we record the callee type at the saturation point and the
+        // absorbed entries from *all* callback args, then emit once at the end.
+        let mut saturation_callee: Option<Type> = None;
+        let mut absorbed_entries = Vec::<super::EffectEntry>::new();
+
         for (idx, (arg, app_expr)) in args.iter().zip(apps.iter()).enumerate() {
             let callee_ty = current_ty.clone();
             let (param_ty, ret_ty) =
                 self.expect_function_type_for_app(&callee_ty, app_expr.span, app_expr)?;
             let resolved_param = self.sub.apply(&param_ty);
             let is_last = idx + 1 == args.len();
+            let saturates = is_last && !matches!(self.sub.apply(&ret_ty), Type::Fun(_, _, _));
 
             if let ExprKind::Lambda { params, body } = &arg.kind
                 && matches!(resolved_param, Type::Fun(_, _, _))
@@ -806,26 +815,28 @@ impl Checker {
                     params,
                     body,
                     param_ty: param_ty.clone(),
-                    callee_ty: callee_ty.clone(),
-                    ret_ty: ret_ty.clone(),
-                    is_last,
                 });
                 self.record_type(app_expr.id, &ret_ty);
                 current_ty = ret_ty;
+                if saturates {
+                    saturation_callee = Some(callee_ty);
+                }
                 continue;
             }
 
             let arg_ty = self.infer_arg_against(arg, &param_ty)?;
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
-            let absorbed_entries =
-                self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
+            absorbed_entries.extend(self.apply_callback_argument_effects(
+                &arg_ty_pre,
+                &param_ty,
+                arg.span,
+            )?);
             self.record_type(app_expr.id, &ret_ty);
             current_ty = ret_ty.clone();
 
-            if is_last && !matches!(self.sub.apply(&ret_ty), Type::Fun(_, _, _)) {
-                self.emit_saturated_call_effects(&callee_ty, &absorbed_entries);
-                self.emit_concrete_trait_impl_effects(head);
+            if saturates {
+                saturation_callee = Some(callee_ty);
             }
         }
 
@@ -850,17 +861,18 @@ impl Checker {
                 &deferred_lambda.param_ty,
                 deferred_lambda.arg_expr.span,
             )?;
-            let absorbed_entries = self.apply_callback_argument_effects(
+            absorbed_entries.extend(self.apply_callback_argument_effects(
                 &arg_ty_pre,
                 &deferred_lambda.param_ty,
                 deferred_lambda.arg_expr.span,
-            )?;
-            if deferred_lambda.is_last
-                && !matches!(self.sub.apply(&deferred_lambda.ret_ty), Type::Fun(_, _, _))
-            {
-                self.emit_saturated_call_effects(&deferred_lambda.callee_ty, &absorbed_entries);
-                self.emit_concrete_trait_impl_effects(head);
-            }
+            )?);
+        }
+
+        // Now that deferred lambdas have bound any open effect rows, emit the
+        // saturated call's effects (callee row minus everything absorbed).
+        if let Some(callee_ty) = saturation_callee {
+            self.emit_saturated_call_effects(&callee_ty, &absorbed_entries);
+            self.emit_concrete_trait_impl_effects(head);
         }
 
         Ok(current_ty)

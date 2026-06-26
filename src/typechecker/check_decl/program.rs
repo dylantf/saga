@@ -331,15 +331,21 @@ impl Checker {
                 .map(|r| r.effects.iter().map(|e| e.name.clone()).collect())
                 .unwrap_or_default();
             if !main_effects.is_empty() {
-                let span = program.iter().find_map(|d| {
-                    if let Decl::FunSignature { name, span, .. } = d
-                        && name == "main"
-                    {
-                        Some(*span)
-                    } else {
-                        None
-                    }
-                });
+                // Prefer the signature's span, but `main` often has no explicit
+                // signature (`main () = ...`); fall back to the binding's span so
+                // the error lands on `main` rather than the module header.
+                let span = program
+                    .iter()
+                    .find_map(|d| match d {
+                        Decl::FunSignature { name, span, .. } if name == "main" => Some(*span),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        program.iter().find_map(|d| match d {
+                            Decl::FunBinding { name, span, .. } if name == "main" => Some(*span),
+                            _ => None,
+                        })
+                    });
                 errors.push(Diagnostic::error_at(
                     span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
                     format!(
