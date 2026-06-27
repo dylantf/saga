@@ -894,16 +894,33 @@ impl<'a> Populator<'a> {
                 // the binder. `call_effects` is the authoritative owner of
                 // this lexical classification; the lowerer only consumes the
                 // completed per-App map.
+                let mut recorded = false;
                 if let Pat::Var { name, .. } = pattern {
                     if let Some(effs) = self.inputs.let_effect_bindings.get(name)
                         && !effs.is_empty()
                     {
                         self.record_effectful_var(name.clone(), effs.clone());
+                        recorded = true;
                     } else if let Some(effs) = self.value_effect_signature(value)
                         && !effs.is_empty()
                     {
                         self.record_effectful_var(name.clone(), effs);
+                        recorded = true;
                     }
+                }
+                // Fall back to the binding's resolved type. This catches
+                // bindings whose *type* is an effectful function value — e.g. a
+                // partial application `let app = choose_string [route]` of type
+                // `String -> String needs {..e}` — which `value_effect_signature`
+                // misses because the partial application itself performs no
+                // effects, so the call map records it as Pure. Reading the
+                // binder's type also recovers open-row callables (`needs {..e}`
+                // with no named effects), which the value-signature path never
+                // tracks; without this, `app "/ok"` lowers as a pure 1-arg
+                // apply against a 3-arity CPS function and crashes with a
+                // badarity at runtime.
+                if !recorded {
+                    self.record_pattern_effectful_vars(pattern);
                 }
             }
             Stmt::LetFun {

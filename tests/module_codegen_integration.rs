@@ -4667,6 +4667,87 @@ run () = {
     );
 }
 
+/// Regression: a let binding whose value is a *partial application* returning
+/// an effectful function — `let app = choose [route]` where `choose` takes two
+/// user args but only one is supplied — must classify `app` as an effectful
+/// (open-row) callable so `app input` lowers to the CPS-aware
+/// `apply app(Input, Evidence, ReturnK)` call.
+///
+/// Before the fix, the call-effects pre-pass only promoted a let binding to an
+/// effectful var when the *value itself* was a saturated effectful call
+/// (`value_effect_signature`). A partial application performs no effects, so it
+/// classified as Pure and `app` was never recorded — and that path never
+/// tracked open-row callables (`needs {..e}` with no named effects) anyway. The
+/// call `app input` then lowered to a plain 1-arg `apply`, crashing at runtime
+/// with `badarity` ("function called with 1 argument(s), but expects 3"). The
+/// fix falls back to the binder's resolved type via `record_pattern_effectful_vars`.
+#[test]
+fn let_bound_partial_application_threads_evidence() {
+    let main_src = "
+module Main
+
+effect TryNext {
+  fun skip : Unit -> a
+}
+
+fun choose : List (String -> String needs {TryNext, ..e}) -> String -> String
+  needs {..e}
+choose routes input = case routes {
+  [] -> \"not found\"
+  r :: rest -> r input with {
+    skip () = choose rest input
+  }
+}
+
+fun match_route : String -> (String -> String needs {..e}) -> String -> String
+  needs {TryNext, ..e}
+match_route pattern h input =
+  if input == pattern then h input
+  else skip! ()
+
+fun ok_route : String -> String needs {..e}
+ok_route _ = \"ok\"
+
+pub fun run_hit : Unit -> String
+run_hit () = {
+  let app = choose [match_route \"/ok\" ok_route]
+  app \"/ok\"
+}
+
+pub fun run_miss : Unit -> String
+run_miss () = {
+  let app = choose [match_route \"/ok\" ok_route]
+  app \"/nope\"
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&main_core, "main");
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_hit(unit), main:run_miss(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("ok|not found"),
+        "expected 'ok|not found', got: {stdout}"
+    );
+}
+
 // --- Codegen-side coverage for canonical-name auto-load ---
 //
 // These pin the codegen analogue of the typecheck-side rule:
