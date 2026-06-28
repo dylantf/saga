@@ -357,7 +357,7 @@ pub struct Lowerer<'a> {
     effect_canonical: HashMap<String, String>,
     /// Typechecker result for the module currently being lowered.
     /// Provides resolved types, handler info, effect info, etc.
-    check_result: crate::typechecker::CheckResult,
+    check_result: &'a crate::typechecker::CheckResult,
     /// Post-classifier optimizer facts for the module being lowered.
     optimization: super::optimize::OptimizationFacts,
     /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
@@ -398,7 +398,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolution: LowererResolution,
-        check_result: &crate::typechecker::CheckResult,
+        check_result: &'a crate::typechecker::CheckResult,
         optimization: super::optimize::OptimizationFacts,
         source_info: Option<SourceInfo>,
         entry_export: Option<String>,
@@ -442,7 +442,7 @@ impl<'a> Lowerer<'a> {
             current_handler_inherited_k: None,
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
-            check_result: check_result.clone(),
+            check_result,
             optimization,
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
@@ -927,6 +927,28 @@ impl<'a> Lowerer<'a> {
             .map(|f| &f.effects)
             .filter(|e| !e.is_empty())
     }
+}
+
+pub(crate) fn precompute_call_effects(
+    ctx: &super::CodegenContext,
+    module_name: &str,
+    program: &ast::Program,
+    resolution: super::resolve::ResolutionMap,
+    check_result: &crate::typechecker::CheckResult,
+) -> super::call_effects::CallEffectMap {
+    Lowerer::new(
+        ctx,
+        super::resolve::ConstructorAtoms::new(),
+        LowererResolution {
+            symbols: resolution,
+            ..Default::default()
+        },
+        check_result,
+        super::optimize::OptimizationFacts::default(),
+        None,
+        None,
+    )
+    .precompute_call_effects(module_name, program)
 }
 
 #[cfg(test)]

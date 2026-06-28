@@ -41,9 +41,9 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
             exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
-        // dev: always clean rebuild
+        // dev: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let sb = build_script(f, "dev");
+            let sb = check_script_cache(f, "dev").unwrap_or_else(|| build_script(f, "dev"));
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -55,8 +55,13 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 eprintln!("This project is a library and cannot be run. Use `saga build` instead.");
                 std::process::exit(1);
             }
-            let pb = build_project("dev");
-            exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "main");
+            let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
+            let (build_dir, stdlib_dir) =
+                check_project_cache(&project_root, "dev").unwrap_or_else(|| {
+                    let pb = build_project("dev");
+                    (pb.build_dir, pb.stdlib_dir)
+                });
+            exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     }
 }
@@ -65,9 +70,21 @@ pub fn cmd_build(file: Option<&str>, release: bool) {
     let profile = if release { "release" } else { "dev" };
 
     if let Some(f) = file {
-        let _sb = build_script(f, profile);
+        if check_script_cache(f, profile).is_some() {
+            eprintln!("  {} build is fresh", color::green("Cached"));
+        } else {
+            let _sb = build_script(f, profile);
+        }
     } else {
-        let _pb = build_project(profile);
+        let project_root = super::find_project_root().unwrap_or_else(|| {
+            eprintln!("No project.toml found.");
+            std::process::exit(1);
+        });
+        if check_project_cache(&project_root, profile).is_some() {
+            eprintln!("  {} build is fresh", color::green("Cached"));
+        } else {
+            let _pb = build_project(profile);
+        }
     }
 }
 
@@ -275,6 +292,7 @@ pub fn cmd_emit(file: &str) {
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
+            call_effects_ready: false,
             optimization: codegen::optimize::OptimizationFacts::default(),
         },
     );

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::ast::{self, Decl, Expr, ExprKind, Pat};
 use crate::codegen::call_effects;
@@ -12,6 +13,31 @@ use super::util::{self, core_var};
 use super::{EvidenceCtx, FunInfo, GeneratedHelperVariant, HoistedDictMethod, Lowerer};
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+
+fn lower_trace_enabled() -> bool {
+    std::env::var_os("SAGA_BUILD_TRACE").is_some()
+}
+
+fn trace_lower_phase(module: &str, phase: &str, duration: std::time::Duration) {
+    if lower_trace_enabled() {
+        eprintln!(
+            "[saga-lower] module={} phase={} elapsed={:.1}ms",
+            module,
+            phase,
+            duration.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+fn timed_lower_phase<T>(module: &str, phase: &str, f: impl FnOnce() -> T) -> T {
+    if !lower_trace_enabled() {
+        return f();
+    }
+    let start = Instant::now();
+    let out = f();
+    trace_lower_phase(module, phase, start.elapsed());
+    out
+}
 
 /// Borrowed metadata for one `DictConstructor` decl, in the field order the
 /// dict-lowering and hoist planner consume: name, dict params, superclass dicts,
@@ -110,7 +136,11 @@ fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
+    pub(super) fn precompute_call_effects(
+        &mut self,
+        module_name: &str,
+        program: &ast::Program,
+    ) -> call_effects::CallEffectMap {
         self.current_module = module_name.to_string();
         self.current_source_module = program
             .iter()
@@ -126,22 +156,33 @@ impl<'a> Lowerer<'a> {
         self.generated_helper_variants.clear();
         self.generated_hof_variants.clear();
         self.trait_spec_stats.clear();
-        let mut pending_annotations = self.init_module(module_name, program);
 
-        // Group FunBindings by name, preserving declaration order, and simultaneously
-        // populate top_level_funs. Handler params are added to the arity for effectful funs.
-        let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
-        let mut dict_constructors: Vec<DictCtorMeta<'_>> = Vec::new();
+        let mut pending_annotations = timed_lower_phase(module_name, "init_module", || {
+            self.init_module(module_name, program)
+        });
+        let dict_constructors = timed_lower_phase(module_name, "scan_decls", || {
+            self.register_call_effect_decl_metadata(program, &mut pending_annotations)
+        });
+        timed_lower_phase(module_name, "collect_impl_effects", || {
+            self.collect_impl_effect_metadata(&dict_constructors);
+        });
+        timed_lower_phase(module_name, "populate_call_effects_active", || {
+            self.populate_call_effects_with_check(program, self.check_result)
+                .map
+        })
+    }
+
+    fn register_call_effect_decl_metadata<'p>(
+        &mut self,
+        program: &'p ast::Program,
+        pending_annotations: &mut HashMap<String, PendingAnnotation>,
+    ) -> Vec<DictCtorMeta<'p>> {
+        let mut dict_constructors: Vec<DictCtorMeta<'p>> = Vec::new();
 
         for decl in program {
             match decl {
                 Decl::FunBinding {
-                    name,
-                    params,
-                    guard,
-                    body,
-                    span,
-                    ..
+                    name, params, body, ..
                 } => {
                     let PendingAnnotation {
                         mut effects,
@@ -171,10 +212,6 @@ impl<'a> Lowerer<'a> {
                             util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty));
                     }
                     let mut base_arity = lower_params(params).len() + count_lambda_params(body);
-                    // For eta-reduced functions (e.g. `pg_text = coerce_value`),
-                    // the binding has 0 params but the type annotation declares a
-                    // higher arity. Use the annotation's arity so cross-module
-                    // callers (who derive arity from the type) find the right /N.
                     if let Some(scheme) = self.check_result.env.get(name) {
                         let declared_arity = util::arity_and_effects_from_type(
                             &self.check_result.sub.apply(&scheme.ty),
@@ -212,34 +249,21 @@ impl<'a> Lowerer<'a> {
                     }
                     let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
                     let arity = shape.expanded_arity(base_arity);
-                    if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
-                        // Additional clause: just add to existing group
-                        group.2.push((params, guard, body));
-                    } else {
-                        // First clause: register fun_info for arity/effects lookup.
-                        self.fun_info.insert(
-                            name.clone(),
-                            FunInfo {
-                                arity,
-                                effects,
-                                is_open_row,
-                                param_absorbed_effects,
-                                param_types,
-                                dict_param_count: self
-                                    .check_result
-                                    .env
-                                    .get(name)
-                                    .map(|scheme| util::dict_param_count(&scheme.constraints))
-                                    .unwrap_or(0),
-                            },
-                        );
-                        clause_groups.push((
-                            name.clone(),
+                    self.fun_info
+                        .entry(name.clone())
+                        .or_insert_with(|| FunInfo {
                             arity,
-                            vec![(params, guard, body)],
-                            *span,
-                        ));
-                    }
+                            effects,
+                            is_open_row,
+                            param_absorbed_effects,
+                            param_types,
+                            dict_param_count: self
+                                .check_result
+                                .env
+                                .get(name)
+                                .map(|scheme| util::dict_param_count(&scheme.constraints))
+                                .unwrap_or(0),
+                        });
                 }
                 Decl::DictConstructor {
                     name,
@@ -272,21 +296,13 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        // Phase 2 trait specialization: plan which local nullary dict methods
-        // to hoist into top-level functions for direct dispatch. Done before
-        // body lowering so call sites can reference the hoisted names; the
-        // functions themselves are emitted during dict-constructor lowering.
-        self.plan_dict_method_hoists(&dict_constructors);
+        dict_constructors
+    }
 
-        // Build dict_name -> impl_effects from the active module's
-        // `DictConstructor` nodes (which carry the field directly post-
-        // elaboration, since the active module may not appear in
-        // `check_result.codegen_info()`) and imported modules' TraitImplDicts.
-        // The per-method map keeps pure sibling methods direct even when the
-        // impl has an effectful method.
+    fn collect_impl_effect_metadata(&mut self, dict_constructors: &[DictCtorMeta<'_>]) {
         self.impl_effects_by_dict.clear();
         self.impl_method_effects_by_dict.clear();
-        for (name, _, _, methods, method_effects, _, impl_effects) in &dict_constructors {
+        for (name, _, _, methods, method_effects, _, impl_effects) in dict_constructors {
             let impl_effects = self.canonicalize_effects(impl_effects.to_vec());
             self.impl_effects_by_dict
                 .insert((*name).to_string(), impl_effects.clone());
@@ -309,13 +325,202 @@ impl<'a> Lowerer<'a> {
                     .or_insert_with(|| d.impl_effects.clone());
             }
         }
+    }
+
+    pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
+        self.current_module = module_name.to_string();
+        self.current_source_module = program
+            .iter()
+            .find_map(|decl| {
+                if let Decl::ModuleDecl { path, .. } = decl {
+                    Some(path.join("."))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| module_name.to_string());
+        self.effect_op_trace.clear();
+        self.generated_helper_variants.clear();
+        self.generated_hof_variants.clear();
+        self.trait_spec_stats.clear();
+        let mut pending_annotations = timed_lower_phase(module_name, "init_module", || {
+            self.init_module(module_name, program)
+        });
+
+        // Group FunBindings by name, preserving declaration order, and simultaneously
+        // populate top_level_funs. Handler params are added to the arity for effectful funs.
+        let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
+        let mut dict_constructors: Vec<DictCtorMeta<'_>> = Vec::new();
+
+        timed_lower_phase(module_name, "scan_decls", || {
+            for decl in program {
+                match decl {
+                    Decl::FunBinding {
+                        name,
+                        params,
+                        guard,
+                        body,
+                        span,
+                        ..
+                    } => {
+                        let PendingAnnotation {
+                            mut effects,
+                            mut param_absorbed_effects,
+                        } = pending_annotations.remove(name.as_str()).unwrap_or(
+                            PendingAnnotation {
+                                effects: Vec::new(),
+                                param_absorbed_effects: HashMap::new(),
+                            },
+                        );
+                        let mut param_types = Vec::new();
+                        if effects.is_empty()
+                            && let Some(scheme) = self.check_result.env.get(name)
+                        {
+                            let resolved_ty = self.check_result.sub.apply(&scheme.ty);
+                            effects = self.canonicalize_effects(
+                                util::arity_and_effects_from_type(&resolved_ty).1,
+                            );
+                            param_absorbed_effects =
+                                util::param_absorbed_effects_from_type(&resolved_ty)
+                                    .into_iter()
+                                    .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                                    .collect();
+                            param_types = util::param_types_from_type(&resolved_ty);
+                        } else if let Some(scheme) = self.check_result.env.get(name) {
+                            param_types = util::param_types_from_type(
+                                &self.check_result.sub.apply(&scheme.ty),
+                            );
+                        }
+                        let mut base_arity = lower_params(params).len() + count_lambda_params(body);
+                        // For eta-reduced functions (e.g. `pg_text = coerce_value`),
+                        // the binding has 0 params but the type annotation declares a
+                        // higher arity. Use the annotation's arity so cross-module
+                        // callers (who derive arity from the type) find the right /N.
+                        if let Some(scheme) = self.check_result.env.get(name) {
+                            let declared_arity = util::arity_and_effects_from_type(
+                                &self.check_result.sub.apply(&scheme.ty),
+                            )
+                            .0;
+                            if declared_arity > base_arity {
+                                base_arity = declared_arity;
+                            }
+                        }
+                        let mut shape = self
+                            .check_result
+                            .env
+                            .get(name)
+                            .map(|scheme| {
+                                let ty = self.check_result.sub.apply(&scheme.ty);
+                                RuntimeFunctionShape::from_type(&ty, |effects| {
+                                    self.canonicalize_effects(effects)
+                                })
+                            })
+                            .unwrap_or_else(|| {
+                                if effects.is_empty() {
+                                    RuntimeFunctionShape::Pure
+                                } else {
+                                    RuntimeFunctionShape::Cps(CpsShape {
+                                        static_effects: effects.clone(),
+                                        is_open_row: false,
+                                    })
+                                }
+                            });
+                        if matches!(shape, RuntimeFunctionShape::Pure) && !effects.is_empty() {
+                            shape = RuntimeFunctionShape::Cps(CpsShape {
+                                static_effects: effects.clone(),
+                                is_open_row: false,
+                            });
+                        }
+                        let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+                        let arity = shape.expanded_arity(base_arity);
+                        if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name)
+                        {
+                            // Additional clause: just add to existing group
+                            group.2.push((params, guard, body));
+                        } else {
+                            // First clause: register fun_info for arity/effects lookup.
+                            self.fun_info.insert(
+                                name.clone(),
+                                FunInfo {
+                                    arity,
+                                    effects,
+                                    is_open_row,
+                                    param_absorbed_effects,
+                                    param_types,
+                                    dict_param_count: self
+                                        .check_result
+                                        .env
+                                        .get(name)
+                                        .map(|scheme| util::dict_param_count(&scheme.constraints))
+                                        .unwrap_or(0),
+                                },
+                            );
+                            clause_groups.push((
+                                name.clone(),
+                                arity,
+                                vec![(params, guard, body)],
+                                *span,
+                            ));
+                        }
+                    }
+                    Decl::DictConstructor {
+                        name,
+                        dict_params,
+                        super_dicts,
+                        methods,
+                        method_effects,
+                        method_open_rows,
+                        impl_effects,
+                        ..
+                    } => {
+                        self.fun_info.insert(
+                            name.clone(),
+                            FunInfo {
+                                arity: dict_params.len(),
+                                ..Default::default()
+                            },
+                        );
+                        dict_constructors.push((
+                            name,
+                            dict_params,
+                            super_dicts,
+                            methods,
+                            method_effects,
+                            method_open_rows,
+                            impl_effects,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Phase 2 trait specialization: plan which local nullary dict methods
+        // to hoist into top-level functions for direct dispatch. Done before
+        // body lowering so call sites can reference the hoisted names; the
+        // functions themselves are emitted during dict-constructor lowering.
+        timed_lower_phase(module_name, "plan_dict_method_hoists", || {
+            self.plan_dict_method_hoists(&dict_constructors);
+        });
+
+        // Build dict_name -> impl_effects from the active module's
+        // `DictConstructor` nodes (which carry the field directly post-
+        // elaboration, since the active module may not appear in
+        // `check_result.codegen_info()`) and imported modules' TraitImplDicts.
+        // The per-method map keeps pure sibling methods direct even when the
+        // impl has an effectful method.
+        timed_lower_phase(module_name, "collect_impl_effects", || {
+            self.collect_impl_effect_metadata(&dict_constructors);
+        });
 
         // Call-effects pre-pass: tag every `App` node in the elaborated
         // program with `CallEffectInfo` so the lowerer can consume it via
         // lookup. Runs after `init_module` + per-decl `fun_info` registration
         // so all callees have arity/effect entries by the time we classify
         // their call sites.
-        let call_effects = self.populate_call_effects_with_check(program, &self.check_result);
+        let call_effects = timed_lower_phase(module_name, "populate_call_effects_active", || {
+            self.populate_call_effects_with_check(program, self.check_result)
+        });
         if call_effects::call_effect_trace_enabled_for(&self.current_source_module) {
             eprintln!(
                 "{}",
@@ -329,21 +534,29 @@ impl<'a> Lowerer<'a> {
         // Cross-module inlined handler bodies live in the elaborated programs
         // of compiled modules and are lowered through the active Lowerer.
         // Tag their `App` nodes too so the parallel-check can see them.
-        for (name, compiled) in self.ctx.modules.iter() {
-            // Use the source module's CheckResult so type_at_span lookups in
-            // the populator (e.g. for handler arm parameters) hit. The active
-            // module's check_result only carries spans from its own source.
-            let module_check = self
-                .check_result
-                .module_check_results()
-                .get(name)
-                .unwrap_or(&self.check_result);
-            let cross_call_effects =
-                self.populate_call_effects_with_check(&compiled.elaborated, module_check);
-            for (id, info) in cross_call_effects.map {
-                self.call_effects.entry(id).or_insert(info);
+        timed_lower_phase(module_name, "populate_call_effects_cross_modules", || {
+            for (name, compiled) in self.ctx.modules.iter() {
+                if compiled.call_effects_ready {
+                    for (id, info) in &compiled.call_effects {
+                        self.call_effects.entry(*id).or_insert_with(|| info.clone());
+                    }
+                    continue;
+                }
+                // Use the source module's CheckResult so type_at_span lookups in
+                // the populator (e.g. for handler arm parameters) hit. The active
+                // module's check_result only carries spans from its own source.
+                let module_check = self
+                    .check_result
+                    .module_check_results()
+                    .get(name)
+                    .unwrap_or(self.check_result);
+                let cross_call_effects =
+                    self.populate_call_effects_with_check(&compiled.elaborated, module_check);
+                for (id, info) in cross_call_effects.map {
+                    self.call_effects.entry(id).or_insert(info);
+                }
             }
-        }
+        });
 
         let mut exports = Vec::new();
         let mut fun_defs = Vec::new();
