@@ -1145,12 +1145,7 @@ impl Elaborator {
             .cloned()
             .unwrap_or_else(|| fields.iter().map(|(name, _, _)| name.clone()).collect());
 
-        let constructor = Expr::synth(
-            record_span,
-            ExprKind::Constructor {
-                name: record.to_string(),
-            },
-        );
+        let constructor = self.projection_record_constructor(record, record_span, &field_order);
         let project_into = self.projection_builder_ref(marker_module, "project_into", span);
         let mut chain = Expr::synth(
             span,
@@ -1167,11 +1162,31 @@ impl Elaborator {
             };
             let project_with =
                 self.projection_builder_ref(marker_module, "project_with", field_expr.span);
+            let relabel_projection =
+                self.projection_builder_ref(marker_module, "relabel_projection", field_expr.span);
+            let relabeled_field = Expr::synth(
+                field_expr.span,
+                ExprKind::App {
+                    func: Box::new(Expr::synth(
+                        field_expr.span,
+                        ExprKind::App {
+                            func: Box::new(relabel_projection),
+                            arg: Box::new(Expr::synth(
+                                field_expr.span,
+                                ExprKind::Lit {
+                                    value: Lit::String(field_name.clone(), StringKind::Normal),
+                                },
+                            )),
+                        },
+                    )),
+                    arg: Box::new(self.elaborate_expr(field_expr)),
+                },
+            );
             let with_arg = Expr::synth(
                 field_expr.span,
                 ExprKind::App {
                     func: Box::new(project_with),
-                    arg: Box::new(self.elaborate_expr(field_expr)),
+                    arg: Box::new(relabeled_field),
                 },
             );
             chain = Expr::synth(
@@ -1184,6 +1199,52 @@ impl Elaborator {
         }
 
         chain
+    }
+
+    fn projection_record_constructor(
+        &self,
+        record: &str,
+        record_span: Span,
+        field_order: &[String],
+    ) -> Expr {
+        let params: Vec<String> = field_order
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| format!("__project_{}_{}", idx, field))
+            .collect();
+        let mut body = Expr::synth(
+            record_span,
+            ExprKind::Constructor {
+                name: record.to_string(),
+            },
+        );
+        for param in &params {
+            body = Expr::synth(
+                record_span,
+                ExprKind::App {
+                    func: Box::new(body),
+                    arg: Box::new(Expr::synth(
+                        record_span,
+                        ExprKind::Var {
+                            name: param.clone(),
+                        },
+                    )),
+                },
+            );
+        }
+        params.into_iter().rev().fold(body, |body, name| {
+            Expr::synth(
+                record_span,
+                ExprKind::Lambda {
+                    params: vec![Pat::Var {
+                        id: NodeId::fresh(),
+                        name,
+                        span: record_span,
+                    }],
+                    body: Box::new(body),
+                },
+            )
+        })
     }
 
     /// If a `KnownSymbol` evidence record at `node_id` carries a concrete symbol

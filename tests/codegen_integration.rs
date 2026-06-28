@@ -245,6 +245,43 @@ fn emitted_function(out: &str, name: &str, arity: usize) -> String {
 }
 
 #[test]
+fn projection_literal_runtime_uses_curried_record_constructor() {
+    let src = r#"
+type Projection a = Projection a
+
+fun project_into : (a -> b) -> Projection (a -> b)
+project_into f = Projection f
+
+fun project_with : Projection a -> Projection (a -> b) -> Projection b
+project_with arg ctor = case arg {
+  Projection a -> case ctor {
+    Projection f -> Projection (f a)
+  }
+}
+
+fun relabel_projection : String -> Projection a -> Projection a
+relabel_projection _ projection = projection
+
+record User {
+  name: String,
+  age: Int,
+}
+
+fun unwrap : Projection a -> a
+unwrap projection = case projection {
+  Projection value -> value
+}
+
+main () = {
+  let user = unwrap (project User { age: Projection 42, name: Projection "Ada" })
+  if user.age == 42 then user.name else "bad"
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["Ada"]);
+}
+
+#[test]
 fn mixed_effect_trait_impl_keeps_pure_method_callable() {
     let src = r#"
 effect Ask {
