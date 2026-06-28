@@ -354,6 +354,13 @@ impl Checker {
                 Ok(ty)
             }
 
+            ExprKind::ProjectionLiteral {
+                record,
+                record_span,
+                fields,
+                ..
+            } => self.infer_projection_literal(node_id, record, *record_span, fields, span),
+
             ExprKind::AnonRecordCreate { fields, .. } => {
                 let ty = self.infer_anon_record_create(fields)?;
                 self.record_type(node_id, &ty);

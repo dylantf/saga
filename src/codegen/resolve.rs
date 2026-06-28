@@ -807,7 +807,9 @@ fn resolve_expr(
                 resolve_expr(e, scope, map, front_resolution);
             }
         }
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, e) in fields {
                 resolve_expr(e, scope, map, front_resolution);
             }

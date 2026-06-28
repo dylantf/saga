@@ -138,7 +138,9 @@ fn visit_expr_for_arms(expr: &Expr, out: &mut HandlerAnalysis) {
         }
         ExprKind::Lambda { body, .. } => visit_expr_for_arms(body, out),
         ExprKind::FieldAccess { expr, .. } => visit_expr_for_arms(expr, out),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields } => {
             for (_, _, field_expr) in fields {
                 visit_expr_for_arms(field_expr, out);
             }
@@ -374,7 +376,9 @@ fn walk_count(expr: &Expr, count: &mut usize) {
         }
         ExprKind::Lambda { body, .. } => walk_count(body, count),
         ExprKind::FieldAccess { expr, .. } => walk_count(expr, count),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields } => {
             for (_, _, field_expr) in fields {
                 walk_count(field_expr, count);
             }

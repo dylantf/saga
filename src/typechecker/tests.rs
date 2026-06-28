@@ -11847,3 +11847,91 @@ fn impl_for_tuple_missing_element_constraint_is_error() {
         err.message
     );
 }
+
+fn projection_literal_prelude() -> &'static str {
+    "type Projection a = Projection a\n\
+     fun project_into : (a -> b) -> Projection (a -> b)\n\
+     project_into f = Projection f\n\
+     fun project_with : Projection a -> Projection (a -> b) -> Projection b\n\
+     project_with arg ctor = case arg { Projection a -> case ctor { Projection f -> Projection (f a) } }\n\
+     record User { name: String, age: Int }\n\
+     let name_p = Projection \"Ada\"\n\
+     let age_p = Projection 42\n"
+}
+
+#[test]
+fn projection_literal_typechecks_out_of_order_fields() {
+    let src = format!(
+        "{}{}",
+        projection_literal_prelude(),
+        "fun ok : Unit -> Projection User\n\
+         ok () = project User { age: age_p, name: name_p }\n"
+    );
+    check(&src).expect("projection literal should typecheck");
+}
+
+#[test]
+fn projection_literal_rejects_missing_field() {
+    let src = format!(
+        "{}{}",
+        projection_literal_prelude(),
+        "let bad = project User { name: name_p }\n"
+    );
+    let err = check(&src)
+        .err()
+        .expect("expected missing-field diagnostic");
+    assert!(
+        err.message.contains("missing field") && err.message.contains("age"),
+        "expected missing-field diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn projection_literal_rejects_unknown_field() {
+    let src = format!(
+        "{}{}",
+        projection_literal_prelude(),
+        "let bad = project User { name: name_p, age: age_p, bogus: age_p }\n"
+    );
+    let err = check(&src)
+        .err()
+        .expect("expected unknown-field diagnostic");
+    assert!(
+        err.message.contains("unknown field") && err.message.contains("bogus"),
+        "expected unknown-field diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn projection_literal_rejects_duplicate_field() {
+    let src = format!(
+        "{}{}",
+        projection_literal_prelude(),
+        "let bad = project User { name: name_p, name: name_p, age: age_p }\n"
+    );
+    let err = check(&src)
+        .err()
+        .expect("expected duplicate-field diagnostic");
+    assert!(
+        err.message.contains("duplicate field") && err.message.contains("name"),
+        "expected duplicate-field diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn projection_literal_checks_field_projection_types() {
+    let src = format!(
+        "{}{}",
+        projection_literal_prelude(),
+        "let bad = project User { name: age_p, age: name_p }\n"
+    );
+    let err = check(&src).err().expect("expected field type diagnostic");
+    assert!(
+        err.message.contains("type mismatch"),
+        "expected type mismatch diagnostic, got: {}",
+        err.message
+    );
+}

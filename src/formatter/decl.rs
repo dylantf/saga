@@ -148,7 +148,9 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         ExprKind::ListLit { elements } => !elements.is_empty(),
         ExprKind::Tuple { .. } => true,
         // Named record creates stay on = line
-        ExprKind::RecordCreate { .. } | ExprKind::AnonRecordCreate { .. } => true,
+        ExprKind::RecordCreate { .. }
+        | ExprKind::ProjectionLiteral { .. }
+        | ExprKind::AnonRecordCreate { .. } => true,
         // with expressions are block-like when the inner expr is block-like or handler is inline
         ExprKind::With { expr, handler } => {
             matches!(handler.as_ref(), Handler::Inline { .. }) || is_block_like(expr)

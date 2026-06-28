@@ -176,7 +176,9 @@ fn desugar_expr(expr: &mut Expr) {
             desugar_expr(body);
         }
         ExprKind::FieldAccess { expr: inner, .. } => desugar_expr(inner),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, val) in fields {
                 desugar_expr(val);
             }
@@ -727,7 +729,9 @@ pub fn freshen_expr_ids(expr: &mut Expr) {
             freshen_expr_ids(body);
         }
         ExprKind::FieldAccess { expr: inner, .. } => freshen_expr_ids(inner),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, val) in fields {
                 freshen_expr_ids(val);
             }
@@ -1032,7 +1036,9 @@ pub fn retarget_expr_spans(expr: &mut Expr, target: Span) {
             retarget_expr_spans(body, target);
         }
         ExprKind::FieldAccess { expr: inner, .. } => retarget_expr_spans(inner, target),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, val) in fields {
                 retarget_expr_spans(val, target);
             }

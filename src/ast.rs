@@ -682,6 +682,14 @@ pub enum ExprKind {
         record_name: Option<String>,
     },
 
+    /// `Db.project User { name: projected_name, age: projected_age }`
+    ProjectionLiteral {
+        marker_module: Option<String>,
+        record: String,
+        record_span: Span,
+        fields: Vec<(String, Span, Expr)>,
+    },
+
     /// `{ street: "Main St", city: "Portland" }` (anonymous record)
     AnonRecordCreate { fields: Vec<(String, Span, Expr)> },
 
@@ -858,7 +866,9 @@ impl Expr {
             ExprKind::UnaryMinus { expr, .. } => expr.contains_resume(),
             ExprKind::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
             ExprKind::FieldAccess { expr, .. } => expr.contains_resume(),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            ExprKind::RecordCreate { fields, .. }
+            | ExprKind::ProjectionLiteral { fields, .. }
+            | ExprKind::AnonRecordCreate { fields, .. } => {
                 fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             ExprKind::RecordUpdate { record, fields, .. } => {

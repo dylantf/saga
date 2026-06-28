@@ -255,6 +255,8 @@ pub(crate) struct Elaborator {
     /// Scope map effects for canonical name bridging (user name -> canonical
     /// effect name, e.g. `"Fail"` -> `"Std.Fail.Fail"`).
     pub(crate) scope_map_effects: HashMap<String, String>,
+    /// Record name -> declared field order.
+    pub(crate) record_fields: HashMap<String, Vec<String>>,
     /// Front-end resolution result for looking up canonical names by span/node id.
     pub(crate) resolution: crate::typechecker::ResolutionResult,
     /// Finalized per-node type information for resolving record names in

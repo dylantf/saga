@@ -415,7 +415,9 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
             normalize_expr(body);
         }
         ExprKind::FieldAccess { expr, .. } => normalize_expr(expr),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields } => {
             for (_, s, e) in fields.iter_mut() {
                 *s = S;
                 normalize_expr(e);

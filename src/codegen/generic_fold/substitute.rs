@@ -637,7 +637,9 @@ pub(crate) fn child_exprs_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         }
         ExprKind::Lambda { body, .. } => out.push(body),
         ExprKind::FieldAccess { expr: inner, .. } => out.push(inner),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::ProjectionLiteral { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, val) in fields {
                 out.push(val);
             }

@@ -347,6 +347,29 @@ impl Normalizer {
                 )
             }
 
+            // ProjectionLiteral: normalize field values. Successful programs
+            // elaborate this away before lowering, but keep traversal complete.
+            ExprKind::ProjectionLiteral {
+                marker_module,
+                record,
+                record_span,
+                fields,
+            } => {
+                let new_fields = fields
+                    .iter()
+                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
+                    .collect();
+                Expr::rebuild_like(
+                    expr,
+                    ExprKind::ProjectionLiteral {
+                        marker_module: marker_module.clone(),
+                        record: record.clone(),
+                        record_span: *record_span,
+                        fields: new_fields,
+                    },
+                )
+            }
+
             // AnonRecordCreate: normalize field values.
             ExprKind::AnonRecordCreate { fields } => {
                 let new_fields = fields
@@ -835,7 +858,9 @@ mod tests {
             }
             ExprKind::UnaryMinus { expr } => walk(expr, ids),
             ExprKind::FieldAccess { expr, .. } => walk(expr, ids),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            ExprKind::RecordCreate { fields, .. }
+            | ExprKind::ProjectionLiteral { fields, .. }
+            | ExprKind::AnonRecordCreate { fields } => {
                 for (_, _, value) in fields {
                     walk(value, ids);
                 }

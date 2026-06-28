@@ -1,5 +1,7 @@
 use crate::ast::Expr;
+use crate::ast::ExprKind;
 use crate::token::Span;
+use std::collections::{HashMap, HashSet};
 
 use super::{Checker, Diagnostic, Type};
 
@@ -83,6 +85,138 @@ impl Checker {
         }
         typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         Ok(Type::Record(typed_fields))
+    }
+
+    pub(crate) fn infer_projection_literal(
+        &mut self,
+        node_id: crate::ast::NodeId,
+        record: &str,
+        record_span: Span,
+        fields: &[(String, Span, Expr)],
+        span: Span,
+    ) -> Result<Type, Diagnostic> {
+        let resolved_record = self.resolved_record_type_name(node_id, record);
+        let info = self.records.get(&resolved_record).cloned().ok_or_else(|| {
+            Diagnostic::error_at(record_span, format!("undefined record type: {}", record))
+        })?;
+
+        self.lsp.type_references.push((
+            crate::token::Span {
+                start: record_span.start,
+                end: record_span.start + record.len(),
+            },
+            resolved_record.clone(),
+        ));
+
+        let (inst_fields, result_ty) = self.instantiate_record(&resolved_record, &info);
+        let builders = self
+            .resolution
+            .projection_builders(node_id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::error_at(
+                    span,
+                    "projection literal requires `project_into` and `project_with` next to the `project` marker",
+                )
+            })?;
+
+        let mut provided: HashMap<&str, &Expr> = HashMap::new();
+        let declared: HashSet<&str> = inst_fields.iter().map(|(n, _)| n.as_str()).collect();
+        let mut has_shape_error = false;
+
+        for (fname, fspan, fexpr) in fields {
+            if !declared.contains(fname.as_str()) {
+                has_shape_error = true;
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    *fspan,
+                    format!("unknown field '{}' on record {}", fname, record),
+                ));
+                let _ = self.infer_expr(fexpr);
+                continue;
+            }
+            if provided.insert(fname.as_str(), fexpr).is_some() {
+                has_shape_error = true;
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    *fspan,
+                    format!("duplicate field '{}' in projection literal", fname),
+                ));
+                let _ = self.infer_expr(fexpr);
+            }
+        }
+
+        let missing: Vec<&str> = inst_fields
+            .iter()
+            .filter(|(n, _)| !provided.contains_key(n.as_str()))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        if !missing.is_empty() {
+            has_shape_error = true;
+            self.collected_diagnostics.push(Diagnostic::error_at(
+                span,
+                format!(
+                    "missing field{} on record {}: {}",
+                    if missing.len() > 1 { "s" } else { "" },
+                    record,
+                    missing.join(", "),
+                ),
+            ));
+        }
+
+        if has_shape_error {
+            for (_, _, fexpr) in fields {
+                let _ = self.infer_expr(fexpr);
+            }
+            return Ok(Type::Error);
+        }
+
+        let constructor = Expr::synth(
+            record_span,
+            ExprKind::Constructor {
+                name: resolved_record,
+            },
+        );
+        let project_into = Expr::synth(
+            span,
+            ExprKind::Var {
+                name: builders.project_into,
+            },
+        );
+        let mut chain = Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(project_into),
+                arg: Box::new(constructor),
+            },
+        );
+
+        for (field_name, _) in &inst_fields {
+            let field_expr = provided[field_name.as_str()].clone();
+            let project_with = Expr::synth(
+                field_expr.span,
+                ExprKind::Var {
+                    name: builders.project_with.clone(),
+                },
+            );
+            let with_arg = Expr::synth(
+                field_expr.span,
+                ExprKind::App {
+                    func: Box::new(project_with),
+                    arg: Box::new(field_expr),
+                },
+            );
+            chain = Expr::synth(
+                span,
+                ExprKind::App {
+                    func: Box::new(with_arg),
+                    arg: Box::new(chain),
+                },
+            );
+        }
+
+        let ty = self.infer_expr(&chain)?;
+        self.record_type(node_id, &ty);
+        let _ = result_ty;
+        Ok(self.sub.apply(&ty))
     }
 
     pub(crate) fn infer_record_update(

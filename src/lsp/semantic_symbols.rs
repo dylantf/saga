@@ -590,6 +590,24 @@ fn add_expr_type_symbols(
                 add_expr_type_symbols(index, uri, line_index, source, value, check);
             }
         }
+        ast::ExprKind::ProjectionLiteral {
+            record,
+            record_span,
+            fields,
+            ..
+        } => {
+            if let Some(resolved) = check.resolved_type_name_for_node(expr.id) {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    resolved.to_string(),
+                    name_range(record_span.start, record, line_index, source),
+                );
+            }
+            for (_, _, value) in fields {
+                add_expr_type_symbols(index, uri, line_index, source, value, check);
+            }
+        }
         ast::ExprKind::AnonRecordCreate { fields } => {
             for (_, _, value) in fields {
                 add_expr_type_symbols(index, uri, line_index, source, value, check);

@@ -1354,6 +1354,53 @@ fn record_create_simple() {
 }
 
 #[test]
+fn projection_literal_simple() {
+    let expr = parse_expr("project User { name: read_name, age: read_age }");
+    match expr {
+        Expr {
+            kind:
+                ExprKind::ProjectionLiteral {
+                    marker_module,
+                    record,
+                    fields,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(marker_module, None);
+            assert_eq!(record, "User");
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0, "name");
+            assert_eq!(fields[1].0, "age");
+        }
+        _ => panic!("expected ProjectionLiteral, got {:?}", expr),
+    }
+}
+
+#[test]
+fn qualified_projection_literal_simple() {
+    let expr = parse_expr("Db.project User { name: read_name }");
+    match expr {
+        Expr {
+            kind:
+                ExprKind::ProjectionLiteral {
+                    marker_module,
+                    record,
+                    fields,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(marker_module.as_deref(), Some("Db"));
+            assert_eq!(record, "User");
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].0, "name");
+        }
+        _ => panic!("expected ProjectionLiteral, got {:?}", expr),
+    }
+}
+
+#[test]
 fn record_create_single_field() {
     let expr = parse_expr("Point { x: 1 }");
     match expr {

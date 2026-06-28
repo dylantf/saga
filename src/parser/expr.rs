@@ -2,6 +2,16 @@ use super::{ParseError, Parser};
 use crate::ast::*;
 use crate::token::{Span, Token};
 
+fn projection_marker(expr: &Expr) -> Option<(Option<String>, usize)> {
+    match &expr.kind {
+        ExprKind::Var { name } if name == "project" => Some((None, expr.span.start)),
+        ExprKind::QualifiedName { module, name, .. } if name == "project" => {
+            Some((Some(module.clone()), expr.span.start))
+        }
+        _ => None,
+    }
+}
+
 impl Parser {
     /// Parse record fields: `field: expr, field2: expr2, ...`
     /// Handles recovery for incomplete fields (missing `:` or value) so that
@@ -350,6 +360,31 @@ impl Parser {
     /// Greedily consumes arguments while the next token can start a primary.
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_postfix()?;
+
+        if let Some((marker_module, marker_start)) = projection_marker(&expr)
+            && matches!(self.peek(), Token::UpperIdent(_))
+            && matches!(self.peek_at(1), Token::LBrace)
+        {
+            let record = self.expect_upper_ident()?;
+            let record_span = self.tokens[self.pos - 1].span;
+            self.expect(Token::LBrace)?;
+            let fields = self.parse_record_fields()?;
+            let end = self.tokens[self.pos].span;
+            self.expect(Token::RBrace)?;
+            expr = Expr {
+                id: self.next_id(),
+                span: Span {
+                    start: marker_start,
+                    end: end.end,
+                },
+                kind: ExprKind::ProjectionLiteral {
+                    marker_module,
+                    record,
+                    record_span,
+                    fields,
+                },
+            };
+        }
 
         while self.can_start_primary() && !self.next_on_new_line() {
             let arg = self.parse_postfix()?;

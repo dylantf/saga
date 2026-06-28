@@ -275,6 +275,16 @@ impl Elaborator {
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
             scope_map_effects: result.scope_map.effects.clone(),
+            record_fields: result
+                .records
+                .iter()
+                .map(|(name, info)| {
+                    (
+                        name.clone(),
+                        info.fields.iter().map(|(field, _)| field.clone()).collect(),
+                    )
+                })
+                .collect(),
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
             where_bound_var_names: result.where_bound_var_names.clone(),

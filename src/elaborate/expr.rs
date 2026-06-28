@@ -628,6 +628,20 @@ impl Elaborator {
                 )
             }
 
+            ExprKind::ProjectionLiteral {
+                marker_module,
+                record,
+                record_span,
+                fields,
+            } => self.elaborate_projection_literal(
+                marker_module.as_deref(),
+                record,
+                *record_span,
+                fields,
+                span,
+                node_id,
+            ),
+
             ExprKind::AnonRecordCreate { fields } => Expr::rebuild_like(
                 expr,
                 ExprKind::AnonRecordCreate {
@@ -1094,6 +1108,82 @@ impl Elaborator {
                 arg: Box::new(elab_right),
             },
         ))
+    }
+
+    fn projection_builder_ref(&self, module: Option<&str>, name: &str, span: Span) -> Expr {
+        match module {
+            Some(module) => Expr::synth(
+                span,
+                ExprKind::QualifiedName {
+                    module: module.to_string(),
+                    name: name.to_string(),
+                    canonical_module: None,
+                },
+            ),
+            None => Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: name.to_string(),
+                },
+            ),
+        }
+    }
+
+    fn elaborate_projection_literal(
+        &mut self,
+        marker_module: Option<&str>,
+        record: &str,
+        record_span: Span,
+        fields: &[(String, Span, Expr)],
+        span: Span,
+        node_id: crate::ast::NodeId,
+    ) -> Expr {
+        let resolved_record = self.resolution.record_type(node_id).unwrap_or(record);
+        let field_order = self
+            .record_fields
+            .get(resolved_record)
+            .cloned()
+            .unwrap_or_else(|| fields.iter().map(|(name, _, _)| name.clone()).collect());
+
+        let constructor = Expr::synth(
+            record_span,
+            ExprKind::Constructor {
+                name: record.to_string(),
+            },
+        );
+        let project_into = self.projection_builder_ref(marker_module, "project_into", span);
+        let mut chain = Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(project_into),
+                arg: Box::new(constructor),
+            },
+        );
+
+        for field_name in field_order {
+            let Some((_, _, field_expr)) = fields.iter().find(|(name, _, _)| name == &field_name)
+            else {
+                continue;
+            };
+            let project_with =
+                self.projection_builder_ref(marker_module, "project_with", field_expr.span);
+            let with_arg = Expr::synth(
+                field_expr.span,
+                ExprKind::App {
+                    func: Box::new(project_with),
+                    arg: Box::new(self.elaborate_expr(field_expr)),
+                },
+            );
+            chain = Expr::synth(
+                span,
+                ExprKind::App {
+                    func: Box::new(with_arg),
+                    arg: Box::new(chain),
+                },
+            );
+        }
+
+        chain
     }
 
     /// If a `KnownSymbol` evidence record at `node_id` carries a concrete symbol

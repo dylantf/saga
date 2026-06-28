@@ -217,6 +217,7 @@ impl LocalBindingDefinitionCollector {
             }
             ast::ExprKind::FieldAccess { expr, .. } => self.collect_expr(expr),
             ast::ExprKind::RecordCreate { fields, .. }
+            | ast::ExprKind::ProjectionLiteral { fields, .. }
             | ast::ExprKind::AnonRecordCreate { fields, .. } => {
                 for (_, _, value) in fields {
                     self.collect_expr(value);
@@ -562,6 +563,7 @@ fn collect_expr_value_definition_nodes(expr: &ast::Expr, out: &mut HashSet<ast::
             collect_expr_value_definition_nodes(expr, out);
         }
         ast::ExprKind::RecordCreate { fields, .. }
+        | ast::ExprKind::ProjectionLiteral { fields, .. }
         | ast::ExprKind::AnonRecordCreate { fields, .. } => {
             for (_, _, value) in fields {
                 collect_expr_value_definition_nodes(value, out);

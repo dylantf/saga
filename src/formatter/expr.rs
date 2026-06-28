@@ -327,6 +327,12 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         ExprKind::RecordCreate { name, fields, .. } => format_record_create(Some(name), fields),
+        ExprKind::ProjectionLiteral {
+            marker_module,
+            record,
+            fields,
+            ..
+        } => format_projection_literal(marker_module.as_deref(), record, fields),
         ExprKind::AnonRecordCreate { fields } => format_record_create(None, fields),
 
         ExprKind::RecordUpdate { record, fields, .. } => {
@@ -684,6 +690,22 @@ fn format_record_create(name: Option<&String>, fields: &[(String, Span, Expr)]) 
     };
     // flat: Name { a: 1, b: 2 }
     // broken: Name {\n  a: 1,\n  b: 2,\n}
+    format_comma_list_spaced(opener, "}", field_docs)
+}
+
+fn format_projection_literal(
+    marker_module: Option<&str>,
+    record: &str,
+    fields: &[(String, Span, Expr)],
+) -> Doc {
+    let field_docs: Vec<Doc> = fields
+        .iter()
+        .map(|(fname, _, val)| docs![Doc::text(format!("{}: ", fname)), format_expr(val)])
+        .collect();
+    let opener = match marker_module {
+        Some(module) => Doc::text(format!("{module}.project {record} {{")),
+        None => Doc::text(format!("project {record} {{")),
+    };
     format_comma_list_spaced(opener, "}", field_docs)
 }
 

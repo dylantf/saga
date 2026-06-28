@@ -36,6 +36,12 @@ pub struct ResolvedTraitMethod {
     pub method: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProjectionBuilders {
+    pub project_into: String,
+    pub project_with: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionResult {
     pub values: HashMap<NodeId, ResolvedValue>,
@@ -50,6 +56,7 @@ pub struct ResolutionResult {
     pub effect_calls: HashMap<NodeId, ResolvedEffectOp>,
     pub handler_arms: HashMap<NodeId, ResolvedEffectOp>,
     pub trait_methods: HashMap<NodeId, ResolvedTraitMethod>,
+    pub projection_builders: HashMap<NodeId, ResolvedProjectionBuilders>,
 }
 
 impl ResolutionResult {
@@ -99,6 +106,10 @@ impl ResolutionResult {
 
     pub fn trait_method(&self, node_id: NodeId) -> Option<&ResolvedTraitMethod> {
         self.trait_methods.get(&node_id)
+    }
+
+    pub fn projection_builders(&self, node_id: NodeId) -> Option<&ResolvedProjectionBuilders> {
+        self.projection_builders.get(&node_id)
     }
 }
 
@@ -875,6 +886,44 @@ impl<'a> Resolver<'a> {
                     self.resolve_expr(field_expr);
                 }
             }
+            ExprKind::ProjectionLiteral {
+                marker_module,
+                record,
+                fields,
+                ..
+            } => {
+                if let Some(resolved) = self.resolve_type_name(record) {
+                    self.result.record_types.insert(expr.id, resolved);
+                }
+                let into_name = marker_module
+                    .as_ref()
+                    .map(|m| format!("{m}.project_into"))
+                    .unwrap_or_else(|| "project_into".to_string());
+                let with_name = marker_module
+                    .as_ref()
+                    .map(|m| format!("{m}.project_with"))
+                    .unwrap_or_else(|| "project_with".to_string());
+                let project_into = match self.resolve_value_name(&into_name) {
+                    Some(ResolvedValue::Global { lookup_name }) => Some(lookup_name),
+                    _ => None,
+                };
+                let project_with = match self.resolve_value_name(&with_name) {
+                    Some(ResolvedValue::Global { lookup_name }) => Some(lookup_name),
+                    _ => None,
+                };
+                if let (Some(project_into), Some(project_with)) = (project_into, project_with) {
+                    self.result.projection_builders.insert(
+                        expr.id,
+                        ResolvedProjectionBuilders {
+                            project_into,
+                            project_with,
+                        },
+                    );
+                }
+                for (_, _, field_expr) in fields {
+                    self.resolve_expr(field_expr);
+                }
+            }
             ExprKind::AnonRecordCreate { fields } => fields
                 .iter()
                 .for_each(|(_, _, field_expr)| self.resolve_expr(field_expr)),
@@ -1170,6 +1219,18 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
         ExprKind::Lambda { body, .. } => walk_expr(body, out),
         ExprKind::FieldAccess { expr, .. } => walk_expr(expr, out),
         ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, e) in fields {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::ProjectionLiteral {
+            marker_module,
+            fields,
+            ..
+        } => {
+            if let Some(module) = marker_module {
+                record_module(out, module, expr.span);
+            }
             for (_, _, e) in fields {
                 walk_expr(e, out);
             }
