@@ -8,10 +8,10 @@ use std::time::Instant;
 
 use super::cache::{
     BuildInputFingerprint, BuildManifest, BuildManifestInput, BuildModuleArtifact,
-    compare_input_fingerprints, content_hash, file_mtime, input_fingerprint_changes,
-    missing_output_artifact, module_artifacts_ready, module_interface_fingerprint,
-    project_input_fingerprints, relative_source_path, script_input_fingerprints,
-    write_build_manifest,
+    compare_dependency_fingerprints, compare_input_fingerprints, content_hash, file_mtime,
+    input_fingerprint_changes, missing_output_artifact, module_artifacts_ready,
+    module_interface_fingerprint, project_dependency_fingerprints, project_input_fingerprints,
+    relative_source_path, script_input_fingerprints, write_build_manifest,
 };
 use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
@@ -196,6 +196,14 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
     }
     if manifest.stdlib_fingerprint != stdlib_fingerprint {
         trace_cache_event("project", profile, "miss", "stdlib fingerprint changed");
+        return None;
+    }
+
+    let current_dependencies = project_dependency_fingerprints(project_root, &config);
+    if let Err(reason) =
+        compare_dependency_fingerprints(&manifest.dependency_fingerprints, &current_dependencies)
+    {
+        trace_cache_event("project", profile, "miss", &reason);
         return None;
     }
 
@@ -843,6 +851,7 @@ enum ProjectRebuildPlan {
 struct ProjectRebuildOptions<'a> {
     stdlib_fingerprint: &'a str,
     profile: &'a str,
+    dependency_fingerprints: &'a [super::cache::BuildDependencyFingerprint],
     custom_main: bool,
 }
 
@@ -988,6 +997,7 @@ fn plan_project_rebuild(
         || previous.manifest_version != super::cache::BUILD_MANIFEST_VERSION
         || previous.profile != options.profile
         || previous.stdlib_fingerprint != options.stdlib_fingerprint
+        || previous.dependency_fingerprints != options.dependency_fingerprints
         || previous.module_artifacts.is_empty()
     {
         return ProjectRebuildPlan::Full;
@@ -1376,6 +1386,7 @@ pub fn build_project_ext(
     }
 
     let current_inputs = project_input_fingerprints(&project_root, &config);
+    let current_dependencies = project_dependency_fingerprints(&project_root, &config);
     let mut current_module_artifacts: Vec<BuildModuleArtifact> = modules_to_emit
         .iter()
         .filter_map(|module_name| {
@@ -1405,6 +1416,7 @@ pub fn build_project_ext(
         ProjectRebuildOptions {
             stdlib_fingerprint: &current_stdlib_fingerprint,
             profile,
+            dependency_fingerprints: &current_dependencies,
             custom_main: custom_main.is_some(),
         },
     );
@@ -1503,6 +1515,7 @@ pub fn build_project_ext(
                 profile: profile.to_string(),
                 stdlib_fingerprint: current_stdlib_fingerprint,
                 input_fingerprints: current_inputs,
+                dependency_fingerprints: current_dependencies,
                 output_artifacts,
                 module_artifacts: current_module_artifacts,
             },
@@ -1635,6 +1648,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             profile: profile.to_string(),
             stdlib_fingerprint: stdlib_fingerprint(),
             input_fingerprints: script_input_fingerprints(file),
+            dependency_fingerprints: Vec::new(),
             output_artifacts: vec![format!("{erlang_name}.beam")],
             module_artifacts: vec![BuildModuleArtifact {
                 module_name,
@@ -1722,6 +1736,7 @@ mod tests {
                 .map(|artifact| artifact.beam.clone())
                 .collect(),
             input_fingerprints: inputs,
+            dependency_fingerprints: Vec::new(),
             module_artifacts: artifacts,
         }
     }
@@ -1836,6 +1851,7 @@ mod tests {
             ProjectRebuildOptions {
                 stdlib_fingerprint: "stdlib",
                 profile: "dev",
+                dependency_fingerprints: &[],
                 custom_main: false,
             },
         ));
@@ -1884,6 +1900,7 @@ mod tests {
             ProjectRebuildOptions {
                 stdlib_fingerprint: "stdlib",
                 profile: "dev",
+                dependency_fingerprints: &[],
                 custom_main: false,
             },
         ));
@@ -1931,6 +1948,7 @@ mod tests {
             ProjectRebuildOptions {
                 stdlib_fingerprint: "stdlib",
                 profile: "dev",
+                dependency_fingerprints: &[],
                 custom_main: false,
             },
         ));
@@ -1979,6 +1997,7 @@ mod tests {
             ProjectRebuildOptions {
                 stdlib_fingerprint: "stdlib",
                 profile: "dev",
+                dependency_fingerprints: &[],
                 custom_main: false,
             },
         ));
@@ -2017,6 +2036,7 @@ mod tests {
             ProjectRebuildOptions {
                 stdlib_fingerprint: "stdlib",
                 profile: "dev",
+                dependency_fingerprints: &[],
                 custom_main: false,
             },
         ));
@@ -2055,6 +2075,56 @@ mod tests {
                 ProjectRebuildOptions {
                     stdlib_fingerprint: "stdlib",
                     profile: "dev",
+                    dependency_fingerprints: &[],
+                    custom_main: false,
+                },
+            ),
+            ProjectRebuildPlan::Full
+        ));
+        let _ = fs::remove_dir_all(build_dir);
+    }
+
+    #[test]
+    fn project_rebuild_plan_falls_back_to_full_for_dependency_changes() {
+        let build_dir = test_root("dependency-change");
+        let previous_artifacts = vec![artifact("Main", "src/Main.saga", "main", "main-iface")];
+        write_artifacts(&build_dir, &previous_artifacts);
+        let mut previous = manifest(
+            vec![
+                input("project.toml", "config"),
+                input("src/Main.saga", "main"),
+            ],
+            previous_artifacts,
+        );
+        previous.dependency_fingerprints = vec![super::super::cache::BuildDependencyFingerprint {
+            id: "path:dep:deps/dep".to_string(),
+            name: "dep".to_string(),
+            kind: "path".to_string(),
+            fingerprint: "old".to_string(),
+        }];
+        let current_inputs = vec![
+            input("project.toml", "config"),
+            input("src/Main.saga", "main"),
+        ];
+        let current_artifacts = vec![artifact("Main", "src/Main.saga", "main", "main-iface")];
+        let current_deps = vec![super::super::cache::BuildDependencyFingerprint {
+            id: "path:dep:deps/dep".to_string(),
+            name: "dep".to_string(),
+            kind: "path".to_string(),
+            fingerprint: "new".to_string(),
+        }];
+
+        assert!(matches!(
+            plan_project_rebuild(
+                &build_dir,
+                Some(&previous),
+                &current_inputs,
+                &current_artifacts,
+                &imports(&[("Main", &[])]),
+                ProjectRebuildOptions {
+                    stdlib_fingerprint: "stdlib",
+                    profile: "dev",
+                    dependency_fingerprints: &current_deps,
                     custom_main: false,
                 },
             ),
@@ -2092,6 +2162,7 @@ mod tests {
                 ProjectRebuildOptions {
                     stdlib_fingerprint: "stdlib",
                     profile: "dev",
+                    dependency_fingerprints: &[],
                     custom_main: false,
                 },
             ),

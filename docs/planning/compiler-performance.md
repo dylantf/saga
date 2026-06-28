@@ -270,9 +270,16 @@ Progress:
 - 2026-06-28: added focused stdlib cache-completeness coverage so missing
   manifests, mismatched fingerprints, mismatched content hashes, and missing
   Beam artifacts all reject the cache.
-- Remaining gap: dependency artifact reuse is still project-local/input-cache
-  based rather than its own persistent artifact cache keyed by dependency
-  source and package metadata.
+- 2026-06-28: upgraded build manifests to version 7 with structured dependency
+  fingerprints. Project cache validation and partial-rebuild planning now
+  compare direct and transitive dependency fingerprints. Path/git dependencies
+  include source metadata and local `ebin` / `priv` artifacts; Hex dependencies
+  include lock metadata and installed `ebin` / `priv` artifacts. Dependency
+  changes conservatively force a full project rebuild instead of reusing module
+  artifacts across a changed dependency boundary.
+- Remaining gap: dependency artifacts are fingerprinted but not yet stored in a
+  separate persistent artifact cache keyed by dependency source and package
+  metadata.
 
 ### Phase 4: Incremental Build Manifest
 
@@ -314,6 +321,10 @@ Progress:
   interface fingerprints for emitted modules, matching the LSP's sorted
   `ModuleExports` projection. These fingerprints let source changes distinguish
   body-only edits from public surface changes.
+- 2026-06-28: upgraded build manifests to version 7 with dependency
+  fingerprints, so the incremental project manifest has a dependency-level
+  invalidation boundary in addition to project source and emitted module
+  artifact metadata.
 
 ### Phase 5: Partial Rebuilds
 
