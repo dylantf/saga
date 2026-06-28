@@ -548,7 +548,9 @@ pub(crate) fn qualify_free_vars(
         ExprKind::FieldAccess { expr: inner, .. } => {
             qualify_free_vars(inner, module, module_values, trait_methods, bound);
         }
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. }
+        | ExprKind::RecordBuild { fields, .. } => {
             for (_, _, val) in fields {
                 qualify_free_vars(val, module, module_values, trait_methods, bound);
             }
@@ -819,7 +821,9 @@ pub(crate) fn qualify_ctor_refs(
         ExprKind::FieldAccess { expr: inner, .. } => {
             qualify_ctor_refs(inner, module, module_constructors);
         }
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. }
+        | ExprKind::RecordBuild { fields, .. } => {
             for (_, _, val) in fields {
                 qualify_ctor_refs(val, module, module_constructors);
             }

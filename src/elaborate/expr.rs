@@ -638,6 +638,10 @@ impl Elaborator {
                 },
             ),
 
+            ExprKind::RecordBuild { record, fields, .. } => {
+                self.elaborate_record_build(expr.id, record.as_deref(), fields, span)
+            }
+
             ExprKind::RecordUpdate { record, fields, .. } => {
                 let record_name = self.resolve_record_name(record.id);
                 Expr::rebuild_like(
@@ -1142,4 +1146,150 @@ impl Elaborator {
             },
         ))
     }
+
+    fn elaborate_record_build(
+        &mut self,
+        node_id: NodeId,
+        record: Option<&str>,
+        fields: &[(String, Span, Expr)],
+        span: Span,
+    ) -> Expr {
+        let Some(builder) = self.resolution.record_builder(node_id).cloned() else {
+            return Expr::synth(span, ExprKind::Lit { value: Lit::Unit });
+        };
+        let (constructor, field_order) = if let Some(record_name) = record {
+            let resolved_record = self
+                .resolution
+                .record_type(node_id)
+                .unwrap_or(record_name)
+                .to_string();
+            let field_order: Vec<String> = self
+                .records
+                .get(&resolved_record)
+                .map(|info| info.fields.iter().map(|(name, _)| name.clone()).collect())
+                .unwrap_or_else(|| fields.iter().map(|(name, _, _)| name.clone()).collect());
+            (
+                named_record_build_constructor(&resolved_record, &field_order, span),
+                field_order,
+            )
+        } else {
+            let mut field_order: Vec<String> =
+                fields.iter().map(|(name, _, _)| name.clone()).collect();
+            field_order.sort();
+            (
+                anonymous_record_build_constructor(&field_order, span),
+                field_order,
+            )
+        };
+
+        let mut chain = app(value_ref(&builder.start, span), constructor, span);
+        let field_exprs: HashMap<&str, Expr> = fields
+            .iter()
+            .map(|(name, _, expr)| (name.as_str(), self.elaborate_expr(expr)))
+            .collect();
+        for field_name in field_order {
+            let Some(field_expr) = field_exprs.get(field_name.as_str()).cloned() else {
+                continue;
+            };
+            let label = Expr::synth(
+                span,
+                ExprKind::Lit {
+                    value: Lit::String(field_name.clone(), StringKind::Normal),
+                },
+            );
+            let field_fn = app(value_ref(&builder.field, span), label, span);
+            let field_fn = app(field_fn, field_expr, span);
+            chain = app(field_fn, chain, span);
+        }
+        chain
+    }
+}
+
+fn app(func: Expr, arg: Expr, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(func),
+            arg: Box::new(arg),
+        },
+    )
+}
+
+fn value_ref(name: &str, span: Span) -> Expr {
+    if let Some((module, value)) = name.rsplit_once('.') {
+        Expr::synth(
+            span,
+            ExprKind::QualifiedName {
+                module: module.to_string(),
+                name: value.to_string(),
+                canonical_module: None,
+            },
+        )
+    } else {
+        Expr::synth(
+            span,
+            ExprKind::Var {
+                name: name.to_string(),
+            },
+        )
+    }
+}
+
+fn anonymous_record_build_constructor(field_order: &[String], span: Span) -> Expr {
+    let fields: Vec<(String, Span, Expr)> = field_order
+        .iter()
+        .map(|name| {
+            let var_name = record_build_param_name(name);
+            (
+                name.clone(),
+                span,
+                Expr::synth(span, ExprKind::Var { name: var_name }),
+            )
+        })
+        .collect();
+    let body = Expr::synth(span, ExprKind::AnonRecordCreate { fields });
+    curried_constructor_lambda(field_order, body, span)
+}
+
+fn named_record_build_constructor(record_name: &str, field_order: &[String], span: Span) -> Expr {
+    let fields: Vec<(String, Span, Expr)> = field_order
+        .iter()
+        .map(|name| {
+            let var_name = record_build_param_name(name);
+            (
+                name.clone(),
+                span,
+                Expr::synth(span, ExprKind::Var { name: var_name }),
+            )
+        })
+        .collect();
+    let body = Expr::synth(
+        span,
+        ExprKind::RecordCreate {
+            name: record_name.to_string(),
+            fields,
+            record_name: Some(record_name.to_string()),
+        },
+    );
+    curried_constructor_lambda(field_order, body, span)
+}
+
+fn record_build_param_name(field: &str) -> String {
+    format!("__record_build_{}", field)
+}
+
+fn curried_constructor_lambda(field_order: &[String], body: Expr, span: Span) -> Expr {
+    field_order.iter().rev().fold(body, |body, name| {
+        Expr::synth(
+            span,
+            ExprKind::Lambda {
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: record_build_param_name(name),
+                    span,
+                }],
+                body: Box::new(body),
+            },
+        )
+    })
 }

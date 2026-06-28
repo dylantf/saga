@@ -209,6 +209,20 @@ fn normalize_decl(d: &mut Decl) {
                 normalize_annotated(f, |(_name, te)| normalize_type_expr(te));
             }
         }
+        Decl::RecordBuilderDef {
+            id,
+            context_span,
+            start_span,
+            field_span,
+            span,
+            ..
+        } => {
+            *id = NID;
+            *context_span = S;
+            *start_span = S;
+            *field_span = S;
+            *span = S;
+        }
         Decl::EffectDef {
             id,
             name_span,
@@ -416,6 +430,21 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
         }
         ExprKind::FieldAccess { expr, .. } => normalize_expr(expr),
         ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            for (_, s, e) in fields.iter_mut() {
+                *s = S;
+                normalize_expr(e);
+            }
+        }
+        ExprKind::RecordBuild {
+            context_span,
+            record_span,
+            fields,
+            ..
+        } => {
+            *context_span = S;
+            if let Some(span) = record_span {
+                *span = S;
+            }
             for (_, s, e) in fields.iter_mut() {
                 *s = S;
                 normalize_expr(e);

@@ -360,6 +360,10 @@ impl Checker {
                 Ok(ty)
             }
 
+            ExprKind::RecordBuild { record, fields, .. } => {
+                self.infer_record_build(node_id, record.as_deref(), fields, span)
+            }
+
             ExprKind::FieldAccess {
                 expr: inner, field, ..
             } => {

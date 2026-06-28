@@ -7,6 +7,13 @@ use super::{
 use crate::ast::{Kind, NodeId};
 use crate::token::Span;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordBuilderInfo {
+    pub context: String,
+    pub start: String,
+    pub field: String,
+}
+
 // --- Internal types used by inference ---
 
 #[derive(Debug, Clone)]
@@ -397,6 +404,8 @@ pub struct ScopeMap {
     pub traits: HashMap<String, String>,
     /// Bare trait method name -> canonical traits that make that method visible.
     pub trait_methods: HashMap<String, HashSet<String>>,
+    /// Canonical record-builder context type -> builder implementation.
+    pub record_builders: HashMap<String, RecordBuilderInfo>,
     /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
     /// Used by LSP to determine import origins without a separate parallel map.
     pub origins: HashMap<String, String>,
@@ -455,6 +464,10 @@ impl ScopeMap {
 
     pub fn resolve_trait(&self, name: &str) -> Option<&str> {
         self.traits.get(name).map(|s| s.as_str())
+    }
+
+    pub fn record_builder(&self, canonical_context: &str) -> Option<&RecordBuilderInfo> {
+        self.record_builders.get(canonical_context)
     }
 
     pub fn register_trait_method(&mut self, method_name: &str, canonical_trait: &str) {
@@ -554,6 +567,11 @@ impl ScopeMap {
                 .entry(method_name.clone())
                 .or_default()
                 .extend(traits.iter().cloned());
+        }
+        for (k, v) in &other.record_builders {
+            self.record_builders
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
         for (k, v) in &other.origins {
             self.origins.entry(k.clone()).or_insert_with(|| v.clone());

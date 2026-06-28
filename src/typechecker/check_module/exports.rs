@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::import_scope::synthesize_all_exposed;
 use crate::typechecker::{
-    Checker, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, TraitInfo, TypeAliasInfo,
-    arity_keyed_target_name,
+    Checker, EffectDefInfo, HandlerInfo, ImplInfo, RecordBuilderInfo, RecordInfo, Scheme,
+    TraitInfo, TypeAliasInfo, arity_keyed_target_name,
 };
 
 /// All public items exported by a typechecked module, cached as a single unit.
@@ -42,6 +42,8 @@ pub struct ModuleExports {
     pub handlers: HashMap<String, HandlerInfo>,
     /// Public handler surface name -> canonical origin handler name.
     pub handler_origins: HashMap<String, String>,
+    /// Public record builder context surface name -> builder implementation.
+    pub record_builders: HashMap<String, RecordBuilderInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
     /// Type name -> declared kinds of each type parameter (for kind checking
@@ -188,6 +190,7 @@ impl ModuleExports {
         let mut effect_origins: HashMap<String, String> = HashMap::new();
         let mut handlers: HashMap<String, HandlerInfo> = HashMap::new();
         let mut handler_origins: HashMap<String, String> = HashMap::new();
+        let mut record_builders: HashMap<String, RecordBuilderInfo> = HashMap::new();
 
         for decl in program {
             match decl {
@@ -268,6 +271,34 @@ impl ModuleExports {
                     if let Some(info) = checker.handlers.get(&canonical) {
                         handlers.insert(name.clone(), info.clone());
                         handler_origins.insert(name.clone(), canonical);
+                    }
+                }
+                Decl::RecordBuilderDef {
+                    public: true,
+                    id,
+                    context,
+                    start,
+                    field,
+                    ..
+                } => {
+                    if let Some(context) =
+                        resolved_builder_context(checker, module_prefix, *id, context)
+                        && let Some(start) = resolved_builder_value(checker, module_prefix, start)
+                        && let Some(field) = resolved_builder_value(checker, module_prefix, field)
+                    {
+                        let surface = context
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(context.as_str())
+                            .to_string();
+                        record_builders.insert(
+                            surface,
+                            RecordBuilderInfo {
+                                context,
+                                start,
+                                field,
+                            },
+                        );
                     }
                 }
                 _ => {}
@@ -428,6 +459,7 @@ impl ModuleExports {
             &mut type_arity,
             &mut type_param_kinds,
             &mut type_aliases_out,
+            &mut record_builders,
             &mut doc_comments,
         );
         collect_effect_and_handler_reexports(
@@ -456,6 +488,7 @@ impl ModuleExports {
             effect_origins,
             handlers,
             handler_origins,
+            record_builders,
             type_arity,
             type_param_kinds,
             type_aliases: type_aliases_out,
@@ -472,6 +505,36 @@ fn canonical_export_name(module_prefix: &str, name: &str) -> String {
     } else {
         format!("{}.{}", module_prefix, name)
     }
+}
+
+fn resolved_builder_context(
+    checker: &Checker,
+    module_prefix: &str,
+    id: crate::ast::NodeId,
+    context: &str,
+) -> Option<String> {
+    checker
+        .resolution
+        .type_ref(id)
+        .map(|name| name.to_string())
+        .or_else(|| checker.scope_map.resolve_type(context).map(str::to_string))
+        .or_else(|| {
+            checker
+                .type_arity
+                .contains_key(&canonical_export_name(module_prefix, context))
+                .then(|| canonical_export_name(module_prefix, context))
+        })
+}
+
+fn resolved_builder_value(checker: &Checker, module_prefix: &str, name: &str) -> Option<String> {
+    checker
+        .scope_map
+        .resolve_value(name)
+        .map(str::to_string)
+        .or_else(|| {
+            (checker.env.get(name).is_some() || checker.constructors.get(name).is_some())
+                .then(|| canonical_export_name(module_prefix, name))
+        })
 }
 
 fn collect_effectful_reexports(
@@ -548,6 +611,7 @@ fn collect_type_and_trait_reexports(
     type_arity: &mut HashMap<String, usize>,
     type_param_kinds: &mut HashMap<String, Vec<crate::ast::Kind>>,
     type_aliases: &mut HashMap<String, TypeAliasInfo>,
+    record_builders: &mut HashMap<String, RecordBuilderInfo>,
     doc_comments: &mut HashMap<String, Vec<String>>,
 ) {
     for (module_name, item) in public_import_items(program, checker) {
@@ -582,6 +646,9 @@ fn collect_type_and_trait_reexports(
             }
             if let Some(info) = exports.record_defs.get(origin_name) {
                 record_defs.insert(surface.to_string(), info.clone());
+            }
+            if let Some(builder) = exports.record_builders.get(origin_name) {
+                record_builders.insert(surface.to_string(), builder.clone());
             }
             if let Some(ctors) = exports.type_constructors.get(origin_name) {
                 let surfaced_ctors: Vec<String> = ctors

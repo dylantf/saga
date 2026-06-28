@@ -412,7 +412,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
                 .iter()
                 .all(|element| self.static_helper_expr_supported(element, stack)),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+            ExprKind::RecordCreate { fields, .. }
+            | ExprKind::AnonRecordCreate { fields }
+            | ExprKind::RecordBuild { fields, .. } => fields
                 .iter()
                 .all(|(_, _, field)| self.static_helper_expr_supported(field, stack)),
             ExprKind::RecordUpdate { record, fields, .. } => {

@@ -844,6 +844,7 @@ impl Checker {
             effect_origins,
             handlers,
             handler_origins,
+            record_builders,
             type_arity,
             type_param_kinds,
             type_aliases,
@@ -851,6 +852,7 @@ impl Checker {
             def_ids,
             doc_comments,
         } = exports;
+        let _ = record_builders;
 
         // Traits and their methods. The full `Scheme` is owned by
         // `TraitMethodInfo` on the imported module's `TraitInfo` — read it

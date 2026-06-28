@@ -36,6 +36,13 @@ pub struct ResolvedTraitMethod {
     pub method: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRecordBuilder {
+    pub context: String,
+    pub start: String,
+    pub field: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionResult {
     pub values: HashMap<NodeId, ResolvedValue>,
@@ -50,6 +57,7 @@ pub struct ResolutionResult {
     pub effect_calls: HashMap<NodeId, ResolvedEffectOp>,
     pub handler_arms: HashMap<NodeId, ResolvedEffectOp>,
     pub trait_methods: HashMap<NodeId, ResolvedTraitMethod>,
+    pub record_builders: HashMap<NodeId, ResolvedRecordBuilder>,
 }
 
 impl ResolutionResult {
@@ -100,6 +108,10 @@ impl ResolutionResult {
     pub fn trait_method(&self, node_id: NodeId) -> Option<&ResolvedTraitMethod> {
         self.trait_methods.get(&node_id)
     }
+
+    pub fn record_builder(&self, node_id: NodeId) -> Option<&ResolvedRecordBuilder> {
+        self.record_builders.get(&node_id)
+    }
 }
 
 #[derive(Default)]
@@ -115,6 +127,14 @@ struct LocalModuleNames {
     /// top-level values: their visibility tracks their owning trait.
     trait_methods: HashMap<String, HashSet<String>>,
     handlers: HashSet<String>,
+    record_builders: Vec<LocalRecordBuilderDecl>,
+}
+
+#[derive(Clone)]
+struct LocalRecordBuilderDecl {
+    context: String,
+    start: String,
+    field: String,
 }
 
 impl LocalModuleNames {
@@ -174,6 +194,16 @@ impl LocalModuleNames {
                     out.handlers.insert(name.clone());
                     out.top_level_values.insert(name.clone());
                 }
+                Decl::RecordBuilderDef {
+                    context,
+                    start,
+                    field,
+                    ..
+                } => out.record_builders.push(LocalRecordBuilderDecl {
+                    context: context.clone(),
+                    start: start.clone(),
+                    field: field.clone(),
+                }),
                 _ => {}
             }
         }
@@ -451,6 +481,39 @@ impl<'a> Resolver<'a> {
         })
     }
 
+    fn resolved_record_builder(&self, context: &str) -> Option<ResolvedRecordBuilder> {
+        let resolved_context = self.resolve_type_name(context)?;
+        for builder in &self.locals.record_builders {
+            let builder_context = self.resolve_type_name(&builder.context)?;
+            if builder_context != resolved_context {
+                continue;
+            }
+            let start = match self.resolve_value_name(&builder.start)? {
+                ResolvedValue::Local { name, .. } | ResolvedValue::Global { lookup_name: name } => {
+                    name
+                }
+            };
+            let field = match self.resolve_value_name(&builder.field)? {
+                ResolvedValue::Local { name, .. } | ResolvedValue::Global { lookup_name: name } => {
+                    name
+                }
+            };
+            return Some(ResolvedRecordBuilder {
+                context: resolved_context,
+                start,
+                field,
+            });
+        }
+        if let Some(builder) = self.scope.record_builder(&resolved_context) {
+            return Some(ResolvedRecordBuilder {
+                context: builder.context.clone(),
+                start: builder.start.clone(),
+                field: builder.field.clone(),
+            });
+        }
+        None
+    }
+
     fn record_type_ref(&mut self, id: NodeId, name: &str) {
         if let Some(resolved) = self.resolve_type_name(name) {
             self.result.types.insert(id, resolved);
@@ -681,6 +744,11 @@ impl<'a> Resolver<'a> {
                     self.resolve_type_expr(&field.node.1);
                 }
             }
+            Decl::RecordBuilderDef { id, context, .. } => {
+                if let Some(resolved) = self.resolve_type_name(context) {
+                    self.result.types.insert(*id, resolved);
+                }
+            }
             Decl::EffectDef { operations, .. } => {
                 for op in operations {
                     for (_, texpr) in &op.node.params {
@@ -878,6 +946,24 @@ impl<'a> Resolver<'a> {
             ExprKind::AnonRecordCreate { fields } => fields
                 .iter()
                 .for_each(|(_, _, field_expr)| self.resolve_expr(field_expr)),
+            ExprKind::RecordBuild {
+                context,
+                record,
+                fields,
+                ..
+            } => {
+                if let Some(resolved) = self.resolved_record_builder(context) {
+                    self.result.record_builders.insert(expr.id, resolved);
+                }
+                if let Some(record) = record
+                    && let Some(resolved) = self.resolve_type_name(record)
+                {
+                    self.result.record_types.insert(expr.id, resolved);
+                }
+                for (_, _, field_expr) in fields {
+                    self.resolve_expr(field_expr);
+                }
+            }
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.resolve_expr(record);
                 for (_, _, field_expr) in fields {
@@ -1120,6 +1206,7 @@ fn walk_decl(decl: &Decl, out: &mut HashMap<String, crate::token::Span>) {
         | Decl::TypeDef { .. }
         | Decl::TypeAlias { .. }
         | Decl::RecordDef { .. }
+        | Decl::RecordBuilderDef { .. }
         | Decl::EffectDef { .. }
         | Decl::TraitDef { .. }
         | Decl::Import { .. }
@@ -1169,7 +1256,9 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
         }
         ExprKind::Lambda { body, .. } => walk_expr(body, out),
         ExprKind::FieldAccess { expr, .. } => walk_expr(expr, out),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::AnonRecordCreate { fields, .. }
+        | ExprKind::RecordBuild { fields, .. } => {
             for (_, _, e) in fields {
                 walk_expr(e, out);
             }

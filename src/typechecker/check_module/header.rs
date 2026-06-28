@@ -17,6 +17,7 @@ pub struct ModuleHeader {
     pub unannotated_functions: Vec<String>,
     pub types: HashMap<String, HeaderTypeDecl>,
     pub records: HashMap<String, HeaderRecordDecl>,
+    pub record_builders: HashMap<String, HeaderRecordBuilderDecl>,
     pub traits: HashMap<String, HeaderTraitDecl>,
     pub effects: HashMap<String, HeaderEffectDecl>,
     pub handlers: HashMap<String, HeaderHandlerDecl>,
@@ -140,6 +141,14 @@ pub struct HeaderRecordDecl {
     pub public: bool,
     pub type_params: Vec<HeaderTypeParam>,
     pub fields: Vec<(String, HeaderTypeExpr)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderRecordBuilderDecl {
+    pub public: bool,
+    pub context: String,
+    pub start: String,
+    pub field: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +355,27 @@ impl ModuleHeader {
                                     (name.clone(), header_type_expr(ty))
                                 })
                                 .collect(),
+                        },
+                    );
+                }
+                Decl::RecordBuilderDef {
+                    public,
+                    context,
+                    start,
+                    field,
+                    ..
+                } => {
+                    header.record_builders.insert(
+                        context
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(context.as_str())
+                            .to_string(),
+                        HeaderRecordBuilderDecl {
+                            public: *public,
+                            context: context.clone(),
+                            start: start.clone(),
+                            field: field.clone(),
                         },
                     );
                 }

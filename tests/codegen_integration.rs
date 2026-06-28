@@ -4546,3 +4546,45 @@ main () = {
 
     assert_runs_and_stdout_contains(src, &["t0"]);
 }
+
+#[test]
+fn record_build_lowers_to_builder_calls_at_runtime() {
+    let src = r#"
+type Projection a = Projection a
+
+fun projection_start : (a -> b) -> Projection (a -> b)
+projection_start f = Projection f
+
+fun projection_field : String -> Projection a -> Projection (a -> b) -> Projection b
+projection_field _ arg ctor = case arg {
+  Projection a -> case ctor {
+    Projection f -> Projection (f a)
+  }
+}
+
+fun unwrap_projection : Projection a -> a
+unwrap_projection projection = case projection {
+  Projection value -> value
+}
+
+record builder Projection {
+  start: projection_start,
+  field: projection_field,
+}
+
+record User {
+  name: String,
+  age: Int,
+}
+
+main () = {
+  let user = unwrap_projection (build Projection User {
+    age: Projection 42,
+    name: Projection "Ada",
+  })
+  user.age
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}

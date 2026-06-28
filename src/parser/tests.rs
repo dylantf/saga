@@ -3665,3 +3665,64 @@ fn opaque_type_alias_is_rejected() {
         result
     );
 }
+
+#[test]
+fn record_builder_decl_parses() {
+    let program =
+        parse("record builder Projection { start: projection_start, field: projection_field }");
+    let Decl::RecordBuilderDef {
+        context,
+        start,
+        field,
+        public,
+        ..
+    } = &program[0]
+    else {
+        panic!("expected RecordBuilderDef, got {:?}", program[0]);
+    };
+    assert_eq!(context, "Projection");
+    assert_eq!(start, "projection_start");
+    assert_eq!(field, "projection_field");
+    assert!(!public);
+}
+
+#[test]
+fn record_build_expr_parses_named_and_anonymous() {
+    let named = parse_expr("build Projection User { name: name_p, age: age_p }");
+    let ExprKind::RecordBuild {
+        context,
+        record,
+        fields,
+        ..
+    } = &named.kind
+    else {
+        panic!("expected RecordBuild, got {:?}", named.kind);
+    };
+    assert_eq!(context, "Projection");
+    assert_eq!(record.as_deref(), Some("User"));
+    assert_eq!(fields.len(), 2);
+
+    let anonymous = parse_expr("build Projection { name: name_p }");
+    let ExprKind::RecordBuild {
+        context,
+        record,
+        fields,
+        ..
+    } = &anonymous.kind
+    else {
+        panic!("expected RecordBuild, got {:?}", anonymous.kind);
+    };
+    assert_eq!(context, "Projection");
+    assert!(record.is_none());
+    assert_eq!(fields.len(), 1);
+}
+
+#[test]
+fn build_remains_normal_identifier_without_record_build_shape() {
+    let expr = parse_expr("build value");
+    assert!(matches!(expr.kind, ExprKind::App { .. }));
+    let ExprKind::App { func, .. } = expr.kind else {
+        unreachable!();
+    };
+    assert!(matches!(func.kind, ExprKind::Var { ref name } if name == "build"));
+}
