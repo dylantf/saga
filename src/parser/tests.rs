@@ -2417,33 +2417,6 @@ fn trait_def_with_extra_type_params() {
     }
 }
 
-#[test]
-fn trait_def_with_functional_dependency() {
-    let decls = parse(
-        "trait Selectable selection row | selection -> row {\n  fun prepare : selection -> row\n}",
-    );
-    assert_eq!(decls.len(), 1);
-    match &decls[0] {
-        Decl::TraitDef {
-            name,
-            type_params,
-            functional_dependency,
-            methods,
-            ..
-        } => {
-            assert_eq!(name, "Selectable");
-            assert_eq!(type_params, &["selection", "row"]);
-            let fd = functional_dependency
-                .as_ref()
-                .expect("expected functional dependency");
-            assert_eq!(fd.determinant, vec!["selection"]);
-            assert_eq!(fd.determined, vec!["row"]);
-            assert_eq!(methods.len(), 1);
-        }
-        _ => panic!("expected TraitDef, got {:?}", decls[0]),
-    }
-}
-
 // --- Impl definitions ---
 
 #[test]

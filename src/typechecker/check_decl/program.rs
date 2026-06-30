@@ -528,20 +528,13 @@ impl Checker {
                 Decl::TraitDef {
                     name,
                     type_params,
-                    functional_dependency,
                     supertraits,
                     methods,
                     ..
                 } => {
                     let plain_methods: Vec<_> = methods.iter().map(|a| &a.node).collect();
-                    self.register_trait_def(
-                        name,
-                        type_params,
-                        functional_dependency.as_ref(),
-                        supertraits,
-                        &plain_methods,
-                    )
-                    .map_err(|e| vec![e])?;
+                    self.register_trait_def(name, type_params, supertraits, &plain_methods)
+                        .map_err(|e| vec![e])?;
                 }
                 _ => {}
             }

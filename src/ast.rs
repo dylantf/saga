@@ -492,7 +492,6 @@ pub enum Decl {
         /// Type parameters: first is the self type, rest are extras.
         /// e.g. `trait ConvertTo a b` -> ["a", "b"]
         type_params: Vec<TypeParam>,
-        functional_dependency: Option<TraitFunctionalDependency>,
         supertraits: Vec<TraitRef>,
         /// `synthesizes via <Trait> deriving (...)` clause, if present. Marks the
         /// trait as a record-synthesizing link. See [SynthesisSpec].
@@ -1463,18 +1462,6 @@ pub fn op_dict_param_names(where_clause: &[TraitBound]) -> Vec<String> {
         }
     }
     names
-}
-
-/// Functional dependency on a trait declaration, e.g.
-/// `trait Selectable selection row | selection -> row` or a multi-variable
-/// determinant like `trait T a b c | a b -> c`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TraitFunctionalDependency {
-    /// One or more determining type parameters (left of the `->`).
-    pub determinant: Vec<String>,
-    /// The determined type parameters (right of the `->`).
-    pub determined: Vec<String>,
-    pub span: Span,
 }
 
 /// A trait's `synthesizes via <Trait> deriving (...)` clause. Marks the trait as

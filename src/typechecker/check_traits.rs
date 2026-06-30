@@ -4,19 +4,6 @@ use crate::token::Span;
 use super::unify::kind_name;
 use super::{Checker, Diagnostic, ImplInfo, Scheme, TraitMethodEffectSig, Type};
 
-/// Traits whose first (self) parameter functionally determines the remaining
-/// trait parameters. Multiple impls sharing the same target type but with
-/// differing trait_type_args are rejected as coherence violations.
-///
-/// Entries are exact canonical names — both the bare form (used by
-/// module-less test sources, where the canonical name is just `Generic`)
-/// and the fully-qualified stdlib form. The flag is resolved once at trait
-/// registration into `TraitInfo.is_functional`, so use sites read the
-/// stored flag instead of re-matching against this list.
-///
-/// Phase 2 may replace this with an explicit per-trait attribute.
-pub(crate) const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"];
-
 fn trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
     let mut user_arity = 0;
     let mut effects = std::collections::BTreeSet::new();
@@ -43,25 +30,6 @@ pub(crate) fn target_key_for_type(ty: &Type) -> Option<String> {
     match ty {
         Type::Con(name, args) => Some(super::arity_keyed_target_name(name, args.len())),
         _ => None,
-    }
-}
-
-/// Conservatively decide whether two impl target patterns can never describe
-/// the same type. Used by the functional-dependency coherence check: two impls
-/// whose determining parameter (the `for` target) shares an arity-keyed head
-/// (e.g. both `Column`) may still be perfectly disjoint when some concrete
-/// argument position differs — e.g. `Column src Required n a` vs
-/// `Column src Optional n a`, where `Required` and `Optional` are distinct
-/// nullary constructors. Returns `true` only when we are certain there is a
-/// definite clash; pattern variables match anything and so are never disjoint.
-pub(crate) fn types_disjoint(a: &Type, b: &Type) -> bool {
-    match (a, b) {
-        (Type::Var(_), _) | (_, Type::Var(_)) => false,
-        (Type::Con(n1, a1), Type::Con(n2, a2)) => {
-            n1 != n2 || a1.len() != a2.len() || a1.iter().zip(a2).any(|(x, y)| types_disjoint(x, y))
-        }
-        (Type::Symbol(s1), Type::Symbol(s2)) => s1 != s2,
-        _ => false,
     }
 }
 
@@ -188,7 +156,6 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[TypeParam],
-        functional_dependency: Option<&ast::TraitFunctionalDependency>,
         supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
@@ -371,113 +338,6 @@ impl Checker {
             .iter()
             .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
-        let has_builtin_functional_rule = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
-        // Resolve the parameter name -> index, used to build the fundep's
-        // index sets and validate that every mentioned name is a real param.
-        let param_index = |name: &str| type_params.iter().position(|tp| tp.name == name);
-        let mut fundep: Option<super::TraitFundep> = None;
-        if let Some(fd) = functional_dependency {
-            let Some(first_param) = type_params.first() else {
-                return Err(Diagnostic::error_at(
-                    fd.span,
-                    "functional dependency requires a trait self parameter".to_string(),
-                ));
-            };
-            if fd.determined.is_empty() {
-                return Err(Diagnostic::error_at(
-                    fd.span,
-                    "functional dependency must determine at least one parameter".to_string(),
-                ));
-            }
-            // The self/first parameter must be a determinant: concrete-self
-            // impl selection recovers the determined params from the self type,
-            // so the self type has to sit on the determining side.
-            if !fd.determinant.iter().any(|d| d == &first_param.name) {
-                return Err(Diagnostic::error_at(
-                    fd.span,
-                    format!(
-                        "unsupported functional dependency: the trait's first parameter `{}` must appear on the determining side",
-                        first_param.name
-                    ),
-                ));
-            }
-            let mut determinant_idx = Vec::new();
-            for d in &fd.determinant {
-                let Some(idx) = param_index(d) else {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        format!(
-                            "functional dependency mentions unknown trait parameter `{}`",
-                            d
-                        ),
-                    ));
-                };
-                if determinant_idx.contains(&idx) {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        format!(
-                            "functional dependency repeats determining parameter `{}`",
-                            d
-                        ),
-                    ));
-                }
-                determinant_idx.push(idx);
-            }
-            let mut determined_idx = Vec::new();
-            for d in &fd.determined {
-                let Some(idx) = param_index(d) else {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        format!(
-                            "functional dependency mentions unknown trait parameter `{}`",
-                            d
-                        ),
-                    ));
-                };
-                if determinant_idx.contains(&idx) {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        format!("functional dependency cannot determine `{}` from itself", d),
-                    ));
-                }
-                if determined_idx.contains(&idx) {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        format!("functional dependency repeats determined parameter `{}`", d),
-                    ));
-                }
-                determined_idx.push(idx);
-            }
-            // Every parameter must be covered: a param that is neither
-            // determining nor determined would be left free, which breaks the
-            // coherence guarantee the rest of the compiler relies on.
-            if determinant_idx.len() + determined_idx.len() != type_params.len() {
-                let uncovered: Vec<&str> = type_params
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !determinant_idx.contains(i) && !determined_idx.contains(i))
-                    .map(|(_, tp)| tp.name.as_str())
-                    .collect();
-                return Err(Diagnostic::error_at(
-                    fd.span,
-                    format!(
-                        "functional dependency must cover all trait parameters; `{}` left undetermined",
-                        uncovered.join(" ")
-                    ),
-                ));
-            }
-            fundep = Some(super::TraitFundep {
-                determinant: determinant_idx,
-                determined: determined_idx,
-            });
-        } else if has_builtin_functional_rule {
-            // Legacy builtin rule (Generic): first param determines the rest.
-            fundep = Some(super::TraitFundep {
-                determinant: vec![0],
-                determined: (1..type_params.len()).collect(),
-            });
-        }
-        let is_functional = fundep.is_some();
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
@@ -487,8 +347,6 @@ impl Checker {
                     .collect(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
-                is_functional,
-                fundep,
             },
         );
         Ok(())
@@ -654,53 +512,6 @@ impl Checker {
                 ),
             ));
         }
-        if let Some(fundep) = &trait_info.fundep {
-            // Positions (within the extra trait args) of the determinant
-            // parameters other than self. Self is `target_key`, handled below.
-            let det_extra_positions = fundep.determinant_extra_positions();
-            for ((existing_trait, existing_args, existing_target), existing_info) in
-                &self.trait_state.impls
-            {
-                // Two impls clash only when their determining inputs coincide:
-                // the self head (`target_key`) and every determinant extra arg
-                // must match. Differing on a determinant arg means the impls
-                // determine outputs for distinct inputs, so they may coexist.
-                let determinants_agree = existing_target == &target_key
-                    && det_extra_positions
-                        .iter()
-                        .all(|&p| existing_args.get(p) == trait_type_args_names.get(p));
-                if existing_trait == trait_name
-                    && determinants_agree
-                    && existing_args != trait_type_args_names
-                {
-                    // The determining inputs coincide, but the functional
-                    // dependency is only violated if the targets can actually
-                    // overlap. Compare the full target patterns: distinct
-                    // concrete constructors in the same argument position (e.g.
-                    // `Required` vs `Optional`) make the targets disjoint, so
-                    // both impls may coexist.
-                    if let Some(existing_pattern) = &existing_info.target_pattern
-                        && types_disjoint(existing_pattern, &target)
-                    {
-                        continue;
-                    }
-                    let prev_loc = match existing_info.span {
-                        Some(s) => format!(" (previous impl at byte {})", s.start),
-                        None => String::new(),
-                    };
-                    return Err(Diagnostic::error_at(
-                        span,
-                        format!(
-                            "coherence violation: trait {} requires that the determining \
-                             parameters functionally determine the rest, but `{}` already has an \
-                             impl with the same determining arguments but different determined \
-                             arguments ({:?} vs {:?}){}",
-                            trait_name, target_type, existing_args, trait_type_arg_names, prev_loc
-                        ),
-                    ));
-                }
-            }
-        }
 
         // Convert each TypeExpr trait_type_arg into a Type, reusing the
         // impl target's pattern variables so extras like `(a, b)` share vars
@@ -752,11 +563,9 @@ impl Checker {
         }
 
         // Validate new-form `where {Trait arg1 arg2 ...}` constraints.
-        // Process source-order; later constraints can reference fresh vars
-        // resolved by earlier ones. For functional traits, the bound first
-        // param determines the remaining params via the [Phase 1b] coherence
-        // rule; for non-functional traits, all args must be already bound.
-        let mut local_subst: std::collections::HashMap<String, String> =
+        // Every trait argument must already be bound (to a concrete type or an
+        // impl type parameter); a fresh, undetermined argument is an error.
+        let local_subst: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut where_app_param_constraints: Vec<(String, u32, Vec<Type>)> = Vec::new();
         for app in where_apps {
@@ -896,62 +705,17 @@ impl Checker {
                     ));
                 }
             } else {
-                // Some args fresh. Must be a functional trait.
-                if !resolved_trait_info.is_functional {
-                    return Err(Diagnostic::error_at(
-                        app.span,
-                        format!(
-                            "fresh type variable not determined by constraint: trait {} is not \
-                             a functional trait (only functional traits can determine extra \
-                             parameters from the first)",
-                            resolved_trait
-                        ),
-                    ));
-                }
-                // The self position (index 0) must be concrete for the
-                // functional rule to fire.
-                let self_name = match &resolved_names[0] {
-                    Some(s) => s.clone(),
-                    None => {
-                        return Err(Diagnostic::error_at(
-                            app.span,
-                            format!(
-                                "trait {}'s self parameter must be known to resolve fresh \
-                                 type variables",
-                                resolved_trait
-                            ),
-                        ));
-                    }
-                };
-                // Find a matching impl for (trait, _, self_name).
-                let matched = self
-                    .trait_state
-                    .impls
-                    .iter()
-                    .find(|((t, _, tgt), _)| t == &resolved_trait && tgt == &self_name);
-                let ((_, extras, _), _) = matched.ok_or_else(|| {
-                    Diagnostic::error_at(
-                        app.span,
-                        format!("no impl of {} for {}", resolved_trait, self_name),
-                    )
-                })?;
-                // Bind each fresh var to its corresponding resolved extra.
-                for (i, fresh_name) in fresh_positions {
-                    if i == 0 {
-                        // self position can't be fresh here (we errored above)
-                        continue;
-                    }
-                    let value = extras.get(i - 1).cloned().ok_or_else(|| {
-                        Diagnostic::error_at(
-                            app.span,
-                            format!(
-                                "internal: matched impl for {} on {} has unexpected arity",
-                                resolved_trait, self_name
-                            ),
-                        )
-                    })?;
-                    local_subst.insert(fresh_name, value);
-                }
+                // Some trait args are fresh type variables not bound to an impl
+                // parameter. Without functional dependencies there is no rule to
+                // determine them from the others, so this is unresolvable.
+                return Err(Diagnostic::error_at(
+                    app.span,
+                    format!(
+                        "fresh type variable not determined by constraint: trait {}'s extra \
+                         parameters cannot be determined from the others",
+                        resolved_trait
+                    ),
+                ));
             }
         }
 
@@ -1249,13 +1013,6 @@ impl Checker {
             }
         }
 
-        // Resolve the fundep-determined `where`-app dict params now, while the
-        // full impl registry is in scope, and stash them on the ImplInfo. The
-        // elaborator recomputes these for impls in its own module, but an
-        // importing module never sees this impl's AST, so it relies on this
-        // pre-resolved copy (which travels via `ModuleExports.trait_impls`).
-        let where_app_dict_params = self.compute_where_app_dict_params(where_apps, type_params);
-
         self.trait_state.impls.insert(
             dup_key,
             ImplInfo {
@@ -1267,172 +1024,8 @@ impl Checker {
                 target_type_param_ids,
                 span: Some(span),
                 method_effects: impl_method_effects,
-                where_app_dict_params,
             },
         );
         Ok(())
-    }
-
-    fn impl_tparam_id(type_params: &[TypeParam], name: &str) -> Option<u32> {
-        type_params
-            .iter()
-            .position(|tp| tp.name == name)
-            .map(|idx| u32::MAX - idx as u32)
-    }
-
-    /// Typechecker-side mirror of the elaborator's
-    /// `Elaborator::type_expr_to_constraint_type`: convert a `where`-app type
-    /// argument into a `Type`, using the `u32::MAX - idx` convention for impl
-    /// type parameters so the result matches what `dict_for_type` expects.
-    fn where_app_constraint_type(
-        &self,
-        expr: &ast::TypeExpr,
-        type_params: &[TypeParam],
-        local_subst: &std::collections::HashMap<String, Type>,
-    ) -> Option<Type> {
-        match expr {
-            ast::TypeExpr::Named { id, name, .. } => {
-                Some(Type::Con(self.resolved_type_name(*id, name), vec![]))
-            }
-            ast::TypeExpr::Var { name, .. } => local_subst
-                .get(name)
-                .cloned()
-                .or_else(|| Self::impl_tparam_id(type_params, name).map(Type::Var)),
-            ast::TypeExpr::App { .. } => {
-                let head = expr.head_name()?;
-                let head_id = expr.head_id().unwrap_or(expr.id());
-                let mut args = Vec::new();
-                let mut current = expr;
-                while let ast::TypeExpr::App { func, arg, .. } = current {
-                    args.push(self.where_app_constraint_type(arg, type_params, local_subst)?);
-                    current = func;
-                }
-                args.reverse();
-                Some(Type::Con(self.resolved_type_name(head_id, head), args))
-            }
-            ast::TypeExpr::Symbol { name, .. } => Some(Type::Symbol(name.clone())),
-            ast::TypeExpr::Labeled { inner, .. } => {
-                self.where_app_constraint_type(inner, type_params, local_subst)
-            }
-            ast::TypeExpr::Record { fields, .. } => fields
-                .iter()
-                .map(|(name, ty)| {
-                    self.where_app_constraint_type(ty, type_params, local_subst)
-                        .map(|ty| (name.clone(), ty))
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(Type::Record),
-            ast::TypeExpr::Arrow { .. } => None,
-        }
-    }
-
-    /// Mirror of the elaborator's `resolve_functional_where_app_fresh_vars`:
-    /// pin the determined extra params of a fundep `where`-app from the matching
-    /// impl, recording them in `local_subst` so later args (and the self
-    /// position) resolve to concrete types.
-    fn resolve_fundep_where_app(
-        &self,
-        app: &ast::TraitApp,
-        resolved_trait: &str,
-        self_type: &Type,
-        type_params: &[TypeParam],
-        local_subst: &mut std::collections::HashMap<String, Type>,
-    ) {
-        let Some(info) = self.trait_state.traits.get(resolved_trait) else {
-            return;
-        };
-        let Some(fundep) = &info.fundep else {
-            return;
-        };
-        let Type::Con(self_name, self_args) = self_type else {
-            return;
-        };
-        let Some((_, impl_info)) =
-            self.trait_state
-                .impls
-                .iter()
-                .find(|((trait_name, _, target), _)| {
-                    trait_name == resolved_trait && target == self_name
-                })
-        else {
-            return;
-        };
-        let mut subst = std::collections::HashMap::new();
-        for (var_id, arg) in impl_info.target_type_param_ids.iter().zip(self_args.iter()) {
-            subst.insert(*var_id, arg.clone());
-        }
-        let determined = fundep.determined_extra_positions();
-        for (idx, arg) in app.type_args.iter().enumerate().skip(1) {
-            if !determined.contains(&(idx - 1)) {
-                continue;
-            }
-            let ast::TypeExpr::Var { name, .. } = arg else {
-                continue;
-            };
-            if Self::impl_tparam_id(type_params, name).is_some() || local_subst.contains_key(name) {
-                continue;
-            }
-            if let Some(extra) = impl_info.trait_type_args.get(idx - 1) {
-                local_subst.insert(name.clone(), substitute_pattern_vars(extra, &subst));
-            }
-        }
-    }
-
-    /// Mirror of the elaborator's `where_app_dict_params_for_impl`, run at
-    /// registration so the resolved params travel cross-module on `ImplInfo`.
-    fn compute_where_app_dict_params(
-        &self,
-        where_apps: &[ast::TraitApp],
-        type_params: &[TypeParam],
-    ) -> Vec<crate::typechecker::state::WhereAppDictParam> {
-        use crate::typechecker::state::WhereAppDictParam;
-        let mut params = Vec::new();
-        let mut local_subst: std::collections::HashMap<String, Type> =
-            std::collections::HashMap::new();
-        for app in where_apps {
-            if matches!(app.trait_name.as_str(), "Num" | "Eq") {
-                continue;
-            }
-            let resolved_trait = self
-                .resolve_trait_name(&app.trait_name)
-                .unwrap_or_else(|| app.trait_name.clone());
-            let Some(first_arg) = app.type_args.first() else {
-                continue;
-            };
-            let Some(self_type) =
-                self.where_app_constraint_type(first_arg, type_params, &local_subst)
-            else {
-                continue;
-            };
-            self.resolve_fundep_where_app(
-                app,
-                &resolved_trait,
-                &self_type,
-                type_params,
-                &mut local_subst,
-            );
-            let ast::TypeExpr::Var { name, .. } = first_arg else {
-                continue;
-            };
-            if Self::impl_tparam_id(type_params, name).is_some() {
-                continue;
-            }
-            let Some(self_type) = local_subst.get(name).cloned() else {
-                continue;
-            };
-            let Some(trait_type_args) = app.type_args[1..]
-                .iter()
-                .map(|arg| self.where_app_constraint_type(arg, type_params, &local_subst))
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            params.push(WhereAppDictParam {
-                trait_name: resolved_trait,
-                trait_type_args,
-                self_type,
-            });
-        }
-        params
     }
 }

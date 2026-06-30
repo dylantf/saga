@@ -19,8 +19,6 @@ impl Checker {
                 type_params: vec![("a".into(), crate::ast::Kind::Star)],
                 supertraits: vec![],
                 methods: vec![],
-                is_functional: false,
-                fundep: None,
             },
         );
         for prim in &["Int", "Float"] {
@@ -35,7 +33,6 @@ impl Checker {
                     target_type_param_ids: vec![],
                     span: None,
                     method_effects: std::collections::HashMap::new(),
-                    where_app_dict_params: vec![],
                 },
             );
         }
@@ -47,8 +44,6 @@ impl Checker {
                 type_params: vec![("a".into(), crate::ast::Kind::Star)],
                 supertraits: vec![],
                 methods: vec![],
-                is_functional: false,
-                fundep: None,
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {
@@ -63,7 +58,6 @@ impl Checker {
                     target_type_param_ids: vec![],
                     span: None,
                     method_effects: std::collections::HashMap::new(),
-                    where_app_dict_params: vec![],
                 },
             );
         }
@@ -175,7 +169,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
         self.trait_state.impls.insert(
@@ -189,7 +182,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
         self.trait_state.impls.insert(
@@ -203,7 +195,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
 
@@ -219,7 +210,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
 
@@ -235,7 +225,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
 
@@ -251,7 +240,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
 
@@ -267,7 +255,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
 
@@ -283,7 +270,6 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
-                where_app_dict_params: vec![],
             },
         );
     }

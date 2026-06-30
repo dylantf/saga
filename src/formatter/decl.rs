@@ -450,7 +450,6 @@ pub fn format_trait_def(
     public: bool,
     name: &str,
     type_params: &[TypeParam],
-    functional_dependency: Option<&TraitFunctionalDependency>,
     supertraits: &[TraitRef],
     synthesis: Option<&crate::ast::SynthesisSpec>,
     methods: &[Annotated<TraitMethod>],
@@ -468,12 +467,6 @@ pub fn format_trait_def(
     for tp in type_params {
         header.push(' ');
         write!(header, "{}", tp).unwrap();
-    }
-    if let Some(fd) = functional_dependency {
-        header.push_str(" | ");
-        header.push_str(&fd.determinant.join(" "));
-        header.push_str(" -> ");
-        header.push_str(&fd.determined.join(" "));
     }
     parts.push(Doc::text(header));
 

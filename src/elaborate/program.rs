@@ -37,7 +37,6 @@ impl Elaborator {
                     target_type_expr,
                     type_params,
                     where_clause,
-                    where_apps,
                     ..
                 } => {
                     let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
@@ -94,16 +93,7 @@ impl Elaborator {
                         canonical_trait_type_args,
                         canonical_target_type,
                     );
-                    let where_app_params =
-                        self.where_app_dict_params_for_impl(where_apps, type_params);
-                    self.impl_dict_params.insert(key.clone(), params);
-                    // Insert unconditionally (even when empty): a present key
-                    // marks this impl as local, so `dict_for_type` trusts this
-                    // computation and only falls back to the typechecker-
-                    // resolved `ImplInfo.where_app_dict_params` for imported
-                    // impls (whose AST this module never sees).
-                    self.impl_where_app_dict_params
-                        .insert(key, where_app_params);
+                    self.impl_dict_params.insert(key, params);
                 }
                 Decl::HandlerDef { name, body, .. } => {
                     let dict_params = self.dict_params_from_where(&body.where_clause);

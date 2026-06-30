@@ -100,39 +100,6 @@ pub struct TraitMethodInfo {
     pub effect_sig: TraitMethodEffectSig,
 }
 
-/// A functional dependency on a trait, stored as parameter *indices* into
-/// `TraitInfo.type_params`. The determinant always contains index 0 (the
-/// self parameter) so that concrete-self impl selection can recover the
-/// determined parameters. e.g. `trait T a b c | a b -> c` stores
-/// `determinant = [0, 1]`, `determined = [2]`.
-#[derive(Debug, Clone)]
-pub struct TraitFundep {
-    pub determinant: Vec<usize>,
-    pub determined: Vec<usize>,
-}
-
-impl TraitFundep {
-    /// Positions of determinant parameters within the *extra* trait args
-    /// (`trait_type_args`, which correspond to params `1..n`). The self
-    /// parameter (index 0) is not an extra and is excluded.
-    pub fn determinant_extra_positions(&self) -> Vec<usize> {
-        self.determinant
-            .iter()
-            .filter(|&&i| i >= 1)
-            .map(|&i| i - 1)
-            .collect()
-    }
-
-    /// Positions of determined parameters within the extra trait args.
-    pub fn determined_extra_positions(&self) -> Vec<usize> {
-        self.determined
-            .iter()
-            .filter(|&&i| i >= 1)
-            .map(|&i| i - 1)
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
     /// Type parameters: first is self, rest are extras.
@@ -141,32 +108,6 @@ pub struct TraitInfo {
     pub type_params: Vec<(String, Kind)>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
-    /// `true` if the trait's determinant parameters functionally determine
-    /// the determined parameters. Equivalent to `fundep.is_some()`; kept as a
-    /// flag for the many boolean call sites. Set at registration time from a
-    /// declared `| ... -> ...` clause or a hardcoded canonical-name list
-    /// (see `check_traits::FUNCTIONAL_TRAITS`).
-    pub is_functional: bool,
-    /// The functional dependency's determinant/determined parameter indices,
-    /// when the trait is functional. Drives improvement and coherence so they
-    /// know which positions are pinned by which.
-    pub fundep: Option<TraitFundep>,
-}
-
-/// A dictionary parameter a conditional impl requires from a `where`-app
-/// constraint whose self position is a fresh/existential variable determined by
-/// a functional dependency (rather than an impl type parameter). Carries the
-/// fully fundep-resolved trait, extra trait args, and self type so the
-/// elaborator can build the sub-dict at a call site — including cross-module,
-/// where the importer never sees the impl's AST. Mirrors the elaborator's
-/// `ImplWhereAppDictParam`; the resolved `Type`s use the `u32::MAX - idx`
-/// impl-type-parameter convention so `dict_for_type`'s positional substitution
-/// applies uniformly to local and imported impls.
-#[derive(Debug, Clone)]
-pub struct WhereAppDictParam {
-    pub trait_name: String,
-    pub trait_type_args: Vec<Type>,
-    pub self_type: Type,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -205,11 +146,6 @@ pub struct ImplInfo {
     /// caller (the trait-effect-propagation bugfix). Travels cross-module via
     /// `ModuleExports.trait_impls`. See docs/planning/effect-polymorphic-traits.md.
     pub method_effects: HashMap<String, Vec<String>>,
-    /// Dict params required by fundep-determined `where`-app constraints (see
-    /// [`WhereAppDictParam`]). Computed at registration and read by the
-    /// elaborator for imported impls, whose AST the importer cannot re-derive
-    /// these from. Empty for impls without such constraints.
-    pub where_app_dict_params: Vec<WhereAppDictParam>,
 }
 
 /// Evidence that a trait constraint was resolved during typechecking.

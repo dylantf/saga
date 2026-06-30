@@ -656,42 +656,6 @@ impl Checker {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
-                    if is_generic_trait_name(&trait_name)
-                        && let Some(rep_ty) = trait_type_arg_types.first()
-                        && let Some(record_ty) =
-                            anon_record_from_generic_rep(&self.sub.apply(rep_ty))
-                    {
-                        self.unify_at(&Type::Var(id), &record_ty, span)?;
-                        self.trait_state.pending_constraints.push((
-                            trait_name,
-                            trait_type_arg_types,
-                            Type::Var(id),
-                            span,
-                            node_id,
-                        ));
-                        continue;
-                    }
-
-                    if is_generic_trait_name(&trait_name) {
-                        let mut extra_vars = Vec::new();
-                        for extra in &trait_type_arg_types {
-                            crate::typechecker::collect_free_vars(
-                                &self.sub.apply(extra),
-                                &mut extra_vars,
-                            );
-                        }
-                        if extra_vars.iter().any(|extra| !type_vars.contains(extra)) {
-                            self.trait_state.pending_constraints.push((
-                                trait_name,
-                                trait_type_arg_types,
-                                Type::Var(id),
-                                span,
-                                node_id,
-                            ));
-                            continue;
-                        }
-                    }
-
                     // Check where_bounds, resolving bound var IDs through
                     // substitution so they match after annotation unification.
                     let in_where =

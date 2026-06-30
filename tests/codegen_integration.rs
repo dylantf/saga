@@ -337,49 +337,6 @@ main () = case map Leaf 42 {
 }
 
 #[test]
-fn multi_determinant_fundep_distinct_dicts_no_collision() {
-    // A function with two where-bounds for the same trait and self var that
-    // differ only in a determinant extra (`table Required -> ...` vs
-    // `table Optional -> ...`). The two dict params must get distinct names
-    // (else erlc rejects "duplicate variable") and each call site must select
-    // the matching impl, so the result is "required / optional" not "optional /
-    // optional".
-    let src = r#"
-type Required = Required
-type Optional = Optional
-type UsersTable = UsersTable
-type Table table = Table table
-trait TableScope table mode cols | table mode -> cols {
-  fun cols : (mode, table) -> cols
-}
-record RequiredCols { value: String }
-record OptionalCols { value: String }
-impl TableScope Required RequiredCols for UsersTable {
-  cols _ = RequiredCols { value: "required" }
-}
-impl TableScope Optional OptionalCols for UsersTable {
-  cols _ = OptionalCols { value: "optional" }
-}
-fun both : Table table -> (required_cols, optional_cols)
-  where {
-    table: TableScope Required required_cols,
-    table: TableScope Optional optional_cols,
-  }
-both table_value = case table_value {
-  Table table -> (cols (Required, table), cols (Optional, table))
-}
-fun users : Table UsersTable
-users = Table UsersTable
-main () = {
-  let (required, optional) = both users
-  (required.value, optional.value)
-}
-"#;
-
-    assert_runs_and_stdout_contains(src, &["required", "optional"]);
-}
-
-#[test]
 fn anonymous_record_layout_from_function_signature_lowers_field_access() {
     let src = r#"
 fun pick_id : { id: Int, name: String } -> Int
@@ -3960,54 +3917,6 @@ main () = gt 18
 }
 
 #[test]
-fn disjoint_impls_on_same_head_resolve_through_recursive_dict() {
-    // `Column Required a` and `Column Optional a` are disjoint `Sel` impls that
-    // coexist (the determining position differs). When a dict for `Sel` is
-    // built recursively through a wrapper whose trait args are unresolved
-    // out-vars, the exact-key dict lookup misses and the fuzzy fallback finds
-    // two impls sharing the `Column` head — it must disambiguate by matching
-    // each impl's full target pattern against the concrete type, not bail.
-    let src = r#"
-type Required = Required
-type Optional = Optional
-type Column meta a = Column a
-
-trait PgType a {}
-impl PgType for Int {}
-
-trait Sel s r | s -> r {
-  fun sel : s -> r
-}
-
-type Wrap a = Wrap a
-
-impl Sel a for (Column Required a) where {a: PgType} {
-  sel c = case c { Column v -> v }
-}
-
-impl Sel (Maybe a) for (Column Optional a) where {a: PgType} {
-  sel _ = Nothing
-}
-
-impl Sel (Wrap r) for (Wrap s) where {s: Sel r} {
-  sel w = case w { Wrap inner -> Wrap (sel inner) }
-}
-
-fun run_sel : s -> r where {s: Sel r}
-run_sel x = sel x
-
-fun req : Wrap (Column Required Int)
-req = Wrap (Column 7)
-
-main () = case run_sel req {
-  Wrap n -> n
-}
-"#;
-
-    assert_runs_and_stdout_contains(src, &["7"]);
-}
-
-#[test]
 fn dict_parameterized_value_passed_as_first_class_function_is_saturated() {
     // A dict-parameterized function bound to a local and passed as a value (not
     // applied at the binding site) is eta-expanded to take a leading dict param.
@@ -4036,64 +3945,6 @@ main () = {
 "#;
 
     assert_runs_and_stdout_contains(src, &["5"]);
-}
-
-#[test]
-fn closure_capturing_trait_method_stored_and_called_has_correct_arity() {
-    // A closure built inside a `where`-constrained function captures a trait
-    // method (`schema_cols`) and is stored in a record, then called later. The
-    // closure binding is dict-parameterized; passing it as a value must yield a
-    // saturated partial application (regression for `table_for/2` aborting with
-    // an arity error).
-    let src = r#"
-type TableRef table = TableRef
-type UsersTable = UsersTable
-type Required = Required
-
-record TableDef cols {
-  make_cols: String -> cols,
-}
-type Table table cols = Table (TableDef cols)
-
-trait TableScope cols table | cols -> table {
-  fun schema_cols : (TableRef table, String) -> cols
-}
-
-fun table_ref : TableRef table
-table_ref = TableRef
-
-fun table : (String -> cols) -> Table table cols
-table make_cols = Table (TableDef { make_cols: make_cols })
-
-fun table_for : TableRef table -> Table table cols where {cols: TableScope table}
-table_for ref = {
-  let make: String -> cols = fun source -> schema_cols (ref, source)
-  table make
-}
-
-fun table_cols : String -> Table table cols -> cols
-table_cols source table_value = case table_value {
-  Table def -> def.make_cols source
-}
-
-record Users meta {
-  name: String,
-}
-
-impl TableScope UsersTable for Users meta {
-  schema_cols (_, source) = Users { name: source }
-}
-
-fun users : Table UsersTable (Users Required)
-users = table_for table_ref
-
-main () = {
-  let cols = table_cols "t0" users
-  cols.name
-}
-"#;
-
-    assert_runs_and_stdout_contains(src, &["t0"]);
 }
 
 #[test]

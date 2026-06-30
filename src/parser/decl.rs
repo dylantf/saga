@@ -935,31 +935,6 @@ impl Parser {
             type_params.push(self.parse_type_param()?);
         }
 
-        let functional_dependency = if *self.peek() == Token::Bar {
-            let fd_start = self.tokens[self.pos].span;
-            self.advance(); // consume '|'
-            let mut determinant = Vec::new();
-            determinant.push(self.expect_ident()?);
-            while matches!(self.peek(), Token::Ident(_)) && !is_synthesizes(self) {
-                determinant.push(self.expect_ident()?);
-            }
-            self.expect(Token::Arrow)?;
-            let mut determined = Vec::new();
-            let first = self.expect_ident()?;
-            determined.push(first);
-            while matches!(self.peek(), Token::Ident(_)) && !is_synthesizes(self) {
-                determined.push(self.expect_ident()?);
-            }
-            let fd_end = self.tokens[self.pos.saturating_sub(1)].span;
-            Some(crate::ast::TraitFunctionalDependency {
-                determinant,
-                determined,
-                span: fd_start.to(fd_end),
-            })
-        } else {
-            None
-        };
-
         let mut supertraits = Vec::new();
         if *self.peek() == Token::Where {
             self.advance();
@@ -1043,7 +1018,6 @@ impl Parser {
                 name,
                 name_span,
                 type_params,
-                functional_dependency,
                 supertraits,
                 synthesis,
                 methods: Vec::new(),
@@ -1119,7 +1093,6 @@ impl Parser {
             name,
             name_span,
             type_params,
-            functional_dependency,
             supertraits,
             synthesis,
             methods,

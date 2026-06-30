@@ -153,14 +153,14 @@ impl Elaborator {
         &self,
         trait_name: &str,
         var_name: &str,
-        trait_type_args: &[Type],
+        _trait_type_args: &[Type],
         span: Span,
     ) -> Option<Expr> {
         // For multi-variable-determinant fundeps, several constraints on the
         // same self var are distinguished by a determinant suffix baked into
         // the dict-param's var key. Try the qualified key first; for ordinary
         // traits the suffix is empty so this is identical to the base lookup.
-        let suffix = dict_var_suffix_from_types(&self.traits, trait_name, trait_type_args);
+        let suffix = String::new();
         let qualified_var = format!("{}{}", var_name, suffix);
         if let Some(param_name) = self
             .current_dict_params_by_var
@@ -329,39 +329,6 @@ impl Elaborator {
                         name: dict_name.clone(),
                     },
                 );
-                // Local impls are recorded in `impl_where_app_dict_params`
-                // (always, even empty). Imported impls are not — the importing
-                // module never sees their AST — so fall back to the resolved
-                // copy the typechecker stashed on `ImplInfo`.
-                if let Some(params) = self
-                    .impl_where_app_dict_params
-                    .get(&key)
-                    .or_else(|| self.impl_infos.get(&key).map(|i| &i.where_app_dict_params))
-                {
-                    let target_arg_subst = Self::impl_type_param_subst(args);
-                    for param in params {
-                        let self_type =
-                            substitute_pattern_vars(&param.self_type, &target_arg_subst);
-                        let trait_type_args: Vec<Type> = param
-                            .trait_type_args
-                            .iter()
-                            .map(|arg| substitute_pattern_vars(arg, &target_arg_subst))
-                            .collect();
-                        let sub_dict = self.dict_for_type(
-                            &param.trait_name,
-                            &trait_type_args,
-                            &self_type,
-                            span,
-                        )?;
-                        dict_expr = Expr::synth(
-                            span,
-                            ExprKind::App {
-                                func: Box::new(dict_expr),
-                                arg: Box::new(sub_dict),
-                            },
-                        );
-                    }
-                }
                 if let Some(info) = impl_info
                     && let Some(pattern) = &info.target_pattern
                 {
