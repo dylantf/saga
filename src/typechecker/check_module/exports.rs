@@ -532,7 +532,7 @@ fn resolved_builder_value(checker: &Checker, module_prefix: &str, name: &str) ->
         .resolve_value(name)
         .map(str::to_string)
         .or_else(|| {
-            (checker.env.get(name).is_some() || checker.constructors.get(name).is_some())
+            (checker.env.get(name).is_some() || checker.constructors.contains_key(name))
                 .then(|| canonical_export_name(module_prefix, name))
         })
 }
