@@ -14,6 +14,32 @@ pub mod trait_dispatch;
 use crate::ast;
 use crate::typechecker::ModuleCodegenInfo;
 use std::collections::HashMap;
+use std::time::Instant;
+
+fn build_trace_enabled() -> bool {
+    std::env::var_os("SAGA_BUILD_TRACE").is_some()
+}
+
+fn trace_codegen_phase(module: &str, phase: &str, duration: std::time::Duration) {
+    if build_trace_enabled() {
+        eprintln!(
+            "[saga-codegen] module={} phase={} elapsed={:.1}ms",
+            module,
+            phase,
+            duration.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+fn timed_codegen_phase<T>(module: &str, phase: &str, f: impl FnOnce() -> T) -> T {
+    if !build_trace_enabled() {
+        return f();
+    }
+    let start = Instant::now();
+    let out = f();
+    trace_codegen_phase(module, phase, start.elapsed());
+    out
+}
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
 /// and pre-computed name resolution.
@@ -29,6 +55,10 @@ pub struct CompiledModule {
     /// writes it back via `set_compiled_call_effects`). Read by the lowerer at
     /// every effectful call site to drive evidence threading and projection.
     pub call_effects: call_effects::CallEffectMap,
+    /// True when `call_effects` has been deliberately populated. An empty map
+    /// is a valid result for modules without `App` nodes, so emptiness alone
+    /// cannot distinguish "computed empty" from "not computed yet".
+    pub call_effects_ready: bool,
     /// Post-classifier optimizer facts for this module. Empty facts mean
     /// lowering should take the normal direct-first/evidence path.
     pub optimization: optimize::OptimizationFacts,
@@ -54,6 +84,19 @@ pub struct CodegenContext {
     pub prelude_imports: Vec<ast::Decl>,
 }
 
+/// Per-build emit indexes derived from a `CodegenContext`.
+///
+/// These are intentionally separate from `CodegenContext`: the Generic-fold
+/// external maps borrow module ASTs and resolution maps from `ctx.modules`, so
+/// storing them inside the owning context would be self-referential.
+pub struct PreparedEmitContext<'a> {
+    pub ctx: &'a CodegenContext,
+    pub codegen_info: HashMap<String, ModuleCodegenInfo>,
+    pub external_ctors: generic_fold::ExternalCtors<'a>,
+    pub external_funs: generic_fold::ExternalFuns<'a>,
+    pub module_resolution: resolve::ResolutionMap,
+}
+
 impl CodegenContext {
     /// Get codegen info for all modules (for backward compat with resolve/init).
     pub fn codegen_info(&self) -> HashMap<String, ModuleCodegenInfo> {
@@ -61,6 +104,21 @@ impl CodegenContext {
             .iter()
             .map(|(k, v)| (k.clone(), v.codegen_info.clone()))
             .collect()
+    }
+
+    pub fn prepare_emit(&self) -> PreparedEmitContext<'_> {
+        let module_resolution = self
+            .modules
+            .values()
+            .flat_map(|compiled| compiled.resolution.iter().map(|(k, v)| (*k, v.clone())))
+            .collect();
+        PreparedEmitContext {
+            ctx: self,
+            codegen_info: self.codegen_info(),
+            external_ctors: generic_fold::external_ctors_from_modules(&self.modules),
+            external_funs: generic_fold::external_funs_from_modules(&self.modules),
+            module_resolution,
+        }
     }
 
     /// Get elaborated program for a specific module.
@@ -128,8 +186,58 @@ pub fn compile_module_from_result(
         resolution,
         front_resolution: mod_result.resolution.clone(),
         call_effects: call_effects::CallEffectMap::new(),
+        call_effects_ready: false,
         optimization,
     })
+}
+
+pub fn precompute_context_call_effects(
+    ctx: &mut CodegenContext,
+    result: &crate::typechecker::CheckResult,
+) {
+    let module_names: Vec<String> = ctx.modules.keys().cloned().collect();
+    let computed: Vec<(String, call_effects::CallEffectMap)> = module_names
+        .into_iter()
+        .filter_map(|module_name| {
+            let compiled = ctx.modules.get(&module_name)?;
+            if compiled.call_effects_ready {
+                return None;
+            }
+            if module_name == "Main" {
+                return Some((module_name, call_effects::CallEffectMap::new()));
+            }
+            let check_result = result
+                .module_check_results()
+                .get(&module_name)
+                .unwrap_or(result);
+            let mut resolution = compiled.resolution.clone();
+            for other in ctx.modules.values() {
+                resolution.extend(
+                    other
+                        .resolution
+                        .iter()
+                        .map(|(id, symbol)| (*id, symbol.clone())),
+                );
+            }
+            let call_effects = timed_codegen_phase(&module_name, "precompute_call_effects", || {
+                lower::precompute_call_effects(
+                    ctx,
+                    &module_name,
+                    &compiled.elaborated,
+                    resolution,
+                    check_result,
+                )
+            });
+            Some((module_name, call_effects))
+        })
+        .collect();
+
+    for (module_name, call_effects) in computed {
+        if let Some(compiled) = ctx.modules.get_mut(&module_name) {
+            compiled.call_effects = call_effects;
+            compiled.call_effects_ready = true;
+        }
+    }
 }
 
 /// Source file path and source text for error location tracking.
@@ -148,17 +256,39 @@ pub fn emit_module_with_context(
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
-    let codegen_info = ctx.codegen_info();
+    let prepared = timed_codegen_phase(module_name, "prepare_emit_context", || ctx.prepare_emit());
+    emit_module_with_prepared_context(
+        module_name,
+        program,
+        &prepared,
+        check_result,
+        source_file,
+        entry_export,
+    )
+}
+
+pub fn emit_module_with_prepared_context(
+    module_name: &str,
+    program: &ast::Program,
+    prepared: &PreparedEmitContext<'_>,
+    check_result: &crate::typechecker::CheckResult,
+    source_file: Option<&SourceFile>,
+    entry_export: Option<&str>,
+) -> String {
+    let ctx = prepared.ctx;
     // Generic fold, with cross-module impls supplied from the other compiled
     // modules. Inlined cross-module nodes carry the producer's resolution, merged
     // below after `resolve_names`.
-    let externals = generic_fold::external_ctors_from_modules(&ctx.modules);
-    let external_funs = generic_fold::external_funs_from_modules(&ctx.modules);
-    let fold_out = generic_fold::fold_program(
-        &normalize::normalize_effects(program),
-        &externals,
-        &external_funs,
-    );
+    let normalized = timed_codegen_phase(module_name, "normalize_effects", || {
+        normalize::normalize_effects(program)
+    });
+    let fold_out = timed_codegen_phase(module_name, "generic_fold_cross_module", || {
+        generic_fold::fold_program(
+            &normalized,
+            &prepared.external_ctors,
+            &prepared.external_funs,
+        )
+    });
     let generic_fold::FoldOutput {
         program,
         carried_resolution,
@@ -167,51 +297,67 @@ pub fn emit_module_with_context(
         carried_constructor_names,
         carried_names,
     } = fold_out;
-    let constructor_atoms = resolve::build_constructor_atoms(
-        module_name,
-        &program,
-        &codegen_info,
-        &ctx.prelude_imports,
-    );
+    let constructor_atoms = timed_codegen_phase(module_name, "build_constructor_atoms", || {
+        resolve::build_constructor_atoms(
+            module_name,
+            &program,
+            &prepared.codegen_info,
+            &ctx.prelude_imports,
+        )
+    });
     let front_resolution = check_result
         .module_check_results()
         .get(module_name)
         .map(|m| &m.resolution)
         .unwrap_or(&check_result.resolution);
-    let mut resolution_map = resolve::resolve_names(
-        module_name,
-        &program,
-        &codegen_info,
-        &ctx.prelude_imports,
-        front_resolution,
-        &carried_names,
-    );
+    let mut resolution_map = timed_codegen_phase(module_name, "resolve_codegen_names", || {
+        resolve::resolve_names(
+            module_name,
+            &program,
+            &prepared.codegen_info,
+            &ctx.prelude_imports,
+            front_resolution,
+            &carried_names,
+        )
+    });
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.
-    for compiled in ctx.modules.values() {
-        resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
-    }
+    timed_codegen_phase(module_name, "merge_module_resolution", || {
+        resolution_map.extend(
+            prepared
+                .module_resolution
+                .iter()
+                .map(|(id, symbol)| (*id, symbol.clone())),
+        );
+    });
     // Carried resolution for inlined cross-module nodes: keyed by fresh NodeIds,
     // so this overrides any consumer-scope resolution `resolve_names` guessed for
     // them (e.g. a producer-private helper unknown in this module's scope).
-    resolution_map.extend(carried_resolution);
-    let optimization = optimize::analyze(module_name, &program, &resolution_map);
-    let source_info =
-        source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
-    let cmod = lower::Lowerer::new(
-        ctx,
-        constructor_atoms,
-        lower::LowererResolution {
-            symbols: resolution_map,
-            carried_record_types,
-            carried_constructors,
-            carried_constructor_names,
-        },
-        check_result,
-        optimization,
-        source_info,
-        entry_export.map(str::to_string),
-    )
-    .lower_module(module_name, &program);
-    cerl::print_module(&cmod)
+    timed_codegen_phase(module_name, "merge_carried_resolution", || {
+        resolution_map.extend(carried_resolution);
+    });
+    let optimization = timed_codegen_phase(module_name, "analyze_optimization", || {
+        optimize::analyze(module_name, &program, &resolution_map)
+    });
+    let source_info = timed_codegen_phase(module_name, "build_source_info", || {
+        source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source))
+    });
+    let cmod = timed_codegen_phase(module_name, "lower_module", || {
+        lower::Lowerer::new(
+            ctx,
+            constructor_atoms,
+            lower::LowererResolution {
+                symbols: resolution_map,
+                carried_record_types,
+                carried_constructors,
+                carried_constructor_names,
+            },
+            check_result,
+            optimization,
+            source_info,
+            entry_export.map(str::to_string),
+        )
+        .lower_module(module_name, &program)
+    });
+    timed_codegen_phase(module_name, "print_core", || cerl::print_module(&cmod))
 }

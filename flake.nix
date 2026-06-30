@@ -73,6 +73,7 @@
           ++ runtimeDeps;
 
           buildInputs = [
+            pkgs.time
             pkgs.bashInteractive
             pkgs.openssl
           ];
