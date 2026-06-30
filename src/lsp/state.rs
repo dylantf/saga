@@ -102,6 +102,10 @@ pub(super) struct CachedModuleInterface {
     pub(super) exports: typechecker::ModuleExports,
     pub(super) codegen_info: Option<typechecker::ModuleCodegenInfo>,
     pub(super) check_result: Option<typechecker::CheckResult>,
+    /// Checker var-id watermark when this interface was harvested. All var ids
+    /// in `exports`/`check_result` are below it, so a checker seeding this
+    /// interface must advance its own counter past it to stay collision-free.
+    pub(super) next_var: u32,
 }
 
 pub(super) struct CachedSemanticIndex {
@@ -117,6 +121,8 @@ pub(super) struct ModuleInterfaceUpdate {
     pub(super) exports: typechecker::ModuleExports,
     pub(super) codegen_info: Option<typechecker::ModuleCodegenInfo>,
     pub(super) check_result: Option<typechecker::CheckResult>,
+    /// Checker var-id watermark at harvest time (see [`CachedModuleInterface`]).
+    pub(super) next_var: u32,
     pub(super) is_current: bool,
 }
 
@@ -413,6 +419,10 @@ impl ProjectSemanticStore {
                 None,
                 entry.check_result.clone(),
             );
+            // Seeded exports carry var ids from the checker that produced them.
+            // Keep this checker's fresh-var counter above them so newly minted
+            // vars don't collide with (and get pinned by) seeded types.
+            checker.ensure_next_var_at_least(entry.next_var);
             seeded += 1;
         }
         seeded
@@ -460,6 +470,7 @@ impl ProjectSemanticStore {
                 exports: update.exports,
                 codegen_info: update.codegen_info,
                 check_result: update.check_result,
+                next_var: update.next_var,
             };
             project.module_interfaces.insert(update.module_name, entry);
             updated += 1;

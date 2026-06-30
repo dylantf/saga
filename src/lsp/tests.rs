@@ -40,6 +40,7 @@ fn interface_update(module_name: &str, interface_fingerprint: u64) -> ModuleInte
         exports: typechecker::ModuleExports::default(),
         codegen_info: None,
         check_result: None,
+        next_var: 0,
         is_current: true,
     }
 }
@@ -632,5 +633,111 @@ fn module_interface_fingerprint_uses_stable_projection() {
     assert_ne!(
         module_interface_fingerprint(&left),
         module_interface_fingerprint(&right)
+    );
+}
+
+// Regression: re-harvesting a dependency module's interface (as happens when
+// the editor edits that file repeatedly) pushes its var ids higher each time.
+// Seeding those interfaces into the cached base checker must advance the
+// checker's fresh-var counter past them; otherwise a consumer's fresh vars
+// collide with seeded ones and share substitution entries, which silently pins
+// a polymorphic function to its first use. Symptom: a polymorphic decoder
+// wrapper reports "expected Json -> String, got Json -> Float" all over a file
+// that compiles cleanly.
+#[test]
+fn seeded_module_interfaces_do_not_pin_consumer_polymorphism() {
+    let root = temp_project("seed-var-collision");
+    let lib_dir = root.join("lib");
+    std::fs::create_dir_all(&lib_dir).expect("create lib dir");
+    std::fs::write(
+        root.join("project.toml"),
+        "[project]\nname = \"app\"\n\n[library]\nmodule = \"Lib\"\nexpose = [\"Lib\"]\n",
+    )
+    .expect("write project.toml");
+
+    let lib_path = lib_dir.join("Lib.saga");
+    let lib_text = "\
+module Lib
+
+pub fun run : (Int -> a) -> a
+run g = g 0
+
+pub fun s : Int -> String
+s n = \"x\"
+
+pub fun f : Int -> Float
+f n = 1.5
+
+pub fun b : Int -> Bool
+b n = True
+";
+    std::fs::write(&lib_path, lib_text).expect("write Lib.saga");
+    let lib_uri = Url::from_file_path(&lib_path).unwrap();
+
+    // Consumer wraps the dependency's polymorphic combinator, then uses it at
+    // several concrete types — exactly the saga_json `decode dec j = run dec j`
+    // shape that surfaced the bug.
+    let main_path = root.join("src").join("Main.saga");
+    let main_text = "\
+module Main
+
+import Lib
+
+fun apply : (Int -> a) -> a
+apply g = Lib.run g
+
+pub fun go : Unit -> Unit
+go () = {
+  let _ = apply Lib.s
+  let _ = apply Lib.f
+  let _ = apply Lib.b
+  ()
+}
+";
+    std::fs::write(&main_path, main_text).expect("write Main.saga");
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+
+    let shared = SharedState::default();
+    let apply = |shared: &SharedState, res: ParseJobResult| {
+        shared
+            .projects
+            .lock()
+            .unwrap()
+            .apply_module_interface_updates(Some(root.clone()), res.module_interfaces);
+    };
+
+    // Prime: analyze Main so Lib's interface is harvested and cached.
+    apply(
+        &shared,
+        analyze_document(&shared, Some(&main_uri), 1, main_text, Some(root.clone())),
+    );
+
+    // Edit the dependency repeatedly, re-checking the consumer each round. The
+    // var-id watermark of Lib's interface climbs with every edit.
+    let mut last = Vec::new();
+    for version in 2..=6 {
+        let edited = format!("{lib_text}\n# edit {version}\n");
+        apply(
+            &shared,
+            analyze_document(&shared, Some(&lib_uri), version, &edited, Some(root.clone())),
+        );
+        let res = analyze_document(&shared, Some(&main_uri), version, main_text, Some(root.clone()));
+        last = res.diagnostics.clone();
+        apply(&shared, res);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mismatches: Vec<_> = last
+        .iter()
+        .filter(|d| d.message.contains("type mismatch"))
+        .collect();
+    for d in &mismatches {
+        eprintln!("DIAG: {}", d.message);
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} spurious type-mismatch diagnostics from seeded var-id collision",
+        mismatches.len()
     );
 }

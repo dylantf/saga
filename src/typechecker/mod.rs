@@ -521,6 +521,24 @@ impl Checker {
         Type::Var(id)
     }
 
+    /// Exclusive upper bound on every type-variable id allocated so far: all
+    /// live var ids are `< next_var_watermark()`. Used by incremental callers
+    /// (the LSP) that seed pre-checked module exports into a fresh checker, so
+    /// they can keep this checker's var space disjoint from the seeded one.
+    pub fn next_var_watermark(&self) -> u32 {
+        self.next_var
+    }
+
+    /// Advance the fresh-variable counter so newly minted vars stay above a
+    /// floor. Seeding module exports whose var ids were allocated in another
+    /// checker requires this, otherwise fresh vars collide with seeded ones and
+    /// share substitution entries (which silently pins polymorphic types).
+    pub fn ensure_next_var_at_least(&mut self, floor: u32) {
+        if self.next_var < floor {
+            self.next_var = floor;
+        }
+    }
+
     /// Instantiate a record's type parameters to fresh variables.
     /// Returns (instantiated field types, result Type::Con with fresh args).
     pub(crate) fn instantiate_record(

@@ -309,6 +309,7 @@ pub(super) fn collect_module_interface_updates(
             exports: exports.clone(),
             codegen_info: check.codegen_info().get(module_name).cloned(),
             check_result: check.module_check_results().get(module_name).cloned(),
+            next_var: checker.next_var_watermark(),
             is_current: false,
         });
     }
@@ -334,6 +335,7 @@ pub(super) fn collect_module_interface_updates(
             exports,
             codegen_info: None,
             check_result: Some(check.clone()),
+            next_var: checker.next_var_watermark(),
             is_current: true,
         });
     }
