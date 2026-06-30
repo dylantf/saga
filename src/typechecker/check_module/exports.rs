@@ -46,8 +46,8 @@ pub struct ModuleExports {
     pub record_builders: HashMap<String, RecordBuilderInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
-    /// Type name -> declared kinds of each type parameter (for kind checking
-    /// across modules, e.g. symbol-kinded params on stdlib `Proxy`).
+    /// Type name -> declared kinds of each type parameter (kind-checking
+    /// infrastructure across modules; every kind is currently `Star`).
     pub type_param_kinds: HashMap<String, Vec<crate::ast::Kind>>,
     /// Public type aliases — exported by bare name. Bodies use the alias's
     /// own positional var IDs as placeholders; the importer re-keys them
@@ -356,8 +356,8 @@ impl ModuleExports {
             }
         }
 
-        // Collect declared param kinds (e.g. `Proxy (n : Symbol)`) so the
-        // importer can enforce kind-correct uses at type-application sites.
+        // Collect declared param kinds so the importer can enforce kind-correct
+        // uses at type-application sites (currently all `Star`).
         let mut type_param_kinds: HashMap<String, Vec<crate::ast::Kind>> = HashMap::new();
         for name in type_constructors.keys().chain(type_aliases_out.keys()) {
             let canonical = if module_prefix.is_empty() {

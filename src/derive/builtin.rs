@@ -304,8 +304,8 @@ pub(crate) fn generate_derive(
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
         "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
         "Enum" => Some(derive_enum(type_name, variants, span)),
-        // "Generic" is handled by `expand_derives` via `derive_adt_generic`
-        // because it emits multiple decls (TypeDef + ImplDef).
+        // Any other name is not a built-in derive; `expand_derives` reports it
+        // as an unsupported derive target.
         _ => None,
     }
 }

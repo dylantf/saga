@@ -11,9 +11,6 @@ pub enum Token {
     Ident(String),
     UpperIdent(String),
 
-    /// `'Foo` or `'foo` — type-level symbol literal. Payload is the identifier
-    /// portion without the leading apostrophe.
-
     // Keywords
     True,
     False,

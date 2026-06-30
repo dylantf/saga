@@ -145,10 +145,11 @@ impl Elaborator {
         _trait_type_args: &[Type],
         span: Span,
     ) -> Option<Expr> {
-        // For multi-variable-determinant fundeps, several constraints on the
-        // same self var are distinguished by a determinant suffix baked into
-        // the dict-param's var key. Try the qualified key first; for ordinary
-        // traits the suffix is empty so this is identical to the base lookup.
+        // Dict-param var keys carry an optional suffix to disambiguate several
+        // constraints on the same self var. The suffix-producing machinery
+        // (functional dependencies) was removed, so the suffix is now always
+        // empty and this reduces to the base lookup; the qualified-key form is
+        // retained as the single resolution path.
         let suffix = String::new();
         let qualified_var = format!("{}{}", var_name, suffix);
         if let Some(param_name) = self

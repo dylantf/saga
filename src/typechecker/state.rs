@@ -104,7 +104,7 @@ pub struct TraitMethodInfo {
 pub struct TraitInfo {
     /// Type parameters: first is self, rest are extras.
     /// e.g. `trait ConvertTo a b` -> [("a", Star), ("b", Star)].
-    /// Symbol-kinded params are declared as `(n : Symbol)` in source.
+    /// Every kind is currently `Star`.
     pub type_params: Vec<(String, Kind)>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
@@ -128,7 +128,7 @@ pub struct ImplInfo {
     /// legacy/builtin impl matching by coarse target key only.
     pub target_pattern: Option<Type>,
     /// Extra type arguments applied to the trait, as full Types.
-    /// For parameterized impls (e.g. `impl Generic (Box a) (Rep__Box a)`),
+    /// For parameterized impls (e.g. `impl ConvertTo (Box a) (List a)`),
     /// these reference the impl's target type-parameter Type::Vars listed
     /// in `target_type_param_ids`, so the call-site can substitute the
     /// concrete args of the target to materialize the extras.
@@ -169,10 +169,11 @@ pub struct TraitEvidence {
     /// e.g. for `ConvertTo NOK`, this holds [Type::Con("NOK", [])].
     /// Empty for single-param traits.
     pub trait_type_args: Vec<Type>,
-    /// For `KnownSymbol 'foo` constraints resolved against a concrete symbol
-    /// literal: the symbol's source name (e.g. `"foo"`). The elaborator uses
-    /// this to emit a symbol-flavored intrinsic instead of a normal dict
-    /// lookup. `None` for all other trait evidence.
+    /// Vestigial: this used to carry the source name of a `KnownSymbol 'foo`
+    /// constraint resolved against a concrete symbol literal, so the elaborator
+    /// could emit a symbol-flavored intrinsic. The Symbol kind has been removed,
+    /// so this is now always `None` and no longer read. Kept to avoid churn at
+    /// the (many) `TraitEvidence` construction sites; drop when convenient.
     pub resolved_symbol: Option<String>,
 }
 
@@ -246,34 +247,33 @@ pub struct Checker {
     /// Type name -> number of declared type parameters (for arity checking).
     /// Absent entries (e.g. Tuple) are unchecked.
     pub(crate) type_arity: HashMap<String, usize>,
-    /// Type name -> kinds of declared type parameters (positional). Used by
-    /// `convert_type_expr` to know the expected kind of each argument slot
-    /// in a type application. Absent entries default to all-Star.
+    /// Type name -> kinds of declared type parameters (positional). Kept as
+    /// kind-tracking infrastructure, but since `Kind` now has only `Star` every
+    /// entry is all-Star; absent entries default to all-Star too.
     pub(crate) type_param_kinds: HashMap<String, Vec<Kind>>,
     /// Type aliases (canonical name -> info). Unfolded structurally during
     /// `convert_type_expr` so the rest of the typechecker never sees aliases.
     pub(crate) type_aliases: HashMap<String, TypeAliasInfo>,
     /// Per type-variable id -> declared kind. Absent entries default to
-    /// `Kind::Star`. Populated when a fresh variable is minted for an
-    /// `Symbol`-kinded type parameter (type, trait, impl, effect).
+    /// `Kind::Star`. Since `Kind` now has only `Star`, every entry is `Star`;
+    /// the map is kept as kind infrastructure for a future richer kind system.
     pub(crate) var_kinds: HashMap<u32, Kind>,
     /// Names of type parameters in scope for the binder currently being
     /// checked (e.g. an impl whose body is mid-check). Populated by
     /// `register_impl` before walking each method body and cleared after.
     /// `convert_type_expr` consults this on a `TypeExpr::Var` miss so that
-    /// inline type ascriptions like `(Proxy : Proxy n)` inside a method body
-    /// resolve `n` to the impl's `n` rather than creating a fresh,
-    /// unconstrained var. Without this, polymorphic `KnownSymbol n` impl
-    /// bodies can't reflect the symbol — the Generic migration's library
-    /// impls (`impl ToJson for Variant n a`) depend on it.
+    /// inline type ascriptions like `(x : b)` inside a method body resolve `b`
+    /// to the impl's `b` rather than creating a fresh, unconstrained var. This
+    /// keeps multi-param impl bodies (`impl ConvertTo a b for Box a`) referring
+    /// to the same extra type vars the impl header introduced.
     pub(crate) outer_named_type_vars: HashMap<String, u32>,
     /// Per top-level `fun`: the (name, var_id) mapping for the type params
     /// introduced by its signature annotation. Recorded by
     /// `collect_annotations` so `check_fun_clauses` can seed
     /// `outer_named_type_vars` before checking the body — same fix as for
-    /// impls, applied to functions. Without this, an ascription like
-    /// `(Proxy : Proxy n)` inside a body whose signature also has `n`
-    /// would mint a fresh, unrelated var.
+    /// impls, applied to functions. Without this, an ascription like `(x : b)`
+    /// inside a body whose signature also has `b` would mint a fresh,
+    /// unrelated var.
     pub(crate) fun_type_param_vars: HashMap<String, Vec<(String, u32)>>,
     /// Name resolution map: user-visible names -> canonical names.
     pub(crate) scope_map: ScopeMap,

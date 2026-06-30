@@ -100,11 +100,10 @@ During `build_fun_scheme`, pending constraints from the function body are partit
 
 - **Type variable** (`Type::Var`): The typechecker checks if the variable is in `where_bounds` for the required trait. If so, it records evidence with `resolved_type: None` and `type_var_name: Some("a")`.
 
-Multi-parameter traits add `trait_type_args` to the same process. If a trait
-declares a supported functional dependency, such as `trait Selectable selection
-row | selection -> row`, the typechecker may use the self type to improve or
-pin the extra arguments before recording evidence. See
-[`docs/typechecking.md`](typechecking.md#multi-parameter-traits-and-functional-dependencies)
+Multi-parameter traits add `trait_type_args` to the same process. The extra
+trait arguments are resolved through ordinary unification and impl selection
+(there is no functional-dependency improvement step). See
+[`docs/typechecking.md`](typechecking.md#multi-parameter-traits)
 for the solver details; dictionary passing itself only consumes the resolved
 evidence.
 
@@ -425,13 +424,19 @@ Turns a `KnownImpl` site from `apply (element(i, dict))(…)` into a direct call
   specialize at the consumer" move — BEAM won't inline across modules, so we do
   it at the AST level.
 
-### Generic folding — fuse the `Rep` walk
+### Generic folding — deforest inlined dict-method bodies
 
-`src/codegen/generic_fold.rs` is a **fuel-bounded bottom-up fixpoint AST
+`src/codegen/generic_fold/` is a **fuel-bounded bottom-up fixpoint AST
 rewriter** (`fold_program` → `FoldOutput { program, carried_resolution }`). It
 runs **after `normalize_effects`, before `resolve`**, so every NodeId-keyed
 analysis (resolution, `call_effects`, optimizer) recomputes over the rewritten
 tree, and it is meaning-preserving (Anchor 2: the effect ABI is untouched).
+
+> Historical note: this pass was originally built to fuse the `Rep` walk of the
+> `Generic` deriving machinery, which is why the module is still named
+> `generic_fold`. `Generic`/`Rep`/symbol reflection have since been removed; the
+> rewrites below are trait-neutral general optimizations and survived because
+> they pay off on ordinary dict-method inlining.
 
 - **Parameterized inline (4a / 4a-x).** β-reduces a statically-known
   *parameterized* dict-method call: the conditional impl's method lambda is
@@ -440,15 +445,13 @@ tree, and it is meaning-preserving (Anchor 2: the effect ABI is untouched).
   nullary dict call. 4a-x does this **cross-module** — external impl bodies are
   inlined, freshened, and the producer's resolution remapped onto the fresh
   NodeIds (`carried_resolution`, merged after `resolve_names`).
-- **Rep-cancellation fusion (encode, "Phase 5").** Inlines `to x` together with
-  the codec and cancels the `Rep` constructor tree via
-  `case_of_known_constructor` / `case_of_case`, so the encoder never allocates
-  the `Adt/Variant/And/Labeled/Leaf` tree it would immediately destructure.
-- **Decode/from fusion ("Phase 6").** The mirror for the `from`/decode direction
-  (Rep-anchored — see the gates in the planning doc; do not loosen them).
-- **Literal-key β-reduction (Items 1/2).** Reduces the `apply_name_style ∘
-  symbol_name (Proxy n)` proxy closures to literal field-name keys and
-  propagates a constant `opts` through the recursive codec.
+- **Case-of-known-constructor collapse.** When inlining exposes a `case` whose
+  scrutinee is a literal constructor application, select the matching arm and
+  drop the rest (`case_of_known_constructor`).
+- **Constant-record projection & β-reduction.** Projects a field out of a
+  constant record literal (`(Options {…}).field`) and β-reduces saturated
+  literal-lambda applications, so a constant `opts` threaded through an inlined
+  callee collapses to its literal result.
 
 ### Two correctness findings — do not regress
 
@@ -459,13 +462,14 @@ tree, and it is meaning-preserving (Anchor 2: the effect ABI is untouched).
    sub-scope that re-binds the name (`Case` arms, `Lambda`/handler params,
    `Block` `let`/`letfun`, `Do`, `ListComprehension`, `Receive` — via
    `pat_binds`). Without this, a shadowed scrutinee is rewritten and badmatches
-   at runtime (the original Phase 5 blocker).
+   at runtime.
 2. **`bind_subpats` preserves effect semantics.** It *substitutes* a
    `Var`/`Wildcard` parameter only when the argument `is_duplicable` (pure &
    cheap — var, literal, field access, constructor app of duplicables); a
    non-duplicable argument is let-bound (single-arm `case`) so its effects run
-   exactly once. `to`'s `Rep` trees are field accesses / literals / ctor apps →
-   duplicable, which is what lets fusion proceed without changing effects.
+   exactly once. Inlined dict-method arguments are typically field accesses /
+   literals / ctor apps → duplicable, which is what lets fusion proceed without
+   changing effects.
 
 ### Measuring & debugging
 

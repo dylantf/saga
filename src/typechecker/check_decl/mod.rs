@@ -5,7 +5,7 @@
 //! - `functions`   — `fun` clause checking, scheme building, exhaustiveness
 //! - `types`       — type/alias/record definition registration
 //! - `handlers`    — effect stub/op registration and handler checking
-//! - `constraints` — fundep improvement, pending-constraint and supertrait solving
+//! - `constraints` — pending-constraint and supertrait solving
 //!
 //! Shared free helpers and `FunctionAnnotation` live here and are re-exported to
 //! the submodules via `use super::*`.

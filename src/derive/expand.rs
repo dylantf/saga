@@ -6,16 +6,15 @@ use crate::typechecker::{Diagnostic, Severity};
 /// nodes after each `TypeDef` that has them. Returns diagnostics for
 /// unsupported derive requests.
 ///
-/// `imported` carries trait/type summaries pulled from imported modules so
-/// routed derives (`deriving (Foo)` where `Foo` is imported) can resolve.
-/// Callers without import context can pass `&ImportedDecls::empty()`.
+/// `imported` carries trait/type summaries pulled from imported modules; it is
+/// now used only to let `inherit_trait_defaults` clone default-method bodies
+/// from imported traits. Callers without import context can pass
+/// `&ImportedDecls::empty()`.
 pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
-    // Build a fresh program, splicing each decl's derived siblings in directly
-    // after it. Generic-derived `Rep__T` typedefs and their impls must be
-    // visible before any later user impl whose where-app form mentions
-    // `Generic T r`, otherwise the where-app's coherence lookup fires before
-    // the impl is registered.
+    // Build a fresh program, splicing each decl's derived siblings (the
+    // built-in `deriving (Show, Eq, …)` impls) in directly after the decl they
+    // come from, so they stay adjacent to their type.
     let original = std::mem::take(program);
 
     let current_module = original.iter().find_map(|d| {

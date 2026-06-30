@@ -1102,7 +1102,7 @@ impl Parser {
     }
 
     /// Parse `where {a: Show + Eq, b: Ord}` clause and/or new-form
-    /// `where {Generic Person r}` entries. Returns the two lists separately:
+    /// `where {ConvertTo a b}` entries. Returns the two lists separately:
     /// existing-form `TraitBound`s and new-form `TraitApp`s. Empty vecs if no
     /// `where` keyword.
     fn parse_where_clause(

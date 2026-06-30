@@ -68,7 +68,7 @@ impl Elaborator {
     }
 
     /// Resolve trait type args via the resolution map. For App heads (e.g.
-    /// `Rep__Box a`), uses the head name — only the head identifies the impl
+    /// `List a`), uses the head name — only the head identifies the impl
     /// for dict-name purposes.
     pub(crate) fn resolved_trait_type_args(&self, args: &[crate::ast::TypeExpr]) -> Vec<String> {
         args.iter()

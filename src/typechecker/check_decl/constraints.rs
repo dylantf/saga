@@ -39,9 +39,9 @@ impl Checker {
         // Within each batch, sort so that constraints whose self-type already
         // resolves to a concrete Type::Con are processed first. Constraints
         // whose self is still a Var depend on prior constraints to pin them
-        // (e.g. `ToJson r` waits on `Generic T r`), and erroring on them
-        // before the pinning constraint runs produces spurious "ambiguous"
-        // diagnostics.
+        // (e.g. `Show r` waits on a sibling `ConvertTo T r` to unify `r`), and
+        // erroring on them before the pinning constraint runs produces spurious
+        // "ambiguous" diagnostics.
         loop {
             let mut constraints = std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
@@ -49,11 +49,11 @@ impl Checker {
             }
             constraints.sort_by_key(|(_, _, ty, _, _)| matches!(self.sub.apply(ty), Type::Var(_)));
             // Worklist bookkeeping: a Var-self constraint that isn't resolvable
-            // this pass (e.g. `Show q` before the `Two c q` fundep has pinned
-            // `q`) is *deferred* rather than reported, because a sibling
+            // this pass (e.g. `Show q` before a sibling `ConvertTo c q` has
+            // unified `q`) is *deferred* rather than reported, because a sibling
             // constraint processed later — or a later pass — may still pin it.
             // The sort puts concrete-self constraints first, but it cannot
-            // topologically order the Var-self group by their mutual fundep
+            // topologically order the Var-self group by their mutual
             // dependencies, so deferral + progress retry is what makes solving
             // order-independent.
             let sub_before = self.sub.solved_count();
@@ -460,7 +460,7 @@ impl Checker {
             // queued fresh constraints. Without progress the deferrals are
             // genuinely ambiguous, so re-raise the first one's diagnostic. This
             // bounds the loop — progress is monotone (the substitution only
-            // grows) — while making fundep solving order-independent.
+            // grows) — while making constraint solving order-independent.
             if !deferred.is_empty() {
                 let progressed = self.sub.solved_count() > sub_before
                     || !self.trait_state.pending_constraints.is_empty();

@@ -518,8 +518,8 @@ pub enum Decl {
         target_type_expr: Option<TypeExpr>,
         type_params: Vec<TypeParam>,
         where_clause: Vec<TraitBound>,
-        /// Bare trait-application constraints, e.g. `Generic Person r` in
-        /// `impl ToJson for Person where {Generic Person r, ToJson r}`.
+        /// Bare trait-application constraints, e.g. `ConvertTo a b` in
+        /// `impl Show for Box a where {ConvertTo a b, Show b}`.
         /// See [TraitApp] for semantics.
         where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
@@ -1447,34 +1447,30 @@ pub fn op_dict_param_names(where_clause: &[TraitBound]) -> Vec<String> {
     names
 }
 
-/// A trait's `synthesizes via <Trait> deriving (...)` clause. Marks the trait as
-/// a *record-synthesizing* link: `deriving (Trait NewName)` on a carrier record
-/// generates a new record `NewName` whose fields are the carrier's fields mapped
-/// through the `via` field-map trait, plus a link `impl Trait NewName for Carrier`.
+/// A trait's `synthesizes via <Trait> deriving (...)` clause. Historically this
+/// marked a trait as a *record-synthesizing* link consumed by the routed-derive
+/// expansion (a `deriving (Trait NewName)` on a carrier record generated a new
+/// record `NewName` from the carrier's fields).
 ///
-/// Which parameter is the carrier vs. the synthesized type is read from the
-/// trait's functional dependency: the determinant is the carrier (the record the
-/// derive sits on), the determined parameter is the synthesized type. This keeps
-/// the whole transform library-defined — the compiler holds only the names the
-/// library chose, as data.
+/// The routed-derive / `Generic` machinery that consumed this spec has been
+/// removed, so the clause is currently vestigial: it still parses and
+/// round-trips through the formatter, but nothing downstream reads it. Kept as
+/// data to avoid churn; remove if the surface syntax is also dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SynthesisSpec {
-    /// The field-map trait (a functional `field -> field` relation whose impls
-    /// declare the per-field-type rewrite, e.g. `Col a -> a`).
+    /// The field-map trait whose impls declare the per-field-type rewrite.
     pub via_trait: String,
     pub via_trait_span: Span,
-    /// Derives to attach to the synthesized record (e.g. `InsertRow`). `Generic`
-    /// is auto-included, as with any routed derive.
+    /// Derives to attach to the synthesized record (e.g. `InsertRow`).
     pub attach_derives: Vec<DeriveSpec>,
     pub span: Span,
 }
 
-/// Bare trait-application constraint: `Generic Person r` in a `where` clause.
+/// Bare trait-application constraint: `ConvertTo a b` in a `where` clause.
 /// Unlike `TraitBound`, the self/first parameter is just `type_args[0]`, so
 /// any position may hold a concrete type or a fresh existential type variable
-/// (one not in the surrounding `type_params`). The solver resolves the fresh
-/// vars using the coherence rule of [Phase 1b]: for functional traits like
-/// `Generic`, the bound first parameter determines the rest.
+/// (one not in the surrounding `type_params`), resolved by ordinary impl
+/// selection and unification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitApp {
     pub id: NodeId,

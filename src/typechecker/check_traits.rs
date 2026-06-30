@@ -451,7 +451,7 @@ impl Checker {
 
         // Resolve target type and run overlap/coherence checks before the
         // body type-check. Method bodies mutate the substitution map (they
-        // unify the trait's phantom type vars like `r` in `Generic a r` with
+        // unify the trait's phantom type vars like `b` in `ConvertTo a b` with
         // the impl's return type), so the second impl's body would fail to
         // unify before the overlap check has a chance to fire.
         let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
@@ -742,10 +742,10 @@ impl Checker {
 
         // Expose the impl's own type-param names (with their fresh var IDs) to
         // any nested `convert_type_expr` call inside the method bodies, so an
-        // inline ascription like `(Proxy : Proxy n)` resolves `n` to the
-        // impl's `n` rather than a fresh, unconstrained var. This is what
-        // lets `impl ToJson for Labeled n a where {n : KnownSymbol}` reflect
-        // the symbol at runtime.
+        // inline ascription like `(x : b)` resolves `b` to the impl's `b`
+        // rather than a fresh, unconstrained var. This keeps method bodies of a
+        // multi-param impl such as `impl ConvertTo a b for Box a` referring to
+        // the same `b` the impl header introduced.
         let saved_outer = std::mem::take(&mut self.outer_named_type_vars);
         for (tp, var_id) in type_params.iter().zip(target_type_param_ids.iter()) {
             self.outer_named_type_vars.insert(tp.name.clone(), *var_id);
@@ -768,10 +768,10 @@ impl Checker {
             let trait_param_id = trait_method.trait_param_id;
             // Freshen the trait method's non-self forall vars so that
             // unification in one impl's body doesn't leak into the next.
-            // E.g. for `trait Generic a r`, the `r` var is shared across
+            // E.g. for `trait ConvertTo a b`, the `b` var is shared across
             // impls in the trait's stored signature; without freshening,
-            // the first impl pins `r` globally and subsequent impls with
-            // a different `r` fail to unify.
+            // the first impl pins `b` globally and subsequent impls with
+            // a different `b` fail to unify.
             let mut fresh_mapping: std::collections::HashMap<u32, Type> =
                 std::collections::HashMap::new();
             for id in &trait_method.scheme.forall {

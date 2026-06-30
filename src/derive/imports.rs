@@ -121,10 +121,10 @@ pub(crate) fn collect_summaries_from_imports(
             let summary = module_summary(&prog);
             // Unqualified `import A.B.C` brings names into scope under the last
             // path segment (`C.name`), so the derive scope must register that
-            // prefix too — otherwise a `deriving (C.SomeTrait ...)` can't find
-            // the imported trait's synthesis metadata and silently falls back to
-            // the non-synthesizing path (the synthesized `Rep__*` then never
-            // exists). An explicit `as` alias overrides the segment.
+            // prefix too — otherwise an imported trait referenced by its short
+            // name can't be found when `inherit_trait_defaults` clones its
+            // default-method bodies. An explicit `as` alias overrides the
+            // segment.
             let last_segment = module_name.rsplit('.').next().unwrap_or(&module_name);
             merge_summary_import(
                 out,

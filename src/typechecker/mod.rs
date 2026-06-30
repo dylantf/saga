@@ -524,8 +524,9 @@ impl Checker {
     }
 
     /// Allocate a fresh type variable of the given kind. Star-kinded vars
-    /// are the default and not recorded; Symbol-kinded vars are tracked in
-    /// `var_kinds` so unification can enforce kind correctness.
+    /// are the default and not recorded; any non-Star kind would be tracked in
+    /// `var_kinds` so unification can enforce kind correctness (currently `Kind`
+    /// has only `Star`, so nothing is recorded).
     pub(crate) fn fresh_var_of_kind(&mut self, kind: Kind) -> Type {
         let id = self.next_var;
         self.next_var += 1;

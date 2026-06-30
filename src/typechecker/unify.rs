@@ -717,8 +717,8 @@ impl Checker {
     }
 
     /// Like `convert_type_expr` but enforces that the resulting type has
-    /// kind `expected_kind`. Used to detect kind mismatches such as
-    /// `Maybe 'foo` or `Id Int` (when `Id` expects a Symbol-kinded arg).
+    /// kind `expected_kind`. Kind infrastructure is retained, but since `Kind`
+    /// now has only `Star` no mismatch is currently possible.
     pub(crate) fn convert_type_expr_kinded(
         &mut self,
         texpr: &crate::ast::TypeExpr,

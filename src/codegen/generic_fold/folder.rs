@@ -168,21 +168,19 @@ impl Folder<'_> {
     /// inline fuel never sees an un-collapsed `Rep` tree.
     fn rewrite_once(&mut self, expr: &Expr) -> Option<Expr> {
         // Type ascriptions are erased at codegen; drop them so the rewrites
-        // below see through `(to x : Rep__T)`.
+        // below see through `(x : T)`.
         if let ExprKind::Ascription { expr: inner, .. } = &expr.kind {
             return Some((**inner).clone());
         }
         // Project a field out of a constant record literal: `(Options {…}).field`
         // ⟶ the field value. Exposes `opts.<field>` as a known constructor for the
-        // case-collapse below once a constant `opts` is substituted into a codec.
+        // case-collapse below once a constant `opts` is substituted into a callee.
         if let Some(e) = project_record_field(expr) {
             return Some(e);
         }
-        // β-reduce a saturated application of a literal lambda. The load-bearing
-        // case is `symbol_name`'s reflection closure `(fun __proxy -> "field")(Proxy)`
-        // — elaboration emits one per derived record field; reducing it drops the
-        // phantom `Proxy` and exposes the literal key (the precondition for folding
-        // `apply_name_style` and any later key→iodata fusion).
+        // β-reduce a saturated application of a literal lambda, e.g.
+        // `(fun x -> body)(arg)` ⟶ `body[x := arg]`. Exposes the result as a
+        // known value for the case-collapse and inlining rewrites below.
         if let Some(e) = beta_reduce_lambda_app(expr) {
             return Some(e);
         }

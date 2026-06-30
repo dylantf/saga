@@ -35,11 +35,10 @@ pub(crate) fn known_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 /// match can't be decided statically (a guard on a matching arm, or an
 /// undecidable pattern shape) — in which case the case is left intact.
 ///
-/// Not restricted to `Rep` constructors: this fires on `Ok`/`Err` too (Phase 6
-/// cancels the `Result` wrapper threaded through the decode codec). It is sound
-/// and bounded for arbitrary constructors because it only matches a scrutinee
-/// that is a *literal* constructor application — a shape that arises from the
-/// fold's own inlining/commuting, not from ordinary source.
+/// Fires on any constructor (`Ok`/`Err`, user ADTs, …). It is sound and bounded
+/// because it only matches a scrutinee that is a *literal* constructor
+/// application — a shape that arises from the fold's own inlining/commuting, not
+/// from ordinary source.
 /// Project a field out of a compile-time-constant record literal:
 /// `(Options { rename_all: AsIs, … }).rename_all` ⟶ `AsIs`. This is what makes a
 /// constant `opts` argument, once substituted into an inlined codec body, fold to
@@ -316,12 +315,10 @@ pub(crate) fn clone_fresh_pat(pat: &Pat) -> Pat {
 /// β-reduce a saturated application of a *literal* lambda:
 /// `(fun p… -> body)(a…)` ⟶ `body` with each `p` bound to its `a`.
 ///
-/// Reuses [`bind_subpats`]: each duplicable argument is substituted inline (so
-/// the phantom `Proxy` arg of a `symbol_name` closure is dropped and the body's
-/// literal symbol is exposed). The substitution is capture-avoiding
-/// ([`substitute_var`]) and the lambda body keeps its NodeIds (the node appears
-/// once and is replaced in place, never duplicated), so resolution entries stay
-/// valid.
+/// Reuses [`bind_subpats`]: each duplicable argument is substituted inline. The
+/// substitution is capture-avoiding ([`substitute_var`]) and the lambda body
+/// keeps its NodeIds (the node appears once and is replaced in place, never
+/// duplicated), so resolution entries stay valid.
 ///
 /// **Only fires when every argument is [`is_duplicable`]** (pure: vars, literals,
 /// constructors, field accesses). This is the soundness boundary, not just a
@@ -338,10 +335,9 @@ pub(crate) fn clone_fresh_pat(pat: &Pat) -> Pat {
 /// for a later pass.
 ///
 /// Note this runs as part of the generic fold, which short-circuits in a module
-/// with **no dict constructors** ([`fold_program`]'s `ctors.is_empty()` guard).
-/// That is exactly the right scope: derived reflection closures only exist in a
-/// module that derives something (so its dict constructors are present), and a
-/// bare `symbol_name (Proxy …)` in a deriving-free module is not worth folding.
+/// with **no dict constructors** ([`fold_program`]'s `ctors.is_empty()` guard):
+/// the fusible shapes all arise from inlined dict-method bodies, so a module
+/// with no dictionaries has nothing for this pass to do.
 pub(crate) fn beta_reduce_lambda_app(expr: &Expr) -> Option<Expr> {
     let (head, args) = peel_app(expr);
     let ExprKind::Lambda { params, body } = &head.kind else {

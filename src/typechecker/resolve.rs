@@ -807,7 +807,7 @@ impl<'a> Resolver<'a> {
                     self.resolve_type_expr(target_type_expr);
                 }
                 // Resolve types appearing in the impl's trait_type_args
-                // (e.g. `impl Generic (Box a) (Rep__Box a)` → resolve Rep__Box).
+                // (e.g. `impl ConvertTo (Box a) (List a)` → resolve List).
                 // TypeExpr::Var (lowercase ident) is treated as a type variable
                 // and skipped by resolve_type_expr; named heads get type_ref entries.
                 let _ = type_params;

@@ -130,23 +130,20 @@ impl Elaborator {
     }
 
     /// Like [`dict_params_from_where`], but emits bounds that carry trait type
-    /// arguments (multi-parameter traits, e.g. `field: ReadLeft out`) ahead of
-    /// those that don't (e.g. `n: KnownSymbol`). This mirrors the order in
-    /// which the call site applies sub-dictionaries: `dict_for_type`
-    /// ([`dict_resolve`]) runs `param_constraints_by_var_with_args` before
+    /// arguments (multi-parameter traits, e.g. `field: ConvertTo out`) ahead of
+    /// those that don't (e.g. `a: Show`). This mirrors the order in which the
+    /// call site applies sub-dictionaries: `dict_for_type` ([`dict_resolve`])
+    /// runs `param_constraints_by_var_with_args` before
     /// `param_constraints_by_var`, so a conditional impl's dict-constructor
     /// parameters must line up positionally with the args passed to it.
     ///
     /// Without this split, a where clause that *interleaves* the two kinds —
-    /// `where {n: KnownSymbol, field: ReadLeft out}` — builds a constructor
-    /// `(__dict_KnownSymbol_n, __dict_ReadLeft_field)` (source order) but is
-    /// called with `(ReadLeft_field, KnownSymbol_n)`, binding the symbol-name
-    /// String to `__dict_ReadLeft_field` and the ReadLeft dict tuple to
-    /// `__dict_KnownSymbol_n` — a runtime crash when the latter is appended as
-    /// a String. The where-clause order matters for any impl mixing a single-
-    /// param bound with a multi-param bound; codecs over single-param traits
-    /// (all bounds in `param_constraints_by_var`) are unaffected, which is why
-    /// the derived `saga_json` path never hit this.
+    /// `where {a: Show, field: ConvertTo out}` — builds a constructor
+    /// `(__dict_Show_a, __dict_ConvertTo_field)` (source order) but is called
+    /// with `(ConvertTo_field, Show_a)`, binding each dict to the wrong
+    /// parameter — a runtime crash. The where-clause order matters for any impl
+    /// mixing a single-param bound with a multi-param bound; impls whose bounds
+    /// are all single-param (all in `param_constraints_by_var`) are unaffected.
     pub(crate) fn dict_params_from_where_call_order(
         &self,
         where_clause: &[TraitBound],

@@ -351,8 +351,8 @@ impl Checker {
         }
 
         // Inherit kind annotations for type-variable IDs introduced by the
-        // module (e.g. symbol-kinded `n` from `type Proxy (n : Symbol) = ...`),
-        // so subsequent instantiations of imported schemes preserve kinds.
+        // module so subsequent instantiations of imported schemes preserve
+        // kinds (currently all `Star`).
         for (id, kind) in &mod_checker.var_kinds {
             self.var_kinds.entry(*id).or_insert(*kind);
         }
