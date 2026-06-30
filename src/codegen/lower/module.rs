@@ -95,6 +95,7 @@ pub(super) fn lower_head_debug_label(head: &Expr) -> String {
         ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
         ExprKind::RecordCreate { name, fields, .. } => format!("record({name}/{})", fields.len()),
         ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
+        ExprKind::RecordBuild { fields, .. } => format!("record-build/{}", fields.len()),
         ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
         ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),
         ExprKind::App { .. } => "app-head".to_string(),

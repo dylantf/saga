@@ -114,6 +114,21 @@ pub(super) fn add_decl_type_symbols(
                 add_type_expr_symbols(index, uri, line_index, source, &field.node.1, check);
             }
         }
+        ast::Decl::RecordBuilderDef {
+            id,
+            context,
+            context_span,
+            ..
+        } => {
+            if let Some(resolved) = check.resolved_type_name_for_node(*id) {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    resolved.to_string(),
+                    name_range(context_span.start, context, line_index, source),
+                );
+            }
+        }
         ast::Decl::EffectDef {
             name,
             name_span,

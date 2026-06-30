@@ -11847,3 +11847,164 @@ fn impl_for_tuple_missing_element_constraint_is_error() {
         err.message
     );
 }
+
+fn record_builder_fixture(body: &str) -> String {
+    format!(
+        "type Projection a = Projection a\n\
+         fun projection_start : (a -> b) -> Projection (a -> b)\n\
+         projection_start f = Projection f\n\
+         fun projection_field : String -> Projection a -> Projection (a -> b) -> Projection b\n\
+         projection_field _ arg ctor = case arg {{\n\
+           Projection a -> case ctor {{\n\
+             Projection f -> Projection (f a)\n\
+           }}\n\
+         }}\n\
+         record builder Projection {{ start: projection_start, field: projection_field }}\n\
+         record User {{ name: String, age: Int }}\n\
+         let name_p = Projection \"Ada\"\n\
+         let age_p = Projection 42\n\
+         {}",
+        body
+    )
+}
+
+#[test]
+fn record_build_named_typechecks_through_builder_functions() {
+    check(&record_builder_fixture(
+        "fun ok : Unit -> Projection User\n\
+         ok () = build Projection User { age: age_p, name: name_p }\n",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn record_build_anonymous_typechecks_with_synthesized_constructor() {
+    check(&record_builder_fixture(
+        "fun ok : Unit -> Projection { age: Int, name: String }\n\
+         ok () = build Projection { name: name_p, age: age_p }\n",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn record_build_named_reports_missing_field() {
+    let err = check(&record_builder_fixture(
+        "fun bad : Unit -> Projection User\n\
+         bad () = build Projection User { name: name_p }\n",
+    ))
+    .err()
+    .expect("expected missing-field diagnostic");
+    assert!(
+        err.message.contains("missing field") && err.message.contains("age"),
+        "expected missing-field diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn record_build_named_reports_unknown_field() {
+    let err = check(&record_builder_fixture(
+        "fun bad : Unit -> Projection User\n\
+         bad () = build Projection User { name: name_p, age: age_p, bogus: age_p }\n",
+    ))
+    .err()
+    .expect("expected unknown-field diagnostic");
+    assert!(
+        err.message.contains("unknown field") && err.message.contains("bogus"),
+        "expected unknown-field diagnostic, got: {}",
+        err.message
+    );
+}
+
+fn record_builder_module() -> &'static str {
+    r#"
+module Db
+
+pub type Selection = Selection
+pub type Projection a = Projection a
+
+pub fun projection_start : (a -> b) -> Projection (a -> b)
+projection_start f = Projection f
+
+pub fun projection_field : String -> Projection a -> Projection (a -> b) -> Projection b
+projection_field _ arg ctor = case arg {
+  Projection a -> case ctor {
+    Projection f -> Projection (f a)
+  }
+}
+
+pub record builder Selection {
+  start: projection_start,
+  field: projection_field,
+}
+
+pub record User {
+  name: String,
+  age: Int,
+}
+
+pub fun name_p : Projection String
+name_p = Projection "Ada"
+
+pub fun age_p : Projection Int
+age_p = Projection 42
+"#
+}
+
+#[test]
+fn record_builder_imported_with_context_type() {
+    let main = r#"
+module Main
+import Db (Selection, Projection, User, name_p, age_p)
+
+fun ok : Unit -> Projection User
+ok () = build Selection User { name: name_p, age: age_p }
+"#;
+
+    check_with_project_files(&[("src/Db.saga", record_builder_module())], main).unwrap();
+}
+
+#[test]
+fn record_builder_reexported_with_public_all_import() {
+    let lib = r#"
+module Lib
+import Db (pub ..)
+"#;
+    let main = r#"
+module Main
+import Lib (Selection, Projection, User, name_p, age_p)
+
+fun ok : Unit -> Projection User
+ok () = build Selection User { name: name_p, age: age_p }
+"#;
+
+    check_with_project_files(
+        &[
+            ("src/Db.saga", record_builder_module()),
+            ("src/Lib.saga", lib),
+        ],
+        main,
+    )
+    .unwrap();
+}
+
+#[test]
+fn private_record_builder_is_not_imported_with_context_type() {
+    let db = record_builder_module().replace("pub record builder", "record builder");
+    let main = r#"
+module Main
+import Db (Selection, Projection, User, name_p, age_p)
+
+fun bad : Unit -> Projection User
+bad () = build Selection User { name: name_p, age: age_p }
+"#;
+
+    let err = check_with_project_files(&[("src/Db.saga", db.as_str())], main)
+        .err()
+        .expect("expected missing record builder diagnostic");
+    assert!(
+        err.message.contains("no record builder"),
+        "expected missing record builder diagnostic, got: {}",
+        err.message
+    );
+}

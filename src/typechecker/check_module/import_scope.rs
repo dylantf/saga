@@ -58,6 +58,9 @@ pub(super) fn synthesize_all_exposed(
     for name in exports.handlers.keys() {
         push(name, &mut items, &mut seen);
     }
+    for name in exports.record_builders.keys() {
+        push(name, &mut items, &mut seen);
+    }
     items
 }
 
@@ -268,6 +271,13 @@ pub(super) fn resolve_import(
         }
     }
 
+    for builder in exports.record_builders.values() {
+        scope
+            .record_builders
+            .entry(builder.context.clone())
+            .or_insert_with(|| builder.clone());
+    }
+
     // Builtin types (Dict, Set, List, ...) are compiler builtins, not declared
     // in any `.saga` file, so they never appear in `exports.type_arity`. Without
     // this, a qualified reference like `Dict.Dict` (or `Std.Dict.Dict`) finds no
@@ -469,6 +479,12 @@ pub(super) fn resolve_import(
         scope
             .origins
             .entry(bare_name.clone())
+            .or_insert_with(|| module.clone());
+    }
+    for canonical_context in scope.record_builders.keys() {
+        scope
+            .origins
+            .entry(canonical_context.clone())
             .or_insert_with(|| module.clone());
     }
 

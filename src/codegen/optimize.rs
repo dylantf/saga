@@ -349,7 +349,9 @@ pub(super) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 visit(element);
             }
         }
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::AnonRecordCreate { fields }
+        | ExprKind::RecordBuild { fields, .. } => {
             for (_, _, field) in fields {
                 visit(field);
             }

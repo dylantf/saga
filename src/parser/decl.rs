@@ -124,6 +124,9 @@ impl Parser {
                 self.advance(); // consume 'opaque'
                 self.parse_type_def(true, true)
             }
+            Token::Record if matches!(self.peek_at(1), Token::Ident(s) if s == "builder") => {
+                self.parse_record_builder_def(false)
+            }
             Token::Record => self.parse_record_def(false),
             Token::Let => {
                 let start = self.tokens[self.pos].span;
@@ -174,6 +177,9 @@ impl Parser {
                     Token::Opaque => {
                         self.advance(); // consume 'opaque'
                         self.parse_type_def(true, true)
+                    }
+                    Token::Record if matches!(self.peek_at(1), Token::Ident(s) if s == "builder") => {
+                        self.parse_record_builder_def(true)
                     }
                     Token::Record => self.parse_record_def(true),
                     Token::Effect => self.parse_effect_def(true),
@@ -256,6 +262,99 @@ impl Parser {
             dangling_trivia,
             span: start.to(end),
         })
+    }
+
+    // Parses: record builder <Context> { start: <function>, field: <function> }
+    fn parse_record_builder_def(&mut self, public: bool) -> Result<Decl, ParseError> {
+        let start_span = self.tokens[self.pos].span;
+        self.advance(); // consume 'record'
+        let builder_tok = self.expect_ident()?;
+        if builder_tok != "builder" {
+            return Err(ParseError {
+                message: "expected `builder` after `record`".to_string(),
+                span: self.tokens[self.pos - 1].span,
+            });
+        }
+
+        let context_span = self.tokens[self.pos].span;
+        let context = self.parse_upper_name()?;
+        self.expect(Token::LBrace)?;
+
+        let mut start: Option<(String, Span)> = None;
+        let mut field: Option<(String, Span)> = None;
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let key_span = self.tokens[self.pos].span;
+            let key = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let value_span = self.tokens[self.pos].span;
+            let value = self.parse_value_name_path()?;
+            match key.as_str() {
+                "start" if start.is_none() => start = Some((value, value_span)),
+                "field" if field.is_none() => field = Some((value, value_span)),
+                "start" | "field" => {
+                    return Err(ParseError {
+                        message: format!("duplicate record builder entry `{}`", key),
+                        span: key_span,
+                    });
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: format!("unknown record builder entry `{}`", key),
+                        span: key_span,
+                    });
+                }
+            }
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+            }
+        }
+
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+        let (start, start_span) = start.ok_or_else(|| ParseError {
+            message: "record builder missing `start` entry".to_string(),
+            span: start_span.to(end),
+        })?;
+        let (field, field_span) = field.ok_or_else(|| ParseError {
+            message: "record builder missing `field` entry".to_string(),
+            span: start_span.to(end),
+        })?;
+
+        Ok(Decl::RecordBuilderDef {
+            id: NodeId::fresh(),
+            doc: vec![],
+            public,
+            context,
+            context_span,
+            start,
+            start_span,
+            field,
+            field_span,
+            span: start_span.to(end),
+        })
+    }
+
+    fn parse_value_name_path(&mut self) -> Result<String, ParseError> {
+        let mut name = match self.advance() {
+            Token::Ident(s) | Token::UpperIdent(s) => s,
+            tok => {
+                return Err(ParseError {
+                    message: format!("expected function name, got {:?}", tok),
+                    span: self.tokens[self.pos - 1].span,
+                });
+            }
+        };
+        while matches!(self.peek(), Token::Dot)
+            && matches!(self.peek_at(1), Token::Ident(_) | Token::UpperIdent(_))
+        {
+            self.advance();
+            let segment = match self.advance() {
+                Token::Ident(s) | Token::UpperIdent(s) => s,
+                _ => unreachable!(),
+            };
+            name = format!("{name}.{segment}");
+        }
+        Ok(name)
     }
 
     fn parse_type_def(&mut self, public: bool, opaque: bool) -> Result<Decl, ParseError> {

@@ -328,6 +328,12 @@ pub fn format_expr(expr: &Expr) -> Doc {
 
         ExprKind::RecordCreate { name, fields, .. } => format_record_create(Some(name), fields),
         ExprKind::AnonRecordCreate { fields } => format_record_create(None, fields),
+        ExprKind::RecordBuild {
+            context,
+            record,
+            fields,
+            ..
+        } => format_record_build(context, record.as_ref(), fields),
 
         ExprKind::RecordUpdate { record, fields, .. } => {
             let field_docs: Vec<Doc> = fields
@@ -665,6 +671,7 @@ pub fn format_expr_atom(expr: &Expr) -> Doc {
         | ExprKind::FieldAccess { .. }
         | ExprKind::Tuple { .. }
         | ExprKind::Block { .. }
+        | ExprKind::RecordBuild { .. }
         | ExprKind::StringInterp { .. }
         | ExprKind::ListLit { .. }
         | ExprKind::Ascription { .. }
@@ -684,6 +691,22 @@ fn format_record_create(name: Option<&String>, fields: &[(String, Span, Expr)]) 
     };
     // flat: Name { a: 1, b: 2 }
     // broken: Name {\n  a: 1,\n  b: 2,\n}
+    format_comma_list_spaced(opener, "}", field_docs)
+}
+
+fn format_record_build(
+    context: &str,
+    record: Option<&String>,
+    fields: &[(String, Span, Expr)],
+) -> Doc {
+    let field_docs: Vec<Doc> = fields
+        .iter()
+        .map(|(fname, _, val)| docs![Doc::text(format!("{}: ", fname)), format_expr(val)])
+        .collect();
+    let opener = match record {
+        Some(record) => Doc::text(format!("build {} {} {{", context, record)),
+        None => Doc::text(format!("build {} {{", context)),
+    };
     format_comma_list_spaced(opener, "}", field_docs)
 }
 

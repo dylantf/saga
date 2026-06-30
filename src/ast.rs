@@ -224,6 +224,7 @@ pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
         Decl::FunSignature { doc: d, .. }
         | Decl::TypeDef { doc: d, .. }
         | Decl::RecordDef { doc: d, .. }
+        | Decl::RecordBuilderDef { doc: d, .. }
         | Decl::EffectDef { doc: d, .. }
         | Decl::HandlerDef { doc: d, .. }
         | Decl::TraitDef { doc: d, .. }
@@ -431,6 +432,20 @@ pub enum Decl {
         multiline: bool,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
+        span: Span,
+    },
+
+    /// `record builder Projection { start: projection_start, field: projection_field }`
+    RecordBuilderDef {
+        id: NodeId,
+        doc: Vec<String>,
+        public: bool,
+        context: String,
+        context_span: Span,
+        start: String,
+        start_span: Span,
+        field: String,
+        field_span: Span,
         span: Span,
     },
 
@@ -685,6 +700,15 @@ pub enum ExprKind {
     /// `{ street: "Main St", city: "Portland" }` (anonymous record)
     AnonRecordCreate { fields: Vec<(String, Span, Expr)> },
 
+    /// `build Projection User { name: name_p }` or `build Projection { name: name_p }`
+    RecordBuild {
+        context: String,
+        context_span: Span,
+        record: Option<String>,
+        record_span: Option<Span>,
+        fields: Vec<(String, Span, Expr)>,
+    },
+
     /// `{ user | age: user.age + 1 }`
     RecordUpdate {
         record: Box<Expr>,
@@ -858,7 +882,9 @@ impl Expr {
             ExprKind::UnaryMinus { expr, .. } => expr.contains_resume(),
             ExprKind::Tuple { elements, .. } => elements.iter().any(|e| e.contains_resume()),
             ExprKind::FieldAccess { expr, .. } => expr.contains_resume(),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            ExprKind::RecordCreate { fields, .. }
+            | ExprKind::AnonRecordCreate { fields, .. }
+            | ExprKind::RecordBuild { fields, .. } => {
                 fields.iter().any(|(_, _, e)| e.contains_resume())
             }
             ExprKind::RecordUpdate { record, fields, .. } => {

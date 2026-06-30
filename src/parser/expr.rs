@@ -42,6 +42,69 @@ impl Parser {
         Ok(fields)
     }
 
+    fn parse_upper_path_with_span(&mut self) -> Result<(String, Span), ParseError> {
+        let start = self.tokens[self.pos].span;
+        let mut name = self.expect_upper_ident()?;
+        while matches!(self.peek(), Token::Dot) && matches!(self.peek_at(1), Token::UpperIdent(_)) {
+            self.advance(); // consume '.'
+            let segment = self.expect_upper_ident()?;
+            name = format!("{name}.{segment}");
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Ok((name, start.to(end)))
+    }
+
+    fn record_build_ahead_after_build(&self) -> bool {
+        let mut i = 0;
+        if !matches!(self.peek_at(i), Token::UpperIdent(_)) {
+            return false;
+        }
+        i += 1;
+        while matches!(self.peek_at(i), Token::Dot)
+            && matches!(self.peek_at(i + 1), Token::UpperIdent(_))
+        {
+            i += 2;
+        }
+        if matches!(self.peek_at(i), Token::LBrace) {
+            return true;
+        }
+        if !matches!(self.peek_at(i), Token::UpperIdent(_)) {
+            return false;
+        }
+        i += 1;
+        while matches!(self.peek_at(i), Token::Dot)
+            && matches!(self.peek_at(i + 1), Token::UpperIdent(_))
+        {
+            i += 2;
+        }
+        matches!(self.peek_at(i), Token::LBrace)
+    }
+
+    fn parse_record_build(&mut self, build_span: Span) -> Result<Expr, ParseError> {
+        let (context, context_span) = self.parse_upper_path_with_span()?;
+        let (record, record_span) = if matches!(self.peek(), Token::UpperIdent(_)) {
+            let (record, record_span) = self.parse_upper_path_with_span()?;
+            (Some(record), Some(record_span))
+        } else {
+            (None, None)
+        };
+        self.expect(Token::LBrace)?;
+        let fields = self.parse_record_fields()?;
+        let end = self.tokens[self.pos].span;
+        self.expect(Token::RBrace)?;
+        Ok(Expr {
+            id: self.next_id(),
+            span: build_span.to(end),
+            kind: ExprKind::RecordBuild {
+                context,
+                context_span,
+                record,
+                record_span,
+                fields,
+            },
+        })
+    }
+
     /// Return the binding power of the next token if it's a binary operator.
     fn peek_binop_bp(&self) -> Option<u8> {
         match self.peek() {
@@ -892,6 +955,9 @@ impl Parser {
                         kind,
                     },
                 })
+            }
+            Token::Ident(i) if i == "build" && self.record_build_ahead_after_build() => {
+                self.parse_record_build(span)
             }
             Token::Ident(i) => Ok(Expr {
                 id: self.next_id(),

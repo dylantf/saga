@@ -23,8 +23,8 @@ pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use crate::ast::*;
 pub(crate) use crate::token::{Span, StringKind};
 pub(crate) use crate::typechecker::{
-    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, ResolvedValue, TraitEvidence, TraitInfo, Type,
-    WhereAppDictParam,
+    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo,
+    Type, WhereAppDictParam,
 };
 
 mod anon_record;
@@ -260,6 +260,8 @@ pub(crate) struct Elaborator {
     /// Finalized per-node type information for resolving record names in
     /// FieldAccess/RecordUpdate.
     pub(crate) type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Record definitions, used to lower record builders in declaration order.
+    pub(crate) records: HashMap<String, RecordInfo>,
     /// var_id -> source name for where-clause-bound type vars. Used by
     /// `dict_for_type`'s `Type::Var` branch to translate a polymorphic
     /// var-id back to the source name so it can find the matching where-

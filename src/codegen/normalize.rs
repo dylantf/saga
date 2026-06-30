@@ -356,6 +356,10 @@ impl Normalizer {
                 Expr::rebuild_like(expr, ExprKind::AnonRecordCreate { fields: new_fields })
             }
 
+            ExprKind::RecordBuild { .. } => {
+                unreachable!("record builds should be elaborated before normalization")
+            }
+
             // RecordUpdate: normalize record and field values.
             ExprKind::RecordUpdate {
                 record,
@@ -732,6 +736,7 @@ mod tests {
             | Decl::TypeDef { .. }
             | Decl::TypeAlias { .. }
             | Decl::RecordDef { .. }
+            | Decl::RecordBuilderDef { .. }
             | Decl::EffectDef { .. }
             | Decl::TraitDef { .. }
             | Decl::Import { .. }
@@ -835,7 +840,9 @@ mod tests {
             }
             ExprKind::UnaryMinus { expr } => walk(expr, ids),
             ExprKind::FieldAccess { expr, .. } => walk(expr, ids),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            ExprKind::RecordCreate { fields, .. }
+            | ExprKind::AnonRecordCreate { fields }
+            | ExprKind::RecordBuild { fields, .. } => {
                 for (_, _, value) in fields {
                     walk(value, ids);
                 }

@@ -4,12 +4,13 @@ use super::{
     HeaderExposedItem, HeaderExposing, HeaderFunction, HeaderReExport, HeaderTypeDecl,
     HeaderTypeExpr, ModuleHeader,
 };
-use crate::typechecker::{ScopeMap, canonical_join};
+use crate::typechecker::{RecordBuilderInfo, ScopeMap, canonical_join};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HeaderTypeSurface {
     canonical: String,
     constructors: Vec<HeaderConstructorSurface>,
+    record_builder: Option<RecordBuilderInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +118,12 @@ fn insert_header_qualified_entries(
     }
     for (name, info) in &surface.types {
         insert_qualified(&mut scope.types, &info.canonical, module_name, prefix, name);
+        if let Some(builder) = &info.record_builder {
+            scope
+                .record_builders
+                .entry(builder.context.clone())
+                .or_insert_with(|| builder.clone());
+        }
     }
     for (name, canonical) in &surface.constructors {
         insert_qualified(
@@ -203,6 +210,12 @@ fn insert_header_exposed_item(
                 .entry(ctor.surface_name.clone())
                 .or_insert_with(|| ctor.canonical.clone());
         }
+        if let Some(builder) = &info.record_builder {
+            scope
+                .record_builders
+                .entry(builder.context.clone())
+                .or_insert_with(|| builder.clone());
+        }
         found = true;
     }
     if found {
@@ -246,6 +259,7 @@ fn insert_header_origins(scope: &mut ScopeMap) {
         .chain(scope.effects.values())
         .chain(scope.traits.values())
         .chain(scope.types.values())
+        .chain(scope.record_builders.keys())
         .cloned()
         .collect::<Vec<_>>();
     for canonical in canonicals {
@@ -328,6 +342,7 @@ fn local_header_surface(module_name: &str, header: &ModuleHeader) -> HeaderSurfa
             HeaderTypeSurface {
                 canonical: canonical_join(module_name, name),
                 constructors: constructors.clone(),
+                record_builder: None,
             },
         );
         for ctor in constructors {
@@ -348,6 +363,7 @@ fn local_header_surface(module_name: &str, header: &ModuleHeader) -> HeaderSurfa
                         surface_name: name.clone(),
                         canonical: canonical.clone(),
                     }],
+                    record_builder: None,
                 },
             );
             surface.constructors.insert(name.clone(), canonical.clone());
@@ -387,7 +403,47 @@ fn local_header_surface(module_name: &str, header: &ModuleHeader) -> HeaderSurfa
             surface.values.insert(name.clone(), canonical);
         }
     }
+    for builder in header.record_builders.values() {
+        if !builder.public {
+            continue;
+        }
+        let context_surface = builder
+            .context
+            .rsplit('.')
+            .next()
+            .unwrap_or(builder.context.as_str());
+        let Some(start) = resolve_local_header_value(&surface, module_name, &builder.start) else {
+            continue;
+        };
+        let Some(field) = resolve_local_header_value(&surface, module_name, &builder.field) else {
+            continue;
+        };
+        let Some(context_type) = surface.types.get_mut(context_surface) else {
+            continue;
+        };
+        context_type.record_builder = Some(RecordBuilderInfo {
+            context: context_type.canonical.clone(),
+            start,
+            field,
+        });
+    }
     surface
+}
+
+fn resolve_local_header_value(
+    surface: &HeaderSurface,
+    module_name: &str,
+    name: &str,
+) -> Option<String> {
+    surface.values.get(name).cloned().or_else(|| {
+        name.rsplit_once('.').and_then(|(module, value)| {
+            if module == module_name {
+                surface.values.get(value).cloned()
+            } else {
+                Some(name.to_string())
+            }
+        })
+    })
 }
 
 fn merge_explicit_header_re_export(

@@ -892,13 +892,13 @@ mod tests {
             Err("input removed: src/Main.saga".to_string())
         );
         assert_eq!(
-            compare_input_fingerprints(&expected, &vec![fingerprint("src/Main.saga", "def")]),
+            compare_input_fingerprints(&expected, &[fingerprint("src/Main.saga", "def")]),
             Err("input changed: src/Main.saga".to_string())
         );
         assert_eq!(
             compare_input_fingerprints(
                 &expected,
-                &vec![
+                &[
                     fingerprint("src/Main.saga", "abc"),
                     fingerprint("src/Extra.saga", "def")
                 ]
@@ -981,16 +981,13 @@ mod tests {
             Err("dependency removed: path:dep:/dep".to_string())
         );
         assert_eq!(
-            compare_dependency_fingerprints(
-                &expected,
-                &vec![dep_fingerprint("path:dep:/dep", "def")]
-            ),
+            compare_dependency_fingerprints(&expected, &[dep_fingerprint("path:dep:/dep", "def")]),
             Err("dependency changed: path:dep:/dep".to_string())
         );
         assert_eq!(
             compare_dependency_fingerprints(
                 &expected,
-                &vec![
+                &[
                     dep_fingerprint("path:dep:/dep", "abc"),
                     dep_fingerprint("path:extra:/extra", "def")
                 ]

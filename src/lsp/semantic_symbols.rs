@@ -595,6 +595,26 @@ fn add_expr_type_symbols(
                 add_expr_type_symbols(index, uri, line_index, source, value, check);
             }
         }
+        ast::ExprKind::RecordBuild {
+            record,
+            record_span,
+            fields,
+            ..
+        } => {
+            if let (Some(record), Some(record_span)) = (record, record_span)
+                && let Some(resolved) = check.resolved_type_name_for_node(expr.id)
+            {
+                add_type_reference_symbol(
+                    index,
+                    uri,
+                    resolved.to_string(),
+                    name_range(record_span.start, record, line_index, source),
+                );
+            }
+            for (_, _, value) in fields {
+                add_expr_type_symbols(index, uri, line_index, source, value, check);
+            }
+        }
         ast::ExprKind::RecordUpdate { record, fields, .. } => {
             add_expr_type_symbols(index, uri, line_index, source, record, check);
             for (_, _, value) in fields {

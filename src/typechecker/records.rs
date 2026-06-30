@@ -1,5 +1,7 @@
-use crate::ast::Expr;
-use crate::token::Span;
+use std::collections::{HashMap, HashSet};
+
+use crate::ast::{Expr, ExprKind, Lit, NodeId, Pat};
+use crate::token::{Span, StringKind};
 
 use super::{Checker, Diagnostic, Type};
 
@@ -83,6 +85,172 @@ impl Checker {
         }
         typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         Ok(Type::Record(typed_fields))
+    }
+
+    pub(crate) fn infer_record_build(
+        &mut self,
+        node_id: NodeId,
+        record: Option<&str>,
+        fields: &[(String, Span, Expr)],
+        span: Span,
+    ) -> Result<Type, Diagnostic> {
+        let Some(builder) = self.resolution.record_builder(node_id).cloned() else {
+            return Err(Diagnostic::error_at(
+                span,
+                "no record builder is defined for this build context",
+            ));
+        };
+
+        let (constructor, field_order) = if let Some(record) = record {
+            let resolved_name = self.resolved_record_type_name(node_id, record);
+            let info = self.records.get(&resolved_name).cloned().ok_or_else(|| {
+                Diagnostic::error_at(span, format!("undefined record type: {}", record))
+            })?;
+            if !self.validate_named_record_build(&resolved_name, &info.fields, fields, span) {
+                return Ok(Type::Error);
+            }
+            let field_order: Vec<String> =
+                info.fields.iter().map(|(name, _)| name.clone()).collect();
+            (
+                self.named_record_build_constructor(&resolved_name, &field_order, span),
+                field_order,
+            )
+        } else {
+            let mut seen = HashSet::new();
+            for (name, field_span, _) in fields {
+                if !seen.insert(name.as_str()) {
+                    self.collected_diagnostics.push(Diagnostic::error_at(
+                        *field_span,
+                        format!("duplicate field '{}' in anonymous record build", name),
+                    ));
+                }
+            }
+            let mut field_order: Vec<String> =
+                fields.iter().map(|(name, _, _)| name.clone()).collect();
+            field_order.sort();
+            let constructor = self.anonymous_record_build_constructor(&field_order, span);
+            (constructor, field_order)
+        };
+
+        let mut chain = app(value_ref(&builder.start, span), constructor, span);
+        let field_exprs: HashMap<&str, &Expr> = fields
+            .iter()
+            .map(|(name, _, expr)| (name.as_str(), expr))
+            .collect();
+        for field_name in field_order {
+            let Some(field_expr) = field_exprs.get(field_name.as_str()) else {
+                continue;
+            };
+            let label = Expr::synth(
+                span,
+                ExprKind::Lit {
+                    value: Lit::String(field_name.clone(), StringKind::Normal),
+                },
+            );
+            let field_fn = app(value_ref(&builder.field, span), label, span);
+            let field_fn = app(field_fn, (*field_expr).clone(), span);
+            chain = app(field_fn, chain, span);
+        }
+
+        let ty = self.infer_expr(&chain)?;
+        self.record_type(node_id, &ty);
+        Ok(ty)
+    }
+
+    fn validate_named_record_build(
+        &mut self,
+        record_name: &str,
+        record_fields: &[(String, Type)],
+        fields: &[(String, Span, Expr)],
+        span: Span,
+    ) -> bool {
+        let mut valid = true;
+        let declared: HashSet<&str> = record_fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut provided = HashSet::new();
+        for (name, field_span, expr) in fields {
+            if !declared.contains(name.as_str()) {
+                valid = false;
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    *field_span,
+                    format!("unknown field '{}' on record {}", name, record_name),
+                ));
+                let _ = self.infer_expr(expr);
+                continue;
+            }
+            if !provided.insert(name.as_str()) {
+                valid = false;
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    *field_span,
+                    format!("duplicate field '{}' in record build", name),
+                ));
+            }
+        }
+
+        let missing: Vec<&str> = record_fields
+            .iter()
+            .filter(|(name, _)| !provided.contains(name.as_str()))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            valid = false;
+            self.collected_diagnostics.push(Diagnostic::error_at(
+                span,
+                format!(
+                    "missing field{} on record {}: {}",
+                    if missing.len() == 1 { "" } else { "s" },
+                    record_name,
+                    missing.join(", "),
+                ),
+            ));
+        }
+        valid
+    }
+
+    fn anonymous_record_build_constructor(&self, field_order: &[String], span: Span) -> Expr {
+        let fields: Vec<(String, Span, Expr)> = field_order
+            .iter()
+            .map(|name| {
+                let var_name = record_build_param_name(name);
+                (
+                    name.clone(),
+                    span,
+                    Expr::synth(span, ExprKind::Var { name: var_name }),
+                )
+            })
+            .collect();
+        let body = Expr::synth(span, ExprKind::AnonRecordCreate { fields });
+        curried_constructor_lambda(field_order, body, span)
+    }
+
+    fn named_record_build_constructor(
+        &self,
+        record_name: &str,
+        field_order: &[String],
+        span: Span,
+    ) -> Expr {
+        let fields: Vec<(String, Span, Expr)> = field_order
+            .iter()
+            .map(|name| {
+                let var_name = record_build_param_name(name);
+                (
+                    name.clone(),
+                    span,
+                    Expr::synth(span, ExprKind::Var { name: var_name }),
+                )
+            })
+            .collect();
+        let body = Expr::synth(
+            span,
+            ExprKind::RecordCreate {
+                name: record_name.to_string(),
+                fields,
+                record_name: None,
+            },
+        );
+        curried_constructor_lambda(field_order, body, span)
     }
 
     pub(crate) fn infer_record_update(
@@ -299,4 +467,54 @@ impl Checker {
             )),
         }
     }
+}
+
+fn app(func: Expr, arg: Expr, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(func),
+            arg: Box::new(arg),
+        },
+    )
+}
+
+fn value_ref(name: &str, span: Span) -> Expr {
+    if let Some((module, value)) = name.rsplit_once('.') {
+        Expr::synth(
+            span,
+            ExprKind::QualifiedName {
+                module: module.to_string(),
+                name: value.to_string(),
+                canonical_module: None,
+            },
+        )
+    } else {
+        Expr::synth(
+            span,
+            ExprKind::Var {
+                name: name.to_string(),
+            },
+        )
+    }
+}
+
+fn record_build_param_name(field: &str) -> String {
+    format!("__record_build_{}", field)
+}
+
+fn curried_constructor_lambda(field_order: &[String], body: Expr, span: Span) -> Expr {
+    field_order.iter().rev().fold(body, |body, name| {
+        Expr::synth(
+            span,
+            ExprKind::Lambda {
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: record_build_param_name(name),
+                    span,
+                }],
+                body: Box::new(body),
+            },
+        )
+    })
 }

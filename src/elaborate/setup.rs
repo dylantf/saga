@@ -277,6 +277,7 @@ impl Elaborator {
             scope_map_effects: result.scope_map.effects.clone(),
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
+            records: result.records.clone(),
             where_bound_var_names: result.where_bound_var_names.clone(),
         }
     }

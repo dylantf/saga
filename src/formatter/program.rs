@@ -217,6 +217,29 @@ fn format_decl(decl: &Decl) -> Doc {
         Decl::TypeDef { .. } => format_type_def(decl),
         Decl::TypeAlias { .. } => format_type_alias(decl),
         Decl::RecordDef { .. } => format_record_def(decl),
+        Decl::RecordBuilderDef {
+            public,
+            context,
+            start,
+            field,
+            ..
+        } => {
+            let prefix = if *public { "pub " } else { "" };
+            docs![
+                Doc::text(format!("{prefix}record builder {} {{", context)),
+                Doc::nest(
+                    2,
+                    docs![
+                        Doc::hardline(),
+                        Doc::text(format!("start: {},", start)),
+                        Doc::hardline(),
+                        Doc::text(format!("field: {},", field))
+                    ]
+                ),
+                Doc::hardline(),
+                Doc::text("}")
+            ]
+        }
         Decl::EffectDef {
             doc,
             public,

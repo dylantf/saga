@@ -1041,15 +1041,15 @@ import SeshImporter.D
         .filter_map(|item| item["label"].as_str())
         .collect();
     assert!(
-        labels.iter().any(|label| *label == "SeshImporter.DbSchema"),
+        labels.contains(&"SeshImporter.DbSchema"),
         "saved module should still complete: {result:?}"
     );
     assert!(
-        labels.iter().any(|label| *label == "SeshImporter.Database"),
+        labels.contains(&"SeshImporter.Database"),
         "other saved module should complete: {result:?}"
     );
     assert!(
-        !labels.iter().any(|label| *label == "SeshImporter.D"),
+        !labels.contains(&"SeshImporter.D"),
         "dirty partial module name should not complete: {result:?}"
     );
     let database = result
