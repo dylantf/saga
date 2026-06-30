@@ -1,10 +1,17 @@
-//! Phase 4/5 (generic fold): trait-neutral inlining of known dict-method calls,
-//! and cancellation of the intermediate `Generic` `Rep` constructor tree.
+//! Trait-neutral deforestation pass: inline statically-known dict-method calls
+//! (collapsing parameterized dict chains, including across modules) and fold the
+//! constructors they expose — constant record-field projection, β-reduction of
+//! immediately-applied lambdas, and case-of-known-constructor collapse.
 //!
-//! See the submodules for the phases:
+//! Historically this pass also cancelled the `Generic` representation tree
+//! (`Rep__T`/`Leaf`/`Labeled`/…), which is why it is still named `generic_fold`;
+//! that machinery was removed with the Generic deriving system. What remains is
+//! the general dict/constant optimizer, which applies to ordinary trait dispatch.
+//!
+//! See the submodules:
 //! - `externals`  — collecting cross-module dict-ctors/funs as inline sources
 //! - `folder`     — the `Folder` engine and `fold_program` entry point
-//! - `rewrite`    — local rewrite rules (known-ctor matching, case-of-case, β-reduction)
+//! - `rewrite`    — local rewrite rules (known-ctor matching, β-reduction)
 //! - `substitute` — variable substitution and AST traversal helpers
 //!
 //! Shared types, constants, and the view structs live here and reach the
@@ -42,26 +49,6 @@ pub(crate) const INLINE_FUEL: u32 = 64;
 /// "inline-to-cancel" carry. Keeps the carried-function set small (dispatch
 /// helpers like `apply_name_style`) and bounds the code a single inline can add.
 pub(crate) const FUN_INLINE_SIZE_CAP: usize = 64;
-
-/// The `Generic` routing trait and its `to` method index. The fusion driver
-/// inlines `to` (the `Rep` builder) so its constructor result can be cancelled
-/// against the codec's case-matches. (`from`, the decode direction, is Phase 6.)
-pub(crate) const GENERIC_TRAIT: &str = "Std.Generic.Generic";
-
-pub(crate) const GENERIC_TO_METHOD: usize = 0;
-
-/// `Generic.from` (the `Rep` *consumer*, decode direction). Inlining it exposes
-/// the consuming `case rep { Rep__T (…) -> T … }` so the produced `Rep` cancels.
-pub(crate) const GENERIC_FROM_METHOD: usize = 1;
-
-/// The `Std.Generic` representation constructors. The fusion engine only cancels
-/// *these* (plus the per-type `Rep__T` wrappers), which scopes it to the
-/// Generic-routing machinery — trait-agnostic across `ToJson`/`PostgresRow`/… —
-/// rather than inlining arbitrary user/stdlib codecs (which would broaden the
-/// blast radius and risk breaking their scoping).
-pub(crate) const REP_CTORS: &[&str] = &[
-    "U1", "Leaf", "Labeled", "And", "Or_Left", "Or_Right", "Variant", "Record", "Adt",
-];
 
 /// A parameterized `DictConstructor` defined in another compiled module, with
 /// the producer's resolution map for carrying its body's name resolutions.

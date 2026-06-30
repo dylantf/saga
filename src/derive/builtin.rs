@@ -2,6 +2,46 @@ use super::*;
 use crate::ast::*;
 use crate::token::Span;
 use crate::token::StringKind;
+use crate::typechecker::Diagnostic;
+
+/// Dispatch a built-in derive request on a record to the matching generator.
+///
+/// Returns the decls to splice into the program, or:
+///   - `Err(None)` for "unsupported trait, use the default cannot-derive error"
+///   - `Err(Some(diag))` for a specific diagnostic
+pub(crate) fn generate_record_derive(
+    _public: bool,
+    trait_name: &str,
+    record_name: &str,
+    type_params: &[TypeParam],
+    fields: &[Annotated<(String, TypeExpr)>],
+    span: Span,
+) -> Result<Vec<Decl>, Option<Diagnostic>> {
+    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+    match bare {
+        "Show" | "Debug" => Ok(vec![derive_record_stringify(
+            bare,
+            if bare == "Show" { "show" } else { "debug" },
+            record_name,
+            type_params,
+            fields,
+            span,
+        )]),
+        "Eq" => Ok(vec![derive_marker_trait(
+            "Eq",
+            record_name,
+            type_params,
+            span,
+        )]),
+        "Default" => Ok(vec![derive_record_default(
+            record_name,
+            type_params,
+            fields,
+            span,
+        )]),
+        _ => Err(None),
+    }
+}
 
 /// Generate `impl Show/Debug for R { show/debug r = "R { field: " <> show/debug r.field <> ... <> "}" }`
 pub(crate) fn derive_record_stringify(

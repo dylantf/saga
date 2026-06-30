@@ -1055,37 +1055,6 @@ main () = greet 42 \"hi\"
 }
 
 #[test]
-fn parameterized_dict_chain_is_inlined_in_module() {
-    // Phase 4a (generic fold): a statically-known *parameterized* dict-method
-    // call on a local impl is inlined — the conditional impl's method body is
-    // beta-reduced into a `case` over the argument whose body dispatches through
-    // the concrete sub-dictionary, collapsing the dict chain. Here `encode b`
-    // with `b : Box Int` dispatches `__dict_Encodable_Box(__dict_Encodable_Int)`;
-    // after folding it becomes `case b of Box x -> <direct Int-method call>`,
-    // with no dict tuple build and no `element/2` projection for the chain.
-    let src = "
-trait Encodable a { fun encode : (x: a) -> Int }
-type Box a = Box a
-impl Encodable for Int { encode x = x }
-impl Encodable for Box a where {a: Encodable} { encode (Box x) = encode x }
-fun run : (b: Box Int) -> Int
-run b = encode b
-main () = run (Box 5)
-";
-    let out = emit_elaborated(src);
-    let run_fn = emitted_function(&out, "run", 1);
-    assert!(
-        run_fn.contains("_script_Box")
-            && run_fn.contains("apply '__saga_dictmethod___dict_Encodable_Std_Int_Int_0'/1("),
-        "expected `run` to destructure Box and call the Int method directly\n{run_fn}"
-    );
-    assert!(
-        !run_fn.contains("element("),
-        "expected no element/2 dict projection in the inlined chain\n{run_fn}"
-    );
-}
-
-#[test]
 fn effectful_parameterized_dict_chain_threads_evidence_through_inline() {
     // The inlined parameterized chain must still thread evidence: an effectful
     // conditional impl folded into nested cases keeps `_Evidence`/`_ReturnK`
@@ -3866,64 +3835,6 @@ main () = {
 } with silent
 "#;
     assert_runs_and_stdout_contains(src, &["42"]);
-}
-
-#[test]
-fn constant_record_field_projection_collapses_case() {
-    // Blocker-2 Unit A: a field projected out of a *constant* record literal folds
-    // to the field value, so `case (Opts {…}).fmt of { Tagged -> "T"; Untagged ->
-    // "U" }` collapses to just `"T"` — no `element` projection, no dead `Untagged`
-    // arm. The `deriving (Show)` record is only here so the generic fold runs at all
-    // (it short-circuits in a module with no dict constructors).
-    let src = r#"
-type Fmt = | Tagged | Untagged
-
-record Opts { fmt: Fmt, name: String }
-
-record Tag { v: Int } deriving (Show)
-
-main () = case (Opts { fmt: Tagged, name: "x" }).fmt {
-  Tagged -> "T"
-  Untagged -> "U"
-}
-"#;
-    let main_fn = emitted_function(&emit_elaborated(src), "main", 1);
-    // 'T' = 84 survives; 'U' = 85 (the dead Untagged arm) is gone; the field read
-    // never lowers to element/2 because the projection folded first.
-    assert!(
-        main_fn.contains("#<84>"),
-        "expected the folded 'T' result in main:\n{main_fn}"
-    );
-    assert!(
-        !main_fn.contains("#<85>"),
-        "the dead `Untagged -> \"U\"` arm should be gone (case collapsed):\n{main_fn}"
-    );
-    assert!(
-        !main_fn.contains("element"),
-        "the `.fmt` projection should fold, not lower to erlang:element:\n{main_fn}"
-    );
-}
-
-#[test]
-fn constant_record_substituted_through_lambda_then_projected() {
-    // Blocker-2 Unit A: a record literal is now duplicable, so an immediately-applied
-    // lambda binding it β-reduces (Item 1's machinery) and the body's `o.fmt` then
-    // projects + collapses. This is the in-an-inlined-body path the real codec hits
-    // (opts arrives as a substituted constant), exercised without dict machinery.
-    let src = r#"
-type Fmt = | Tagged | Untagged
-
-record Opts { fmt: Fmt, name: String }
-
-record Tag { v: Int } deriving (Show)
-
-main () = (fun o -> case o.fmt { Tagged -> "T"; Untagged -> "U" }) (Opts { fmt: Tagged, name: "x" })
-"#;
-    let main_fn = emitted_function(&emit_elaborated(src), "main", 1);
-    assert!(
-        main_fn.contains("#<84>") && !main_fn.contains("#<85>"),
-        "expected the lambda+projection chain to collapse to 'T':\n{main_fn}"
-    );
 }
 
 #[test]

@@ -448,24 +448,6 @@ pub(crate) fn record_field_bound_names(fields: &[(String, Option<Pat>)], out: &m
     }
 }
 
-/// Free variables across a list of case arms (each arm pattern binds within its
-/// guard + body). Binder-aware so a name bound *inside* an arm isn't counted as
-/// free — the case-of-case capture guard needs the precise set, not an
-/// over-approximation (the decode codec reuses `e` for every `Err` arm).
-pub(crate) fn free_vars_arms(arms: &[Annotated<CaseArm>]) -> std::collections::HashSet<String> {
-    let mut acc = std::collections::HashSet::new();
-    for ann in arms {
-        let arm = &ann.node;
-        let mut bound = Vec::new();
-        pat_bound_names(&arm.pattern, &mut bound);
-        if let Some(g) = &arm.guard {
-            collect_free_vars(g, &bound, &mut acc);
-        }
-        collect_free_vars(&arm.body, &bound, &mut acc);
-    }
-    acc
-}
-
 /// Collect free `Var` names of `expr` into `acc`, treating names in `bound` (and
 /// any binders encountered along the way) as not free. Mirrors the binder
 /// structure of [`substitute_var`].

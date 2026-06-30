@@ -1,9 +1,10 @@
 use super::*;
 
-/// Inline known dict-method calls throughout a module's function and
-/// dict-constructor bodies, cancelling `Generic` `Rep` constructors where they
-/// become statically visible. `externals`/`external_funs` supply cross-module
-/// impls and carryable plain functions; pass empty maps for local-only folding.
+/// Inline statically-known dict-method calls throughout a module's function and
+/// dict-constructor bodies, then collapse the constructors they expose
+/// (constant record projection, β-reduction, case-of-known-constructor).
+/// `externals`/`external_funs` supply cross-module impls and carryable plain
+/// functions; pass empty maps for local-only folding.
 pub fn fold_program(
     program: &Program,
     externals: &ExternalCtors<'_>,
@@ -188,20 +189,6 @@ impl Folder<'_> {
         if let Some(e) = case_of_known_constructor(expr) {
             return Some(e);
         }
-        // Phase 6 (decode): `case (case S {…}) {…}` ⟶ commute, so the producer
-        // codec's `Ok (RepCtor …)` meets the consuming `from`/`Result` case.
-        if let Some(e) = case_of_case(expr) {
-            return Some(e);
-        }
-        if let Some(e) = float_case_out_of_arg(expr) {
-            return Some(e);
-        }
-        // Phase 6 (decode): inline a nullary producer codec that is the scrutinee
-        // of a case, so its `Ok (RepCtor …)` result becomes a literal ctor under
-        // that case (which `case_of_case` + cancellation then collapse).
-        if let Some(e) = self.inline_codec_scrutinee(expr) {
-            return Some(e);
-        }
         // Inline-to-cancel a dispatch-shaped plain function (e.g. `apply_name_style
         // AsIs "id"`) when a constructor argument makes its body's `case` collapse.
         if let Some(e) = self.try_inline_fun(expr) {
@@ -217,9 +204,7 @@ impl Folder<'_> {
     fn try_inline(&mut self, expr: &Expr) -> Option<Expr> {
         let (head, args) = peel_app(expr);
         let ExprKind::DictMethodAccess {
-            dict,
-            trait_name,
-            method_index,
+            dict, method_index, ..
         } = &head.kind
         else {
             return None;
@@ -230,85 +215,14 @@ impl Folder<'_> {
             return None; // `Var` head => runtime dict; leave on the dispatch path.
         };
 
-        // Nullary dicts normally lower to a direct call (Phase 2/3). Inline a
-        // nullary body only in a *fusion* context, where the inline immediately
-        // unblocks constructor cancellation: it's `Generic.to` (the `Rep`
-        // builder, encode) or `Generic.from` (the `Rep` consumer, decode), or its
-        // argument is already a known `Rep` constructor (a codec walking a known
-        // `Rep`). Otherwise leave it — e.g. `encode u.id` on a plain value stays
-        // a direct leaf call. Parameterized dicts (Phase 4a) always inline.
+        // Nullary dicts lower to a direct call (Phase 2/3); there is nothing to
+        // fuse, so leave them on the dispatch path. Only parameterized dicts
+        // (Phase 4a) are inlined here, collapsing the dict chain.
         if sub_dicts.is_empty() {
-            let is_generic_to = trait_name == GENERIC_TRAIT && *method_index == GENERIC_TO_METHOD;
-            let is_generic_from =
-                trait_name == GENERIC_TRAIT && *method_index == GENERIC_FROM_METHOD;
-            let arg_is_rep_ctor = args.iter().any(|a| known_rep_ctor(a).is_some());
-            if !is_generic_to && !is_generic_from && !arg_is_rep_ctor {
-                return None;
-            }
+            return None;
         }
 
         self.perform_inline(name, &sub_dicts, &args, *method_index)
-    }
-
-    /// Inline a nullary producer codec that is the *scrutinee* of a case (decode
-    /// direction). The routed-from codec `FromJson_Rep__T.from_json s` is nullary
-    /// and its argument is the input (not a `Rep` ctor), so the `try_inline` gates
-    /// don't fire — but its result is `Ok (RepCtor …)`, consumed by the enclosing
-    /// `case`. Inlining it here makes that `Ok (RepCtor …)` a literal ctor under
-    /// the case, which `case_of_case` + cancellation then collapse. Gated on the
-    /// codec body being a constructor-producing `case` (a `Result`-map), so it
-    /// never inlines arbitrary nullary methods that merely sit in scrutinee
-    /// position.
-    fn inline_codec_scrutinee(&mut self, expr: &Expr) -> Option<Expr> {
-        let ExprKind::Case {
-            scrutinee,
-            arms,
-            dangling_trivia,
-        } = &expr.kind
-        else {
-            return None;
-        };
-        let (head, sargs) = peel_app(scrutinee);
-        let ExprKind::DictMethodAccess {
-            dict, method_index, ..
-        } = &head.kind
-        else {
-            return None;
-        };
-        let (dict_head, sub_dicts) = peel_app(dict);
-        let ExprKind::DictRef { name } = &dict_head.kind else {
-            return None;
-        };
-        // Only nullary codecs here; parameterized ones inline via `try_inline`.
-        if !sub_dicts.is_empty() || !self.codec_body_produces_rep(name, *method_index) {
-            return None;
-        }
-        let inlined = self.perform_inline(name, &sub_dicts, &sargs, *method_index)?;
-        Some(Expr::synth(
-            expr.span,
-            ExprKind::Case {
-                scrutinee: Box::new(inlined),
-                arms: arms.clone(),
-                dangling_trivia: dangling_trivia.clone(),
-            },
-        ))
-    }
-
-    /// True when dict `name`'s method `method_index` body is a `Rep`-producing
-    /// `case` — the routed-from bridge shape `case _ { Ok x -> Ok (Rep__T x); Err
-    /// e -> Err e }`. Used to gate [`Self::inline_codec_scrutinee`] so it only
-    /// inlines genuine `Rep`-tree producers.
-    fn codec_body_produces_rep(&self, name: &str, method_index: usize) -> bool {
-        let Some(ctor) = self.ctors.get(name) else {
-            return false;
-        };
-        let Some(method) = ctor.methods.get(method_index) else {
-            return false;
-        };
-        let ExprKind::Lambda { body, .. } = &method.kind else {
-            return false;
-        };
-        body_is_rep_producing_case(body)
     }
 
     /// Perform the inline: look up dict `name`'s method `method_index`, β-reduce

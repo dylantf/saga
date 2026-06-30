@@ -8179,83 +8179,6 @@ fn function_with_row_claiming_unavailable_effect_still_rejected() {
     );
 }
 
-fn module_tojson_lib() -> &'static str {
-    "module JsonLib\n\
-     import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
-     pub trait ToJson a { fun to_json : a -> String }\n\
-     pub fun helper : Unit -> Unit\n\
-     helper () = ()\n\
-     impl ToJson for U1 { to_json _ = \"null\" }\n\
-     impl ToJson for Int { to_json n = show n }\n\
-     impl ToJson for String { to_json s = s }\n\
-     impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
-     impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} { to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x }\n\
-     impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
-     impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
-     impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} { to_json (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x }\n\
-     impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = to_json inner }\n\
-     impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n"
-}
-
-#[test]
-fn routed_derive_respects_selective_import_visibility() {
-    let err = check_with_project_files(
-        &[("src/JsonLib.saga", module_tojson_lib())],
-        "import JsonLib (helper)\n\
-         record Person { name: String, age: Int }\n  deriving (ToJson)\n",
-    )
-    .err()
-    .expect("expected derive error");
-    assert!(
-        err.message.contains("trait is not in scope"),
-        "expected ToJson to be hidden by selective import; got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn routed_derive_reports_ambiguous_imported_bare_trait() {
-    let lib_a = "module A\npub trait ToJson a { fun to_json : a -> String }\n";
-    let lib_b = "module B\npub trait ToJson a { fun to_json : a -> String }\n";
-    let err = check_with_project_files(
-        &[("src/A.saga", lib_a), ("src/B.saga", lib_b)],
-        "import A\n\
-         import B\n\
-         record Person { name: String }\n  deriving (ToJson)\n",
-    )
-    .err()
-    .expect("expected ambiguous derive error");
-    assert!(
-        err.message.contains("ambiguous")
-            && err.message.contains("A.ToJson")
-            && err.message.contains("B.ToJson"),
-        "expected ambiguous ToJson diagnostic; got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn routed_from_derive_reports_ambiguous_imported_wrapper() {
-    let lib_a = "module A\npub type Wrapped a = WrappedA a\n";
-    let lib_b = "module B\npub type Wrapped a = WrappedB a\n";
-    let err = check_with_project_files(
-        &[("src/A.saga", lib_a), ("src/B.saga", lib_b)],
-        "import A\n\
-         import B\n\
-         trait Decode a { fun decode : String -> Wrapped a }\n\
-         record Person { name: String }\n  deriving (Decode)\n",
-    )
-    .err()
-    .expect("expected ambiguous wrapper error");
-    assert!(
-        err.message.contains("ambiguous")
-            && err.message.contains("A.Wrapped")
-            && err.message.contains("B.Wrapped"),
-        "expected ambiguous Wrapped diagnostic; got: {}",
-        err.message
-    );
-}
-
 #[test]
 fn where_app_accepts_impl_type_parameter_as_old_bound_sugar() {
     check(
@@ -8269,79 +8192,6 @@ fn where_app_accepts_impl_type_parameter_as_old_bound_sugar() {
          go b = pretty b",
     )
     .unwrap();
-}
-
-#[test]
-fn phase3_routed_derive_from_direction_unsupported_wrapper() {
-    // Phase 7: structural wrappers (custom sums like MyResult) now succeed;
-    // the truly unsupported shape is one with `a` nested at a non-leaf
-    // position, e.g. `Yep (List a)`. That's what this test pins now.
-    let src = "type Wrapped a = Yep (List a) | Nope\n\
-               trait FromJson a { fun from_json : String -> Wrapped a }\n\
-               record Person { name: String, age: Int }\n  deriving (FromJson)\n";
-    let err = check(src).err().expect("expected error");
-    assert!(
-        err.message.contains("nested in a non-leaf") && err.message.contains("Wrapped"),
-        "expected nested-a diagnostic naming the wrapper; got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn phase7_routed_derive_nested_under_list_still_rejected() {
-    // `a` nested under a non-product container (`List`) stays rejected — that
-    // would need functor/Generic recursion the derive doesn't do.
-    let src = "trait Decode a { fun decode : Int -> Result (List a) String }\n\
-               record Foo { x: Int }\n  deriving (Decode)\n";
-    let err = check(src).err().expect("expected error");
-    assert!(
-        err.message.contains("nested in a non-leaf") && err.message.contains("List"),
-        "expected nested-a diagnostic naming List; got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn phase7_routed_derive_nested_in_recursive_record_rejected() {
-    // `a` reachable only through a self-referential record trips the recursion
-    // guard rather than looping.
-    let src = "record R a { self_ref: R a, v: a }\n\
-               trait Decode a { fun decode : Int -> Result (R a) String }\n\
-               record Foo { x: Int }\n  deriving (Decode)\n";
-    let err = check(src).err().expect("expected error");
-    assert!(
-        err.message.contains("recursive"),
-        "expected recursion-guard diagnostic; got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn phase7_opaque_wrapper_diagnostic() {
-    // Wrapper used in the trait method's return is not defined in the
-    // current module or imports — clear diagnostic, names the wrapper.
-    let src = "trait FromX a { fun from_x : String -> NotDefined a }\n\
-               record Person { name: String }\n  deriving (FromX)\n";
-    let err = check(src).err().expect("expected error");
-    assert!(
-        err.message.contains("NotDefined") && err.message.contains("not defined"),
-        "expected opaque-wrapper diagnostic naming the wrapper; got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn phase7_no_a_position_diagnostic() {
-    // Wrapper takes `a` but doesn't actually carry it in any field.
-    let src = "type Hide a = Hide String\n\
-               trait FromHide a { fun from_hide : String -> Hide a }\n\
-               record Person { name: String }\n  deriving (FromHide)\n";
-    let err = check(src).err().expect("expected error");
-    assert!(
-        err.message.contains("Hide") && err.message.contains("self type"),
-        "expected no-a-position diagnostic; got: {}",
-        err.message
-    );
 }
 
 #[test]
@@ -8977,22 +8827,6 @@ fn insertable_derive_generated_field_rejects_bare_value() {
 }
 
 #[test]
-fn synthesize_derive_errors_on_unmapped_field() {
-    // A field whose type matches no `via`-trait impl has no mapping; the derive
-    // reports it rather than silently dropping or miscompiling the field.
-    let result = check(&format!(
-        "{INSERTABLE_MOCK}\
-         record Bad {{ raw: Int }}\n  deriving (Insertable BadInsert)\n"
-    ));
-    assert!(result.is_err(), "expected an unmapped-field error");
-    let msg = result.err().unwrap().message;
-    assert!(
-        msg.contains("InsertField") && msg.contains("mapping"),
-        "expected a missing-mapping diagnostic, got: {msg}"
-    );
-}
-
-#[test]
 fn insertable_derive_fundep_rejects_unrelated_record() {
     // The same caller must reject a record that is not `Users`' insert type:
     // no `Insertable Users Other` impl exists.
@@ -9079,59 +8913,6 @@ run _ = Db.do_insert (users_table ()) (Other { foo: 1 })\n";
         main,
     );
     assert!(result.is_err(), "expected unrelated record to be rejected");
-}
-
-#[test]
-fn applied_selectable_derive_rejects_non_functional_trait() {
-    let err = check(
-        "record User { id: Int } deriving (Generic)\n\
-         record Users { id: Int } deriving (Selectable User)\n\
-         trait Selectable selection row {\n\
-           fun to_row : selection -> row\n\
-         }\n",
-    )
-    .err()
-    .expect("expected non-functional trait diagnostic");
-    assert!(
-        err.message.contains("functional two-parameter trait"),
-        "expected functional-trait diagnostic, got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn applied_selectable_derive_rejects_wrong_method_shape() {
-    let err = check(
-        "record User { id: Int } deriving (Generic)\n\
-         record Users { id: Int } deriving (Selectable User)\n\
-         trait Selectable selection row | selection -> row {\n\
-           fun to_row : selection -> Int\n\
-         }\n",
-    )
-    .err()
-    .expect("expected method-shape diagnostic");
-    assert!(
-        err.message.contains("method `to_row` must have shape"),
-        "expected method-shape diagnostic, got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn applied_selectable_derive_rejects_tuple_row_argument() {
-    let err = check(
-        "record Users { id: Int } deriving (Selectable (Int, String))\n\
-         trait Selectable selection row | selection -> row {\n\
-           fun to_row : selection -> row\n\
-         }\n",
-    )
-    .err()
-    .expect("expected row argument diagnostic");
-    assert!(
-        err.message.contains("row argument must be a named type"),
-        "expected row argument diagnostic, got: {}",
-        err.message
-    );
 }
 
 #[test]
