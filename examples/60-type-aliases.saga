@@ -8,11 +8,6 @@ type alias UserId = Int
 # Parameterized alias.
 type alias Bag a = List a
 
-# Symbol-tagged ids — paired with the type-symbols feature.
-type Id (k : Symbol) = Id Int
-type alias PostId = Id 'post
-type alias OrderId = Id 'order
-
 fun next_user_id : UserId -> UserId
 next_user_id n = n + 1
 
@@ -28,12 +23,5 @@ main () = {
 
   let xs : Bag Int = [1, 2, 3]
   println (show (bag_sum xs))
-
-  let post : PostId = Id 7
-  let order : OrderId = Id 99
-  let _ = post
-  let _ = order
-  # `let bad : PostId = order` would fail — the symbols disagree
-  # even though both unfold to `Id Int`.
   println "type aliases ok"
 } with console

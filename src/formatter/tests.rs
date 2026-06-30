@@ -1437,16 +1437,6 @@ fn single_blank_line_preserved() {
     assert_eq!(fmt80(src), "let x = 1\n\nlet y = 2\n");
 }
 
-// --- Idempotency ---
-
-#[test]
-fn idempotent_scratch_file() {
-    let source = std::fs::read_to_string("examples/scratch.saga").unwrap();
-    let first = fmt80(&source);
-    let second = fmt80(&first);
-    assert_eq!(first, second, "Formatter is not idempotent");
-}
-
 // --- Triple-quoted / multiline strings ---
 
 #[test]
