@@ -3476,102 +3476,6 @@ fn import_dotdot_mixed_with_names_is_error() {
     );
 }
 
-// --- Symbol literals and kind-annotated type parameters ---
-
-#[test]
-fn type_decl_with_symbol_kinded_param() {
-    let program = parse("type Variant (n : Symbol) a = Variant a");
-    let Decl::TypeDef { type_params, .. } = &program[0] else {
-        panic!("expected TypeDef");
-    };
-    assert_eq!(type_params.len(), 2);
-    assert_eq!(type_params[0].name, "n");
-    assert_eq!(type_params[0].kind, Kind::Symbol);
-    assert_eq!(type_params[1].name, "a");
-    assert_eq!(type_params[1].kind, Kind::Star);
-}
-
-#[test]
-fn type_decl_proxy_symbol_only() {
-    let program = parse("type Proxy (n : Symbol) = Proxy");
-    let Decl::TypeDef { type_params, .. } = &program[0] else {
-        panic!("expected TypeDef");
-    };
-    assert_eq!(type_params.len(), 1);
-    assert_eq!(type_params[0].kind, Kind::Symbol);
-}
-
-#[test]
-fn trait_decl_with_symbol_kinded_param() {
-    let program =
-        parse("trait KnownSymbol (n : Symbol) {\n  fun symbol_name : Proxy n -> String\n}");
-    let Decl::TraitDef { type_params, .. } = &program[0] else {
-        panic!("expected TraitDef");
-    };
-    assert_eq!(type_params.len(), 1);
-    assert_eq!(type_params[0].name, "n");
-    assert_eq!(type_params[0].kind, Kind::Symbol);
-}
-
-#[test]
-fn symbol_literal_in_type_position() {
-    let program = parse("type UserId = Id 'user");
-    let Decl::TypeDef { variants, .. } = &program[0] else {
-        panic!("expected TypeDef");
-    };
-    // UserId has a single variant `Id 'user` — the second field is a symbol.
-    let ctor = &variants[0].node;
-    assert_eq!(ctor.name, "Id");
-    assert_eq!(ctor.fields.len(), 1);
-    let (_, fty) = &ctor.fields[0];
-    assert!(
-        matches!(fty, TypeExpr::Symbol { name, .. } if name == "user"),
-        "expected symbol literal, got {:?}",
-        fty
-    );
-}
-
-#[test]
-fn symbol_literal_in_expr_position_errors() {
-    let err = parse_program_error("let x = 'Foo");
-    assert!(
-        err.message.contains("symbol literals"),
-        "got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn unknown_kind_errors() {
-    let err = parse_program_error("type T (n : Bogus) = T");
-    assert!(
-        err.message.contains("unknown kind") && err.message.contains("Bogus"),
-        "got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn symbol_decl_formatter_roundtrip() {
-    use crate::formatter::format;
-
-    let src = "type Variant (n : Symbol) a = Variant a\n";
-    let tokens = crate::lexer::Lexer::new(src).lex().unwrap();
-    let parsed = Parser::new(tokens).parse_program_annotated().unwrap();
-    let formatted = format(&parsed, 80);
-
-    assert!(
-        formatted.contains("(n : Symbol)"),
-        "formatted output missing kind annotation: {}",
-        formatted
-    );
-
-    let tokens2 = Lexer::new(&formatted).lex().unwrap();
-    let parsed2 = Parser::new(tokens2).parse_program_annotated().unwrap();
-    let format2 = format(&parsed2, 80);
-    assert_eq!(formatted, format2, "format is not idempotent");
-}
-
 // --- Type aliases ---
 
 #[test]
@@ -3599,17 +3503,6 @@ fn type_alias_pub_parses() {
         panic!("expected TypeAlias");
     };
     assert!(public);
-}
-
-#[test]
-fn type_alias_with_kind_annotated_param_parses() {
-    let program = parse("type alias Tagged (k : Symbol) = Id k");
-    let Decl::TypeAlias { type_params, .. } = &program[0] else {
-        panic!("expected TypeAlias");
-    };
-    assert_eq!(type_params.len(), 1);
-    assert_eq!(type_params[0].name, "k");
-    assert_eq!(type_params[0].kind, crate::ast::Kind::Symbol);
 }
 
 #[test]

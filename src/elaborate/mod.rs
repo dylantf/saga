@@ -13,7 +13,6 @@
 //! - `program`      — top-level program elaboration
 //! - `expr`         — expression and handler elaboration, method desugaring
 //! - `dict_resolve` — resolving a concrete dictionary for a trait at a use site
-//! - `anon_record`  — building `Generic` dictionaries for anonymous records/tuples
 //!
 //! Shared free helpers, constants, and the `Elaborator` struct live here and are
 //! re-exported to the submodules via `use super::*`.
@@ -23,33 +22,16 @@ pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use crate::ast::*;
 pub(crate) use crate::token::{Span, StringKind};
 pub(crate) use crate::typechecker::{
-    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo,
+    CheckResult, ImplInfo, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo,
     Type,
 };
 
-mod anon_record;
 mod dict_params;
 mod dict_resolve;
 mod expr;
 mod program;
 mod setup;
-
-/// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
-/// trait's own `symbol_name` method. Without this guard, a `to_json` call
-/// whose node also carries KnownSymbol evidence (from a parameterized
-/// `impl ToJson for Labeled n a where {n : KnownSymbol}` impl) would be
-/// rewritten to a symbol-name lookup, silently dropping the real dispatch.
-pub(crate) fn is_known_symbol_trait(trait_name: &str) -> bool {
-    trait_name == KNOWN_SYMBOL_TRAIT
-}
-
-pub(crate) fn is_generic_trait(trait_name: &str) -> bool {
-    matches!(trait_name, "Generic" | "Std.Generic.Generic")
-}
-
-pub(crate) fn generic_ctor(name: &str) -> String {
-    format!("Std.Generic.{name}")
-}
+mod tuple_show;
 
 pub(crate) fn match_type_pattern(
     pattern: &Type,
@@ -72,7 +54,6 @@ pub(crate) fn match_type_pattern(
                     .zip(aa.iter())
                     .all(|(p, a)| match_type_pattern(p, a, subst))
         }
-        (Type::Symbol(a), Type::Symbol(b)) => a == b,
         _ => false,
     }
 }

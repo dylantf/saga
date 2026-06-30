@@ -199,7 +199,7 @@ impl Checker {
                         out.insert(canonical.to_string());
                     }
                 }
-                ast::TypeExpr::Var { .. } | ast::TypeExpr::Symbol { .. } => {}
+                ast::TypeExpr::Var { .. } => {}
                 ast::TypeExpr::App { func, arg, .. } => {
                     collect_alias_refs(func, local, scope, out);
                     collect_alias_refs(arg, local, scope, out);

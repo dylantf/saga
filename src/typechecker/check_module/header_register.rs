@@ -382,7 +382,6 @@ impl Checker {
             HeaderTypeExpr::Labeled { inner, .. } => {
                 self.header_type_expr_to_type(inner, params, scope)
             }
-            HeaderTypeExpr::Symbol(name) => Type::Symbol(name.clone()),
         }
     }
 
@@ -575,7 +574,7 @@ fn type_contains_effects(ty: &Type) -> bool {
         }
         Type::Con(_, args) => args.iter().any(type_contains_effects),
         Type::Record(fields) => fields.iter().any(|(_, ty)| type_contains_effects(ty)),
-        Type::Var(_) | Type::Symbol(_) | Type::Error => false,
+        Type::Var(_) | Type::Error => false,
     }
 }
 

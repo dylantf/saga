@@ -6,7 +6,7 @@ use crate::ast::*;
 pub(crate) fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
     match te {
         TypeExpr::Var { name: n, .. } => n == name,
-        TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => false,
+        TypeExpr::Named { .. } => false,
         TypeExpr::App { func, arg, .. } => {
             type_expr_contains_var(func, name) || type_expr_contains_var(arg, name)
         }

@@ -637,8 +637,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
-        | ExprKind::ForeignCall { .. }
-        | ExprKind::SymbolIntrinsic { .. } => Doc::text("<elaboration-only>"),
+        | ExprKind::ForeignCall { .. } => Doc::text("<elaboration-only>"),
     }
 }
 

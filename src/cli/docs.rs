@@ -514,7 +514,6 @@ fn format_type_expr(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named { name, .. } => name.clone(),
         TypeExpr::Var { name, .. } => name.clone(),
-        TypeExpr::Symbol { name, .. } => format!("'{}", name),
         TypeExpr::App { func, arg, .. } => {
             format!("{} {}", format_type_expr(func), format_type_expr_atom(arg))
         }

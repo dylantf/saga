@@ -380,8 +380,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
     match ek {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
-        | ExprKind::Constructor { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::Constructor { .. } => {}
         ExprKind::App { func, arg } => {
             normalize_expr(func);
             normalize_expr(arg);
@@ -725,8 +724,7 @@ fn normalize_stmt(s: &mut Stmt) {
 fn normalize_type_expr(te: &mut TypeExpr) {
     match te {
         TypeExpr::Named { span, .. }
-        | TypeExpr::Var { span, .. }
-        | TypeExpr::Symbol { span, .. } => *span = S,
+        | TypeExpr::Var { span, .. } => *span = S,
         TypeExpr::App {
             func, arg, span, ..
         } => {
@@ -1235,22 +1233,6 @@ fn type_alias_parameterized_round_trip() {
     assert_eq!(
         fmt80("type alias Bag a = List a"),
         "type alias Bag a = List a\n"
-    );
-}
-
-#[test]
-fn type_alias_symbol_round_trip() {
-    assert_eq!(
-        fmt80("type alias UserId = Id 'user"),
-        "type alias UserId = Id 'user\n"
-    );
-}
-
-#[test]
-fn type_alias_kind_annotated_param_round_trip() {
-    assert_eq!(
-        fmt80("type alias Tagged (k : Symbol) = Id k"),
-        "type alias Tagged (k : Symbol) = Id k\n"
     );
 }
 

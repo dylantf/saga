@@ -54,7 +54,6 @@ pub(crate) fn match_type_pattern(
                     .zip(aa.iter())
                     .all(|(p, a)| match_type_pattern(p, a, subst))
         }
-        (Type::Symbol(a), Type::Symbol(b)) => a == b,
         _ => false,
     }
 }

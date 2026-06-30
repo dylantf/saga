@@ -7866,110 +7866,6 @@ fn trait_default_body_with_where_constraint() {
     check(src).unwrap();
 }
 
-// --- Type-level symbols (Chunk 2: typechecker wiring) ---
-
-#[test]
-fn symbol_id_with_same_symbol_kind() {
-    let src = "type Id (k : Symbol) = MkId Int\n\
-               let u : Id 'user = MkId 1\n\
-               let p : Id 'post = MkId 2\n";
-    check(src).unwrap();
-}
-
-#[test]
-fn symbol_distinct_literals_fail_to_unify() {
-    let src = "type Id (k : Symbol) = MkId Int\n\
-               let x : Id 'admin = MkId 1\n\
-               let y : Id 'editor = x\n";
-    let err = check(src).err().expect("expected symbol-mismatch error");
-    let msg = err.message.to_lowercase();
-    assert!(
-        msg.contains("admin") || msg.contains("editor") || msg.contains("mismatch"),
-        "expected message naming the symbols or a mismatch: got {}",
-        err.message
-    );
-}
-
-#[test]
-fn symbol_star_in_symbol_position_fails() {
-    let src = "type Id (k : Symbol) = MkId Int\n\
-               let bad : Id Int = MkId 1\n";
-    let err = check(src).err().expect("expected kind-mismatch error");
-    assert!(
-        err.message.to_lowercase().contains("kind"),
-        "expected kind-mismatch diagnostic, got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn symbol_in_star_position_fails() {
-    let src = "type Bad2 = Maybe 'foo\n";
-    let err = check(src).err().expect("expected kind-mismatch error");
-    assert!(
-        err.message.to_lowercase().contains("kind"),
-        "expected kind-mismatch diagnostic, got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn symbol_var_kind_conflict_in_signature() {
-    // `k` first appears in `Id k` (Symbol-kinded slot), then in `List k`
-    // (Star-kinded slot). The second use must error with a kind mismatch.
-    let src = "type Id (k : Symbol) = MkId Int\n\
-               fun bad : Id k -> List k -> Int\n\
-               bad _ _ = 0\n";
-    let err = check(src).err().expect("expected kind mismatch");
-    let msg = err.message.to_lowercase();
-    assert!(
-        msg.contains("kind"),
-        "expected kind diagnostic, got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn symbol_same_kind_function_with_matching_symbols() {
-    let src = "type Id (k : Symbol) = MkId Int\n\
-               fun same_kind : Id k -> Id k -> Bool\n\
-               same_kind a b = True\n\
-               let a : Id 'user = MkId 1\n\
-               let b : Id 'user = MkId 2\n\
-               let r = same_kind a b\n";
-    check(src).unwrap();
-}
-
-#[test]
-fn symbol_same_kind_function_with_mismatched_symbols() {
-    let src = "type Id (k : Symbol) = MkId Int\n\
-               fun same_kind : Id k -> Id k -> Bool\n\
-               same_kind a b = True\n\
-               let a : Id 'user = MkId 1\n\
-               let b : Id 'post = MkId 2\n\
-               let r = same_kind a b\n";
-    check(src).err().expect("expected symbol-mismatch error");
-}
-
-#[test]
-fn symbol_trait_param_kind_is_tracked() {
-    // A trait declared with a Symbol-kinded parameter should register that kind
-    // on the TraitInfo, so we can use the trait in a constraint without a kind
-    // mismatch when the bounded var is also Symbol-kinded.
-    let src = "trait MySymbolTrait (n : Symbol) {\n\
-                 fun whatever : Int -> Bool\n\
-               }\n";
-    let checker = check(src).unwrap();
-    let info = checker
-        .trait_state
-        .traits
-        .get("MySymbolTrait")
-        .expect("MySymbolTrait registered");
-    assert_eq!(info.type_params.len(), 1);
-    assert_eq!(info.type_params[0].0, "n");
-    assert_eq!(info.type_params[0].1, crate::ast::Kind::Symbol);
-}
-
 // --- Type aliases ---
 
 #[test]
@@ -7990,14 +7886,6 @@ fn alias_parameterized_is_interchangeable_with_underlying() {
                  x :: _ -> Just x\n\
                }\n";
     check(src).expect("parameterized alias should typecheck");
-}
-
-#[test]
-fn alias_symbol_lifted_through_unfolding() {
-    let src = "type Id (k : Symbol) = Id Int\n\
-               type alias UserId = Id 'user\n\
-               let u : UserId = Id 1\n";
-    check(src).expect("symbol-tagged alias should typecheck");
 }
 
 #[test]
@@ -8081,15 +7969,6 @@ fn alias_impl_target_is_rejected() {
 }
 
 #[test]
-fn alias_with_kind_annotated_param_works() {
-    let src = "type Id (k : Symbol) = Id Int\n\
-               type alias Tagged (k : Symbol) = Id k\n\
-               type alias UserId = Tagged 'user\n\
-               let u : UserId = Id 1\n";
-    check(src).expect("kind-annotated alias param should work");
-}
-
-#[test]
 fn alias_cross_module_round_trips() {
     let lib = "module Lib\n\
                pub type alias UserId = Int\n";
@@ -8156,27 +8035,6 @@ fn alias_body_partial_use_is_rejected_at_declaration() {
     assert!(
         msg.contains("alias") && msg.contains("bag"),
         "expected partial-alias diagnostic at the declaration, got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn cross_module_alias_kind_mismatch_is_rejected() {
-    // Tagged expects a Symbol-kinded param. An importer passing Int (Star)
-    // must fail — requires that alias param kinds are exported.
-    let lib = "module Lib\n\
-               type Id (k : Symbol) = Id Int\n\
-               pub type alias Tagged (k : Symbol) = Id k\n";
-    let main = "import Lib\n\
-                fun bad : Lib.Tagged Int -> Int\n\
-                bad _ = 0\n";
-    let err = check_with_project_files(&[("lib/Lib.saga", lib)], main)
-        .err()
-        .expect("expected kind-mismatch diagnostic at importer");
-    let msg = err.message.to_lowercase();
-    assert!(
-        msg.contains("kind"),
-        "expected kind diagnostic, got: {}",
         err.message
     );
 }

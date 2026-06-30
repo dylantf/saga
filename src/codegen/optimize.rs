@@ -451,8 +451,7 @@ pub(super) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
         ExprKind::Lambda { body, .. } => visit(body),
     }
 }

@@ -725,8 +725,7 @@ fn split_arrow_type(label: &str) -> Vec<&str> {
 fn format_type_expr(ty: &ast::TypeExpr) -> String {
     match ty {
         ast::TypeExpr::Var { name, .. }
-        | ast::TypeExpr::Named { name, .. }
-        | ast::TypeExpr::Symbol { name, .. } => name.clone(),
+        | ast::TypeExpr::Named { name, .. } => name.clone(),
         ast::TypeExpr::App { .. } => {
             let mut args = Vec::new();
             let mut current = ty;

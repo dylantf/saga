@@ -274,8 +274,7 @@ pub(crate) fn qualify_free_vars(
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
         ExprKind::App { func, arg } => {
             qualify_free_vars(func, module, module_values, trait_methods, bound);
             qualify_free_vars(arg, module, module_values, trait_methods, bound);
@@ -544,7 +543,6 @@ pub(crate) fn qualify_ctor_refs(
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. }
         | ExprKind::HandlerExpr { .. } => {}
         ExprKind::App { func, arg } => {
             qualify_ctor_refs(func, module, module_constructors);

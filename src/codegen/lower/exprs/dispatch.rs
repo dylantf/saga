@@ -751,7 +751,6 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),
 
-            ExprKind::SymbolIntrinsic { symbol } => lower_string_to_binary(symbol),
 
             // StringInterpolation should be desugared before reaching the lowerer,
             // but keep a fallback just in case.

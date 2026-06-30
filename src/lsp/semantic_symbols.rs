@@ -387,7 +387,7 @@ fn add_type_expr_symbols(
         ast::TypeExpr::Labeled { inner, .. } => {
             add_type_expr_symbols(index, uri, line_index, source, inner, check);
         }
-        ast::TypeExpr::Var { .. } | ast::TypeExpr::Symbol { .. } => {}
+        ast::TypeExpr::Var { .. } => {}
     }
 }
 
@@ -506,8 +506,7 @@ fn add_expr_type_symbols(
     match &expr.kind {
         ast::ExprKind::Lit { .. }
         | ast::ExprKind::Constructor { .. }
-        | ast::ExprKind::DictRef { .. }
-        | ast::ExprKind::SymbolIntrinsic { .. } => {}
+        | ast::ExprKind::DictRef { .. } => {}
         ast::ExprKind::Var { name } => {
             if let Some((trait_name, method_name)) = check.resolved_trait_method_for_node(expr.id) {
                 add_trait_method_reference_symbol(

@@ -12,11 +12,6 @@ impl Elaborator {
                 // (a user function named `compare` won't be mistaken for Ord.compare).
 
                 if let Some((trait_name, method_index)) = self.resolve_trait_method(name, node_id) {
-                    if is_known_symbol_trait(&trait_name)
-                        && let Some(symbol_lambda) = self.try_symbol_intrinsic_lambda(node_id, span)
-                    {
-                        return symbol_lambda;
-                    }
                     if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
                         return Expr::synth(
                             span,
@@ -129,19 +124,6 @@ impl Elaborator {
                     if let Some((trait_name, method_index)) =
                         self.resolve_trait_method(name, func.id)
                     {
-                        if is_known_symbol_trait(&trait_name)
-                            && let Some(symbol_lambda) =
-                                self.try_symbol_intrinsic_lambda(func.id, func.span)
-                        {
-                            let elab_arg = self.elaborate_expr(arg);
-                            return Expr::synth(
-                                span,
-                                ExprKind::App {
-                                    func: Box::new(symbol_lambda),
-                                    arg: Box::new(elab_arg),
-                                },
-                            );
-                        }
                         if let Some(dict_expr) = self
                             .resolve_call_dict_nth(&trait_name, func.id, node_id, func.span, 0)
                             .or_else(|| {
@@ -903,8 +885,7 @@ impl Elaborator {
             // Elaboration-only variants (shouldn't appear in input)
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictSuperAccess { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => expr.clone(),
+            | ExprKind::DictRef { .. } => expr.clone(),
 
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }
@@ -1096,53 +1077,6 @@ impl Elaborator {
                     },
                 )),
                 arg: Box::new(elab_right),
-            },
-        ))
-    }
-
-    /// If a `KnownSymbol` evidence record at `node_id` carries a concrete symbol
-    /// name, return a lambda `fun _proxy -> SymbolIntrinsic { symbol }`. For
-    /// the polymorphic case (where-bound `n : KnownSymbol`), return a lambda
-    /// `fun _proxy -> __dict_KnownSymbol_n` referring to the in-scope dict
-    /// parameter (which is itself the symbol's string at runtime — the
-    /// KnownSymbol dict is carried as a bare String). The lambda ignores its
-    /// Proxy argument (Proxy is a phantom). This shape preserves the trait-
-    /// method calling convention so both bare references (`symbol_name`) and
-    /// direct applications (`symbol_name p`) work uniformly.
-    pub(crate) fn try_symbol_intrinsic_lambda(
-        &self,
-        node_id: crate::ast::NodeId,
-        span: Span,
-    ) -> Option<Expr> {
-        let evidence_list = self.evidence_by_node.get(&node_id)?;
-        let body = evidence_list.iter().find_map(|ev| {
-            if ev.trait_name != KNOWN_SYMBOL_TRAIT {
-                return None;
-            }
-            if let Some(name) = &ev.resolved_symbol {
-                Some(Expr::synth(
-                    span,
-                    ExprKind::SymbolIntrinsic {
-                        symbol: name.clone(),
-                    },
-                ))
-            } else if let Some(var_name) = &ev.type_var_name {
-                let bare = ev.trait_name.rsplit('.').next().unwrap_or(&ev.trait_name);
-                let param_name = format!("__dict_{}_{}", bare, var_name);
-                Some(Expr::synth(span, ExprKind::Var { name: param_name }))
-            } else {
-                None
-            }
-        })?;
-        Some(Expr::synth(
-            span,
-            ExprKind::Lambda {
-                params: vec![Pat::Var {
-                    id: NodeId::fresh(),
-                    name: "__proxy".into(),
-                    span,
-                }],
-                body: Box::new(body),
             },
         ))
     }

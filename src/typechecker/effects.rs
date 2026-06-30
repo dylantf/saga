@@ -392,7 +392,6 @@ handler must share one type argument. Handle the differing uses with separate \
                             collect_vars(ty, vars);
                         }
                     }
-                    Type::Symbol(_) => {}
                     Type::Error => {}
                 }
             }
@@ -495,7 +494,6 @@ handler must share one type argument. Handle the differing uses with separate \
                         collect_vars2(ty, vars);
                     }
                 }
-                Type::Symbol(_) => {}
                 Type::Error => {}
             }
         }

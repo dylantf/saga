@@ -236,8 +236,7 @@ fn visit_expr_for_arms(expr: &Expr, out: &mut HandlerAnalysis) {
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
     }
 }
 
@@ -481,8 +480,7 @@ fn walk_count(expr: &Expr, count: &mut usize) {
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
     }
 }
 

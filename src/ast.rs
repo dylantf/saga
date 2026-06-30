@@ -5,13 +5,12 @@ use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
-/// Kind of a type-level entity. `Star` is the kind of ordinary types; `Symbol`
-/// is the kind of type-level symbol literals like `'Foo`. Only `Symbol` is
-/// user-writable today; `Star` is the implicit default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Kind of a type-level entity. `Star` is the kind of ordinary types and the
+/// only kind today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Kind {
+    #[default]
     Star,
-    Symbol,
 }
 
 /// A type parameter declared on a type, record, trait, or effect declaration.
@@ -85,7 +84,6 @@ impl std::fmt::Display for TypeParam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind {
             Kind::Star => f.write_str(&self.name),
-            Kind::Symbol => write!(f, "({} : Symbol)", self.name),
         }
     }
 }
@@ -848,10 +846,6 @@ pub enum ExprKind {
         func: String,
         args: Vec<Expr>,
     },
-    /// Produced by elaboration for the universal `KnownSymbol` impl: evaluates
-    /// to the source name of the concrete symbol captured at the call site as
-    /// a String. Codegen for this node is implemented in chunk 4.
-    SymbolIntrinsic { symbol: String },
 }
 
 impl Expr {
@@ -946,8 +940,7 @@ impl Expr {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => false,
+            | ExprKind::DictRef { .. } => false,
         }
     }
 }
@@ -1175,13 +1168,6 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         span: Span,
     },
-
-    /// Type-level symbol literal: `'Foo`. Inhabits kind `Symbol`.
-    Symbol {
-        id: NodeId,
-        name: String,
-        span: Span,
-    },
 }
 
 impl TypeExpr {
@@ -1192,8 +1178,7 @@ impl TypeExpr {
             | TypeExpr::App { span, .. }
             | TypeExpr::Arrow { span, .. }
             | TypeExpr::Record { span, .. }
-            | TypeExpr::Labeled { span, .. }
-            | TypeExpr::Symbol { span, .. } => *span,
+            | TypeExpr::Labeled { span, .. } => *span,
         }
     }
 
@@ -1204,8 +1189,7 @@ impl TypeExpr {
             | TypeExpr::App { id, .. }
             | TypeExpr::Arrow { id, .. }
             | TypeExpr::Record { id, .. }
-            | TypeExpr::Labeled { id, .. }
-            | TypeExpr::Symbol { id, .. } => *id,
+            | TypeExpr::Labeled { id, .. } => *id,
         }
     }
 
@@ -1288,7 +1272,6 @@ impl PartialEq for TypeExpr {
                     ..
                 },
             ) => l1 == l2 && i1 == i2,
-            (TypeExpr::Symbol { name: a, .. }, TypeExpr::Symbol { name: b, .. }) => a == b,
             _ => false,
         }
     }

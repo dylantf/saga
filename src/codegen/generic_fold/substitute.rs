@@ -575,8 +575,7 @@ pub(crate) fn child_exprs_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
 
         ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
             out.push(dict)

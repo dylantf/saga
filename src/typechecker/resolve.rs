@@ -550,7 +550,6 @@ impl<'a> Resolver<'a> {
         match texpr {
             TypeExpr::Named { id, name, .. } => self.record_type_ref(*id, name),
             TypeExpr::Var { .. } => {}
-            TypeExpr::Symbol { .. } => {}
             TypeExpr::App { func, arg, .. } => {
                 self.resolve_type_expr(func);
                 self.resolve_type_expr(arg);
@@ -1036,8 +1035,7 @@ impl<'a> Resolver<'a> {
                 self.resolve_expr(dict)
             }
             ExprKind::DictRef { .. }
-            | ExprKind::ForeignCall { .. }
-            | ExprKind::SymbolIntrinsic { .. } => {}
+            | ExprKind::ForeignCall { .. } => {}
         }
     }
 
@@ -1372,8 +1370,7 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
     }
 }
 

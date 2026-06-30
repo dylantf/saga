@@ -247,10 +247,6 @@ fn hash_type<H: Hasher>(ty: &typechecker::Type, state: &mut H) {
                 hash_type(ty, state);
             });
         }
-        typechecker::Type::Symbol(value) => {
-            "Symbol".hash(state);
-            value.hash(state);
-        }
         typechecker::Type::Error => {
             "Error".hash(state);
         }

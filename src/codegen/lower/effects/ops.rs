@@ -82,8 +82,7 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => true,
+            | ExprKind::DictRef { .. } => true,
             ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
                 .iter()
                 .all(Self::static_tail_resume_value_supported),

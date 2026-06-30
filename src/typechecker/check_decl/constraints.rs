@@ -451,28 +451,6 @@ impl Checker {
                             span,
                         ));
                     }
-                    Type::Symbol(name) => {
-                        let resolved_trait = self
-                            .resolve_trait_name(&trait_name)
-                            .unwrap_or_else(|| trait_name.clone());
-                        if resolved_trait == crate::typechecker::KNOWN_SYMBOL_TRAIT {
-                            self.evidence.push(crate::typechecker::TraitEvidence {
-                                node_id,
-                                trait_name: resolved_trait,
-                                resolved_type: None,
-                                resolved_record_type: None,
-                                type_var_name: None,
-                                trait_type_args: vec![],
-                                resolved_symbol: Some(name.clone()),
-                            });
-                        } else {
-                            let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                            return Err(rewrite_diag(
-                                format!("no impl of {} for symbol type '{}", display, name),
-                                span,
-                            ));
-                        }
-                    }
                     // Error/Never type: skip trait checking
                     Type::Error => {}
                 }

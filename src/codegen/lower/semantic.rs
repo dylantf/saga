@@ -95,7 +95,6 @@ impl<'a> Lowerer<'a> {
                     .map(|(name, ty)| (name.clone(), Self::substitute_type_vars(ty, subst)))
                     .collect(),
             ),
-            Type::Symbol(name) => Type::Symbol(name.clone()),
             Type::Error => Type::Error,
         }
     }

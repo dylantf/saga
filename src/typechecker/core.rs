@@ -142,9 +142,6 @@ pub enum Type {
     /// Anonymous record type: `{ street: String, city: String }`
     /// Fields are sorted by name for canonical comparison.
     Record(Vec<(std::string::String, Type)>),
-    /// Type-level symbol literal: `'Foo` at the source level. Inhabits kind `Symbol`.
-    /// Two `Symbol(a)` and `Symbol(b)` are equal iff `a == b`.
-    Symbol(std::string::String),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
 }
@@ -357,7 +354,6 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, " }}")
             }
-            Type::Symbol(name) => write!(f, "'{}", name),
             Type::Error => write!(f, "<error>"),
         }
     }
@@ -453,7 +449,6 @@ impl Substitution {
                     .map(|(name, ty)| (name.clone(), self.apply(ty)))
                     .collect(),
             ),
-            Type::Symbol(_) => ty.clone(),
             Type::Error => Type::Error,
         }
     }
@@ -587,7 +582,6 @@ impl Substitution {
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
             Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
-            Type::Symbol(_) => false,
             Type::Error => false,
         }
     }
@@ -764,7 +758,6 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(ty, bound, out);
             }
         }
-        Type::Symbol(_) => {}
         Type::Error => {}
     }
 }

@@ -38,9 +38,6 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{Expr, ExprKind, Kind};
 use crate::token::Span;
 
-/// Canonical stdlib trait name for type-level symbol reflection.
-pub(crate) const KNOWN_SYMBOL_TRAIT: &str = "Std.Base.KnownSymbol";
-
 /// Returns the span of the first effect call found in `expr`, if any.
 /// Used to reject effect calls inside guard expressions.
 pub(crate) fn find_effect_call(expr: &Expr) -> Option<Span> {
@@ -548,7 +545,6 @@ impl Checker {
     /// `Symbol`, kind is `Symbol`. Everything else is `Star` (for now).
     pub(crate) fn kind_of(&self, ty: &Type) -> Kind {
         match ty {
-            Type::Symbol(_) => Kind::Symbol,
             Type::Var(id) => self.var_kind(*id),
             _ => Kind::Star,
         }

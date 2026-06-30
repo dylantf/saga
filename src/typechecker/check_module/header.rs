@@ -230,7 +230,6 @@ pub enum HeaderTypeExpr {
         label: String,
         inner: Box<HeaderTypeExpr>,
     },
-    Symbol(String),
 }
 
 impl ModuleHeader {
@@ -606,7 +605,6 @@ fn header_type_expr(ty: &crate::ast::TypeExpr) -> HeaderTypeExpr {
             label: label.clone(),
             inner: Box::new(header_type_expr(inner)),
         },
-        TypeExpr::Symbol { name, .. } => HeaderTypeExpr::Symbol(name.clone()),
     }
 }
 

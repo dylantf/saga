@@ -642,8 +642,7 @@ impl Checker {
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictSuperAccess { .. }
             | ExprKind::DictRef { .. }
-            | ExprKind::ForeignCall { .. }
-            | ExprKind::SymbolIntrinsic { .. } => {
+            | ExprKind::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
 

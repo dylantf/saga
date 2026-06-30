@@ -58,17 +58,6 @@ impl Elaborator {
                         count += 1;
                         continue;
                     }
-                    // KnownSymbol with concrete symbol: dict is a bare String
-                    // carrying the symbol's source name. SymbolIntrinsic lowers
-                    // to the binary literal at codegen.
-                    if let Some(sym) = &ev.resolved_symbol {
-                        return Some(Expr::synth(
-                            span,
-                            ExprKind::SymbolIntrinsic {
-                                symbol: sym.clone(),
-                            },
-                        ));
-                    }
                     if let Some(record_ty) = &ev.resolved_record_type {
                         return self.dict_for_type(
                             trait_name,
@@ -251,9 +240,6 @@ impl Elaborator {
         }
 
         match ty {
-            Type::Record(fields) if is_generic_trait(trait_name) => {
-                Some(self.build_anon_record_generic_dict(fields, span))
-            }
             Type::Con(name, args)
                 if name == crate::typechecker::canonicalize_type_name("Tuple")
                     && (trait_name == SHOW || trait_name == DEBUG) =>
@@ -455,19 +441,6 @@ impl Elaborator {
                 }
                 // Fall back to single-trait lookup
                 self.current_dict_param_or_supertrait(trait_name, span)
-            }
-            Type::Symbol(name) => {
-                // KnownSymbol's "dict" is the symbol's source name as a String.
-                // SymbolIntrinsic lowers to a binary literal at codegen. This
-                // branch fires when a parameterized impl (e.g.
-                // `impl ToJson for Variant n a where {n: KnownSymbol, ...}`)
-                // recursively constructs a sub-dict for the symbol parameter.
-                Some(Expr::synth(
-                    span,
-                    ExprKind::SymbolIntrinsic {
-                        symbol: name.clone(),
-                    },
-                ))
             }
             _ => None,
         }

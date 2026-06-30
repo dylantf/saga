@@ -62,7 +62,7 @@ fn type_params_in_type_expr(expr: &TypeExpr) -> Vec<TypeParam> {
                 }
             }
             TypeExpr::Labeled { inner, .. } => visit(inner, out),
-            TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => {}
+            TypeExpr::Named { .. } => {}
         }
     }
 
@@ -1484,42 +1484,15 @@ impl Parser {
 
     /// Parse a single type-parameter declaration: either a bare identifier
     /// (`a`, defaults to `Kind::Star`) or a kind-annotated identifier
-    /// `(name : Symbol)`. Used by `type`, `record`, `effect`, `trait`, and
-    /// `impl` declarations.
+    /// Used by `type`, `record`, `effect`, `trait`, and `impl` declarations.
     fn parse_type_param(&mut self) -> Result<TypeParam, ParseError> {
-        if matches!(self.peek(), Token::LParen) {
-            let start = self.tokens[self.pos].span;
-            self.advance(); // consume '('
-            let name = self.expect_ident()?;
-            self.expect(Token::Colon)?;
-            // Kind RHS is currently restricted to the bare identifier `Symbol`.
-            let kind_name_span = self.tokens[self.pos].span;
-            let kind_name = self.expect_upper_ident()?;
-            let kind = match kind_name.as_str() {
-                "Symbol" => Kind::Symbol,
-                other => {
-                    return Err(ParseError {
-                        message: format!("unknown kind `{}`; expected `Symbol`", other),
-                        span: kind_name_span,
-                    });
-                }
-            };
-            let end = self.tokens[self.pos].span;
-            self.expect(Token::RParen)?;
-            Ok(TypeParam {
-                name,
-                kind,
-                span: start.to(end),
-            })
-        } else {
-            let span = self.tokens[self.pos].span;
-            let name = self.expect_ident()?;
-            Ok(TypeParam {
-                name,
-                kind: Kind::Star,
-                span,
-            })
-        }
+        let span = self.tokens[self.pos].span;
+        let name = self.expect_ident()?;
+        Ok(TypeParam {
+            name,
+            kind: Kind::Star,
+            span,
+        })
     }
 
     // --- Type expressions ---
@@ -1660,11 +1633,6 @@ impl Parser {
             Token::Ident(s) => Ok(TypeExpr::Var {
                 id: NodeId::fresh(),
                 name: s,
-                span: start,
-            }),
-            Token::SymbolLit(name) => Ok(TypeExpr::Symbol {
-                id: NodeId::fresh(),
-                name,
                 span: start,
             }),
             Token::LParen => {
