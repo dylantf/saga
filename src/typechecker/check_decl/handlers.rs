@@ -6,8 +6,8 @@ impl Checker {
     /// (e.g. Process referencing Actor) resolve during op signature processing.
     pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[TypeParam]) {
         let mut type_param_ids = Vec::new();
-        for tp in effect_type_params {
-            let var = self.fresh_var_of_kind(tp.kind);
+        for _ in effect_type_params {
+            let var = self.fresh_var();
             let id = match &var {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
@@ -20,7 +20,7 @@ impl Checker {
             name.into()
         };
         self.effects.insert(
-            key.clone(),
+            key,
             EffectDefInfo {
                 type_params: type_param_ids,
                 ops: vec![],
@@ -28,15 +28,9 @@ impl Checker {
                 source_module: self.current_module.clone(),
             },
         );
-        self.type_param_kinds
-            .insert(key, effect_type_params.iter().map(|p| p.kind).collect());
         self.type_arity
             .insert(name.into(), effect_type_params.len());
         if let Some(module) = &self.current_module {
-            self.type_param_kinds.insert(
-                format!("{}.{}", module, name),
-                effect_type_params.iter().map(|p| p.kind).collect(),
-            );
             self.type_arity
                 .insert(format!("{}.{}", module, name), effect_type_params.len());
         }
@@ -144,12 +138,6 @@ impl Checker {
                     .insert(var_id, bound.type_var.clone());
                 for tr in &bound.traits {
                     let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
-                    self.validate_trait_bound_kind(
-                        &resolved_trait,
-                        &bound.type_var,
-                        var_id,
-                        tr.span,
-                    )?;
                     let extra_types: Vec<Type> = tr
                         .type_args
                         .iter()
@@ -235,12 +223,8 @@ impl Checker {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
-                        let expected_kind = self.var_kind(param_id);
-                        let concrete_ty = self.convert_type_expr_kinded(
-                            type_arg_expr,
-                            &mut type_var_params,
-                            expected_kind,
-                        );
+                        let concrete_ty =
+                            self.convert_type_expr_inner(type_arg_expr, &mut type_var_params);
                         let concrete_ty = self.canonicalize_handler_effect_types(concrete_ty);
                         handler_type_mapping.insert(param_id, concrete_ty);
                     }
@@ -262,14 +246,6 @@ impl Checker {
                     .insert(*var_id, bound.type_var.clone());
                 for tr in &bound.traits {
                     let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
-                    if let Err(diag) = self.validate_trait_bound_kind(
-                        &resolved_req,
-                        &bound.type_var,
-                        *var_id,
-                        tr.span,
-                    ) {
-                        self.collected_diagnostics.push(diag);
-                    }
                     self.lsp
                         .type_references
                         .push((tr.span, resolved_req.clone()));

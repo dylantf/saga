@@ -1,7 +1,6 @@
 use crate::ast::{self, TypeParam};
 use crate::token::Span;
 
-use super::unify::kind_name;
 use super::{Checker, Diagnostic, ImplInfo, Scheme, TraitMethodEffectSig, Type};
 
 fn trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
@@ -96,35 +95,6 @@ fn direct_target_var_index(target: &Type, var_id: u32) -> Option<usize> {
 impl Checker {
     // --- Trait & impl helpers ---
 
-    pub(crate) fn validate_trait_bound_kind(
-        &self,
-        trait_name: &str,
-        type_var_name: &str,
-        var_id: u32,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
-        let Some(trait_info) = self.trait_state.traits.get(trait_name) else {
-            return Ok(());
-        };
-        let Some((_, expected_kind)) = trait_info.type_params.first() else {
-            return Ok(());
-        };
-        let actual_kind = self.var_kind(var_id);
-        if actual_kind == *expected_kind {
-            return Ok(());
-        }
-        Err(Diagnostic::error_at(
-            span,
-            format!(
-                "kind mismatch: type variable `{}` has kind {} but trait {} expects kind {}",
-                type_var_name,
-                kind_name(actual_kind),
-                trait_name.rsplit('.').next().unwrap_or(trait_name),
-                kind_name(*expected_kind),
-            ),
-        ))
-    }
-
     /// Resolve a trait name to its canonical form.
     /// Tries: exact match in traits -> scope_map.traits -> current_module.Name.
     pub(crate) fn resolve_trait_name(&self, name: &str) -> Option<String> {
@@ -177,7 +147,7 @@ impl Checker {
             let mut params_list: Vec<(String, u32)> = type_params
                 .iter()
                 .map(|tp| {
-                    let var = self.fresh_var_of_kind(tp.kind);
+                    let var = self.fresh_var();
                     let id = match var {
                         Type::Var(id) => id,
                         _ => unreachable!(),
@@ -244,7 +214,7 @@ impl Checker {
                     .find(|(n, _)| n == tp_name)
                     .map(|(_, id)| *id)
                     .unwrap_or_else(|| {
-                        let fresh = self.fresh_var_of_kind(tp.kind);
+                        let fresh = self.fresh_var();
                         let id = match fresh {
                             Type::Var(id) => id,
                             _ => unreachable!(),
@@ -340,10 +310,7 @@ impl Checker {
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
-                type_params: type_params
-                    .iter()
-                    .map(|tp| (tp.name.clone(), tp.kind))
-                    .collect(),
+                type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
             },
@@ -477,7 +444,7 @@ impl Checker {
         } else {
             let mut param_vars = Vec::new();
             for tp in type_params {
-                let fresh = self.fresh_var_of_kind(tp.kind);
+                let fresh = self.fresh_var();
                 if let Type::Var(id) = fresh {
                     impl_type_vars.push((tp.name.clone(), id));
                 }
@@ -532,12 +499,6 @@ impl Checker {
                     .insert(var_id, bound.type_var.clone());
                 for tr in &bound.traits {
                     let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
-                    self.validate_trait_bound_kind(
-                        &resolved_req,
-                        &bound.type_var,
-                        var_id,
-                        tr.span,
-                    )?;
                     self.lsp
                         .type_references
                         .push((tr.span, resolved_req.clone()));
@@ -760,8 +721,7 @@ impl Checker {
                 if Some(*id) == trait_param_id {
                     continue;
                 }
-                let kind = self.var_kind(*id);
-                fresh_mapping.insert(*id, self.fresh_var_of_kind(kind));
+                fresh_mapping.insert(*id, self.fresh_var());
             }
             let freshened_params: Vec<Type> = trait_method
                 .param_types
@@ -955,12 +915,6 @@ impl Checker {
                 Some(var_id) => {
                     for tr in &bound.traits {
                         let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
-                        self.validate_trait_bound_kind(
-                            &resolved_req,
-                            &bound.type_var,
-                            var_id,
-                            tr.span,
-                        )?;
                         if tr.type_args.is_empty() {
                             param_constraints_by_var.push((resolved_req.clone(), var_id));
                             if let Some(idx) = direct_target_var_index(&target, var_id) {

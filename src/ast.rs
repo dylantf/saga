@@ -5,31 +5,19 @@ use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
-/// Kind of a type-level entity. `Star` is the kind of ordinary types and the
-/// only kind today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Kind {
-    #[default]
-    Star,
-}
-
 /// A type parameter declared on a type, record, trait, or effect declaration.
-/// Carries the parameter name plus its declared kind. Parameters without an
-/// explicit `(name : Kind)` annotation default to `Kind::Star`.
 #[derive(Debug, Clone)]
 pub struct TypeParam {
     pub name: String,
-    pub kind: Kind,
     pub span: Span,
 }
 
 impl TypeParam {
-    /// Construct a `Star`-kinded type parameter. Most call sites that
-    /// historically built `Vec<String>` should use this.
+    /// Construct a type parameter. Named `star` for historical reasons (the
+    /// compiler once tracked kinds; every type parameter is an ordinary type).
     pub fn star(name: impl Into<String>, span: Span) -> Self {
         TypeParam {
             name: name.into(),
-            kind: Kind::Star,
             span,
         }
     }
@@ -43,7 +31,6 @@ impl Default for TypeParam {
     fn default() -> Self {
         TypeParam {
             name: String::new(),
-            kind: Kind::Star,
             span: Span { start: 0, end: 0 },
         }
     }
@@ -56,9 +43,9 @@ impl AsRef<str> for TypeParam {
 }
 
 impl PartialEq for TypeParam {
-    /// Equality on name + kind; spans are formatting metadata.
+    /// Equality on name; spans are formatting metadata.
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.kind == other.kind
+        self.name == other.name
     }
 }
 
@@ -82,9 +69,7 @@ impl PartialEq<String> for TypeParam {
 
 impl std::fmt::Display for TypeParam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            Kind::Star => f.write_str(&self.name),
-        }
+        f.write_str(&self.name)
     }
 }
 

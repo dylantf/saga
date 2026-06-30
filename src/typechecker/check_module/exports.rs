@@ -46,9 +46,6 @@ pub struct ModuleExports {
     pub record_builders: HashMap<String, RecordBuilderInfo>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
-    /// Type name -> declared kinds of each type parameter (kind-checking
-    /// infrastructure across modules; every kind is currently `Star`).
-    pub type_param_kinds: HashMap<String, Vec<crate::ast::Kind>>,
     /// Public type aliases — exported by bare name. Bodies use the alias's
     /// own positional var IDs as placeholders; the importer re-keys them
     /// against fresh IDs at registration time.
@@ -356,20 +353,6 @@ impl ModuleExports {
             }
         }
 
-        // Collect declared param kinds so the importer can enforce kind-correct
-        // uses at type-application sites (currently all `Star`).
-        let mut type_param_kinds: HashMap<String, Vec<crate::ast::Kind>> = HashMap::new();
-        for name in type_constructors.keys().chain(type_aliases_out.keys()) {
-            let canonical = if module_prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{}.{}", module_prefix, name)
-            };
-            if let Some(kinds) = checker.type_param_kinds.get(&canonical) {
-                type_param_kinds.insert(name.clone(), kinds.clone());
-            }
-        }
-
         // Collect effectful function names — only functions with declared effects,
         // not all known_funs (which includes pure functions too).
         let effectful_funs: HashSet<String> = {
@@ -457,7 +440,6 @@ impl ModuleExports {
             &mut trait_origins,
             &mut trait_impls,
             &mut type_arity,
-            &mut type_param_kinds,
             &mut type_aliases_out,
             &mut record_builders,
             &mut doc_comments,
@@ -490,7 +472,6 @@ impl ModuleExports {
             handler_origins,
             record_builders,
             type_arity,
-            type_param_kinds,
             type_aliases: type_aliases_out,
             effectful_funs,
             def_ids,
@@ -609,7 +590,6 @@ fn collect_type_and_trait_reexports(
     trait_origins: &mut HashMap<String, String>,
     trait_impls: &mut HashMap<(String, Vec<String>, String), ImplInfo>,
     type_arity: &mut HashMap<String, usize>,
-    type_param_kinds: &mut HashMap<String, Vec<crate::ast::Kind>>,
     type_aliases: &mut HashMap<String, TypeAliasInfo>,
     record_builders: &mut HashMap<String, RecordBuilderInfo>,
     doc_comments: &mut HashMap<String, Vec<String>>,
@@ -637,9 +617,6 @@ fn collect_type_and_trait_reexports(
                         .entry(key.clone())
                         .or_insert_with(|| impl_info.clone());
                 }
-            }
-            if let Some(kinds) = exports.type_param_kinds.get(origin_name) {
-                type_param_kinds.insert(surface.to_string(), kinds.clone());
             }
             if let Some(info) = exports.type_aliases.get(origin_name) {
                 type_aliases.insert(surface.to_string(), info.clone());

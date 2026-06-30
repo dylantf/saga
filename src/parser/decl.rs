@@ -379,7 +379,7 @@ impl Parser {
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
-        // Type params are lowercase identifiers (optionally `(name : Kind)`) before `=`
+        // Type params are lowercase identifiers before `=`
         while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
             type_params.push(self.parse_type_param()?);
         }
@@ -1425,17 +1425,12 @@ impl Parser {
             && matches!(self.tokens[base + 1].token, Token::Colon)
     }
 
-    /// Parse a single type-parameter declaration: either a bare identifier
-    /// (`a`, defaults to `Kind::Star`) or a kind-annotated identifier
+    /// Parse a single type-parameter declaration: a bare lowercase identifier.
     /// Used by `type`, `record`, `effect`, `trait`, and `impl` declarations.
     fn parse_type_param(&mut self) -> Result<TypeParam, ParseError> {
         let span = self.tokens[self.pos].span;
         let name = self.expect_ident()?;
-        Ok(TypeParam {
-            name,
-            kind: Kind::Star,
-            span,
-        })
+        Ok(TypeParam { name, span })
     }
 
     // --- Type expressions ---

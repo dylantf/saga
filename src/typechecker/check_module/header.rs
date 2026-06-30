@@ -90,7 +90,6 @@ pub struct HeaderFunction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderTypeParam {
     pub name: String,
-    pub kind: crate::ast::Kind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,7 +542,6 @@ fn header_type_params(params: &[crate::ast::TypeParam]) -> Vec<HeaderTypeParam> 
         .iter()
         .map(|param| HeaderTypeParam {
             name: param.name.clone(),
-            kind: param.kind,
         })
         .collect()
 }

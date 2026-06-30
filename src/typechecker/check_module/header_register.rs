@@ -5,7 +5,7 @@ use super::{
     HeaderEffectRef, HeaderFunction, HeaderTraitBound, HeaderTraitRef, HeaderTypeDecl,
     HeaderTypeExpr, HeaderTypeParam, ModuleHeader,
 };
-use crate::ast::{Decl, Kind, NodeId};
+use crate::ast::{Decl, NodeId};
 use crate::token::Span;
 use crate::typechecker::{
     Checker, EffectEntry, EffectRow, RecordInfo, Scheme, ScopeMap, Type, TypeAliasInfo,
@@ -92,24 +92,13 @@ impl Checker {
         // canonical-keyed entries don't leak private names to user code.
         for (name, decl) in &header.types {
             let canonical = canonical_join(module_name, name);
-            self.type_arity
-                .entry(canonical.clone())
-                .or_insert(decl.arity());
-            self.type_param_kinds.entry(canonical).or_insert_with(|| {
-                header_type_param_kinds(match decl {
-                    HeaderTypeDecl::Adt { type_params, .. }
-                    | HeaderTypeDecl::Alias { type_params, .. } => type_params,
-                })
-            });
+            self.type_arity.entry(canonical).or_insert(decl.arity());
         }
         for (name, record) in &header.records {
             let canonical = canonical_join(module_name, name);
             self.type_arity
-                .entry(canonical.clone())
-                .or_insert(record.type_params.len());
-            self.type_param_kinds
                 .entry(canonical)
-                .or_insert_with(|| header_type_param_kinds(&record.type_params));
+                .or_insert(record.type_params.len());
         }
     }
 
@@ -256,7 +245,6 @@ impl Checker {
                 .entry(canonical_join(module_name, name))
                 .or_insert_with(|| TypeAliasInfo {
                     param_vars,
-                    param_kinds: header_type_param_kinds(type_params),
                     body,
                     span: HEADER_SPAN,
                 });
@@ -521,15 +509,11 @@ fn header_type_param_vars(checker: &mut Checker, params: &[HeaderTypeParam]) -> 
     params
         .iter()
         .map(|param| {
-            let var = checker.fresh_var_of_kind(param.kind);
+            let var = checker.fresh_var();
             let Type::Var(id) = var else { unreachable!() };
             (param.name.clone(), id)
         })
         .collect()
-}
-
-fn header_type_param_kinds(params: &[HeaderTypeParam]) -> Vec<Kind> {
-    params.iter().map(|param| param.kind).collect()
 }
 
 fn header_trait_constraints(

@@ -4,7 +4,7 @@ use super::{
     CheckResult, Diagnostic, EffectRow, ModuleCodegenInfo, ModuleExports, ResolutionResult, Scheme,
     Substitution, Type, TypeAliasInfo, TypeEnv, check_module, result,
 };
-use crate::ast::{Kind, NodeId};
+use crate::ast::NodeId;
 use crate::token::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,10 +102,9 @@ pub struct TraitMethodInfo {
 
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
-    /// Type parameters: first is self, rest are extras.
-    /// e.g. `trait ConvertTo a b` -> [("a", Star), ("b", Star)].
-    /// Every kind is currently `Star`.
-    pub type_params: Vec<(String, Kind)>,
+    /// Type parameter names: first is self, rest are extras.
+    /// e.g. `trait ConvertTo a b` -> ["a", "b"].
+    pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
 }
@@ -241,17 +240,9 @@ pub struct Checker {
     /// Type name -> number of declared type parameters (for arity checking).
     /// Absent entries (e.g. Tuple) are unchecked.
     pub(crate) type_arity: HashMap<String, usize>,
-    /// Type name -> kinds of declared type parameters (positional). Kept as
-    /// kind-tracking infrastructure, but since `Kind` now has only `Star` every
-    /// entry is all-Star; absent entries default to all-Star too.
-    pub(crate) type_param_kinds: HashMap<String, Vec<Kind>>,
     /// Type aliases (canonical name -> info). Unfolded structurally during
     /// `convert_type_expr` so the rest of the typechecker never sees aliases.
     pub(crate) type_aliases: HashMap<String, TypeAliasInfo>,
-    /// Per type-variable id -> declared kind. Absent entries default to
-    /// `Kind::Star`. Since `Kind` now has only `Star`, every entry is `Star`;
-    /// the map is kept as kind infrastructure for a future richer kind system.
-    pub(crate) var_kinds: HashMap<u32, Kind>,
     /// Names of type parameters in scope for the binder currently being
     /// checked (e.g. an impl whose body is mid-check). Populated by
     /// `register_impl` before walking each method body and cleared after.

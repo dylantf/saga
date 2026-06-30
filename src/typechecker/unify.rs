@@ -2,8 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::token::Span;
 
-use crate::ast::Kind;
-
 use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
 
 /// Substitute every `Type::Var(id)` whose id is a key in `subst` with the
@@ -68,11 +66,6 @@ fn ambiguous_row_error(extras: &[super::EffectEntry]) -> Diagnostic {
     ))
 }
 
-pub(crate) fn kind_name(k: Kind) -> &'static str {
-    match k {
-        Kind::Star => "Star",
-    }
-}
 
 /// Replace type variable IDs with readable names for display.
 pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
@@ -160,43 +153,8 @@ impl Checker {
             // Error type unifies with anything (suppresses cascading errors)
             (Type::Error, _) | (_, Type::Error) => Ok(()),
 
-            // Var binding: respect kinds.
-            (Type::Var(id), Type::Var(id2)) => {
-                let k1 = self.var_kind(*id);
-                let k2 = self.var_kind(*id2);
-                if k1 != k2 {
-                    return Err(Diagnostic::error(format!(
-                        "kind mismatch: expected kind {}, found kind {}",
-                        kind_name(k1),
-                        kind_name(k2),
-                    )));
-                }
-                self.sub.bind(*id, &b)
-            }
-            (Type::Var(id), _) => {
-                let vk = self.var_kind(*id);
-                let other_kind = self.kind_of(&b);
-                if vk != other_kind {
-                    return Err(Diagnostic::error(format!(
-                        "kind mismatch: expected kind {}, found kind {}",
-                        kind_name(vk),
-                        kind_name(other_kind),
-                    )));
-                }
-                self.sub.bind(*id, &b)
-            }
-            (_, Type::Var(id)) => {
-                let vk = self.var_kind(*id);
-                let other_kind = self.kind_of(&a);
-                if vk != other_kind {
-                    return Err(Diagnostic::error(format!(
-                        "kind mismatch: expected kind {}, found kind {}",
-                        kind_name(vk),
-                        kind_name(other_kind),
-                    )));
-                }
-                self.sub.bind(*id, &a)
-            }
+            (Type::Var(id), _) => self.sub.bind(*id, &b),
+            (_, Type::Var(id)) => self.sub.bind(*id, &a),
 
             (Type::Fun(a1, b1, row1), Type::Fun(a2, b2, row2)) => {
                 self.unify(a1, a2)?;
@@ -464,10 +422,7 @@ impl Checker {
         let mapping: HashMap<u32, Type> = scheme
             .forall
             .iter()
-            .map(|&id| {
-                let kind = self.var_kind(id);
-                (id, self.fresh_var_of_kind(kind))
-            })
+            .map(|&id| (id, self.fresh_var()))
             .collect();
         let ty = Self::replace_vars(&scheme.ty, &mapping);
         let constraints = scheme
@@ -586,13 +541,12 @@ impl Checker {
     }
 
     /// Convert a surface TypeExpr to our internal Type representation.
-    /// Defaults to `Kind::Star` for the expected kind at the top level.
     pub(crate) fn convert_type_expr(
         &mut self,
         texpr: &crate::ast::TypeExpr,
         params: &mut Vec<(String, u32)>,
     ) -> Type {
-        let ty = self.convert_type_expr_kinded(texpr, params, Kind::Star);
+        let ty = self.convert_type_expr_inner(texpr, params);
         // After conversion, walk the type to catch any partial alias uses
         // that escaped to the top of nested positions (e.g. `Option Bag`
         // where `Bag` is a 1-arity alias used without an arg).
@@ -719,11 +673,10 @@ impl Checker {
     /// Like `convert_type_expr` but enforces that the resulting type has
     /// kind `expected_kind`. Kind infrastructure is retained, but since `Kind`
     /// now has only `Star` no mismatch is currently possible.
-    pub(crate) fn convert_type_expr_kinded(
+    pub(crate) fn convert_type_expr_inner(
         &mut self,
         texpr: &crate::ast::TypeExpr,
         params: &mut Vec<(String, u32)>,
-        expected_kind: Kind,
     ) -> Type {
         match texpr {
             crate::ast::TypeExpr::Named { id, name, span } => {
@@ -753,18 +706,6 @@ impl Checker {
                     return Type::Error;
                 }
 
-                // Named types always have kind Star in the current kind system.
-                if expected_kind != Kind::Star {
-                    self.collected_diagnostics.push(Diagnostic::error_at(
-                        *span,
-                        format!(
-                            "kind mismatch: '{}' has kind Star but kind {} was expected here",
-                            name,
-                            kind_name(expected_kind),
-                        ),
-                    ));
-                    return Type::Error;
-                }
                 // If this references a zero-arity alias, unfold it immediately.
                 // For positive-arity aliases used here without args we leave
                 // a Type::Con(alias_name, []) so the enclosing App can grow
@@ -781,19 +722,6 @@ impl Checker {
                     .map(|(_, id)| *id)
                     .or_else(|| self.outer_named_type_vars.get(name).copied());
                 if let Some(id) = existing_id {
-                    let actual = self.var_kind(id);
-                    if actual != expected_kind {
-                        self.collected_diagnostics.push(Diagnostic::error_at(
-                            texpr.span(),
-                            format!(
-                                "kind mismatch: type variable `{}` has kind {} but kind {} was expected here",
-                                name,
-                                kind_name(actual),
-                                kind_name(expected_kind),
-                            ),
-                        ));
-                        return Type::Error;
-                    }
                     // Only seed `params` if the binding came from the outer
                     // scope — keeps the local list consistent for callers
                     // that scan it after conversion.
@@ -802,35 +730,16 @@ impl Checker {
                     }
                     Type::Var(id)
                 } else {
-                    // New type variable -- create fresh, with the expected kind,
-                    // and remember for reuse.
-                    let var = self.fresh_var_of_kind(expected_kind);
-                    let id = match var {
-                        Type::Var(id) => id,
-                        _ => unreachable!(),
-                    };
+                    // New type variable -- create fresh and remember for reuse.
+                    let id = self.next_var;
+                    self.next_var += 1;
                     params.push((name.clone(), id));
                     Type::Var(id)
                 }
             }
             crate::ast::TypeExpr::App { func, arg, .. } => {
-                // The head of an App is always Star-kinded (a type constructor).
-                let func_ty = self.convert_type_expr_kinded(func, params, Kind::Star);
-                // Determine arg's expected kind from the head's registered kinds.
-                let head_name = match &func_ty {
-                    Type::Con(name, _) => Some(name.clone()),
-                    _ => None,
-                };
-                let arg_pos = match &func_ty {
-                    Type::Con(_, args) => args.len(),
-                    _ => 0,
-                };
-                let arg_expected_kind = head_name
-                    .as_ref()
-                    .and_then(|n| self.type_param_kinds.get(n))
-                    .and_then(|kinds| kinds.get(arg_pos).copied())
-                    .unwrap_or(Kind::Star);
-                let arg_ty = self.convert_type_expr_kinded(arg, params, arg_expected_kind);
+                let func_ty = self.convert_type_expr_inner(func, params);
+                let arg_ty = self.convert_type_expr_inner(arg, params);
                 // Type application: push arg into Con's args list
                 match func_ty {
                     Type::Con(name, mut args) => {
@@ -870,18 +779,8 @@ impl Checker {
                 effect_row_var,
                 ..
             } => {
-                if expected_kind != Kind::Star {
-                    self.collected_diagnostics.push(Diagnostic::error_at(
-                        texpr.span(),
-                        format!(
-                            "kind mismatch: function type has kind Star but kind {} was expected here",
-                            kind_name(expected_kind),
-                        ),
-                    ));
-                    return Type::Error;
-                }
-                let a_ty = self.convert_type_expr_kinded(from, params, Kind::Star);
-                let b_ty = self.convert_type_expr_kinded(to, params, Kind::Star);
+                let a_ty = self.convert_type_expr_inner(from, params);
+                let b_ty = self.convert_type_expr_inner(to, params);
                 {
                     let effect_refs: Vec<super::EffectEntry> = effects
                         .iter()
@@ -935,30 +834,17 @@ impl Checker {
                 }
             }
             crate::ast::TypeExpr::Record { fields, .. } => {
-                if expected_kind != Kind::Star {
-                    self.collected_diagnostics.push(Diagnostic::error_at(
-                        texpr.span(),
-                        format!(
-                            "kind mismatch: record type has kind Star but kind {} was expected here",
-                            kind_name(expected_kind),
-                        ),
-                    ));
-                    return Type::Error;
-                }
                 let mut typed_fields: Vec<(String, Type)> = fields
                     .iter()
                     .map(|(fname, texpr)| {
-                        (
-                            fname.clone(),
-                            self.convert_type_expr_kinded(texpr, params, Kind::Star),
-                        )
+                        (fname.clone(), self.convert_type_expr_inner(texpr, params))
                     })
                     .collect();
                 typed_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
                 Type::Record(typed_fields)
             }
             crate::ast::TypeExpr::Labeled { inner, .. } => {
-                self.convert_type_expr_kinded(inner, params, expected_kind)
+                self.convert_type_expr_inner(inner, params)
             }
         }
     }

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{self, Kind};
+use crate::ast;
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Severity, Type};
@@ -103,23 +103,16 @@ impl Checker {
         params: &mut Vec<(String, u32)>,
     ) -> Vec<Type> {
         let resolved_name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
-        let kinds: Vec<Kind> = self
+        let param_count = self
             .effects
             .get(&resolved_name)
-            .map(|info| {
-                info.type_params
-                    .iter()
-                    .map(|id| self.var_kind(*id))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map(|info| info.type_params.len())
+            .unwrap_or(0);
         let mut args: Vec<Type> = effect_ref
             .type_args
             .iter()
-            .enumerate()
-            .map(|(i, te)| {
-                let kind = kinds.get(i).copied().unwrap_or(Kind::Star);
-                let ty = self.convert_type_expr_kinded(te, params, kind);
+            .map(|te| {
+                let ty = self.convert_type_expr_inner(te, params);
                 self.canonicalize_handler_effect_types(ty)
             })
             .collect();
@@ -131,8 +124,8 @@ impl Checker {
         // Unification at the function boundary then pins it from the body's
         // usage and flags conflicting forwarded instantiations. Without this the
         // arg is dropped and a handler can be handed the wrong payload type.
-        for kind in kinds.iter().skip(args.len()) {
-            args.push(self.fresh_var_of_kind(*kind));
+        for _ in args.len()..param_count {
+            args.push(self.fresh_var());
         }
         args
     }

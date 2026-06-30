@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use super::rename_vars;
-use crate::ast::Kind;
 use crate::token::Span;
 
 // --- Type representation ---
@@ -155,8 +154,6 @@ pub enum Type {
 pub struct TypeAliasInfo {
     /// Positional parameter variable IDs (matching the order of `type_params`).
     pub param_vars: Vec<u32>,
-    /// Positional parameter kinds (mirrors `type_param_kinds` for this alias).
-    pub param_kinds: Vec<Kind>,
     /// Pre-converted RHS, expressed in terms of `param_vars`.
     pub body: Type,
     /// Source span of the alias declaration.

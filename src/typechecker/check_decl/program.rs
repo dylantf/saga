@@ -560,9 +560,7 @@ impl Checker {
                         None => name.to_string(),
                     };
                     self.type_arity
-                        .insert(canonical_name.clone(), type_params.len());
-                    self.type_param_kinds
-                        .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
+                        .insert(canonical_name, type_params.len());
                 }
             }
             // Cycle check across the set of aliases in this module.
@@ -712,13 +710,6 @@ impl Checker {
                         {
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
-                                self.validate_trait_bound_kind(
-                                    &resolved_trait,
-                                    &bound.type_var,
-                                    var_id,
-                                    tr.span,
-                                )
-                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -831,13 +822,6 @@ impl Checker {
                                 .insert(var_id, bound.type_var.clone());
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
-                                self.validate_trait_bound_kind(
-                                    &resolved_trait,
-                                    &bound.type_var,
-                                    var_id,
-                                    tr.span,
-                                )
-                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
