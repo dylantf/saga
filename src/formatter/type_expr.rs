@@ -58,7 +58,6 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
     match ty {
         TypeExpr::Named { name, .. } => Doc::text(name),
         TypeExpr::Var { name, .. } => Doc::text(name),
-        TypeExpr::Symbol { name, .. } => Doc::text(format!("'{}", name)),
         TypeExpr::App { func, arg, .. } => {
             let arg_doc = match arg.as_ref() {
                 // Paren-wrap App args to disambiguate, but not tuples - they

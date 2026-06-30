@@ -380,8 +380,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
     match ek {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
-        | ExprKind::Constructor { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::Constructor { .. } => {}
         ExprKind::App { func, arg } => {
             normalize_expr(func);
             normalize_expr(arg);
@@ -725,8 +724,7 @@ fn normalize_stmt(s: &mut Stmt) {
 fn normalize_type_expr(te: &mut TypeExpr) {
     match te {
         TypeExpr::Named { span, .. }
-        | TypeExpr::Var { span, .. }
-        | TypeExpr::Symbol { span, .. } => *span = S,
+        | TypeExpr::Var { span, .. } => *span = S,
         TypeExpr::App {
             func, arg, span, ..
         } => {
@@ -1239,22 +1237,6 @@ fn type_alias_parameterized_round_trip() {
 }
 
 #[test]
-fn type_alias_symbol_round_trip() {
-    assert_eq!(
-        fmt80("type alias UserId = Id 'user"),
-        "type alias UserId = Id 'user\n"
-    );
-}
-
-#[test]
-fn type_alias_kind_annotated_param_round_trip() {
-    assert_eq!(
-        fmt80("type alias Tagged (k : Symbol) = Id k"),
-        "type alias Tagged (k : Symbol) = Id k\n"
-    );
-}
-
-#[test]
 fn type_alias_pub_round_trip() {
     assert_eq!(
         fmt80("pub type alias ApiResult a = Result a String"),
@@ -1435,16 +1417,6 @@ fn multiple_blank_lines_collapsed_to_one() {
 fn single_blank_line_preserved() {
     let src = "let x = 1\n\nlet y = 2";
     assert_eq!(fmt80(src), "let x = 1\n\nlet y = 2\n");
-}
-
-// --- Idempotency ---
-
-#[test]
-fn idempotent_scratch_file() {
-    let source = std::fs::read_to_string("examples/scratch.saga").unwrap();
-    let first = fmt80(&source);
-    let second = fmt80(&first);
-    assert_eq!(first, second, "Formatter is not idempotent");
 }
 
 // --- Triple-quoted / multiline strings ---
@@ -1719,20 +1691,6 @@ fn trait_default_method_body_preserved() {
 #[test]
 fn empty_trait_body_stays_inline() {
     assert_eq!(fmt80("trait PgType a {\n}"), "trait PgType a {}\n");
-}
-
-#[test]
-fn synthesizing_trait_clause_round_trips() {
-    // The `synthesizes via … deriving (…)` clause is preserved (no body) and
-    // re-emitted on its own indented line.
-    let src = "trait Insertable cols ins | cols -> ins\n  synthesizes via InsertField deriving (InsertRow)\n";
-    assert_eq!(fmt80(src), src);
-}
-
-#[test]
-fn synthesizing_trait_clause_without_deriving_round_trips() {
-    let src = "trait Mirror src out | src -> out\n  synthesizes via FieldOf\n";
-    assert_eq!(fmt80(src), src);
 }
 
 #[test]

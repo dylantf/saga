@@ -550,7 +550,6 @@ impl<'a> Resolver<'a> {
         match texpr {
             TypeExpr::Named { id, name, .. } => self.record_type_ref(*id, name),
             TypeExpr::Var { .. } => {}
-            TypeExpr::Symbol { .. } => {}
             TypeExpr::App { func, arg, .. } => {
                 self.resolve_type_expr(func);
                 self.resolve_type_expr(arg);
@@ -808,7 +807,7 @@ impl<'a> Resolver<'a> {
                     self.resolve_type_expr(target_type_expr);
                 }
                 // Resolve types appearing in the impl's trait_type_args
-                // (e.g. `impl Generic (Box a) (Rep__Box a)` → resolve Rep__Box).
+                // (e.g. `impl ConvertTo (Box a) (List a)` → resolve List).
                 // TypeExpr::Var (lowercase ident) is treated as a type variable
                 // and skipped by resolve_type_expr; named heads get type_ref entries.
                 let _ = type_params;
@@ -1036,8 +1035,7 @@ impl<'a> Resolver<'a> {
                 self.resolve_expr(dict)
             }
             ExprKind::DictRef { .. }
-            | ExprKind::ForeignCall { .. }
-            | ExprKind::SymbolIntrinsic { .. } => {}
+            | ExprKind::ForeignCall { .. } => {}
         }
     }
 
@@ -1372,8 +1370,7 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
     }
 }
 

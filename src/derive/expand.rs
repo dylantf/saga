@@ -6,16 +6,15 @@ use crate::typechecker::{Diagnostic, Severity};
 /// nodes after each `TypeDef` that has them. Returns diagnostics for
 /// unsupported derive requests.
 ///
-/// `imported` carries trait/type summaries pulled from imported modules so
-/// routed derives (`deriving (Foo)` where `Foo` is imported) can resolve.
-/// Callers without import context can pass `&ImportedDecls::empty()`.
+/// `imported` carries trait/type summaries pulled from imported modules; it is
+/// now used only to let `inherit_trait_defaults` clone default-method bodies
+/// from imported traits. Callers without import context can pass
+/// `&ImportedDecls::empty()`.
 pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
-    // Build a fresh program, splicing each decl's derived siblings in directly
-    // after it. Generic-derived `Rep__T` typedefs and their impls must be
-    // visible before any later user impl whose where-app form mentions
-    // `Generic T r`, otherwise the where-app's coherence lookup fires before
-    // the impl is registered.
+    // Build a fresh program, splicing each decl's derived siblings (the
+    // built-in `deriving (Show, Eq, …)` impls) in directly after the decl they
+    // come from, so they stay adjacent to their type.
     let original = std::mem::take(program);
 
     let current_module = original.iter().find_map(|d| {
@@ -43,115 +42,27 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
         })
         .collect();
 
-    // A routed functional derive (`deriving (Selectable User)`) needs its *row*
-    // type (`User`) to be `Generic` so the bridge can decompose it. The row type
-    // is a separate declaration, so collect every such row head up front and
-    // auto-derive `Generic` for the matching local types/records — the same
-    // convenience already applied to the type carrying the derive. Computed
-    // before the scope is built so row types report as `Generic`-deriving (which
-    // `ensure_row_generic_available` consults).
-    let routed_row_heads: std::collections::HashSet<String> = original
-        .iter()
-        .flat_map(|d| match d {
-            Decl::TypeDef { deriving, .. } | Decl::RecordDef { deriving, .. } => {
-                deriving.as_slice()
-            }
-            _ => &[],
-        })
-        .filter_map(|spec| spec.type_args.first().and_then(|row| row.head_name()))
-        .map(|head| head.rsplit('.').next().unwrap_or(head).to_string())
-        .collect();
-    // Whether a local type/record will end up with a `Generic` impl after derive
-    // expansion: explicitly listed, implied by another routed derive on it, or
-    // referenced as a routed derive's row type.
-    let will_derive_generic = |name: &str, deriving: &[DeriveSpec]| -> bool {
-        deriving.iter().any(|d| d.is_plain_named("Generic"))
-            || deriving
-                .iter()
-                .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()))
-            || routed_row_heads.contains(name)
-    };
-
+    // Collect local trait definitions so `inherit_trait_defaults` can clone
+    // default-method bodies into impls that omit them. (This is the only thing
+    // the derive scope is used for now that routed/Generic derives are gone.)
     for d in &original {
-        match d {
-            Decl::TraitDef {
-                name,
-                type_params,
-                functional_dependency,
-                synthesis,
-                methods,
-                ..
-            } => {
-                scope.add_local_trait(
-                    name.clone(),
-                    RoutedTraitInfo {
-                        type_params: type_params.clone(),
-                        is_functional: functional_dependency.is_some(),
-                        fundep: functional_dependency.clone(),
-                        synthesis: synthesis
-                            .as_ref()
-                            .map(|s| qualify_synthesis_spec(s, current_module.as_deref())),
-                        methods: methods.iter().map(|m| m.node.clone()).collect(),
-                        defining_module: current_module.clone(),
-                        defining_module_values: local_defining_values.clone(),
-                        defining_module_constructors: local_defining_constructors.clone(),
-                    },
-                );
-            }
-            Decl::TypeDef {
-                name,
-                type_params,
-                variants,
-                deriving,
-                opaque,
-                ..
-            } => {
-                scope.add_local_type(
-                    name.clone(),
-                    WrapperTypeInfo {
-                        type_params: type_params.clone(),
-                        variants: variants.iter().map(|v| v.node.clone()).collect(),
-                        derives_generic: will_derive_generic(name, deriving),
-                        opaque: *opaque,
-                    },
-                );
-            }
-            Decl::RecordDef {
-                name,
-                type_params,
-                fields,
-                deriving,
-                ..
-            } => {
-                scope.add_local_record(
-                    name.clone(),
-                    WrapperRecordInfo {
-                        type_params: type_params.clone(),
-                        fields: fields
-                            .iter()
-                            .map(|f| (f.node.0.clone(), f.node.1.clone()))
-                            .collect(),
-                        derives_generic: will_derive_generic(name, deriving),
-                    },
-                );
-            }
-            Decl::ImplDef {
-                trait_name,
-                trait_type_args,
-                target_type_expr: Some(target),
-                ..
-            } if trait_type_args.len() == 1 => {
-                scope.local_impls.push(DeriveImplInfo {
-                    trait_bare: trait_name
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or(trait_name)
-                        .to_string(),
-                    target: target.clone(),
-                    row: trait_type_args[0].clone(),
-                });
-            }
-            _ => {}
+        if let Decl::TraitDef {
+            name,
+            type_params,
+            methods,
+            ..
+        } = d
+        {
+            scope.add_local_trait(
+                name.clone(),
+                RoutedTraitInfo {
+                    type_params: type_params.clone(),
+                    methods: methods.iter().map(|m| m.node.clone()).collect(),
+                    defining_module: current_module.clone(),
+                    defining_module_values: local_defining_values.clone(),
+                    defining_module_constructors: local_defining_constructors.clone(),
+                },
+            );
         }
     }
 
@@ -160,7 +71,6 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
         let mut extra: Vec<Decl> = Vec::new();
         match decl {
             Decl::TypeDef {
-                public,
                 name,
                 type_params,
                 variants,
@@ -180,68 +90,14 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     extra.push(impl_def);
                 }
 
-                // Auto-include Generic: if any non-hardcoded derive is requested
-                // and Generic isn't explicitly listed, synthesize it first.
-                let has_routed = deriving
-                    .iter()
-                    .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
-                let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
-                let referenced_as_row = routed_row_heads.contains(name);
-                if (has_routed || referenced_as_row) && !has_generic {
-                    match derive_adt_generic(*public, name, type_params, variants, *span) {
-                        Ok(decls) => extra.extend(decls),
-                        Err(Some(diag)) => errors.push(diag),
-                        Err(None) => errors.push(Diagnostic {
-                            severity: Severity::Error,
-                            message: format!("cannot auto-derive `Generic` for type `{name}`"),
-                            span: Some(*span),
-                        }),
-                    }
-                }
-
                 for spec in deriving {
                     let trait_name = &spec.trait_name;
-                    let bare = spec.bare_name();
                     if !spec.type_args.is_empty() {
-                        if is_hardcoded_derive(bare) {
-                            errors.push(Diagnostic {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "cannot derive `{trait_name}` with type arguments"
-                                ),
-                                span: Some(spec.span),
-                            });
-                        } else {
-                            match derive_applied_functional_bridge(
-                                spec,
-                                name,
-                                type_params,
-                                *span,
-                                &scope,
-                            ) {
-                                Ok(decls) => extra.extend(decls),
-                                Err(diag) => errors.push(diag),
-                            }
-                        }
-                        continue;
-                    }
-                    if bare == "Generic" {
-                        match derive_adt_generic(*public, name, type_params, variants, *span) {
-                            Ok(decls) => extra.extend(decls),
-                            Err(Some(diag)) => errors.push(diag),
-                            Err(None) => errors.push(Diagnostic {
-                                severity: Severity::Error,
-                                message: format!("cannot derive `{trait_name}` for type `{name}`"),
-                                span: Some(*span),
-                            }),
-                        }
-                        continue;
-                    }
-                    if !is_hardcoded_derive(bare) {
-                        match derive_routed(trait_name, name, type_params, *span, &scope) {
-                            Ok(decls) => extra.extend(decls),
-                            Err(diag) => errors.push(diag),
-                        }
+                        errors.push(Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("cannot derive `{trait_name}` with type arguments"),
+                            span: Some(spec.span),
+                        });
                         continue;
                     }
                     match generate_derive(trait_name, name, type_params, variants, *span) {
@@ -263,79 +119,14 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 span,
                 ..
             } => {
-                let has_routed = deriving
-                    .iter()
-                    .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
-                let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
-                let referenced_as_row = routed_row_heads.contains(name);
-                if (has_routed || referenced_as_row) && !has_generic {
-                    match derive_record_generic(*public, name, type_params, fields, *span) {
-                        Ok(decls) => extra.extend(decls),
-                        Err(Some(diag)) => errors.push(diag),
-                        Err(None) => errors.push(Diagnostic {
-                            severity: Severity::Error,
-                            message: format!("cannot auto-derive `Generic` for record `{name}`"),
-                            span: Some(*span),
-                        }),
-                    }
-                }
-
                 for spec in deriving {
                     let trait_name = &spec.trait_name;
-                    let bare = spec.bare_name();
                     if !spec.type_args.is_empty() {
-                        if is_hardcoded_derive(bare) {
-                            errors.push(Diagnostic {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "cannot derive `{trait_name}` with type arguments"
-                                ),
-                                span: Some(spec.span),
-                            });
-                        } else if let Some((trait_info, trait_syntax)) = scope
-                            .trait_entry(trait_name)
-                            .ok()
-                            .flatten()
-                            .filter(|e| e.info.synthesis.is_some())
-                            .map(|e| (e.info.clone(), e.canonical.clone()))
-                        {
-                            // The trait declares `synthesizes …`: the argument
-                            // names a record to *generate* from this carrier,
-                            // not an existing row type. All policy is library-
-                            // supplied; nothing here is library-specific.
-                            match derive_synthesize(
-                                spec,
-                                name,
-                                type_params,
-                                fields,
-                                *public,
-                                *span,
-                                &trait_info,
-                                &trait_syntax,
-                                &scope,
-                            ) {
-                                Ok(decls) => extra.extend(decls),
-                                Err(diag) => errors.push(diag),
-                            }
-                        } else {
-                            match derive_applied_functional_bridge(
-                                spec,
-                                name,
-                                type_params,
-                                *span,
-                                &scope,
-                            ) {
-                                Ok(decls) => extra.extend(decls),
-                                Err(diag) => errors.push(diag),
-                            }
-                        }
-                        continue;
-                    }
-                    if !is_hardcoded_derive(bare) && bare != "Generic" {
-                        match derive_routed(trait_name, name, type_params, *span, &scope) {
-                            Ok(decls) => extra.extend(decls),
-                            Err(diag) => errors.push(diag),
-                        }
+                        errors.push(Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("cannot derive `{trait_name}` with type arguments"),
+                            span: Some(spec.span),
+                        });
                         continue;
                     }
                     match generate_record_derive(
@@ -482,8 +273,7 @@ pub(crate) fn qualify_free_vars(
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
         ExprKind::App { func, arg } => {
             qualify_free_vars(func, module, module_values, trait_methods, bound);
             qualify_free_vars(arg, module, module_values, trait_methods, bound);
@@ -752,7 +542,6 @@ pub(crate) fn qualify_ctor_refs(
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. }
         | ExprKind::HandlerExpr { .. } => {}
         ExprKind::App { func, arg } => {
             qualify_ctor_refs(func, module, module_constructors);

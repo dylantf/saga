@@ -2,6 +2,12 @@ module Main
 
 import Std.IO (console)
 
+# Record builders: a type-directed builder API derived from a record's fields.
+# This is the HKT-free encoding that replaced the old Generic-derive approach
+# to record projection: instead of reflecting a structural Rep of the record
+# at the type level, the compiler threads the per-field start/field methods
+# through ordinary dictionary passing.
+
 record BuildState a {
   fields: List String,
   value: a,

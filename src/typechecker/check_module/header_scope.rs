@@ -600,7 +600,7 @@ fn header_type_expr_uses_effects(ty: &HeaderTypeExpr) -> bool {
             .iter()
             .any(|(_, ty)| header_type_expr_uses_effects(ty)),
         HeaderTypeExpr::Labeled { inner, .. } => header_type_expr_uses_effects(inner),
-        HeaderTypeExpr::Named(_) | HeaderTypeExpr::Var(_) | HeaderTypeExpr::Symbol(_) => false,
+        HeaderTypeExpr::Named(_) | HeaderTypeExpr::Var(_) => false,
     }
 }
 

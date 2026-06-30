@@ -4,7 +4,7 @@ use super::{
     CheckResult, Diagnostic, EffectRow, ModuleCodegenInfo, ModuleExports, ResolutionResult, Scheme,
     Substitution, Type, TypeAliasInfo, TypeEnv, check_module, result,
 };
-use crate::ast::{Kind, NodeId};
+use crate::ast::NodeId;
 use crate::token::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,73 +100,13 @@ pub struct TraitMethodInfo {
     pub effect_sig: TraitMethodEffectSig,
 }
 
-/// A functional dependency on a trait, stored as parameter *indices* into
-/// `TraitInfo.type_params`. The determinant always contains index 0 (the
-/// self parameter) so that concrete-self impl selection can recover the
-/// determined parameters. e.g. `trait T a b c | a b -> c` stores
-/// `determinant = [0, 1]`, `determined = [2]`.
-#[derive(Debug, Clone)]
-pub struct TraitFundep {
-    pub determinant: Vec<usize>,
-    pub determined: Vec<usize>,
-}
-
-impl TraitFundep {
-    /// Positions of determinant parameters within the *extra* trait args
-    /// (`trait_type_args`, which correspond to params `1..n`). The self
-    /// parameter (index 0) is not an extra and is excluded.
-    pub fn determinant_extra_positions(&self) -> Vec<usize> {
-        self.determinant
-            .iter()
-            .filter(|&&i| i >= 1)
-            .map(|&i| i - 1)
-            .collect()
-    }
-
-    /// Positions of determined parameters within the extra trait args.
-    pub fn determined_extra_positions(&self) -> Vec<usize> {
-        self.determined
-            .iter()
-            .filter(|&&i| i >= 1)
-            .map(|&i| i - 1)
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
-    /// Type parameters: first is self, rest are extras.
-    /// e.g. `trait ConvertTo a b` -> [("a", Star), ("b", Star)].
-    /// Symbol-kinded params are declared as `(n : Symbol)` in source.
-    pub type_params: Vec<(String, Kind)>,
+    /// Type parameter names: first is self, rest are extras.
+    /// e.g. `trait ConvertTo a b` -> ["a", "b"].
+    pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
-    /// `true` if the trait's determinant parameters functionally determine
-    /// the determined parameters. Equivalent to `fundep.is_some()`; kept as a
-    /// flag for the many boolean call sites. Set at registration time from a
-    /// declared `| ... -> ...` clause or a hardcoded canonical-name list
-    /// (see `check_traits::FUNCTIONAL_TRAITS`).
-    pub is_functional: bool,
-    /// The functional dependency's determinant/determined parameter indices,
-    /// when the trait is functional. Drives improvement and coherence so they
-    /// know which positions are pinned by which.
-    pub fundep: Option<TraitFundep>,
-}
-
-/// A dictionary parameter a conditional impl requires from a `where`-app
-/// constraint whose self position is a fresh/existential variable determined by
-/// a functional dependency (rather than an impl type parameter). Carries the
-/// fully fundep-resolved trait, extra trait args, and self type so the
-/// elaborator can build the sub-dict at a call site — including cross-module,
-/// where the importer never sees the impl's AST. Mirrors the elaborator's
-/// `ImplWhereAppDictParam`; the resolved `Type`s use the `u32::MAX - idx`
-/// impl-type-parameter convention so `dict_for_type`'s positional substitution
-/// applies uniformly to local and imported impls.
-#[derive(Debug, Clone)]
-pub struct WhereAppDictParam {
-    pub trait_name: String,
-    pub trait_type_args: Vec<Type>,
-    pub self_type: Type,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,7 +127,7 @@ pub struct ImplInfo {
     /// legacy/builtin impl matching by coarse target key only.
     pub target_pattern: Option<Type>,
     /// Extra type arguments applied to the trait, as full Types.
-    /// For parameterized impls (e.g. `impl Generic (Box a) (Rep__Box a)`),
+    /// For parameterized impls (e.g. `impl ConvertTo (Box a) (List a)`),
     /// these reference the impl's target type-parameter Type::Vars listed
     /// in `target_type_param_ids`, so the call-site can substitute the
     /// concrete args of the target to materialize the extras.
@@ -205,11 +145,6 @@ pub struct ImplInfo {
     /// caller (the trait-effect-propagation bugfix). Travels cross-module via
     /// `ModuleExports.trait_impls`. See docs/planning/effect-polymorphic-traits.md.
     pub method_effects: HashMap<String, Vec<String>>,
-    /// Dict params required by fundep-determined `where`-app constraints (see
-    /// [`WhereAppDictParam`]). Computed at registration and read by the
-    /// elaborator for imported impls, whose AST the importer cannot re-derive
-    /// these from. Empty for impls without such constraints.
-    pub where_app_dict_params: Vec<WhereAppDictParam>,
 }
 
 /// Evidence that a trait constraint was resolved during typechecking.
@@ -233,11 +168,6 @@ pub struct TraitEvidence {
     /// e.g. for `ConvertTo NOK`, this holds [Type::Con("NOK", [])].
     /// Empty for single-param traits.
     pub trait_type_args: Vec<Type>,
-    /// For `KnownSymbol 'foo` constraints resolved against a concrete symbol
-    /// literal: the symbol's source name (e.g. `"foo"`). The elaborator uses
-    /// this to emit a symbol-flavored intrinsic instead of a normal dict
-    /// lookup. `None` for all other trait evidence.
-    pub resolved_symbol: Option<String>,
 }
 
 /// Warnings deferred until after inference, when substitutions are complete.
@@ -310,34 +240,25 @@ pub struct Checker {
     /// Type name -> number of declared type parameters (for arity checking).
     /// Absent entries (e.g. Tuple) are unchecked.
     pub(crate) type_arity: HashMap<String, usize>,
-    /// Type name -> kinds of declared type parameters (positional). Used by
-    /// `convert_type_expr` to know the expected kind of each argument slot
-    /// in a type application. Absent entries default to all-Star.
-    pub(crate) type_param_kinds: HashMap<String, Vec<Kind>>,
     /// Type aliases (canonical name -> info). Unfolded structurally during
     /// `convert_type_expr` so the rest of the typechecker never sees aliases.
     pub(crate) type_aliases: HashMap<String, TypeAliasInfo>,
-    /// Per type-variable id -> declared kind. Absent entries default to
-    /// `Kind::Star`. Populated when a fresh variable is minted for an
-    /// `Symbol`-kinded type parameter (type, trait, impl, effect).
-    pub(crate) var_kinds: HashMap<u32, Kind>,
     /// Names of type parameters in scope for the binder currently being
     /// checked (e.g. an impl whose body is mid-check). Populated by
     /// `register_impl` before walking each method body and cleared after.
     /// `convert_type_expr` consults this on a `TypeExpr::Var` miss so that
-    /// inline type ascriptions like `(Proxy : Proxy n)` inside a method body
-    /// resolve `n` to the impl's `n` rather than creating a fresh,
-    /// unconstrained var. Without this, polymorphic `KnownSymbol n` impl
-    /// bodies can't reflect the symbol — the Generic migration's library
-    /// impls (`impl ToJson for Variant n a`) depend on it.
+    /// inline type ascriptions like `(x : b)` inside a method body resolve `b`
+    /// to the impl's `b` rather than creating a fresh, unconstrained var. This
+    /// keeps multi-param impl bodies (`impl ConvertTo a b for Box a`) referring
+    /// to the same extra type vars the impl header introduced.
     pub(crate) outer_named_type_vars: HashMap<String, u32>,
     /// Per top-level `fun`: the (name, var_id) mapping for the type params
     /// introduced by its signature annotation. Recorded by
     /// `collect_annotations` so `check_fun_clauses` can seed
     /// `outer_named_type_vars` before checking the body — same fix as for
-    /// impls, applied to functions. Without this, an ascription like
-    /// `(Proxy : Proxy n)` inside a body whose signature also has `n`
-    /// would mint a fresh, unrelated var.
+    /// impls, applied to functions. Without this, an ascription like `(x : b)`
+    /// inside a body whose signature also has `b` would mint a fresh,
+    /// unrelated var.
     pub(crate) fun_type_param_vars: HashMap<String, Vec<(String, u32)>>,
     /// Name resolution map: user-visible names -> canonical names.
     pub(crate) scope_map: ScopeMap,
@@ -589,14 +510,6 @@ pub(crate) struct TraitState {
     /// Pending trait constraints to check: (trait_name, trait_type_arg_types, self_type, span, node_id).
     /// trait_type_arg_types is empty for single-param traits.
     pub pending_constraints: Vec<(String, Vec<Type>, Type, Span, crate::ast::NodeId)>,
-    /// Constraint NodeIds that originated inside a synthesized routed-derive impl.
-    /// Populated in `register_impl` by snapshotting constraints added during the
-    /// impl's body check. Used by `check_pending_constraints` to rewrite failure
-    /// diagnostics so they point at the user's deriving clause and name the
-    /// user-facing trait + type, instead of mentioning building-block types from
-    /// the synthesized body. See the [crate::ast::RoutedDeriveInfo] marker on
-    /// `Decl::ImplDef` set by `derive_routed`.
-    pub routed_constraint_origins: HashMap<crate::ast::NodeId, crate::ast::RoutedDeriveInfo>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
     /// Extra type arguments for multi-parameter where bounds, keyed by

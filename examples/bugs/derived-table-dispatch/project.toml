@@ -1,5 +1,0 @@
-[project]
-name = "xmod_repro"
-
-[bin]
-main = "src/Main.saga"

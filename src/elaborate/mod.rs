@@ -13,7 +13,6 @@
 //! - `program`      — top-level program elaboration
 //! - `expr`         — expression and handler elaboration, method desugaring
 //! - `dict_resolve` — resolving a concrete dictionary for a trait at a use site
-//! - `anon_record`  — building `Generic` dictionaries for anonymous records/tuples
 //!
 //! Shared free helpers, constants, and the `Elaborator` struct live here and are
 //! re-exported to the submodules via `use super::*`.
@@ -23,101 +22,16 @@ pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use crate::ast::*;
 pub(crate) use crate::token::{Span, StringKind};
 pub(crate) use crate::typechecker::{
-    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo,
-    Type, WhereAppDictParam,
+    CheckResult, ImplInfo, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo,
+    Type,
 };
 
-mod anon_record;
 mod dict_params;
 mod dict_resolve;
 mod expr;
 mod program;
 mod setup;
-
-pub(crate) fn bare_segment(name: &str) -> String {
-    name.rsplit('.').next().unwrap_or(name).to_string()
-}
-
-/// Disambiguating suffix for a dictionary parameter's variable component.
-///
-/// A trait with a multi-variable-determinant fundep (e.g.
-/// `TableScope table mode cols | table mode -> cols`) can be required twice on
-/// the *same* self variable, differing only in a determinant extra
-/// (`table Required -> ...` vs `table Optional -> ...`). The two dicts would
-/// otherwise collapse to the same `__dict_<Trait>_<var>` name and collide in
-/// codegen. We append the concrete determinant-extra heads (`_Required`) so the
-/// names stay distinct. Returns "" for traits without such a fundep, or when a
-/// determinant extra isn't a concrete head — keeping existing names unchanged
-/// and definition/use sites consistent.
-pub(crate) fn dict_var_suffix_from_types(
-    traits: &HashMap<String, TraitInfo>,
-    trait_name: &str,
-    extras: &[Type],
-) -> String {
-    let Some(fundep) = traits.get(trait_name).and_then(|i| i.fundep.as_ref()) else {
-        return String::new();
-    };
-    let positions = fundep.determinant_extra_positions();
-    if positions.is_empty() {
-        return String::new();
-    }
-    let mut parts = Vec::new();
-    for p in positions {
-        match extras.get(p) {
-            Some(Type::Con(name, _)) => parts.push(bare_segment(name)),
-            Some(Type::Symbol(s)) => parts.push(bare_segment(s)),
-            _ => return String::new(),
-        }
-    }
-    format!("_{}", parts.join("_"))
-}
-
-/// `dict_var_suffix_from_types` for the where-clause source form, where the
-/// determinant extras are `TypeExpr`s rather than resolved `Type`s. Renders the
-/// same bare heads so it agrees with the use-site (`Type`-based) computation.
-pub(crate) fn dict_var_suffix_from_type_exprs(
-    traits: &HashMap<String, TraitInfo>,
-    trait_name: &str,
-    extras: &[TypeExpr],
-) -> String {
-    let Some(fundep) = traits.get(trait_name).and_then(|i| i.fundep.as_ref()) else {
-        return String::new();
-    };
-    let positions = fundep.determinant_extra_positions();
-    if positions.is_empty() {
-        return String::new();
-    }
-    let mut parts = Vec::new();
-    for p in positions {
-        match extras.get(p) {
-            Some(TypeExpr::Named { name, .. }) => parts.push(bare_segment(name)),
-            Some(te @ TypeExpr::App { .. }) => match te.head_name() {
-                Some(h) => parts.push(bare_segment(h)),
-                None => return String::new(),
-            },
-            Some(TypeExpr::Symbol { name, .. }) => parts.push(bare_segment(name)),
-            _ => return String::new(),
-        }
-    }
-    format!("_{}", parts.join("_"))
-}
-
-/// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
-/// trait's own `symbol_name` method. Without this guard, a `to_json` call
-/// whose node also carries KnownSymbol evidence (from a parameterized
-/// `impl ToJson for Labeled n a where {n : KnownSymbol}` impl) would be
-/// rewritten to a symbol-name lookup, silently dropping the real dispatch.
-pub(crate) fn is_known_symbol_trait(trait_name: &str) -> bool {
-    trait_name == KNOWN_SYMBOL_TRAIT
-}
-
-pub(crate) fn is_generic_trait(trait_name: &str) -> bool {
-    matches!(trait_name, "Generic" | "Std.Generic.Generic")
-}
-
-pub(crate) fn generic_ctor(name: &str) -> String {
-    format!("Std.Generic.{name}")
-}
+mod tuple_show;
 
 pub(crate) fn match_type_pattern(
     pattern: &Type,
@@ -140,7 +54,6 @@ pub(crate) fn match_type_pattern(
                     .zip(aa.iter())
                     .all(|(p, a)| match_type_pattern(p, a, subst))
         }
-        (Type::Symbol(a), Type::Symbol(b)) => a == b,
         _ => false,
     }
 }
@@ -187,12 +100,6 @@ pub(crate) const SEMIGROUP: &str = "Std.Base.Semigroup";
 /// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
 pub(crate) type ImplKey = (String, Vec<String>, String);
 
-/// The where-app dict param the elaborator threads into conditional dict
-/// constructors. Defined on the typechecker side ([`WhereAppDictParam`]) so the
-/// resolved form can ride along on `ImplInfo` for imported impls; aliased here
-/// for the elaborator's local computation and call-site consumption.
-pub(crate) type ImplWhereAppDictParam = WhereAppDictParam;
-
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
 pub fn elaborate(program: &Program, result: &CheckResult) -> Program {
@@ -223,9 +130,6 @@ pub(crate) struct Elaborator {
     /// impl key -> ordered list of (constraint_trait, param_index) for dict params.
     /// Used to pass the correct sub-dicts when building parameterized dicts.
     pub(crate) impl_dict_params: HashMap<ImplKey, Vec<(String, usize)>>,
-    /// impl key -> ordered list of fresh/existential where-app constraints that
-    /// become dict params but are not tied directly to an impl type parameter.
-    pub(crate) impl_where_app_dict_params: HashMap<ImplKey, Vec<ImplWhereAppDictParam>>,
     /// impl key -> registered impl info, including structured target pattern metadata.
     pub(crate) impl_infos: HashMap<ImplKey, ImplInfo>,
     /// trait_name -> TraitInfo

@@ -447,7 +447,6 @@ fn render_trait_decl(out: &mut String, decl: &Decl) {
         name,
         doc,
         type_params,
-        functional_dependency,
         supertraits,
         methods,
         ..
@@ -461,15 +460,6 @@ fn render_trait_decl(out: &mut String, decl: &Decl) {
     write!(out, "trait {}", name).unwrap();
     for p in type_params {
         write!(out, " {}", p).unwrap();
-    }
-    if let Some(fd) = functional_dependency {
-        write!(
-            out,
-            " | {} -> {}",
-            fd.determinant.join(" "),
-            fd.determined.join(" ")
-        )
-        .unwrap();
     }
     if !supertraits.is_empty() {
         let supers: Vec<String> = supertraits
@@ -524,7 +514,6 @@ fn format_type_expr(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named { name, .. } => name.clone(),
         TypeExpr::Var { name, .. } => name.clone(),
-        TypeExpr::Symbol { name, .. } => format!("'{}", name),
         TypeExpr::App { func, arg, .. } => {
             format!("{} {}", format_type_expr(func), format_type_expr_atom(arg))
         }

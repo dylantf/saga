@@ -12,7 +12,7 @@ impl Checker {
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.fresh_var_of_kind(p.kind);
+                let var = self.fresh_var();
                 let id = match var {
                     Type::Var(id) => id,
                     _ => unreachable!(),
@@ -28,13 +28,6 @@ impl Checker {
             Some(module) => format!("{}.{}", module, name),
             None => name.to_string(),
         };
-
-        // Record declared kinds for this constructor so `convert_type_expr`
-        // can enforce them at application sites.
-        self.type_param_kinds.insert(
-            canonical_name.clone(),
-            type_params.iter().map(|p| p.kind).collect(),
-        );
 
         let result_type = Type::Con(
             canonical_name.clone(),
@@ -108,7 +101,7 @@ impl Checker {
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.fresh_var_of_kind(p.kind);
+                let var = self.fresh_var();
                 let id = match var {
                     Type::Var(id) => id,
                     _ => unreachable!(),
@@ -127,9 +120,8 @@ impl Checker {
         // are free type variables in the alias body — reject them, since
         // Saga doesn't implicitly quantify type alias bodies.
         let declared_count = param_vars.len();
-        let body_ty =
-            self.convert_type_expr_kinded(body, &mut param_vars, crate::typechecker::Kind::Star);
-        // The kinded entry point bypasses convert_type_expr's wrapper, so
+        let body_ty = self.convert_type_expr_inner(body, &mut param_vars);
+        // The inner entry point bypasses convert_type_expr's wrapper, so
         // run the partial-alias check explicitly so invalid alias bodies
         // (`type alias Bad = Bag` where `Bag` has arity 1) fail at the
         // declaration, not at a downstream use site.
@@ -154,7 +146,6 @@ impl Checker {
 
         let info = crate::typechecker::TypeAliasInfo {
             param_vars: param_vars.iter().map(|(_, id)| *id).collect(),
-            param_kinds: type_params.iter().map(|p| p.kind).collect(),
             body: body_ty,
             span,
         };
@@ -199,7 +190,7 @@ impl Checker {
                         out.insert(canonical.to_string());
                     }
                 }
-                ast::TypeExpr::Var { .. } | ast::TypeExpr::Symbol { .. } => {}
+                ast::TypeExpr::Var { .. } => {}
                 ast::TypeExpr::App { func, arg, .. } => {
                     collect_alias_refs(func, local, scope, out);
                     collect_alias_refs(arg, local, scope, out);
@@ -324,7 +315,7 @@ impl Checker {
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.fresh_var_of_kind(p.kind);
+                let var = self.fresh_var();
                 let id = match var {
                     Type::Var(id) => id,
                     _ => unreachable!(),
@@ -390,9 +381,7 @@ impl Checker {
             vec![(canonical_name.clone(), num_fields)],
         );
         self.type_arity
-            .insert(canonical_name.clone(), type_params.len());
-        self.type_param_kinds
-            .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
+            .insert(canonical_name, type_params.len());
         Ok(())
     }
 }

@@ -1,9 +1,0 @@
-[project]
-name = "no_evidence_repro"
-
-[bin]
-main = "src/Main.saga"
-
-[library]
-module = "NoEvidence"
-expose = ["NoEvidence.Lib"]

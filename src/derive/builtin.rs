@@ -2,6 +2,46 @@ use super::*;
 use crate::ast::*;
 use crate::token::Span;
 use crate::token::StringKind;
+use crate::typechecker::Diagnostic;
+
+/// Dispatch a built-in derive request on a record to the matching generator.
+///
+/// Returns the decls to splice into the program, or:
+///   - `Err(None)` for "unsupported trait, use the default cannot-derive error"
+///   - `Err(Some(diag))` for a specific diagnostic
+pub(crate) fn generate_record_derive(
+    _public: bool,
+    trait_name: &str,
+    record_name: &str,
+    type_params: &[TypeParam],
+    fields: &[Annotated<(String, TypeExpr)>],
+    span: Span,
+) -> Result<Vec<Decl>, Option<Diagnostic>> {
+    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+    match bare {
+        "Show" | "Debug" => Ok(vec![derive_record_stringify(
+            bare,
+            if bare == "Show" { "show" } else { "debug" },
+            record_name,
+            type_params,
+            fields,
+            span,
+        )]),
+        "Eq" => Ok(vec![derive_marker_trait(
+            "Eq",
+            record_name,
+            type_params,
+            span,
+        )]),
+        "Default" => Ok(vec![derive_record_default(
+            record_name,
+            type_params,
+            fields,
+            span,
+        )]),
+        _ => Err(None),
+    }
+}
 
 /// Generate `impl Show/Debug for R { show/debug r = "R { field: " <> show/debug r.field <> ... <> "}" }`
 pub(crate) fn derive_record_stringify(
@@ -60,7 +100,6 @@ pub(crate) fn derive_record_stringify(
             }],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -135,7 +174,6 @@ pub(crate) fn derive_record_default(
             params: vec![],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -264,8 +302,8 @@ pub(crate) fn generate_derive(
         "Eq" => Some(derive_marker_trait("Eq", type_name, type_params, span)),
         "Ord" => Some(derive_ord(type_name, type_params, variants, span)),
         "Enum" => Some(derive_enum(type_name, variants, span)),
-        // "Generic" is handled by `expand_derives` via `derive_adt_generic`
-        // because it emits multiple decls (TypeDef + ImplDef).
+        // Any other name is not a built-in derive; `expand_derives` reports it
+        // as an unsupported derive target.
         _ => None,
     }
 }
@@ -447,7 +485,6 @@ pub(crate) fn derive_stringify(
             }],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -659,7 +696,6 @@ pub(crate) fn derive_ord(
             ],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -781,7 +817,6 @@ pub(crate) fn derive_marker_trait(
         where_apps: vec![],
         needs: vec![],
         methods: vec![],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -942,7 +977,6 @@ pub(crate) fn derive_enum(
                 body: from_enum_body,
             }),
         ],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }

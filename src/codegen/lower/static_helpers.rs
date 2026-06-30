@@ -396,8 +396,7 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => true,
+            | ExprKind::DictRef { .. } => true,
             ExprKind::App { func, arg } => {
                 self.static_helper_expr_supported(func, stack)
                     && self.static_helper_expr_supported(arg, stack)
@@ -814,8 +813,7 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => true,
+            | ExprKind::DictRef { .. } => true,
             ExprKind::App { .. } => false,
             ExprKind::BinOp { left, right, .. } => {
                 Self::imported_static_helper_pure_expr_supported(left)
@@ -913,8 +911,7 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => true,
+            | ExprKind::DictRef { .. } => true,
             ExprKind::App { .. } => false,
             ExprKind::BinOp { left, right, .. } => {
                 self.imported_static_helper_expr_supported(left, source_module, stack)
@@ -1083,8 +1080,7 @@ impl<'a> Lowerer<'a> {
         match &expr.kind {
             ExprKind::Lit { .. }
             | ExprKind::Constructor { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => Some(()),
+            | ExprKind::DictRef { .. } => Some(()),
             ExprKind::Var { name } => {
                 if !bound.contains(name) {
                     captures.entry(name.clone()).or_insert_with(|| expr.clone());

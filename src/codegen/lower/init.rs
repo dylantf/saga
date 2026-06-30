@@ -239,8 +239,7 @@ impl<'a> Lowerer<'a> {
                 self.resolved_type_effects_for_module(module_name, inner)
             }
             ast::TypeExpr::Named { .. }
-            | ast::TypeExpr::Var { .. }
-            | ast::TypeExpr::Symbol { .. } => BTreeSet::new(),
+            | ast::TypeExpr::Var { .. } => BTreeSet::new(),
         }
     }
 
@@ -1053,8 +1052,7 @@ impl<'a> Lowerer<'a> {
                 Self::collect_anon_records_from_type_expr(inner, record_fields);
             }
             ast::TypeExpr::Named { .. }
-            | ast::TypeExpr::Var { .. }
-            | ast::TypeExpr::Symbol { .. } => {}
+            | ast::TypeExpr::Var { .. } => {}
         }
     }
 
@@ -1092,7 +1090,6 @@ impl<'a> Lowerer<'a> {
                 }
             }
             crate::typechecker::Type::Var(_)
-            | crate::typechecker::Type::Symbol(_)
             | crate::typechecker::Type::Error => {}
         }
     }

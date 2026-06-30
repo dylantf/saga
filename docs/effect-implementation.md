@@ -478,9 +478,6 @@ Future work:
   traversal. Pure trait methods are globally pure by the typechecker invariant;
   open-row concrete dispatch must use `ImplInfo.method_effects`, not a resolved
   `..a` tail.
-- **Known constructor/generic specialization:** for derived `Generic`-based
-  traits, compile known representation walking into direct constructor/field
-  code where the dictionary path is statically known.
 - **Direct-native fast path:** for BEAM-native ops (Process, Ref, Timer, etc.) called outside of user-defined handlers, fold the closure call into a direct native call. The `use_direct_native_fast_path` hook in `effects.rs` is currently a no-op stub.
 - **Closed-row specialization:** when the entire program is closed-row (common for top-level entry points), specialize op call emission to skip the runtime tag and use direct positional indexing without the `{Tag, OpTuple}` wrapping. Speculative perf — needs benchmarking to justify.
 - **Open-row lookup memoization:** for loops that repeatedly call the same op under an open row, cache the resolved handler closure once outside the loop. Probably not worth doing until a real workload shows it.

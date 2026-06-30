@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use super::rename_vars;
-use crate::ast::Kind;
 use crate::token::Span;
 
 // --- Type representation ---
@@ -142,9 +141,6 @@ pub enum Type {
     /// Anonymous record type: `{ street: String, city: String }`
     /// Fields are sorted by name for canonical comparison.
     Record(Vec<(std::string::String, Type)>),
-    /// Type-level symbol literal: `'Foo` at the source level. Inhabits kind `Symbol`.
-    /// Two `Symbol(a)` and `Symbol(b)` are equal iff `a == b`.
-    Symbol(std::string::String),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
 }
@@ -158,8 +154,6 @@ pub enum Type {
 pub struct TypeAliasInfo {
     /// Positional parameter variable IDs (matching the order of `type_params`).
     pub param_vars: Vec<u32>,
-    /// Positional parameter kinds (mirrors `type_param_kinds` for this alias).
-    pub param_kinds: Vec<Kind>,
     /// Pre-converted RHS, expressed in terms of `param_vars`.
     pub body: Type,
     /// Source span of the alias declaration.
@@ -357,7 +351,6 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, " }}")
             }
-            Type::Symbol(name) => write!(f, "'{}", name),
             Type::Error => write!(f, "<error>"),
         }
     }
@@ -453,7 +446,6 @@ impl Substitution {
                     .map(|(name, ty)| (name.clone(), self.apply(ty)))
                     .collect(),
             ),
-            Type::Symbol(_) => ty.clone(),
             Type::Error => Type::Error,
         }
     }
@@ -587,7 +579,6 @@ impl Substitution {
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
             Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
-            Type::Symbol(_) => false,
             Type::Error => false,
         }
     }
@@ -764,7 +755,6 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(ty, bound, out);
             }
         }
-        Type::Symbol(_) => {}
         Type::Error => {}
     }
 }

@@ -150,7 +150,6 @@ fn replace_type_vars(
                 .map(|(field, ty)| (field.clone(), replace_type_vars(ty, replacements)))
                 .collect(),
         ),
-        typechecker::Type::Symbol(name) => typechecker::Type::Symbol(name.clone()),
         typechecker::Type::Error => typechecker::Type::Error,
     }
 }

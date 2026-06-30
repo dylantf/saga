@@ -35,11 +35,8 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Expr, ExprKind, Kind};
+use crate::ast::{Expr, ExprKind};
 use crate::token::Span;
-
-/// Canonical stdlib trait name for type-level symbol reflection.
-pub(crate) const KNOWN_SYMBOL_TRAIT: &str = "Std.Base.KnownSymbol";
 
 /// Returns the span of the first effect call found in `expr`, if any.
 /// Used to reject effect calls inside guard expressions.
@@ -91,9 +88,7 @@ impl Checker {
             modules: ModuleContext::default(),
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
-            type_param_kinds: HashMap::new(),
             type_aliases: HashMap::new(),
-            var_kinds: HashMap::new(),
             outer_named_type_vars: HashMap::new(),
             fun_type_param_vars: HashMap::new(),
             scope_map: ScopeMap::default(),
@@ -524,34 +519,6 @@ impl Checker {
         let id = self.next_var;
         self.next_var += 1;
         Type::Var(id)
-    }
-
-    /// Allocate a fresh type variable of the given kind. Star-kinded vars
-    /// are the default and not recorded; Symbol-kinded vars are tracked in
-    /// `var_kinds` so unification can enforce kind correctness.
-    pub(crate) fn fresh_var_of_kind(&mut self, kind: Kind) -> Type {
-        let id = self.next_var;
-        self.next_var += 1;
-        if kind != Kind::Star {
-            self.var_kinds.insert(id, kind);
-        }
-        Type::Var(id)
-    }
-
-    /// Kind of a type variable. Defaults to `Kind::Star` for vars not in
-    /// `var_kinds` (the overwhelmingly common case).
-    pub(crate) fn var_kind(&self, id: u32) -> Kind {
-        self.var_kinds.get(&id).copied().unwrap_or(Kind::Star)
-    }
-
-    /// Best-effort kind of a type. For `Var`, look up `var_kinds`. For
-    /// `Symbol`, kind is `Symbol`. Everything else is `Star` (for now).
-    pub(crate) fn kind_of(&self, ty: &Type) -> Kind {
-        match ty {
-            Type::Symbol(_) => Kind::Symbol,
-            Type::Var(id) => self.var_kind(*id),
-            _ => Kind::Star,
-        }
     }
 
     /// Instantiate a record's type parameters to fresh variables.

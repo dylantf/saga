@@ -642,8 +642,7 @@ impl Checker {
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictSuperAccess { .. }
             | ExprKind::DictRef { .. }
-            | ExprKind::ForeignCall { .. }
-            | ExprKind::SymbolIntrinsic { .. } => {
+            | ExprKind::ForeignCall { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
 
@@ -1770,127 +1769,15 @@ impl Checker {
         }
     }
 
-    /// Collect type-variable IDs that are *determined* by a pending functional
-    /// dependency whose determinants are (or will be) concrete. These variables
-    /// are effectively monomorphic — the fundep pins them at
-    /// `check_pending_constraints` time — so they must be excluded from
-    /// let-generalization, which would otherwise hand each use site a fresh
-    /// variable the constraint never reaches ("ambiguous type variable").
-    ///
-    /// This is computed as a fixpoint: a determinant counts as satisfied when
-    /// it already resolves to a concrete head *or* it is itself a variable
-    /// determined by another such fundep. That covers chains like
-    /// `let r = mk Foo; let s = step r`, where `step`'s determinant `r` is only
-    /// pinned transitively by the `mk` fundep.
-    fn fundep_determined_vars(&self) -> std::collections::HashSet<u32> {
-        // Snapshot the functional constraints once: (self_ty, determinant
-        // extras, determined extras), all resolved through the substitution.
-        struct FunConstraint {
-            self_ty: Type,
-            determinant_extras: Vec<Type>,
-            determined_extras: Vec<Type>,
-            /// `Generic`'s representation is a *bijection*, so its fundep runs in
-            /// reverse too: once the representation extra is known, the self type
-            /// (the user/record type) is pinned by the anonymous-record reverse
-            /// or the call-site coherence fallback. A value rebuilt from a
-            /// transformed Generic rep — `from (map_rep (to x))` bound to a `let`
-            /// — has its result type determined *only* this way, so without the
-            /// reverse it gets generalized into a dictionary abstraction that
-            /// severs the effect continuation at the call site.
-            generic_reverse: bool,
-        }
-        let mut funcs = Vec::new();
-        for (trait_name, extras, self_ty, _, _) in &self.trait_state.pending_constraints {
-            let resolved_trait = self
-                .resolve_trait_name(trait_name)
-                .unwrap_or_else(|| trait_name.clone());
-            let Some(info) = self.trait_state.traits.get(&resolved_trait) else {
-                continue;
-            };
-            let Some(fundep) = &info.fundep else {
-                continue;
-            };
-            let pick = |positions: Vec<usize>| -> Vec<Type> {
-                positions
-                    .iter()
-                    .filter_map(|&p| extras.get(p))
-                    .map(|e| self.sub.apply(e))
-                    .collect()
-            };
-            funcs.push(FunConstraint {
-                self_ty: self.sub.apply(self_ty),
-                determinant_extras: pick(fundep.determinant_extra_positions()),
-                determined_extras: pick(fundep.determined_extra_positions()),
-                generic_reverse: crate::typechecker::check_decl::is_generic_trait_name(
-                    &resolved_trait,
-                ),
-            });
-        }
-
+    /// Type-variable IDs held rigid by an enclosing `where`-bound (resolved
+    /// through the substitution). A `let` binding must not generalize over a
+    /// variable the surrounding function/handler holds fixed, so these are
+    /// excluded from let-generalization.
+    fn rigid_where_bound_vars(&self) -> std::collections::HashSet<u32> {
         let mut determined = std::collections::HashSet::new();
-        // Seed with the enclosing scope's where-bound variables (resolved
-        // through substitution). These are rigid — a `let` cannot generalize a
-        // variable the surrounding function/handler holds fixed — so a fundep
-        // whose determinant is such a variable fires just as it would for a
-        // concrete head. Without this, `let nullable = lift_cols cols` inside a
-        // handler arm (where `cols`/`nullable` are op-bound, hence abstract but
-        // rigid) would generalize the fundep-determined `nullable`, recording
-        // its dictionary evidence out of order and under the wrong name — the
-        // two `Generic` dicts then arrive swapped at the call site.
         for &bound_id in self.trait_state.where_bounds.keys() {
             if let Type::Var(resolved) = self.sub.apply(&Type::Var(bound_id)) {
                 determined.insert(resolved);
-            }
-        }
-        // A determinant is satisfied if it has a concrete head, or every free
-        // variable in it is already known to be fundep-determined. Anonymous
-        // records count as concrete heads: their structure (field set) fixes
-        // the determined parameter just as a named type constructor does — e.g.
-        // `Generic {a: _, b: _} r` pins `r` to the record's structural
-        // representation even when the field *types* are still variables.
-        let satisfied = |ty: &Type, determined: &std::collections::HashSet<u32>| -> bool {
-            match ty {
-                Type::Con(..) | Type::Symbol(_) | Type::Record(_) => true,
-                Type::Var(id) => determined.contains(id),
-                _ => false,
-            }
-        };
-        let mark = |ty: &Type, determined: &mut std::collections::HashSet<u32>| -> bool {
-            let mut vs = Vec::new();
-            super::collect_free_vars(ty, &mut vs);
-            let mut changed = false;
-            for v in vs {
-                if determined.insert(v) {
-                    changed = true;
-                }
-            }
-            changed
-        };
-        loop {
-            let mut changed = false;
-            for f in &funcs {
-                // Forward: determinant(s) satisfied -> determined extras pinned.
-                if satisfied(&f.self_ty, &determined)
-                    && f.determinant_extras
-                        .iter()
-                        .all(|e| satisfied(e, &determined))
-                {
-                    for e in &f.determined_extras {
-                        changed |= mark(e, &mut determined);
-                    }
-                }
-                // Reverse (Generic only): representation extras satisfied -> the
-                // self type is pinned by the bijection.
-                if f.generic_reverse
-                    && f.determined_extras
-                        .iter()
-                        .all(|e| satisfied(e, &determined))
-                {
-                    changed |= mark(&f.self_ty, &mut determined);
-                }
-            }
-            if !changed {
-                break;
             }
         }
         determined
@@ -1906,17 +1793,12 @@ impl Checker {
     ) {
         let mut scheme = self.generalize(ty);
 
-        // A functional-dependency *determined* variable must not be
-        // generalized when its determinants are already concrete: the pending
-        // fundep constraint will pin it to a concrete type later. Generalizing
-        // it hands each use of this binding a fresh variable that the
-        // constraint never reaches, yielding spurious "ambiguous type
-        // variable" errors. Keep such variables monomorphic so the eventual
-        // improvement propagates to every use site (matching the inline,
-        // un-let-bound behavior).
-        let determined_vars = self.fundep_determined_vars();
-        if !determined_vars.is_empty() {
-            scheme.forall.retain(|id| !determined_vars.contains(id));
+        // A variable held rigid by an enclosing `where`-bound must not be
+        // generalized: the surrounding function/handler holds it fixed, so
+        // generalizing would hand each use of this binding a fresh variable.
+        let rigid_vars = self.rigid_where_bound_vars();
+        if !rigid_vars.is_empty() {
+            scheme.forall.retain(|id| !rigid_vars.contains(id));
         }
 
         self.trait_state.pending_constraints.retain(
@@ -1944,7 +1826,6 @@ impl Checker {
                         resolved_record_type: None,
                         type_var_name: None,
                         trait_type_args: _trait_type_args.clone(),
-                        resolved_symbol: None,
                     });
                     return false;
                 }

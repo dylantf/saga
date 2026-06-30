@@ -939,7 +939,7 @@ fn resolve_expr(
             }
         }
         // Leaf nodes that don't contain sub-expressions
-        ExprKind::Lit { .. } | ExprKind::Constructor { .. } | ExprKind::SymbolIntrinsic { .. } => {}
+        ExprKind::Lit { .. } | ExprKind::Constructor { .. } => {}
 
         // Sugar nodes should be desugared before this pass
         ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {

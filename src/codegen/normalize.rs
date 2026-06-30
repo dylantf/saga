@@ -526,8 +526,7 @@ impl Normalizer {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => expr.clone(),
+            | ExprKind::DictRef { .. } => expr.clone(),
             ExprKind::Ascription { expr: inner, .. } => self.walk_expr(inner, lifted),
 
             ExprKind::Pipe { .. }
@@ -804,8 +803,7 @@ mod tests {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => {}
+            | ExprKind::DictRef { .. } => {}
             ExprKind::App { func, arg } => {
                 walk(func, ids);
                 walk(arg, ids);

@@ -874,8 +874,7 @@ impl<'a> Populator<'a> {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => {}
+            | ExprKind::DictRef { .. } => {}
             // Surface syntax — should be desugared by now, but be permissive.
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }
@@ -1404,7 +1403,6 @@ fn head_debug_label(head: &Expr) -> String {
         ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
         ExprKind::RecordBuild { fields, .. } => format!("record-build/{}", fields.len()),
         ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
-        ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),
         ExprKind::App { .. } => "app-head".to_string(),
         ExprKind::BinOp { .. } => "binop".to_string(),
         ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),

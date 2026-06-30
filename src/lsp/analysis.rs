@@ -37,9 +37,6 @@ fn hash_module_exports(exports: &typechecker::ModuleExports, state: &mut impl Ha
     hash_sorted_map(&exports.handlers, state, hash_handler_info);
     hash_string_map(&exports.handler_origins, state);
     hash_sorted_map(&exports.type_arity, state, |arity, state| arity.hash(state));
-    hash_sorted_map(&exports.type_param_kinds, state, |kinds, state| {
-        hash_vec(kinds, state, |kind, state| kind.hash(state));
-    });
     hash_sorted_map(&exports.type_aliases, state, hash_type_alias_info);
     let effectful: BTreeSet<_> = exports.effectful_funs.iter().collect();
     hash_vec(
@@ -138,10 +135,6 @@ fn hash_type<H: Hasher>(ty: &typechecker::Type, state: &mut H) {
                 hash_type(ty, state);
             });
         }
-        typechecker::Type::Symbol(value) => {
-            "Symbol".hash(state);
-            value.hash(state);
-        }
         typechecker::Type::Error => {
             "Error".hash(state);
         }
@@ -171,21 +164,9 @@ fn hash_record_info<H: Hasher>(info: &typechecker::RecordInfo, state: &mut H) {
 }
 
 fn hash_trait_info<H: Hasher>(info: &typechecker::TraitInfo, state: &mut H) {
-    hash_vec(&info.type_params, state, |(name, kind), state| {
-        name.hash(state);
-        kind.hash(state);
-    });
+    info.type_params.hash(state);
     info.supertraits.hash(state);
     hash_vec(&info.methods, state, hash_trait_method_info);
-    info.is_functional.hash(state);
-    match &info.fundep {
-        Some(fundep) => {
-            true.hash(state);
-            fundep.determinant.hash(state);
-            fundep.determined.hash(state);
-        }
-        None => false.hash(state),
-    }
 }
 
 fn hash_trait_method_info<H: Hasher>(info: &typechecker::TraitMethodInfo, state: &mut H) {
@@ -221,11 +202,6 @@ fn hash_impl_info<H: Hasher>(info: &typechecker::ImplInfo, state: &mut H) {
     hash_vec(&info.trait_type_args, state, hash_type);
     info.target_type_param_ids.hash(state);
     hash_string_vec_map(&info.method_effects, state);
-    hash_vec(&info.where_app_dict_params, state, |param, state| {
-        param.trait_name.hash(state);
-        hash_vec(&param.trait_type_args, state, hash_type);
-        hash_type(&param.self_type, state);
-    });
 }
 
 fn hash_effect_def_info<H: Hasher>(info: &typechecker::EffectDefInfo, state: &mut H) {
@@ -282,7 +258,6 @@ fn hash_handler_info<H: Hasher>(info: &typechecker::HandlerInfo, state: &mut H) 
 
 fn hash_type_alias_info<H: Hasher>(info: &typechecker::TypeAliasInfo, state: &mut H) {
     info.param_vars.hash(state);
-    info.param_kinds.hash(state);
     hash_type(&info.body, state);
 }
 

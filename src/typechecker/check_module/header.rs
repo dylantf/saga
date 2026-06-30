@@ -90,7 +90,6 @@ pub struct HeaderFunction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderTypeParam {
     pub name: String,
-    pub kind: crate::ast::Kind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +154,6 @@ pub struct HeaderRecordBuilderDecl {
 pub struct HeaderTraitDecl {
     pub public: bool,
     pub type_params: Vec<HeaderTypeParam>,
-    pub is_functional: bool,
     pub supertraits: Vec<HeaderTraitRef>,
     pub methods: Vec<HeaderTraitMethod>,
 }
@@ -231,7 +229,6 @@ pub enum HeaderTypeExpr {
         label: String,
         inner: Box<HeaderTypeExpr>,
     },
-    Symbol(String),
 }
 
 impl ModuleHeader {
@@ -383,7 +380,6 @@ impl ModuleHeader {
                     public,
                     name,
                     type_params,
-                    functional_dependency,
                     supertraits,
                     methods,
                     ..
@@ -393,7 +389,6 @@ impl ModuleHeader {
                         HeaderTraitDecl {
                             public: *public,
                             type_params: header_type_params(type_params),
-                            is_functional: functional_dependency.is_some(),
                             supertraits: supertraits.iter().map(header_trait_ref).collect(),
                             methods: methods
                                 .iter()
@@ -547,7 +542,6 @@ fn header_type_params(params: &[crate::ast::TypeParam]) -> Vec<HeaderTypeParam> 
         .iter()
         .map(|param| HeaderTypeParam {
             name: param.name.clone(),
-            kind: param.kind,
         })
         .collect()
 }
@@ -609,7 +603,6 @@ fn header_type_expr(ty: &crate::ast::TypeExpr) -> HeaderTypeExpr {
             label: label.clone(),
             inner: Box::new(header_type_expr(inner)),
         },
-        TypeExpr::Symbol { name, .. } => HeaderTypeExpr::Symbol(name.clone()),
     }
 }
 

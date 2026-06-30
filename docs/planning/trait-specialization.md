@@ -543,7 +543,7 @@ Read first:
 
 - [trait-dict-passing.md](../trait-dict-passing.md) — how dictionaries are
   represented and passed (`DictRef`, `DictMethodAccess`, `DictConstructor`).
-- [generic-deriving.md](../generic-deriving.md) — how `deriving (ToJson)` routes
+- [generic-deriving.md](../archive/generic-deriving.md) — how `deriving (ToJson)` routes
   through `Generic` (the bridge + delegating impl shape this plan folds).
 - [direct-first-optimizer-matrix.md](./direct-first-optimizer-matrix.md) —
   Stage 6/7 rows; the ground rules this plan inherits.
@@ -815,7 +815,7 @@ Guards:
 - Depth/fuel budget.
 - Bottom out at `Leaf SelfType` as an ordinary monomorphic dict call — never
   inline-recurse through self-types. This is exactly where today's "recursion is
-  free" stops (see generic-deriving.md, "Why Recursion Is Free").
+  free" stops (see archive/generic-deriving.md, "Why Recursion Is Free").
 - No fold through recursive containers (`List` element recursion stays a normal
   dict call) until proven.
 - No fold through `Multishot` resume; no CPS-callable stored in data.
@@ -934,6 +934,6 @@ duplicate too much `Generic` structure?
   detailed plan; that matrix remains the index.
 - Depends on the runtime-shape discipline frozen by
   [direct-first-effect-shape-matrix.md](./direct-first-effect-shape-matrix.md).
-- Builds on [generic-deriving.md](../generic-deriving.md) (Rep shape, routing
+- Builds on [generic-deriving.md](../archive/generic-deriving.md) (Rep shape, routing
   layer) and [trait-dict-passing.md](../trait-dict-passing.md) (dict nodes,
   per-method effects).

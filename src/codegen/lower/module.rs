@@ -97,7 +97,6 @@ pub(super) fn lower_head_debug_label(head: &Expr) -> String {
         ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
         ExprKind::RecordBuild { fields, .. } => format!("record-build/{}", fields.len()),
         ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
-        ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),
         ExprKind::App { .. } => "app-head".to_string(),
         ExprKind::BinOp { .. } => "binop".to_string(),
         ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),

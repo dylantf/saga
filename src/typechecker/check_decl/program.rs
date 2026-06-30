@@ -528,20 +528,13 @@ impl Checker {
                 Decl::TraitDef {
                     name,
                     type_params,
-                    functional_dependency,
                     supertraits,
                     methods,
                     ..
                 } => {
                     let plain_methods: Vec<_> = methods.iter().map(|a| &a.node).collect();
-                    self.register_trait_def(
-                        name,
-                        type_params,
-                        functional_dependency.as_ref(),
-                        supertraits,
-                        &plain_methods,
-                    )
-                    .map_err(|e| vec![e])?;
+                    self.register_trait_def(name, type_params, supertraits, &plain_methods)
+                        .map_err(|e| vec![e])?;
                 }
                 _ => {}
             }
@@ -567,9 +560,7 @@ impl Checker {
                         None => name.to_string(),
                     };
                     self.type_arity
-                        .insert(canonical_name.clone(), type_params.len());
-                    self.type_param_kinds
-                        .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
+                        .insert(canonical_name, type_params.len());
                 }
             }
             // Cycle check across the set of aliases in this module.
@@ -719,13 +710,6 @@ impl Checker {
                         {
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
-                                self.validate_trait_bound_kind(
-                                    &resolved_trait,
-                                    &bound.type_var,
-                                    var_id,
-                                    tr.span,
-                                )
-                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -838,13 +822,6 @@ impl Checker {
                                 .insert(var_id, bound.type_var.clone());
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
-                                self.validate_trait_bound_kind(
-                                    &resolved_trait,
-                                    &bound.type_var,
-                                    var_id,
-                                    tr.span,
-                                )
-                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -963,7 +940,6 @@ impl Checker {
                 where_apps,
                 needs,
                 methods,
-                routed_derive_info,
                 span,
                 ..
             } = decl
@@ -979,12 +955,6 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
-                // Snapshot pending-constraint length before this impl's body
-                // is checked. Anything added during the call belongs to this
-                // impl; if it's a synthesized routed-derive impl, tag those
-                // new constraints with the marker so failure diagnostics can
-                // point back at the user's deriving clause.
-                let before = self.trait_state.pending_constraints.len();
                 let result = self.register_impl(
                     *id,
                     trait_name,
@@ -996,23 +966,8 @@ impl Checker {
                     where_apps,
                     needs,
                     &plain_methods,
-                    routed_derive_info.is_some(),
                     *span,
                 );
-                if let Some(info) = routed_derive_info {
-                    let added: Vec<crate::ast::NodeId> = self
-                        .trait_state
-                        .pending_constraints
-                        .iter()
-                        .skip(before)
-                        .map(|(_, _, _, _, nid)| *nid)
-                        .collect();
-                    for nid in added {
-                        self.trait_state
-                            .routed_constraint_origins
-                            .insert(nid, info.clone());
-                    }
-                }
                 if let Err(e) = result {
                     errors.push(e);
                 }

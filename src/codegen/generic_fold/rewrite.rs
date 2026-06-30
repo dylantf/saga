@@ -9,19 +9,6 @@ pub(crate) fn base_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
-/// True for a `Std.Generic` representation constructor or a per-type `Rep__T`
-/// wrapper — the only constructors the fusion engine cancels.
-pub(crate) fn is_rep_ctor(name: &str) -> bool {
-    let base = base_name(name);
-    base.starts_with("Rep__") || REP_CTORS.contains(&base)
-}
-
-/// Like [`known_ctor`], but only for `Rep` constructors (see [`is_rep_ctor`]).
-pub(crate) fn known_rep_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
-    let (name, args) = known_ctor(expr)?;
-    is_rep_ctor(name).then_some((name, args))
-}
-
 /// If `expr` is a saturated data-constructor application `Con a1 … an`, return
 /// the constructor name and its arguments in source order. `None` otherwise.
 pub(crate) fn known_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
@@ -48,11 +35,10 @@ pub(crate) fn known_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 /// match can't be decided statically (a guard on a matching arm, or an
 /// undecidable pattern shape) — in which case the case is left intact.
 ///
-/// Not restricted to `Rep` constructors: this fires on `Ok`/`Err` too (Phase 6
-/// cancels the `Result` wrapper threaded through the decode codec). It is sound
-/// and bounded for arbitrary constructors because it only matches a scrutinee
-/// that is a *literal* constructor application — a shape that arises from the
-/// fold's own inlining/commuting, not from ordinary source.
+/// Fires on any constructor (`Ok`/`Err`, user ADTs, …). It is sound and bounded
+/// because it only matches a scrutinee that is a *literal* constructor
+/// application — a shape that arises from the fold's own inlining/commuting, not
+/// from ordinary source.
 /// Project a field out of a compile-time-constant record literal:
 /// `(Options { rename_all: AsIs, … }).rename_all` ⟶ `AsIs`. This is what makes a
 /// constant `opts` argument, once substituted into an inlined codec body, fold to
@@ -318,201 +304,10 @@ pub(crate) fn is_duplicable(expr: &Expr) -> bool {
     }
 }
 
-/// `f (case s of { p -> e, … })` ⟶ `case s of { p -> f e, … }`, floating a case
-/// out of an application's argument so the codec meets the constructor each arm
-/// produces. Only fires when some arm body is a known `Rep` constructor (so the
-/// result unblocks an inline), to avoid gratuitously duplicating `f` across arms.
-pub(crate) fn float_case_out_of_arg(expr: &Expr) -> Option<Expr> {
-    let ExprKind::App { func, arg } = &expr.kind else {
-        return None;
-    };
-    let ExprKind::Case {
-        scrutinee, arms, ..
-    } = &arg.kind
-    else {
-        return None;
-    };
-    if !arms.iter().any(|a| known_rep_ctor(&a.node.body).is_some()) {
-        return None;
-    }
-    let new_arms = arms
-        .iter()
-        .map(|ann| {
-            let arm = &ann.node;
-            // `func` is duplicated into each arm, so freshen each copy.
-            let mut func_copy = (**func).clone();
-            freshen_expr_ids(&mut func_copy);
-            Annotated::bare(CaseArm {
-                pattern: clone_fresh_pat(&arm.pattern),
-                guard: arm.guard.clone(),
-                body: Expr::synth(
-                    arm.body.span,
-                    ExprKind::App {
-                        func: Box::new(func_copy),
-                        arg: Box::new(arm.body.clone()),
-                    },
-                ),
-                span: arm.span,
-            })
-        })
-        .collect();
-    Some(Expr::synth(
-        expr.span,
-        ExprKind::Case {
-            scrutinee: Box::new((**scrutinee).clone()),
-            arms: new_arms,
-            dangling_trivia: vec![],
-        },
-    ))
-}
-
 pub(crate) fn clone_fresh_pat(pat: &Pat) -> Pat {
     let mut p = pat.clone();
     freshen_pat_ids(&mut p);
     p
-}
-
-pub(crate) fn clone_fresh_arm(arm: &CaseArm) -> Annotated<CaseArm> {
-    let mut body = arm.body.clone();
-    freshen_expr_ids(&mut body);
-    let guard = arm.guard.as_ref().map(|g| {
-        let mut g = g.clone();
-        freshen_expr_ids(&mut g);
-        g
-    });
-    Annotated::bare(CaseArm {
-        pattern: clone_fresh_pat(&arm.pattern),
-        guard,
-        body,
-        span: arm.span,
-    })
-}
-
-/// case-of-case commuting conversion (Phase 6, decode direction):
-/// `case (case S { p_i -> e_i }) { outer }` ⟶ `case S { p_i -> case e_i { outer } }`.
-///
-/// This pushes the consuming `case` (the delegating `{Ok f -> Ok (from f); Err e
-/// -> Err e}` once `from` is inlined) down to where the producer codec's
-/// `Ok (RepCtor …)` / `Err e` constructors are built, so `case_of_known_constructor`
-/// can then cancel them. Two guards keep it sound and non-explosive:
-///
-/// - **Unblocks cancellation**: fires only when some inner arm body `e_i` is a
-///   known constructor application (mirrors `float_case_out_of_arg`), so the
-///   duplicated `outer` arms immediately collapse rather than lingering.
-/// - **Capture-avoiding**: each inner arm pattern `p_i` now also scopes the
-///   `outer` arms it wraps; if any `p_i` binds a name that occurs *free* in
-///   `outer`, commuting would capture it, so we leave the case intact.
-pub(crate) fn case_of_case(expr: &Expr) -> Option<Expr> {
-    let ExprKind::Case {
-        scrutinee,
-        arms: outer_arms,
-        ..
-    } = &expr.kind
-    else {
-        return None;
-    };
-    let ExprKind::Case {
-        scrutinee: inner_scrut,
-        arms: inner_arms,
-        ..
-    } = &scrutinee.kind
-    else {
-        return None;
-    };
-    // Anchor on `Rep` production somewhere in an inner arm's subtree: only
-    // commute when the codec eventually builds a `Rep` tree, so this never
-    // duplicates the outer arms across an unrelated nested `case` (e.g. a
-    // hand-written parser's `Result` threading, which carries no `Rep`).
-    if !inner_arms
-        .iter()
-        .any(|a| subtree_produces_rep(&a.node.body))
-    {
-        return None;
-    }
-    let outer_free = free_vars_arms(outer_arms);
-    let captures = inner_arms.iter().any(|a| {
-        let mut bound = Vec::new();
-        pat_bound_names(&a.node.pattern, &mut bound);
-        bound.iter().any(|n| outer_free.contains(n))
-    });
-    if captures {
-        return None;
-    }
-
-    let new_arms = inner_arms
-        .iter()
-        .map(|ann| {
-            let arm = &ann.node;
-            // Duplicate `outer` into this arm (fresh ids per copy), wrapping the
-            // inner arm body as the new scrutinee.
-            let outer_copy: Vec<Annotated<CaseArm>> = outer_arms
-                .iter()
-                .map(|a| clone_fresh_arm(&a.node))
-                .collect();
-            let wrapped = Expr::synth(
-                arm.body.span,
-                ExprKind::Case {
-                    scrutinee: Box::new(arm.body.clone()),
-                    arms: outer_copy,
-                    dangling_trivia: vec![],
-                },
-            );
-            Annotated::bare(CaseArm {
-                pattern: clone_fresh_pat(&arm.pattern),
-                guard: arm.guard.clone(),
-                body: wrapped,
-                span: arm.span,
-            })
-        })
-        .collect();
-    Some(Expr::synth(
-        expr.span,
-        ExprKind::Case {
-            scrutinee: Box::new((**inner_scrut).clone()),
-            arms: new_arms,
-            dangling_trivia: vec![],
-        },
-    ))
-}
-
-/// True when `body` is a `Rep`-producing `case` — the routed-from bridge codec
-/// shape `case _ { Ok x -> Ok (Rep__T x); Err e -> Err e }`. Sees through a
-/// leading ascription. Anchoring on a *`Rep`* constructor (not any ctor) keeps
-/// the decode rewrites a no-op on unrelated codecs — e.g. a hand-written JSON
-/// object parser that returns `Ok (value, rest)` produces a tuple, not a `Rep`,
-/// so it is left untouched rather than inlined without any cancellation payoff.
-pub(crate) fn body_is_rep_producing_case(body: &Expr) -> bool {
-    match &body.kind {
-        ExprKind::Case { arms, .. } => arms.iter().any(|a| produces_rep_ctor(&a.node.body)),
-        ExprKind::Ascription { expr, .. } => body_is_rep_producing_case(expr),
-        _ => false,
-    }
-}
-
-/// True when `e` builds a `Rep` constructor, possibly under wrapper constructors
-/// (`Ok (Rep__T …)`, `Ok (Adt …)`). Used to anchor the decode rewrites to actual
-/// `Rep`-tree production so they don't fire on unrelated `Result`-returning code.
-pub(crate) fn produces_rep_ctor(e: &Expr) -> bool {
-    match known_ctor(e) {
-        Some((name, args)) => is_rep_ctor(name) || args.iter().any(|a| produces_rep_ctor(a)),
-        None => false,
-    }
-}
-
-/// True when `e` builds a `Rep` constructor *anywhere* in its subtree. A record's
-/// `And` node is built deep inside the field-codec's nested `Result` threading
-/// (`Ok l -> case … { Ok r -> Ok (And l r) … }`), so the top-level arms don't
-/// directly produce a `Rep`; `case_of_case` needs the subtree view to know the
-/// commute will eventually reach a cancellation. A hand-written object parser
-/// threads tuples with no `Rep` anywhere, so it stays `false`.
-pub(crate) fn subtree_produces_rep(e: &Expr) -> bool {
-    if produces_rep_ctor(e) {
-        return true;
-    }
-    let mut tmp = e.clone();
-    child_exprs_mut(&mut tmp)
-        .into_iter()
-        .any(|c| subtree_produces_rep(c))
 }
 
 /// Peel a chain of `App` nodes, returning the innermost non-`App` head and the
@@ -520,12 +315,10 @@ pub(crate) fn subtree_produces_rep(e: &Expr) -> bool {
 /// β-reduce a saturated application of a *literal* lambda:
 /// `(fun p… -> body)(a…)` ⟶ `body` with each `p` bound to its `a`.
 ///
-/// Reuses [`bind_subpats`]: each duplicable argument is substituted inline (so
-/// the phantom `Proxy` arg of a `symbol_name` closure is dropped and the body's
-/// literal symbol is exposed). The substitution is capture-avoiding
-/// ([`substitute_var`]) and the lambda body keeps its NodeIds (the node appears
-/// once and is replaced in place, never duplicated), so resolution entries stay
-/// valid.
+/// Reuses [`bind_subpats`]: each duplicable argument is substituted inline. The
+/// substitution is capture-avoiding ([`substitute_var`]) and the lambda body
+/// keeps its NodeIds (the node appears once and is replaced in place, never
+/// duplicated), so resolution entries stay valid.
 ///
 /// **Only fires when every argument is [`is_duplicable`]** (pure: vars, literals,
 /// constructors, field accesses). This is the soundness boundary, not just a
@@ -542,10 +335,9 @@ pub(crate) fn subtree_produces_rep(e: &Expr) -> bool {
 /// for a later pass.
 ///
 /// Note this runs as part of the generic fold, which short-circuits in a module
-/// with **no dict constructors** ([`fold_program`]'s `ctors.is_empty()` guard).
-/// That is exactly the right scope: derived reflection closures only exist in a
-/// module that derives something (so its dict constructors are present), and a
-/// bare `symbol_name (Proxy …)` in a deriving-free module is not worth folding.
+/// with **no dict constructors** ([`fold_program`]'s `ctors.is_empty()` guard):
+/// the fusible shapes all arise from inlined dict-method bodies, so a module
+/// with no dictionaries has nothing for this pass to do.
 pub(crate) fn beta_reduce_lambda_app(expr: &Expr) -> Option<Expr> {
     let (head, args) = peel_app(expr);
     let ExprKind::Lambda { params, body } = &head.kind else {

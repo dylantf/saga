@@ -68,7 +68,7 @@ impl Elaborator {
     }
 
     /// Resolve trait type args via the resolution map. For App heads (e.g.
-    /// `Rep__Box a`), uses the head name — only the head identifies the impl
+    /// `List a`), uses the head name — only the head identifies the impl
     /// for dict-name purposes.
     pub(crate) fn resolved_trait_type_args(&self, args: &[crate::ast::TypeExpr]) -> Vec<String> {
         args.iter()
@@ -104,11 +104,11 @@ impl Elaborator {
                 .constraints
                 .iter()
                 .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
-                .map(|(trait_name, var_id, extras)| {
+                .map(|(trait_name, var_id, _extras)| {
                     // Same determinant-extra disambiguation as the where-clause
                     // path, so inferred multi-determinant constraints on one var
                     // get distinct dict-param names.
-                    let suffix = dict_var_suffix_from_types(&result.traits, trait_name, extras);
+                    let suffix = String::new();
                     (trait_name.clone(), format!("v{}{}", var_id, suffix))
                 })
                 .collect()
@@ -262,7 +262,6 @@ impl Elaborator {
             op_dict_params,
             dict_names,
             impl_dict_params: impl_dict_params_from_imports,
-            impl_where_app_dict_params: HashMap::new(),
             impl_infos: result.trait_impls.clone(),
             traits: result.traits.clone(),
             evidence_by_node,

@@ -171,8 +171,7 @@ impl LocalBindingDefinitionCollector {
             | ast::ExprKind::Var { .. }
             | ast::ExprKind::Constructor { .. }
             | ast::ExprKind::QualifiedName { .. }
-            | ast::ExprKind::DictRef { .. }
-            | ast::ExprKind::SymbolIntrinsic { .. } => {}
+            | ast::ExprKind::DictRef { .. } => {}
             ast::ExprKind::App { func, arg } => {
                 self.collect_expr(func);
                 self.collect_expr(arg);
@@ -515,8 +514,7 @@ fn collect_expr_value_definition_nodes(expr: &ast::Expr, out: &mut HashSet<ast::
         | ast::ExprKind::Var { .. }
         | ast::ExprKind::Constructor { .. }
         | ast::ExprKind::QualifiedName { .. }
-        | ast::ExprKind::DictRef { .. }
-        | ast::ExprKind::SymbolIntrinsic { .. } => {}
+        | ast::ExprKind::DictRef { .. } => {}
         ast::ExprKind::App { func, arg } => {
             collect_expr_value_definition_nodes(func, out);
             collect_expr_value_definition_nodes(arg, out);

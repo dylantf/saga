@@ -350,13 +350,6 @@ impl Checker {
             self.next_var = mod_checker.next_var;
         }
 
-        // Inherit kind annotations for type-variable IDs introduced by the
-        // module (e.g. symbol-kinded `n` from `type Proxy (n : Symbol) = ...`),
-        // so subsequent instantiations of imported schemes preserve kinds.
-        for (id, kind) in &mod_checker.var_kinds {
-            self.var_kinds.entry(*id).or_insert(*kind);
-        }
-
         // Merge back any caches populated by transitive imports
         for (k, v) in mod_checker.modules.programs {
             self.modules.programs.entry(k).or_insert(v);
@@ -381,7 +374,6 @@ impl Checker {
             &exports,
             &mod_checker.effects,
             &mod_checker.scope_map,
-            &mod_checker.trait_state.traits,
         );
         self.modules
             .codegen_info
@@ -521,9 +513,6 @@ impl Checker {
             if mod_checker.next_var > self.next_var {
                 self.next_var = mod_checker.next_var;
             }
-            for (id, kind) in &mod_checker.var_kinds {
-                self.var_kinds.entry(*id).or_insert(*kind);
-            }
             for (k, v) in &mod_checker.modules.programs {
                 self.modules.programs.entry(k.clone()).or_insert(v.clone());
             }
@@ -577,7 +566,6 @@ impl Checker {
                 &exports,
                 &mod_checker.effects,
                 &mod_checker.scope_map,
-                &mod_checker.trait_state.traits,
             );
             self.modules
                 .codegen_info
@@ -846,7 +834,6 @@ impl Checker {
             handler_origins,
             record_builders,
             type_arity,
-            type_param_kinds,
             type_aliases,
             effectful_funs,
             def_ids,
@@ -959,15 +946,6 @@ impl Checker {
                 .cloned()
                 .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.type_arity.entry(canonical).or_insert(*arity);
-        }
-        for (name, kinds) in type_param_kinds {
-            let canonical = type_origins
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| format!("{}.{}", module_name, name));
-            self.type_param_kinds
-                .entry(canonical)
-                .or_insert_with(|| kinds.clone());
         }
 
         // Type aliases: register under canonical (module-qualified) name.

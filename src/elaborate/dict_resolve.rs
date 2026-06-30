@@ -58,17 +58,6 @@ impl Elaborator {
                         count += 1;
                         continue;
                     }
-                    // KnownSymbol with concrete symbol: dict is a bare String
-                    // carrying the symbol's source name. SymbolIntrinsic lowers
-                    // to the binary literal at codegen.
-                    if let Some(sym) = &ev.resolved_symbol {
-                        return Some(Expr::synth(
-                            span,
-                            ExprKind::SymbolIntrinsic {
-                                symbol: sym.clone(),
-                            },
-                        ));
-                    }
                     if let Some(record_ty) = &ev.resolved_record_type {
                         return self.dict_for_type(
                             trait_name,
@@ -90,12 +79,7 @@ impl Elaborator {
                             // specific dict param name (handles multiple where-clause
                             // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
                             if let Some(ref var_name) = ev.type_var_name {
-                                self.dict_param_for_trait_var(
-                                    trait_name,
-                                    var_name,
-                                    &ev.trait_type_args,
-                                    span,
-                                )
+                                self.dict_param_for_trait_var(trait_name, var_name, span)
                             } else {
                                 self.current_dict_param_or_supertrait(trait_name, span)
                             }
@@ -153,18 +137,11 @@ impl Elaborator {
         &self,
         trait_name: &str,
         var_name: &str,
-        trait_type_args: &[Type],
         span: Span,
     ) -> Option<Expr> {
-        // For multi-variable-determinant fundeps, several constraints on the
-        // same self var are distinguished by a determinant suffix baked into
-        // the dict-param's var key. Try the qualified key first; for ordinary
-        // traits the suffix is empty so this is identical to the base lookup.
-        let suffix = dict_var_suffix_from_types(&self.traits, trait_name, trait_type_args);
-        let qualified_var = format!("{}{}", var_name, suffix);
         if let Some(param_name) = self
             .current_dict_params_by_var
-            .get(&(trait_name.to_string(), qualified_var.clone()))
+            .get(&(trait_name.to_string(), var_name.to_string()))
         {
             return Some(Expr::synth(
                 span,
@@ -175,7 +152,7 @@ impl Elaborator {
         }
 
         for ((bound_trait, bound_var), param_name) in &self.current_dict_params_by_var {
-            if bound_var == &qualified_var
+            if bound_var == var_name
                 && let Some(projected) = self.project_supertrait_dict(
                     bound_trait,
                     trait_name,
@@ -251,9 +228,6 @@ impl Elaborator {
         }
 
         match ty {
-            Type::Record(fields) if is_generic_trait(trait_name) => {
-                Some(self.build_anon_record_generic_dict(fields, span))
-            }
             Type::Con(name, args)
                 if name == crate::typechecker::canonicalize_type_name("Tuple")
                     && (trait_name == SHOW || trait_name == DEBUG) =>
@@ -329,39 +303,6 @@ impl Elaborator {
                         name: dict_name.clone(),
                     },
                 );
-                // Local impls are recorded in `impl_where_app_dict_params`
-                // (always, even empty). Imported impls are not — the importing
-                // module never sees their AST — so fall back to the resolved
-                // copy the typechecker stashed on `ImplInfo`.
-                if let Some(params) = self
-                    .impl_where_app_dict_params
-                    .get(&key)
-                    .or_else(|| self.impl_infos.get(&key).map(|i| &i.where_app_dict_params))
-                {
-                    let target_arg_subst = Self::impl_type_param_subst(args);
-                    for param in params {
-                        let self_type =
-                            substitute_pattern_vars(&param.self_type, &target_arg_subst);
-                        let trait_type_args: Vec<Type> = param
-                            .trait_type_args
-                            .iter()
-                            .map(|arg| substitute_pattern_vars(arg, &target_arg_subst))
-                            .collect();
-                        let sub_dict = self.dict_for_type(
-                            &param.trait_name,
-                            &trait_type_args,
-                            &self_type,
-                            span,
-                        )?;
-                        dict_expr = Expr::synth(
-                            span,
-                            ExprKind::App {
-                                func: Box::new(dict_expr),
-                                arg: Box::new(sub_dict),
-                            },
-                        );
-                    }
-                }
                 if let Some(info) = impl_info
                     && let Some(pattern) = &info.target_pattern
                 {
@@ -476,31 +417,18 @@ impl Elaborator {
                 // last-inserted dict.
                 let var_key = format!("v{}", id);
                 if let Some(expr) =
-                    self.dict_param_for_trait_var(trait_name, &var_key, trait_type_args, span)
+                    self.dict_param_for_trait_var(trait_name, &var_key, span)
                 {
                     return Some(expr);
                 }
                 if let Some(src_name) = self.where_bound_var_names.get(id)
                     && let Some(expr) =
-                        self.dict_param_for_trait_var(trait_name, src_name, trait_type_args, span)
+                        self.dict_param_for_trait_var(trait_name, src_name, span)
                 {
                     return Some(expr);
                 }
                 // Fall back to single-trait lookup
                 self.current_dict_param_or_supertrait(trait_name, span)
-            }
-            Type::Symbol(name) => {
-                // KnownSymbol's "dict" is the symbol's source name as a String.
-                // SymbolIntrinsic lowers to a binary literal at codegen. This
-                // branch fires when a parameterized impl (e.g.
-                // `impl ToJson for Variant n a where {n: KnownSymbol, ...}`)
-                // recursively constructs a sub-dict for the symbol parameter.
-                Some(Expr::synth(
-                    span,
-                    ExprKind::SymbolIntrinsic {
-                        symbol: name.clone(),
-                    },
-                ))
             }
             _ => None,
         }

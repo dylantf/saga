@@ -1,212 +1,6 @@
 use super::*;
 
 impl Checker {
-    /// Eagerly pin functional-dependency *determined* variables for any pending
-    /// constraint whose determinants are already concrete, by selecting the
-    /// unique matching impl and unifying the determined args. This only refines
-    /// the substitution — it neither consumes pending constraints nor reports
-    /// errors — so eager consumers (e.g. field-access disambiguation) can see a
-    /// determined record type before `check_pending_constraints` runs at the
-    /// end of the body. Coherence guarantees the match is unique, so committing
-    /// early is sound. Idempotent; loops to a fixpoint for chained fundeps.
-    pub(crate) fn improve_pending_fundeps(&mut self) {
-        loop {
-            let before = self.sub.solved_count();
-            let pending = self.trait_state.pending_constraints.clone();
-            for (trait_name, extras, self_ty, span, node_id) in &pending {
-                let resolved_trait = self
-                    .resolve_trait_name(trait_name)
-                    .unwrap_or_else(|| trait_name.clone());
-                // `Generic`'s anonymous-record fundep runs in both directions
-                // here, mirroring `check_pending_constraints` — field-access
-                // disambiguation needs the concrete record type before the
-                // end-of-body constraint solve. There is no named impl for an
-                // anonymous record, so the structural rep is the bridge:
-                //   forward:  `Generic {record} r`   pins `r` to the rep.
-                //   reverse:  `Generic out rep`       pins `out` to the rep's
-                //             record type, once `rep` is a fully concrete
-                //             anonymous-record representation.
-                // The reverse direction is what lets a value rebuilt from a
-                // transformed Generic rep (`from (map_rep (to x))`) recover its
-                // anonymous record type without an annotation.
-                if is_generic_trait_name(&resolved_trait) {
-                    let resolved_self = self.sub.apply(self_ty);
-                    if let Type::Record(fields) = &resolved_self {
-                        let rep = anon_record_generic_rep(fields);
-                        for extra in extras {
-                            if matches!(self.sub.apply(extra), Type::Var(_)) {
-                                let _ = self.unify(extra, &rep);
-                            }
-                        }
-                        continue;
-                    }
-                    if matches!(resolved_self, Type::Var(_))
-                        && let Some(rep_ty) = extras.first()
-                        && let Some(record_ty) =
-                            anon_record_from_generic_rep(&self.sub.apply(rep_ty))
-                    {
-                        let _ = self.unify(self_ty, &record_ty);
-                        continue;
-                    }
-                }
-                let Some(fundep) = self
-                    .trait_state
-                    .traits
-                    .get(&resolved_trait)
-                    .and_then(|ti| ti.fundep.clone())
-                else {
-                    continue;
-                };
-                let resolved_self = self.sub.apply(self_ty);
-                let Type::Con(self_head, self_args) = &resolved_self else {
-                    continue;
-                };
-                let arity_keyed =
-                    crate::typechecker::arity_keyed_target_name(self_head, self_args.len());
-                let det_positions = fundep.determinant_extra_positions();
-                let determined_positions = fundep.determined_extra_positions();
-                // Every determinant extra must already be concrete, otherwise we
-                // can't pick the impl yet.
-                let dets_concrete = det_positions.iter().all(|&p| {
-                    extras
-                        .get(p)
-                        .map(|e| matches!(self.sub.apply(e), Type::Con(..) | Type::Symbol(_)))
-                        .unwrap_or(false)
-                });
-                if !dets_concrete {
-                    continue;
-                }
-                // Find the unique impl whose self type and determinant extras
-                // match this constraint.
-                let candidates: Vec<(
-                    crate::typechecker::ImplInfo,
-                    std::collections::HashMap<u32, Type>,
-                )> = self
-                    .trait_state
-                    .impls
-                    .iter()
-                    .filter_map(|((tn, _, tt), info)| {
-                        if tn != &resolved_trait || tt != &arity_keyed {
-                            return None;
-                        }
-                        let mut pattern_subst = std::collections::HashMap::new();
-                        if let Some(pattern) = &info.target_pattern
-                            && !crate::typechecker::check_traits::match_type_pattern(
-                                pattern,
-                                &resolved_self,
-                                &mut pattern_subst,
-                            )
-                        {
-                            return None;
-                        }
-                        for &p in &det_positions {
-                            let (Some(impl_extra), Some(call_extra)) =
-                                (info.trait_type_args.get(p), extras.get(p))
-                            else {
-                                continue;
-                            };
-                            let expected =
-                                crate::typechecker::check_traits::substitute_pattern_vars(
-                                    impl_extra,
-                                    &pattern_subst,
-                                );
-                            let actual = self.sub.apply(call_extra);
-                            if !crate::typechecker::check_traits::match_type_pattern(
-                                &expected,
-                                &actual,
-                                &mut pattern_subst,
-                            ) {
-                                return None;
-                            }
-                        }
-                        Some((info.clone(), pattern_subst))
-                    })
-                    .collect();
-                if candidates.len() != 1 {
-                    continue;
-                }
-                let (info, mut pattern_subst) = candidates.into_iter().next().unwrap();
-                // Only pin determined extras that are still unresolved. Re-pinning
-                // an already-resolved extra would mint a fresh impl var and bind
-                // it every pass, growing `solved_count` without bound — an
-                // infinite loop. Skipping resolved ones makes this converge.
-                let to_pin: Vec<usize> = determined_positions
-                    .iter()
-                    .copied()
-                    .filter(|&p| {
-                        extras
-                            .get(p)
-                            .map(|e| matches!(self.sub.apply(e), Type::Var(_)))
-                            .unwrap_or(false)
-                    })
-                    .collect();
-                if to_pin.is_empty() {
-                    continue;
-                }
-                // Bind any remaining impl pattern variables (not pinned by the
-                // determinant match) to fresh vars so the determined args are
-                // fully grounded.
-                let mut impl_vars = Vec::new();
-                for extra in &info.trait_type_args {
-                    crate::typechecker::collect_free_vars(extra, &mut impl_vars);
-                }
-                for (_, _, extra_types) in &info.param_constraints_by_var_with_args {
-                    for extra in extra_types {
-                        crate::typechecker::collect_free_vars(extra, &mut impl_vars);
-                    }
-                }
-                for var_id in impl_vars {
-                    pattern_subst
-                        .entry(var_id)
-                        .or_insert_with(|| self.fresh_var());
-                }
-                for p in to_pin {
-                    let (Some(call_extra), Some(impl_extra)) =
-                        (extras.get(p), info.trait_type_args.get(p))
-                    else {
-                        continue;
-                    };
-                    let pinned = crate::typechecker::check_traits::substitute_pattern_vars(
-                        impl_extra,
-                        &pattern_subst,
-                    );
-                    let _ = self.unify(call_extra, &pinned);
-                }
-                // Register the selected impl's fundep-bearing `where`-app
-                // constraints so later passes can keep evaluating a recursive
-                // type-level function (e.g. the structural `MapRep` walk over a
-                // Generic rep, whose determined extra at each level is fixed by
-                // a nested `where`-app on the field/subtree). These are pushed
-                // exactly once — when this constraint's determined extras are
-                // first pinned (`to_pin` non-empty); on later passes those
-                // extras are concrete, so `to_pin` is empty and we return above
-                // before reaching here, keeping the fixpoint bounded.
-                for (req_trait, var_id, extra_types) in &info.param_constraints_by_var_with_args {
-                    if let Some(self_arg) = pattern_subst.get(var_id) {
-                        let resolved_extras: Vec<Type> = extra_types
-                            .iter()
-                            .map(|e| {
-                                crate::typechecker::check_traits::substitute_pattern_vars(
-                                    e,
-                                    &pattern_subst,
-                                )
-                            })
-                            .collect();
-                        self.trait_state.pending_constraints.push((
-                            req_trait.clone(),
-                            resolved_extras,
-                            self_arg.clone(),
-                            *span,
-                            *node_id,
-                        ));
-                    }
-                }
-            }
-            if self.sub.solved_count() == before {
-                break;
-            }
-        }
-    }
 
     pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
         // Build resolved where bounds (substitution may have chained var IDs)
@@ -245,9 +39,9 @@ impl Checker {
         // Within each batch, sort so that constraints whose self-type already
         // resolves to a concrete Type::Con are processed first. Constraints
         // whose self is still a Var depend on prior constraints to pin them
-        // (e.g. `ToJson r` waits on `Generic T r`), and erroring on them
-        // before the pinning constraint runs produces spurious "ambiguous"
-        // diagnostics.
+        // (e.g. `Show r` waits on a sibling `ConvertTo T r` to unify `r`), and
+        // erroring on them before the pinning constraint runs produces spurious
+        // "ambiguous" diagnostics.
         loop {
             let mut constraints = std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
@@ -255,11 +49,11 @@ impl Checker {
             }
             constraints.sort_by_key(|(_, _, ty, _, _)| matches!(self.sub.apply(ty), Type::Var(_)));
             // Worklist bookkeeping: a Var-self constraint that isn't resolvable
-            // this pass (e.g. `Show q` before the `Two c q` fundep has pinned
-            // `q`) is *deferred* rather than reported, because a sibling
+            // this pass (e.g. `Show q` before a sibling `ConvertTo c q` has
+            // unified `q`) is *deferred* rather than reported, because a sibling
             // constraint processed later — or a later pass — may still pin it.
             // The sort puts concrete-self constraints first, but it cannot
-            // topologically order the Var-self group by their mutual fundep
+            // topologically order the Var-self group by their mutual
             // dependencies, so deferral + progress retry is what makes solving
             // order-independent.
             let sub_before = self.sub.solved_count();
@@ -273,33 +67,8 @@ impl Checker {
                 if matches!(resolved, Type::Error) {
                     continue;
                 }
-                // If this constraint originated inside a synthesized routed-
-                // derive impl, the eventual failure should be rewritten to
-                // point at the user's deriving clause and name the user-facing
-                // trait + target type instead of building-block types from the
-                // synthesized body.
-                let routed_origin = self
-                    .trait_state
-                    .routed_constraint_origins
-                    .get(&node_id)
-                    .cloned();
                 let rewrite_diag = |default_msg: String, default_span: Span| -> Diagnostic {
-                    match &routed_origin {
-                        Some(info) => Diagnostic::error_at(
-                            info.deriving_span,
-                            format!(
-                                "cannot derive `{}` for `{}`: missing required instance ({}). \
-                                 Make sure all field types implement `{}`, or also derive \
-                                 `{}` on them.",
-                                info.trait_name,
-                                info.target_type,
-                                default_msg,
-                                info.trait_name,
-                                info.trait_name,
-                            ),
-                        ),
-                        None => Diagnostic::error_at(default_span, default_msg),
-                    }
+                    Diagnostic::error_at(default_span, default_msg)
                 };
                 // Resolve trait type args to concrete type names for impl lookup
                 let resolved_trait_type_args: Vec<String> = trait_type_arg_types
@@ -410,140 +179,6 @@ impl Checker {
                             }
                         }
 
-                        // Functional-trait coherence fallback: if extras are
-                        // unresolved (and direct lookup missed), scan for the
-                        // unique impl with the matching self-type and pin the
-                        // extras to its stored args. The trait info table
-                        // marks Generic-like traits as functional.
-                        if impl_info.is_none()
-                            && resolved_trait_type_args.len() != trait_type_arg_types.len()
-                            && self
-                                .trait_state
-                                .traits
-                                .get(&resolved_trait)
-                                .map(|ti| ti.is_functional)
-                                .unwrap_or(false)
-                        {
-                            // Extra-arg positions that *determine* the rest. For
-                            // a multi-variable determinant (`a b -> c`), the
-                            // self type alone doesn't pick the impl — we must
-                            // also match the resolved determinant extras (`b`),
-                            // then pin the determined extras (`c`).
-                            let det_extra_positions = self
-                                .trait_state
-                                .traits
-                                .get(&resolved_trait)
-                                .and_then(|ti| ti.fundep.as_ref())
-                                .map(|fd| fd.determinant_extra_positions())
-                                .unwrap_or_default();
-                            let matches: Vec<(
-                                crate::typechecker::ImplInfo,
-                                std::collections::HashMap<u32, Type>,
-                            )> = self
-                                .trait_state
-                                .impls
-                                .iter()
-                                .filter_map(|((tn, _, tt), info)| {
-                                    if tn != &resolved_trait || tt != &arity_keyed_name {
-                                        return None;
-                                    }
-                                    let mut pattern_subst = std::collections::HashMap::new();
-                                    if let Some(pattern) = &info.target_pattern
-                                        && !crate::typechecker::check_traits::match_type_pattern(
-                                            pattern,
-                                            &resolved,
-                                            &mut pattern_subst,
-                                        )
-                                    {
-                                        return None;
-                                    }
-                                    // Filter by the determinant extras: each must
-                                    // be resolved at the call site and match this
-                                    // impl's stored arg. An unresolved determinant
-                                    // means we can't commit yet, so drop the
-                                    // candidate and let the constraint defer.
-                                    for &p in &det_extra_positions {
-                                        let (Some(impl_extra), Some(call_extra)) = (
-                                            info.trait_type_args.get(p),
-                                            trait_type_arg_types.get(p),
-                                        ) else {
-                                            continue;
-                                        };
-                                        let actual = self.sub.apply(call_extra);
-                                        if matches!(actual, Type::Var(_)) {
-                                            return None;
-                                        }
-                                        let expected = crate::typechecker::check_traits::substitute_pattern_vars(
-                                            impl_extra,
-                                            &pattern_subst,
-                                        );
-                                        if !crate::typechecker::check_traits::match_type_pattern(
-                                            &expected,
-                                            &actual,
-                                            &mut pattern_subst,
-                                        ) {
-                                            return None;
-                                        }
-                                    }
-                                    Some((info.clone(), pattern_subst))
-                                })
-                                .collect();
-                            if matches.len() == 1 {
-                                let (info, mut pattern_subst) = matches[0].clone();
-                                // Substitute the impl's type-param vars with the
-                                // call-site target. For structured targets such
-                                // as `Leaf (Column n a)`, the determined vars
-                                // live inside the target pattern, so prefer the
-                                // full pattern substitution. For legacy/builtin
-                                // impls without a pattern, fall back to top-level
-                                // argument zipping.
-                                if pattern_subst.is_empty() {
-                                    pattern_subst.extend(
-                                        info.target_type_param_ids
-                                            .iter()
-                                            .zip(args.iter())
-                                            .map(|(id, t)| (*id, t.clone())),
-                                    );
-                                }
-                                let mut impl_vars = Vec::new();
-                                for extra in &info.trait_type_args {
-                                    crate::typechecker::collect_free_vars(extra, &mut impl_vars);
-                                }
-                                for (_, _, extra_types) in &info.param_constraints_by_var_with_args
-                                {
-                                    for extra in extra_types {
-                                        crate::typechecker::collect_free_vars(
-                                            extra,
-                                            &mut impl_vars,
-                                        );
-                                    }
-                                }
-                                for var_id in impl_vars {
-                                    if let std::collections::hash_map::Entry::Vacant(entry) =
-                                        pattern_subst.entry(var_id)
-                                    {
-                                        entry.insert(self.fresh_var());
-                                    }
-                                }
-                                let pinned: Vec<Type> = info
-                                    .trait_type_args
-                                    .iter()
-                                    .map(|t| {
-                                        crate::typechecker::check_traits::substitute_pattern_vars(
-                                            t,
-                                            &pattern_subst,
-                                        )
-                                    })
-                                    .collect();
-                                for (var_ty, pinned_ty) in
-                                    trait_type_arg_types.iter().zip(pinned.iter())
-                                {
-                                    let _ = self.unify(var_ty, pinned_ty);
-                                }
-                                impl_info = Some(info);
-                            }
-                        }
-
                         let mut pattern_subst = std::collections::HashMap::new();
                         let impl_info = impl_info.and_then(|info| {
                             if let Some(pattern) = &info.target_pattern
@@ -650,7 +285,6 @@ impl Checker {
                                     resolved_record_type: None,
                                     type_var_name: None,
                                     trait_type_args: resolved_extra_types,
-                                    resolved_symbol: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == crate::typechecker::canonicalize_type_name("Tuple")
@@ -721,44 +355,6 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
-                        if is_generic_trait_name(&trait_name)
-                            && let Some(rep_ty) = trait_type_arg_types.first()
-                            && let Some(record_ty) =
-                                anon_record_from_generic_rep(&self.sub.apply(rep_ty))
-                        {
-                            self.unify_at(&Type::Var(*id), &record_ty, span)?;
-                            self.trait_state.pending_constraints.push((
-                                trait_name,
-                                trait_type_arg_types,
-                                Type::Var(*id),
-                                span,
-                                node_id,
-                            ));
-                            continue;
-                        }
-
-                        if is_generic_trait_name(&trait_name) {
-                            let mut extra_vars = Vec::new();
-                            for extra in &trait_type_arg_types {
-                                crate::typechecker::collect_free_vars(
-                                    &self.sub.apply(extra),
-                                    &mut extra_vars,
-                                );
-                            }
-                            if !extra_vars.is_empty()
-                                && !self.trait_state.pending_constraints.is_empty()
-                            {
-                                self.trait_state.pending_constraints.push((
-                                    trait_name,
-                                    trait_type_arg_types,
-                                    Type::Var(*id),
-                                    span,
-                                    node_id,
-                                ));
-                                continue;
-                            }
-                        }
-
                         let covering_trait = resolved_bounds.get(id).and_then(|bounds| {
                             bounds
                                 .iter()
@@ -812,7 +408,6 @@ impl Checker {
                                 .iter()
                                 .map(|t| self.sub.apply(t))
                                 .collect(),
-                            resolved_symbol: None,
                         });
                     }
                     Type::Fun(_, _, _) => {
@@ -822,57 +417,12 @@ impl Checker {
                             span,
                         ));
                     }
-                    Type::Record(fields) => {
-                        let resolved_trait = self
-                            .resolve_trait_name(&trait_name)
-                            .unwrap_or_else(|| trait_name.clone());
-                        if is_generic_trait_name(&resolved_trait) {
-                            let rep_ty = anon_record_generic_rep(fields);
-                            for extra in &trait_type_arg_types {
-                                self.unify_at(extra, &rep_ty, span)?;
-                            }
-                            let resolved_extra_types: Vec<Type> = trait_type_arg_types
-                                .iter()
-                                .map(|t| self.sub.apply(t))
-                                .collect();
-                            self.evidence.push(crate::typechecker::TraitEvidence {
-                                node_id,
-                                trait_name: trait_name.clone(),
-                                resolved_type: None,
-                                resolved_record_type: Some(resolved.clone()),
-                                type_var_name: None,
-                                trait_type_args: resolved_extra_types,
-                                resolved_symbol: None,
-                            });
-                            continue;
-                        }
+                    Type::Record(_) => {
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                         return Err(rewrite_diag(
                             format!("no impl of {} for anonymous record type", display),
                             span,
                         ));
-                    }
-                    Type::Symbol(name) => {
-                        let resolved_trait = self
-                            .resolve_trait_name(&trait_name)
-                            .unwrap_or_else(|| trait_name.clone());
-                        if resolved_trait == crate::typechecker::KNOWN_SYMBOL_TRAIT {
-                            self.evidence.push(crate::typechecker::TraitEvidence {
-                                node_id,
-                                trait_name: resolved_trait,
-                                resolved_type: None,
-                                resolved_record_type: None,
-                                type_var_name: None,
-                                trait_type_args: vec![],
-                                resolved_symbol: Some(name.clone()),
-                            });
-                        } else {
-                            let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                            return Err(rewrite_diag(
-                                format!("no impl of {} for symbol type '{}", display, name),
-                                span,
-                            ));
-                        }
                     }
                     // Error/Never type: skip trait checking
                     Type::Error => {}
@@ -883,7 +433,7 @@ impl Checker {
             // queued fresh constraints. Without progress the deferrals are
             // genuinely ambiguous, so re-raise the first one's diagnostic. This
             // bounds the loop — progress is monotone (the substitution only
-            // grows) — while making fundep solving order-independent.
+            // grows) — while making constraint solving order-independent.
             if !deferred.is_empty() {
                 let progressed = self.sub.solved_count() > sub_before
                     || !self.trait_state.pending_constraints.is_empty();

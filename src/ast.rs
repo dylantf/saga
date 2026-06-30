@@ -5,32 +5,19 @@ use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
-/// Kind of a type-level entity. `Star` is the kind of ordinary types; `Symbol`
-/// is the kind of type-level symbol literals like `'Foo`. Only `Symbol` is
-/// user-writable today; `Star` is the implicit default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Kind {
-    Star,
-    Symbol,
-}
-
 /// A type parameter declared on a type, record, trait, or effect declaration.
-/// Carries the parameter name plus its declared kind. Parameters without an
-/// explicit `(name : Kind)` annotation default to `Kind::Star`.
 #[derive(Debug, Clone)]
 pub struct TypeParam {
     pub name: String,
-    pub kind: Kind,
     pub span: Span,
 }
 
 impl TypeParam {
-    /// Construct a `Star`-kinded type parameter. Most call sites that
-    /// historically built `Vec<String>` should use this.
+    /// Construct a type parameter. Named `star` for historical reasons (the
+    /// compiler once tracked kinds; every type parameter is an ordinary type).
     pub fn star(name: impl Into<String>, span: Span) -> Self {
         TypeParam {
             name: name.into(),
-            kind: Kind::Star,
             span,
         }
     }
@@ -44,7 +31,6 @@ impl Default for TypeParam {
     fn default() -> Self {
         TypeParam {
             name: String::new(),
-            kind: Kind::Star,
             span: Span { start: 0, end: 0 },
         }
     }
@@ -57,9 +43,9 @@ impl AsRef<str> for TypeParam {
 }
 
 impl PartialEq for TypeParam {
-    /// Equality on name + kind; spans are formatting metadata.
+    /// Equality on name; spans are formatting metadata.
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.kind == other.kind
+        self.name == other.name
     }
 }
 
@@ -83,10 +69,7 @@ impl PartialEq<String> for TypeParam {
 
 impl std::fmt::Display for TypeParam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            Kind::Star => f.write_str(&self.name),
-            Kind::Symbol => write!(f, "({} : Symbol)", self.name),
-        }
+        f.write_str(&self.name)
     }
 }
 
@@ -143,20 +126,6 @@ pub struct ImplMethod {
 }
 
 /// Marker attached to `Decl::ImplDef` instances synthesized by `derive_routed`.
-/// Lets the typechecker rewrite constraint-failure diagnostics to point at the
-/// user's `deriving (...)` clause and name the user-facing trait + type, rather
-/// than mentioning building-block types from the synthesized impl's body.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RoutedDeriveInfo {
-    /// Trait the user requested (bare name).
-    pub trait_name: String,
-    /// User-facing target type the derive was attached to.
-    pub target_type: String,
-    /// Span of the original type/record declaration carrying the `deriving`
-    /// clause. Used as the diagnostic's anchor.
-    pub deriving_span: Span,
-}
-
 /// One entry in a `deriving (...)` clause.
 ///
 /// Plain derives are represented with an empty `type_args` list:
@@ -492,11 +461,7 @@ pub enum Decl {
         /// Type parameters: first is the self type, rest are extras.
         /// e.g. `trait ConvertTo a b` -> ["a", "b"]
         type_params: Vec<TypeParam>,
-        functional_dependency: Option<TraitFunctionalDependency>,
         supertraits: Vec<TraitRef>,
-        /// `synthesizes via <Trait> deriving (...)` clause, if present. Marks the
-        /// trait as a record-synthesizing link. See [SynthesisSpec].
-        synthesis: Option<SynthesisSpec>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
@@ -521,19 +486,12 @@ pub enum Decl {
         target_type_expr: Option<TypeExpr>,
         type_params: Vec<TypeParam>,
         where_clause: Vec<TraitBound>,
-        /// Bare trait-application constraints, e.g. `Generic Person r` in
-        /// `impl ToJson for Person where {Generic Person r, ToJson r}`.
+        /// Bare trait-application constraints, e.g. `ConvertTo a b` in
+        /// `impl Show for Box a where {ConvertTo a b, Show b}`.
         /// See [TraitApp] for semantics.
         where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
-        /// `Some` when this impl was synthesized by `derive_routed` (either the
-        /// bridge or the delegating impl for a routed derive). Used by the
-        /// typechecker to rewrite constraint-failure diagnostics so they point
-        /// at the user's `deriving (...)` clause and name the user's type and
-        /// trait, instead of mentioning building-block types like `Labeled`
-        /// or `And` from the synthesized impl body.
-        routed_derive_info: Option<RoutedDeriveInfo>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
         span: Span,
@@ -849,10 +807,6 @@ pub enum ExprKind {
         func: String,
         args: Vec<Expr>,
     },
-    /// Produced by elaboration for the universal `KnownSymbol` impl: evaluates
-    /// to the source name of the concrete symbol captured at the call site as
-    /// a String. Codegen for this node is implemented in chunk 4.
-    SymbolIntrinsic { symbol: String },
 }
 
 impl Expr {
@@ -947,8 +901,7 @@ impl Expr {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. }
-            | ExprKind::SymbolIntrinsic { .. } => false,
+            | ExprKind::DictRef { .. } => false,
         }
     }
 }
@@ -1176,13 +1129,6 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         span: Span,
     },
-
-    /// Type-level symbol literal: `'Foo`. Inhabits kind `Symbol`.
-    Symbol {
-        id: NodeId,
-        name: String,
-        span: Span,
-    },
 }
 
 impl TypeExpr {
@@ -1193,8 +1139,7 @@ impl TypeExpr {
             | TypeExpr::App { span, .. }
             | TypeExpr::Arrow { span, .. }
             | TypeExpr::Record { span, .. }
-            | TypeExpr::Labeled { span, .. }
-            | TypeExpr::Symbol { span, .. } => *span,
+            | TypeExpr::Labeled { span, .. } => *span,
         }
     }
 
@@ -1205,8 +1150,7 @@ impl TypeExpr {
             | TypeExpr::App { id, .. }
             | TypeExpr::Arrow { id, .. }
             | TypeExpr::Record { id, .. }
-            | TypeExpr::Labeled { id, .. }
-            | TypeExpr::Symbol { id, .. } => *id,
+            | TypeExpr::Labeled { id, .. } => *id,
         }
     }
 
@@ -1289,7 +1233,6 @@ impl PartialEq for TypeExpr {
                     ..
                 },
             ) => l1 == l2 && i1 == i2,
-            (TypeExpr::Symbol { name: a, .. }, TypeExpr::Symbol { name: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -1465,46 +1408,11 @@ pub fn op_dict_param_names(where_clause: &[TraitBound]) -> Vec<String> {
     names
 }
 
-/// Functional dependency on a trait declaration, e.g.
-/// `trait Selectable selection row | selection -> row` or a multi-variable
-/// determinant like `trait T a b c | a b -> c`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TraitFunctionalDependency {
-    /// One or more determining type parameters (left of the `->`).
-    pub determinant: Vec<String>,
-    /// The determined type parameters (right of the `->`).
-    pub determined: Vec<String>,
-    pub span: Span,
-}
-
-/// A trait's `synthesizes via <Trait> deriving (...)` clause. Marks the trait as
-/// a *record-synthesizing* link: `deriving (Trait NewName)` on a carrier record
-/// generates a new record `NewName` whose fields are the carrier's fields mapped
-/// through the `via` field-map trait, plus a link `impl Trait NewName for Carrier`.
-///
-/// Which parameter is the carrier vs. the synthesized type is read from the
-/// trait's functional dependency: the determinant is the carrier (the record the
-/// derive sits on), the determined parameter is the synthesized type. This keeps
-/// the whole transform library-defined — the compiler holds only the names the
-/// library chose, as data.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SynthesisSpec {
-    /// The field-map trait (a functional `field -> field` relation whose impls
-    /// declare the per-field-type rewrite, e.g. `Col a -> a`).
-    pub via_trait: String,
-    pub via_trait_span: Span,
-    /// Derives to attach to the synthesized record (e.g. `InsertRow`). `Generic`
-    /// is auto-included, as with any routed derive.
-    pub attach_derives: Vec<DeriveSpec>,
-    pub span: Span,
-}
-
-/// Bare trait-application constraint: `Generic Person r` in a `where` clause.
+/// Bare trait-application constraint: `ConvertTo a b` in a `where` clause.
 /// Unlike `TraitBound`, the self/first parameter is just `type_args[0]`, so
 /// any position may hold a concrete type or a fresh existential type variable
-/// (one not in the surrounding `type_params`). The solver resolves the fresh
-/// vars using the coherence rule of [Phase 1b]: for functional traits like
-/// `Generic`, the bound first parameter determines the rest.
+/// (one not in the surrounding `type_params`), resolved by ordinary impl
+/// selection and unification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitApp {
     pub id: NodeId,

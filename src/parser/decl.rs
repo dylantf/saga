@@ -62,7 +62,7 @@ fn type_params_in_type_expr(expr: &TypeExpr) -> Vec<TypeParam> {
                 }
             }
             TypeExpr::Labeled { inner, .. } => visit(inner, out),
-            TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => {}
+            TypeExpr::Named { .. } => {}
         }
     }
 
@@ -379,7 +379,7 @@ impl Parser {
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
-        // Type params are lowercase identifiers (optionally `(name : Kind)`) before `=`
+        // Type params are lowercase identifiers before `=`
         while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
             type_params.push(self.parse_type_param()?);
         }
@@ -923,42 +923,12 @@ impl Parser {
         let name = self.expect_upper_ident()?;
         // Parse type parameters: first is self, rest are extras
         // e.g. `trait ConvertTo a b` -> type_params = ["a", "b"]
-        // `synthesizes` is a soft keyword: it introduces the trait-synthesis
-        // clause (parsed below), so the header's ident-run loops must stop at it
-        // rather than swallow it as a type parameter.
-        let is_synthesizes = |p: &Self| matches!(p.peek(), Token::Ident(s) if s == "synthesizes");
         let mut type_params = vec![self.parse_type_param()?];
         while matches!(self.peek(), Token::Ident(_) | Token::LParen)
             && !matches!(self.peek(), Token::Where | Token::Bar)
-            && !is_synthesizes(self)
         {
             type_params.push(self.parse_type_param()?);
         }
-
-        let functional_dependency = if *self.peek() == Token::Bar {
-            let fd_start = self.tokens[self.pos].span;
-            self.advance(); // consume '|'
-            let mut determinant = Vec::new();
-            determinant.push(self.expect_ident()?);
-            while matches!(self.peek(), Token::Ident(_)) && !is_synthesizes(self) {
-                determinant.push(self.expect_ident()?);
-            }
-            self.expect(Token::Arrow)?;
-            let mut determined = Vec::new();
-            let first = self.expect_ident()?;
-            determined.push(first);
-            while matches!(self.peek(), Token::Ident(_)) && !is_synthesizes(self) {
-                determined.push(self.expect_ident()?);
-            }
-            let fd_end = self.tokens[self.pos.saturating_sub(1)].span;
-            Some(crate::ast::TraitFunctionalDependency {
-                determinant,
-                determined,
-                span: fd_start.to(fd_end),
-            })
-        } else {
-            None
-        };
 
         let mut supertraits = Vec::new();
         if *self.peek() == Token::Where {
@@ -999,57 +969,6 @@ impl Parser {
             }
 
             self.expect(Token::RBrace)?;
-        }
-
-        // Optional `synthesizes via <Trait> deriving (...)` clause: marks the
-        // trait as a record-synthesizing link (see SynthesisSpec). A trait with
-        // this clause may omit its `{ }` body (it is typically method-less).
-        let synthesis = if matches!(self.peek(), Token::Ident(kw) if kw == "synthesizes") {
-            let synth_start = self.tokens[self.pos].span;
-            self.advance(); // consume 'synthesizes'
-            match self.peek() {
-                Token::Ident(kw) if kw == "via" => {
-                    self.advance();
-                }
-                _ => {
-                    return Err(ParseError {
-                        message: "expected `via <Trait>` after `synthesizes`".to_string(),
-                        span: self.tokens[self.pos].span,
-                    });
-                }
-            }
-            let via_trait = self.parse_upper_name()?;
-            let via_trait_span = self.tokens[self.pos - 1].span;
-            // Optional `deriving (...)` list to attach to the synthesized record.
-            let attach_derives = self.parse_deriving_clause()?;
-            let synth_end = self.tokens[self.pos.saturating_sub(1)].span;
-            Some(crate::ast::SynthesisSpec {
-                via_trait,
-                via_trait_span,
-                attach_derives,
-                span: synth_start.to(synth_end),
-            })
-        } else {
-            None
-        };
-
-        // A synthesizing trait may have no body; everything else requires `{ }`.
-        if synthesis.is_some() && !matches!(self.peek(), Token::LBrace) {
-            let end = self.tokens[self.pos.saturating_sub(1)].span;
-            return Ok(Decl::TraitDef {
-                id: NodeId::fresh(),
-                doc: vec![],
-                public,
-                name,
-                name_span,
-                type_params,
-                functional_dependency,
-                supertraits,
-                synthesis,
-                methods: Vec::new(),
-                dangling_trivia: Vec::new(),
-                span: start.to(end),
-            });
         }
 
         self.expect(Token::LBrace)?;
@@ -1119,9 +1038,7 @@ impl Parser {
             name,
             name_span,
             type_params,
-            functional_dependency,
             supertraits,
-            synthesis,
             methods,
             dangling_trivia,
             span: start.to(end),
@@ -1129,7 +1046,7 @@ impl Parser {
     }
 
     /// Parse `where {a: Show + Eq, b: Ord}` clause and/or new-form
-    /// `where {Generic Person r}` entries. Returns the two lists separately:
+    /// `where {ConvertTo a b}` entries. Returns the two lists separately:
     /// existing-form `TraitBound`s and new-form `TraitApp`s. Empty vecs if no
     /// `where` keyword.
     fn parse_where_clause(
@@ -1370,7 +1287,6 @@ impl Parser {
             where_apps,
             needs,
             methods,
-            routed_derive_info: None,
             dangling_trivia,
             span: start.to(end),
         })
@@ -1509,44 +1425,12 @@ impl Parser {
             && matches!(self.tokens[base + 1].token, Token::Colon)
     }
 
-    /// Parse a single type-parameter declaration: either a bare identifier
-    /// (`a`, defaults to `Kind::Star`) or a kind-annotated identifier
-    /// `(name : Symbol)`. Used by `type`, `record`, `effect`, `trait`, and
-    /// `impl` declarations.
+    /// Parse a single type-parameter declaration: a bare lowercase identifier.
+    /// Used by `type`, `record`, `effect`, `trait`, and `impl` declarations.
     fn parse_type_param(&mut self) -> Result<TypeParam, ParseError> {
-        if matches!(self.peek(), Token::LParen) {
-            let start = self.tokens[self.pos].span;
-            self.advance(); // consume '('
-            let name = self.expect_ident()?;
-            self.expect(Token::Colon)?;
-            // Kind RHS is currently restricted to the bare identifier `Symbol`.
-            let kind_name_span = self.tokens[self.pos].span;
-            let kind_name = self.expect_upper_ident()?;
-            let kind = match kind_name.as_str() {
-                "Symbol" => Kind::Symbol,
-                other => {
-                    return Err(ParseError {
-                        message: format!("unknown kind `{}`; expected `Symbol`", other),
-                        span: kind_name_span,
-                    });
-                }
-            };
-            let end = self.tokens[self.pos].span;
-            self.expect(Token::RParen)?;
-            Ok(TypeParam {
-                name,
-                kind,
-                span: start.to(end),
-            })
-        } else {
-            let span = self.tokens[self.pos].span;
-            let name = self.expect_ident()?;
-            Ok(TypeParam {
-                name,
-                kind: Kind::Star,
-                span,
-            })
-        }
+        let span = self.tokens[self.pos].span;
+        let name = self.expect_ident()?;
+        Ok(TypeParam { name, span })
     }
 
     // --- Type expressions ---
@@ -1687,11 +1571,6 @@ impl Parser {
             Token::Ident(s) => Ok(TypeExpr::Var {
                 id: NodeId::fresh(),
                 name: s,
-                span: start,
-            }),
-            Token::SymbolLit(name) => Ok(TypeExpr::Symbol {
-                id: NodeId::fresh(),
-                name,
                 span: start,
             }),
             Token::LParen => {

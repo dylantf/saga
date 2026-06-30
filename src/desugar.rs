@@ -329,8 +329,7 @@ fn desugar_expr(expr: &mut Expr) {
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
-        | ExprKind::ForeignCall { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::ForeignCall { .. } => {}
     }
 
     // Now transform the current node if it's a sugar form
@@ -684,8 +683,7 @@ pub fn freshen_expr_ids(expr: &mut Expr) {
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
 
         ExprKind::App { func, arg } => {
             freshen_expr_ids(func);
@@ -991,8 +989,7 @@ pub fn retarget_expr_spans(expr: &mut Expr, target: Span) {
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictSuperAccess { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::SymbolIntrinsic { .. } => {}
+        | ExprKind::DictRef { .. } => {}
 
         ExprKind::App { func, arg } => {
             retarget_expr_spans(func, target);

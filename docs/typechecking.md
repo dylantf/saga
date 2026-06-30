@@ -331,46 +331,23 @@ Trait constraints are generated throughout inference, especially for:
 
 Many of these constraints are pushed into `trait_state.pending_constraints` during inference and solved later.
 
-### Multi-Parameter Traits and Functional Dependencies
+### Multi-Parameter Traits
 
 Saga traits may have more than one type parameter:
 
 ```saga
-trait Selectable selection row | selection -> row {
+trait Selectable selection row {
   fun to_row : selection -> row
 }
 ```
 
-In source, the `| selection -> row` part is a functional dependency. A single
-clause is supported, and its determining side may list more than one parameter,
-e.g. `trait T a b c | a b -> c`. The rules are:
-
-- the first trait parameter is the "self" parameter and must appear on the
-  determining (left) side, because concrete-self impl selection recovers the
-  determined parameters from the self type
-- the determining and determined sides are disjoint
-- together they must cover every trait parameter (no parameter may be left
-  undetermined)
-
-So `trait Selectable selection row | selection -> row` and
-`trait T a b c | a b -> c` are both supported. `Generic` also participates
-through a legacy hardcoded entry in `check_traits::FUNCTIONAL_TRAITS`, because
-`Std.Generic.Generic` predates user-written fundep syntax; it is treated as
-`self -> (every other parameter)`.
+There is no functional-dependency annotation: the extra trait parameters are
+resolved through ordinary unification and impl selection, not through a solver
+that *improves* one parameter from another. In practice this means a call's
+extra parameters must be pinned by the impl target, by a result annotation, or
+by the surrounding context, rather than being inferred from the self type alone.
 
 #### Representation
-
-Trait registration stores the rule as `TraitInfo.fundep: Option<TraitFundep>`
-(with `is_functional` kept as the convenience boolean `fundep.is_some()`). A
-`TraitFundep` holds the determinant/determined parameter *indices* into
-`type_params`, so improvement and coherence know which positions are inputs and
-which are outputs. The full fundep declaration is validated in
-`register_trait_def`:
-
-- the self/first parameter must be on the determining side
-- it must determine at least one parameter
-- determining and determined sides are disjoint and together cover all
-  parameters
 
 Impl registration stores multi-parameter information in `ImplInfo`:
 
@@ -383,18 +360,17 @@ Impl registration stores multi-parameter information in `ImplInfo`:
 For example:
 
 ```saga
-impl Selectable a for (Column source name a) where {a: PgType} { ... }
+impl Selectable a for (Box a) where {a: Show} { ... }
 
-impl Selectable (Labeled n out) for (Labeled n field)
+impl Selectable (Wrap out) for (Wrap field)
   where {field: Selectable out}
 { ... }
 ```
 
 The first impl stores `a` as the `Selectable` extra argument and also inside
-the `Column ... a` target pattern. The second stores a conditional constraint
-that must later push `Selectable field out`; preserving the `out` extra is
-important when the field is a phantom type such as `Column source 'title
-String`.
+the `Box a` target pattern. The second stores a conditional constraint that
+must later push `Selectable field out`, preserving the `out` extra through the
+constraint chain.
 
 Both conditional-constraint syntaxes feed the same metadata:
 
@@ -416,10 +392,8 @@ pending constraints shaped roughly as:
 (trait_name, trait_type_arg_types, self_type, span, node_id)
 ```
 
-For `to_row u.id` under the `Selectable` trait, the self type might be
-`Column UsersScope 'id Int` and the extra trait argument might be `Int`.
-For `Generic Person r`, the self type is `Person` and the extra is the
-representation variable `r`.
+For `to_row b` under the `Selectable` trait, the self type might be `Box Int`
+and the extra trait argument `Int`.
 
 `check_pending_constraints` solves these constraints after the relevant
 expression or declaration has had a chance to push more unifications into the
@@ -436,20 +410,18 @@ selection in layers:
 2. Structured-pattern lookup for impls with the same trait and self head. This
    matches `target_pattern` against the concrete self type, substitutes
    pattern variables into `trait_type_args`, and checks the requested extras.
-   This is what lets `Selectable Int for Column source 'id Int` resolve even
-   when `Column`'s useful information is phantom.
-3. Functional-trait fallback. If the trait is functional and a *determined*
-   extra argument is still unresolved, scan for the unique impl whose self type
-   and *determinant* extra arguments match the call site, then pin the
-   determined arguments from that impl. For a single-variable determinant the
-   self type alone selects the impl; for a multi-variable determinant
-   (`a b -> c`) the determinant extras must also be resolved and matched before
-   the dependency fires.
+   This is what lets `Selectable Int for Box Int` resolve through the impl's
+   `Box a` target pattern.
 
 After an impl is selected, its conditional constraints are pushed back into
 `pending_constraints`. For structured targets, the stored pattern substitution
 is used so a constraint like `where {field: Selectable out}` becomes a concrete
-child constraint such as `Selectable (Column PostsScope 'title String) String`.
+child constraint such as `Selectable (Wrap Int) Int`.
+
+There is no separate functional-dependency improvement step: if an extra trait
+parameter is still an unresolved type variable after impl selection and
+unification, the constraint simply stays unsolved (and is reported as an
+ambiguous/undetermined constraint) rather than being pinned by a fundep rule.
 
 #### Abstract-Self Solving
 
@@ -464,20 +436,18 @@ For example:
 ```saga
 fun project : selection -> row
   where {
-    selection: Generic selection_rep,
-    selection_rep: Selectable row_rep,
-    row: Generic row_rep,
+    selection: Selectable row,
   }
 ```
 
-Inside `project`, calls can discharge `Selectable selection_rep row_rep`
-against the where-bound evidence instead of selecting a concrete impl. The
-elaborator will later turn that evidence into a dictionary parameter.
+Inside `project`, calls can discharge `Selectable selection row` against the
+where-bound evidence instead of selecting a concrete impl. The elaborator will
+later turn that evidence into a dictionary parameter.
 
 #### Evidence and Runtime Shape
 
-Functional dependencies are a typechecker feature. They do not change runtime
-dictionary layout. Once a constraint is solved, `TraitEvidence` records:
+Multi-parameter traits do not change runtime dictionary layout. Once a
+constraint is solved, `TraitEvidence` records:
 
 - the trait name
 - the self type or polymorphic where-bound variable
@@ -485,10 +455,9 @@ dictionary layout. Once a constraint is solved, `TraitEvidence` records:
 - the source `NodeId` that needs the evidence
 
 Elaboration uses the extra arguments as part of the dictionary key. A concrete
-`Selectable (Column PostsScope 'title String) String` and a polymorphic
-`Selectable selection_rep row_rep` both lower through normal dictionary
-passing; the fundep only helped the typechecker determine which extra argument
-belongs to the constraint.
+`Selectable (Box Int) Int` and a polymorphic `Selectable selection row` both
+lower through normal dictionary passing; the extra argument only tells the
+typechecker which dictionary the constraint refers to.
 
 ### 9. Post-Body Validation Inside `check_program_inner`
 
