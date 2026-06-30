@@ -768,16 +768,44 @@ impl Checker {
                 self.env.insert(tm.name.clone(), tm.scheme.clone());
             }
 
-            // Bind params with expected types
+            // Bind every param. The first `expected_params.len()` line up with
+            // the trait method's declared parameters; any extras are only valid
+            // when the return type is itself a function, so peel an arrow off it
+            // per surplus param. Binding *all* params keeps them in scope — a
+            // surplus param on a non-function return otherwise leaks from the
+            // body as a bogus "undefined variable" instead of a clear arity
+            // error.
+            let mut remaining_return = expected_return.clone();
             for (i, pat) in params.iter().enumerate() {
-                if i < expected_params.len() {
-                    self.bind_pattern(pat, &expected_params[i])?;
-                }
+                let param_ty = if i < expected_params.len() {
+                    expected_params[i].clone()
+                } else {
+                    match self.sub.apply(&remaining_return) {
+                        Type::Fun(arg, ret, _) => {
+                            remaining_return = *ret;
+                            *arg
+                        }
+                        _ => {
+                            return Err(Diagnostic::error_at(
+                                span,
+                                format!(
+                                    "in impl {} for {}, method '{}' binds {} parameter(s) but the \
+                                     trait method's type does not accept that many",
+                                    trait_name,
+                                    target_type,
+                                    method_name,
+                                    params.len(),
+                                ),
+                            ));
+                        }
+                    }
+                };
+                self.bind_pattern(pat, &param_ty)?;
             }
 
-            // Infer body and check it matches the expected return type
+            // Infer body and check it matches the (possibly arrow-peeled) return.
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&body_ty, &expected_return, body.span)
+            self.unify_at(&body_ty, &remaining_return, body.span)
                 .map_err(|e| {
                     Diagnostic::error_at(
                         span,

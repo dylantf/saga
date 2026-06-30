@@ -952,6 +952,23 @@ fn impl_extra_method() {
 }
 
 #[test]
+fn impl_method_with_too_many_params_is_arity_error_not_undefined_var() {
+    // `greet : a -> String` declares one parameter; binding two must report a
+    // clear arity error. Regression: the surplus param `extra` used to be
+    // silently dropped, so its use in the body leaked as "undefined variable".
+    let result = check(
+        "record User { name: String }\ntrait Greet a {\n  fun greet : (x: a) -> String\n}\nimpl Greet for User {\n  greet u extra = extra\n}",
+    );
+    let err = result.err().expect("expected an error");
+    assert!(
+        err.message.contains("binds 2 parameter")
+            && !err.message.contains("undefined variable"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn impl_wrong_return_type() {
     let result = check(
         "record User { name: String }\ntrait Greet a {\n  fun greet : (x: a) -> String\n}\nimpl Greet for User {\n  greet u = 42\n}",
