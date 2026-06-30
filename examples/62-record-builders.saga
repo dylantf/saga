@@ -1,0 +1,83 @@
+module Main
+
+import Std.IO (console)
+
+record BuildState a {
+  fields: List String,
+  value: a,
+}
+
+opaque type Built a = Built (BuildState a)
+
+type RecordBuilder = RecordBuilder
+
+record builder RecordBuilder {
+  start: start,
+  field: field,
+}
+
+record BookCard {
+  title: String,
+  author: String,
+  pages: Int,
+}
+
+fun value : a -> Built a
+value inner = Built (BuildState {
+  fields: [],
+  value: inner,
+})
+
+fun start : (a -> b) -> Built (a -> b)
+start constructor = Built (BuildState {
+  fields: [],
+  value: constructor,
+})
+
+fun field : String -> Built a -> Built (a -> b) -> Built b
+field name arg partial = {
+  let Built arg_state = arg
+  let Built partial_state = partial
+  Built (BuildState {
+    fields: List.append partial_state.fields [name],
+    value: partial_state.value arg_state.value,
+  })
+}
+
+fun unwrap : Built a -> a
+unwrap built = case built {
+  Built state -> state.value
+}
+
+fun field_names : Built a -> List String
+field_names built = case built {
+  Built state -> state.fields
+}
+
+fun book_card : Built BookCard
+book_card =
+  build RecordBuilder BookCard {
+    title: value "Programming Saga",
+    author: value "Ada",
+    pages: value 128,
+  }
+
+fun anonymous_card : Built { title: String, available: Bool }
+anonymous_card =
+  build RecordBuilder {
+    available: value True,
+    title: value "Record Builders",
+  }
+
+main () = {
+  let card = unwrap book_card
+  let anon = unwrap anonymous_card
+
+  println "named record:"
+  println $"{card.title} by {card.author}, {show card.pages} pages"
+  println ("fields: " <> String.join ", " (field_names book_card))
+
+  println "anonymous record:"
+  println $"{anon.title}, available={show anon.available}"
+  println ("fields: " <> String.join ", " (field_names anonymous_card))
+} with {console}
