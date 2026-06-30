@@ -100,7 +100,6 @@ pub(crate) fn derive_record_stringify(
             }],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -175,7 +174,6 @@ pub(crate) fn derive_record_default(
             params: vec![],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -487,7 +485,6 @@ pub(crate) fn derive_stringify(
             }],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -699,7 +696,6 @@ pub(crate) fn derive_ord(
             ],
             body,
         })],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -821,7 +817,6 @@ pub(crate) fn derive_marker_trait(
         where_apps: vec![],
         needs: vec![],
         methods: vec![],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -982,7 +977,6 @@ pub(crate) fn derive_enum(
                 body: from_enum_body,
             }),
         ],
-        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }

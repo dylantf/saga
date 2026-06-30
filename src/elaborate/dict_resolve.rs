@@ -79,12 +79,7 @@ impl Elaborator {
                             // specific dict param name (handles multiple where-clause
                             // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
                             if let Some(ref var_name) = ev.type_var_name {
-                                self.dict_param_for_trait_var(
-                                    trait_name,
-                                    var_name,
-                                    &ev.trait_type_args,
-                                    span,
-                                )
+                                self.dict_param_for_trait_var(trait_name, var_name, span)
                             } else {
                                 self.current_dict_param_or_supertrait(trait_name, span)
                             }
@@ -142,19 +137,11 @@ impl Elaborator {
         &self,
         trait_name: &str,
         var_name: &str,
-        _trait_type_args: &[Type],
         span: Span,
     ) -> Option<Expr> {
-        // Dict-param var keys carry an optional suffix to disambiguate several
-        // constraints on the same self var. The suffix-producing machinery
-        // (functional dependencies) was removed, so the suffix is now always
-        // empty and this reduces to the base lookup; the qualified-key form is
-        // retained as the single resolution path.
-        let suffix = String::new();
-        let qualified_var = format!("{}{}", var_name, suffix);
         if let Some(param_name) = self
             .current_dict_params_by_var
-            .get(&(trait_name.to_string(), qualified_var.clone()))
+            .get(&(trait_name.to_string(), var_name.to_string()))
         {
             return Some(Expr::synth(
                 span,
@@ -165,7 +152,7 @@ impl Elaborator {
         }
 
         for ((bound_trait, bound_var), param_name) in &self.current_dict_params_by_var {
-            if bound_var == &qualified_var
+            if bound_var == var_name
                 && let Some(projected) = self.project_supertrait_dict(
                     bound_trait,
                     trait_name,
@@ -430,13 +417,13 @@ impl Elaborator {
                 // last-inserted dict.
                 let var_key = format!("v{}", id);
                 if let Some(expr) =
-                    self.dict_param_for_trait_var(trait_name, &var_key, trait_type_args, span)
+                    self.dict_param_for_trait_var(trait_name, &var_key, span)
                 {
                     return Some(expr);
                 }
                 if let Some(src_name) = self.where_bound_var_names.get(id)
                     && let Some(expr) =
-                        self.dict_param_for_trait_var(trait_name, src_name, trait_type_args, span)
+                        self.dict_param_for_trait_var(trait_name, src_name, span)
                 {
                     return Some(expr);
                 }

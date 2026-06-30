@@ -1826,7 +1826,6 @@ impl Checker {
                         resolved_record_type: None,
                         type_var_name: None,
                         trait_type_args: _trait_type_args.clone(),
-                        resolved_symbol: None,
                     });
                     return false;
                 }

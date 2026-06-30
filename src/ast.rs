@@ -141,20 +141,6 @@ pub struct ImplMethod {
 }
 
 /// Marker attached to `Decl::ImplDef` instances synthesized by `derive_routed`.
-/// Lets the typechecker rewrite constraint-failure diagnostics to point at the
-/// user's `deriving (...)` clause and name the user-facing trait + type, rather
-/// than mentioning building-block types from the synthesized impl's body.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RoutedDeriveInfo {
-    /// Trait the user requested (bare name).
-    pub trait_name: String,
-    /// User-facing target type the derive was attached to.
-    pub target_type: String,
-    /// Span of the original type/record declaration carrying the `deriving`
-    /// clause. Used as the diagnostic's anchor.
-    pub deriving_span: Span,
-}
-
 /// One entry in a `deriving (...)` clause.
 ///
 /// Plain derives are represented with an empty `type_args` list:
@@ -491,9 +477,6 @@ pub enum Decl {
         /// e.g. `trait ConvertTo a b` -> ["a", "b"]
         type_params: Vec<TypeParam>,
         supertraits: Vec<TraitRef>,
-        /// `synthesizes via <Trait> deriving (...)` clause, if present. Marks the
-        /// trait as a record-synthesizing link. See [SynthesisSpec].
-        synthesis: Option<SynthesisSpec>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
@@ -524,13 +507,6 @@ pub enum Decl {
         where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
-        /// `Some` when this impl was synthesized by `derive_routed` (either the
-        /// bridge or the delegating impl for a routed derive). Used by the
-        /// typechecker to rewrite constraint-failure diagnostics so they point
-        /// at the user's `deriving (...)` clause and name the user's type and
-        /// trait, instead of mentioning building-block types like `Labeled`
-        /// or `And` from the synthesized impl body.
-        routed_derive_info: Option<RoutedDeriveInfo>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
         span: Span,
@@ -1445,25 +1421,6 @@ pub fn op_dict_param_names(where_clause: &[TraitBound]) -> Vec<String> {
         }
     }
     names
-}
-
-/// A trait's `synthesizes via <Trait> deriving (...)` clause. Historically this
-/// marked a trait as a *record-synthesizing* link consumed by the routed-derive
-/// expansion (a `deriving (Trait NewName)` on a carrier record generated a new
-/// record `NewName` from the carrier's fields).
-///
-/// The routed-derive / `Generic` machinery that consumed this spec has been
-/// removed, so the clause is currently vestigial: it still parses and
-/// round-trips through the formatter, but nothing downstream reads it. Kept as
-/// data to avoid churn; remove if the surface syntax is also dropped.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SynthesisSpec {
-    /// The field-map trait whose impls declare the per-field-type rewrite.
-    pub via_trait: String,
-    pub via_trait_span: Span,
-    /// Derives to attach to the synthesized record (e.g. `InsertRow`).
-    pub attach_derives: Vec<DeriveSpec>,
-    pub span: Span,
 }
 
 /// Bare trait-application constraint: `ConvertTo a b` in a `where` clause.

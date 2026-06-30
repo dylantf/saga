@@ -67,33 +67,8 @@ impl Checker {
                 if matches!(resolved, Type::Error) {
                     continue;
                 }
-                // If this constraint originated inside a synthesized routed-
-                // derive impl, the eventual failure should be rewritten to
-                // point at the user's deriving clause and name the user-facing
-                // trait + target type instead of building-block types from the
-                // synthesized body.
-                let routed_origin = self
-                    .trait_state
-                    .routed_constraint_origins
-                    .get(&node_id)
-                    .cloned();
                 let rewrite_diag = |default_msg: String, default_span: Span| -> Diagnostic {
-                    match &routed_origin {
-                        Some(info) => Diagnostic::error_at(
-                            info.deriving_span,
-                            format!(
-                                "cannot derive `{}` for `{}`: missing required instance ({}). \
-                                 Make sure all field types implement `{}`, or also derive \
-                                 `{}` on them.",
-                                info.trait_name,
-                                info.target_type,
-                                default_msg,
-                                info.trait_name,
-                                info.trait_name,
-                            ),
-                        ),
-                        None => Diagnostic::error_at(default_span, default_msg),
-                    }
+                    Diagnostic::error_at(default_span, default_msg)
                 };
                 // Resolve trait type args to concrete type names for impl lookup
                 let resolved_trait_type_args: Vec<String> = trait_type_arg_types
@@ -310,7 +285,6 @@ impl Checker {
                                     resolved_record_type: None,
                                     type_var_name: None,
                                     trait_type_args: resolved_extra_types,
-                                    resolved_symbol: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == crate::typechecker::canonicalize_type_name("Tuple")
@@ -434,7 +408,6 @@ impl Checker {
                                 .iter()
                                 .map(|t| self.sub.apply(t))
                                 .collect(),
-                            resolved_symbol: None,
                         });
                     }
                     Type::Fun(_, _, _) => {

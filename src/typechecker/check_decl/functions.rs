@@ -683,7 +683,6 @@ impl Checker {
                                 .iter()
                                 .map(|t| self.sub.apply(t))
                                 .collect(),
-                            resolved_symbol: None,
                         });
                         continue;
                     }
@@ -723,7 +722,6 @@ impl Checker {
                                     .iter()
                                     .map(|t| self.sub.apply(t))
                                     .collect(),
-                                resolved_symbol: None,
                             });
                             continue;
                         }
@@ -771,7 +769,6 @@ impl Checker {
                             .iter()
                             .map(|t| self.sub.apply(t))
                             .collect(),
-                        resolved_symbol: None,
                     });
                     let resolved_extras = trait_type_arg_types
                         .iter()

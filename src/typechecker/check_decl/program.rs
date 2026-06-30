@@ -956,7 +956,6 @@ impl Checker {
                 where_apps,
                 needs,
                 methods,
-                routed_derive_info,
                 span,
                 ..
             } = decl
@@ -972,12 +971,6 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
-                // Snapshot pending-constraint length before this impl's body
-                // is checked. Anything added during the call belongs to this
-                // impl; if it's a synthesized routed-derive impl, tag those
-                // new constraints with the marker so failure diagnostics can
-                // point back at the user's deriving clause.
-                let before = self.trait_state.pending_constraints.len();
                 let result = self.register_impl(
                     *id,
                     trait_name,
@@ -989,23 +982,8 @@ impl Checker {
                     where_apps,
                     needs,
                     &plain_methods,
-                    routed_derive_info.is_some(),
                     *span,
                 );
-                if let Some(info) = routed_derive_info {
-                    let added: Vec<crate::ast::NodeId> = self
-                        .trait_state
-                        .pending_constraints
-                        .iter()
-                        .skip(before)
-                        .map(|(_, _, _, _, nid)| *nid)
-                        .collect();
-                    for nid in added {
-                        self.trait_state
-                            .routed_constraint_origins
-                            .insert(nid, info.clone());
-                    }
-                }
                 if let Err(e) = result {
                     errors.push(e);
                 }
