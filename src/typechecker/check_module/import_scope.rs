@@ -122,9 +122,9 @@ pub(super) fn resolve_import(
     }
 
     // Traits: canonical + aliased qualified forms always available.
-    // Bare entries (and bare trait method visibility) are only added when
-    // there is no exposing clause; an explicit exposing list adds bare
-    // entries for the named traits below.
+    // Bare entries (and bare trait method visibility) are added only by an
+    // explicit exposing list below — `import Foo` makes traits reachable only
+    // qualified/aliased, matching how types and values are handled.
     for (trait_name, info) in &exports.traits {
         let trait_canonical = trait_origin(trait_name);
         scope
@@ -160,16 +160,6 @@ pub(super) fn resolve_import(
                 let aliased = canonical_join(prefix_canonical, &method.name);
                 scope.values.entry(aliased).or_insert(method_canonical);
             }
-        }
-        if exposing.is_none() {
-            scope
-                .traits
-                .entry(trait_name.clone())
-                .or_insert_with(|| trait_canonical.clone());
-            scope.register_trait_methods(
-                &trait_canonical,
-                info.methods.iter().map(|m| m.name.as_str()),
-            );
         }
     }
 
