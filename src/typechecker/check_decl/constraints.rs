@@ -1,7 +1,6 @@
 use super::*;
 
 impl Checker {
-
     pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =

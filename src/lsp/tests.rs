@@ -719,9 +719,21 @@ go () = {
         let edited = format!("{lib_text}\n# edit {version}\n");
         apply(
             &shared,
-            analyze_document(&shared, Some(&lib_uri), version, &edited, Some(root.clone())),
+            analyze_document(
+                &shared,
+                Some(&lib_uri),
+                version,
+                &edited,
+                Some(root.clone()),
+            ),
         );
-        let res = analyze_document(&shared, Some(&main_uri), version, main_text, Some(root.clone()));
+        let res = analyze_document(
+            &shared,
+            Some(&main_uri),
+            version,
+            main_text,
+            Some(root.clone()),
+        );
         last = res.diagnostics.clone();
         apply(&shared, res);
     }

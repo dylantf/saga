@@ -171,6 +171,54 @@ main () = run_all [fun () -> reg! "a"] with noop
 }
 
 #[test]
+fn pattern_bound_handler_value_lowers_as_dynamic_handler() {
+    let src = r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+handler ignore_log for Log {
+  log _ = resume ()
+}
+
+opaque type StoredLogHandler = StoredLogHandler (Handler Log)
+opaque type App = App (Maybe StoredLogHandler)
+
+fun create_app : App
+create_app = App Nothing
+
+fun use_log : Handler Log -> App -> App
+use_log log_handler _ = App (Just (StoredLogHandler log_handler))
+
+fun program : Unit -> Unit needs {Log}
+program () = log! "hello"
+
+fun run : App -> Unit
+run (App maybe_log_handler) = {
+  let go = fun () -> program ()
+  case maybe_log_handler {
+    Just (StoredLogHandler log_handler) -> go () with {
+      log_handler,
+    }
+    Nothing -> go () with {
+      ignore_log,
+    }
+  }
+}
+
+main () =
+  create_app
+  |> use_log ignore_log
+  |> run
+"#;
+    let out = emit_full(src);
+    assert!(
+        out.contains("Log_handler"),
+        "expected pattern-bound handler variable to appear in emitted Core\n{out}"
+    );
+}
+
+#[test]
 fn handler_returned_lambdas_capture_outer_effect_handlers() {
     let src = r#"
 effect Log {

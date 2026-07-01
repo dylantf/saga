@@ -120,8 +120,7 @@ impl Elaborator {
             for tr in &bound.traits {
                 if tr.name != "Num" && tr.name != "Eq" {
                     let resolved = self.resolved_trait_name(tr.id, &tr.name);
-                    let suffix =
-                        String::new();
+                    let suffix = String::new();
                     dict_params.push((resolved, format!("{}{}", bound.type_var, suffix)));
                 }
             }
@@ -156,8 +155,7 @@ impl Elaborator {
                     continue;
                 }
                 let resolved = self.resolved_trait_name(tr.id, &tr.name);
-                let suffix =
-                    String::new();
+                let suffix = String::new();
                 let pair = (resolved, format!("{}{}", bound.type_var, suffix));
                 if tr.type_args.is_empty() {
                     without_args.push(pair);
@@ -184,8 +182,7 @@ impl Elaborator {
             };
             let resolved = self.resolved_trait_name(app.id, &app.trait_name);
             // `type_args[0]` is the self var; the determinant extras are the rest.
-            let suffix =
-                String::new();
+            let suffix = String::new();
             dict_params.push((resolved, format!("{}{}", name, suffix)));
         }
         dict_params

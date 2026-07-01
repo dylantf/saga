@@ -378,9 +378,7 @@ fn normalize_expr(e: &mut Expr) {
 
 fn normalize_expr_kind(ek: &mut ExprKind) {
     match ek {
-        ExprKind::Lit { .. }
-        | ExprKind::Var { .. }
-        | ExprKind::Constructor { .. } => {}
+        ExprKind::Lit { .. } | ExprKind::Var { .. } | ExprKind::Constructor { .. } => {}
         ExprKind::App { func, arg } => {
             normalize_expr(func);
             normalize_expr(arg);
@@ -723,8 +721,7 @@ fn normalize_stmt(s: &mut Stmt) {
 
 fn normalize_type_expr(te: &mut TypeExpr) {
     match te {
-        TypeExpr::Named { span, .. }
-        | TypeExpr::Var { span, .. } => *span = S,
+        TypeExpr::Named { span, .. } | TypeExpr::Var { span, .. } => *span = S,
         TypeExpr::App {
             func, arg, span, ..
         } => {

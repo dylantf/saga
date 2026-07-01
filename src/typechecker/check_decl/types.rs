@@ -380,8 +380,7 @@ impl Checker {
             canonical_name.clone(),
             vec![(canonical_name.clone(), num_fields)],
         );
-        self.type_arity
-            .insert(canonical_name, type_params.len());
+        self.type_arity.insert(canonical_name, type_params.len());
         Ok(())
     }
 }

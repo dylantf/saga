@@ -190,10 +190,7 @@ impl Parser {
     pub(super) fn can_start_type_atom(&self) -> bool {
         matches!(
             self.peek(),
-            Token::UpperIdent(_)
-                | Token::Ident(_)
-                | Token::LParen
-                | Token::LBrace
+            Token::UpperIdent(_) | Token::Ident(_) | Token::LParen | Token::LBrace
         )
     }
 

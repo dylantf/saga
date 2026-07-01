@@ -653,6 +653,10 @@ impl<'a> Lowerer<'a> {
                 // Single clause, no guard: emit directly without a case wrapper.
                 let (params, _, body) = clauses[0];
                 let mut params_ce = lower_params(params);
+                let mut saved_handler_vars = Vec::new();
+                for param in params {
+                    saved_handler_vars.extend(self.register_dynamic_handler_pattern_vars(param));
+                }
                 // Absorb nested lambda params into the function's param list.
                 // e.g. `f dict = fun x -> body` becomes `f(dict, x) = body`
                 let mut body = body;
@@ -663,6 +667,10 @@ impl<'a> Lowerer<'a> {
                 } = &body.kind
                 {
                     params_ce.extend(lower_params(lam_params));
+                    for param in lam_params {
+                        saved_handler_vars
+                            .extend(self.register_dynamic_handler_pattern_vars(param));
+                    }
                     body = lam_body;
                 }
                 // Eta-expand if the binding has fewer params than the type
@@ -721,6 +729,7 @@ impl<'a> Lowerer<'a> {
                 } else {
                     self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                 };
+                self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
                 // Multi-clause or single clause with a guard: generate fresh arg vars
@@ -735,6 +744,11 @@ impl<'a> Lowerer<'a> {
                 let arms: Vec<CArm> = clauses
                     .iter()
                     .map(|(params, guard, body)| {
+                        let mut saved_handler_vars = Vec::new();
+                        for param in *params {
+                            saved_handler_vars
+                                .extend(self.register_dynamic_handler_pattern_vars(param));
+                        }
                         // Pattern only matches user params, not handler params
                         let pat = if base_arity == 1 {
                             self.lower_pat(
@@ -769,6 +783,7 @@ impl<'a> Lowerer<'a> {
                         } else {
                             self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                         };
+                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         CArm {
                             pat,
                             guard: guard_ce,

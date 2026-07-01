@@ -246,7 +246,11 @@ impl<'a> Lowerer<'a> {
         rest: &[Stmt],
         return_k: Option<CExpr>,
     ) -> CExpr {
+        let saved_handler_vars = pat
+            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
+            .unwrap_or_default();
         let rest_ce = self.lower_block_with_return_k(rest, return_k);
+        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
         let (k_param, rest_ce) = match pat {
             Some(p) => self.destructure_pat(p, rest_ce),
             None => (self.fresh(), rest_ce),
@@ -262,7 +266,11 @@ impl<'a> Lowerer<'a> {
         rest: &[Stmt],
         k_var: &str,
     ) -> CExpr {
+        let saved_handler_vars = pat
+            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
+            .unwrap_or_default();
         let rest_ce = self.lower_block_with_k(rest, k_var);
+        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
         let (k_param, rest_ce) = match pat {
             Some(p) => self.destructure_pat(p, rest_ce),
             None => (self.fresh(), rest_ce),

@@ -1,0 +1,5 @@
+[project]
+name = "handler_repro"
+
+[bin]
+main = "Main.saga"

@@ -416,14 +416,11 @@ impl Elaborator {
                 // through to the single-trait fallback and resolve to the
                 // last-inserted dict.
                 let var_key = format!("v{}", id);
-                if let Some(expr) =
-                    self.dict_param_for_trait_var(trait_name, &var_key, span)
-                {
+                if let Some(expr) = self.dict_param_for_trait_var(trait_name, &var_key, span) {
                     return Some(expr);
                 }
                 if let Some(src_name) = self.where_bound_var_names.get(id)
-                    && let Some(expr) =
-                        self.dict_param_for_trait_var(trait_name, src_name, span)
+                    && let Some(expr) = self.dict_param_for_trait_var(trait_name, src_name, span)
                 {
                     return Some(expr);
                 }

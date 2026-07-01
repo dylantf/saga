@@ -66,7 +66,6 @@ fn ambiguous_row_error(extras: &[super::EffectEntry]) -> Diagnostic {
     ))
 }
 
-
 /// Replace type variable IDs with readable names for display.
 pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
     match ty {

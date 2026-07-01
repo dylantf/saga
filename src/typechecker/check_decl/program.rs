@@ -559,8 +559,7 @@ impl Checker {
                         Some(module) => format!("{}.{}", module, name),
                         None => name.to_string(),
                     };
-                    self.type_arity
-                        .insert(canonical_name, type_params.len());
+                    self.type_arity.insert(canonical_name, type_params.len());
                 }
             }
             // Cycle check across the set of aliases in this module.

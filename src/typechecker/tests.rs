@@ -961,8 +961,7 @@ fn impl_method_with_too_many_params_is_arity_error_not_undefined_var() {
     );
     let err = result.err().expect("expected an error");
     assert!(
-        err.message.contains("binds 2 parameter")
-            && !err.message.contains("undefined variable"),
+        err.message.contains("binds 2 parameter") && !err.message.contains("undefined variable"),
         "got: {}",
         err.message
     );

@@ -41,31 +41,30 @@ impl<'a> Lowerer<'a> {
         let mut result = Vec::new();
 
         for arm in arms {
+            let saved_handler_vars = self.register_dynamic_handler_pattern_vars(&arm.pattern);
             let pat = self.lower_pat(
                 &arm.pattern,
                 &self.constructor_atoms,
                 self.handler_origin_module(),
             );
 
-            match &arm.guard {
-                None => {
-                    result.push(CArm {
-                        pat,
-                        guard: None,
-                        body: self.lower_expr(&arm.body),
-                    });
-                }
-                Some(guard) if is_guard_safe(guard) => {
-                    result.push(CArm {
-                        pat,
-                        guard: Some(self.lower_expr(guard)),
-                        body: self.lower_expr(&arm.body),
-                    });
-                }
+            let lowered_arm = match &arm.guard {
+                None => CArm {
+                    pat,
+                    guard: None,
+                    body: self.lower_expr(&arm.body),
+                },
+                Some(guard) if is_guard_safe(guard) => CArm {
+                    pat,
+                    guard: Some(self.lower_expr(guard)),
+                    body: self.lower_expr(&arm.body),
+                },
                 Some(_guard) => {
                     unreachable!("complex guards should be handled by lower_case_expr_chain");
                 }
-            }
+            };
+            self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
+            result.push(lowered_arm);
         }
 
         result
@@ -77,6 +76,7 @@ impl<'a> Lowerer<'a> {
         for arm in arms.iter().rev() {
             let rest_var = self.fresh();
             let rest_ref = CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            let saved_handler_vars = self.register_dynamic_handler_pattern_vars(&arm.pattern);
             let pat = self.lower_pat(
                 &arm.pattern,
                 &self.constructor_atoms,
@@ -159,6 +159,7 @@ impl<'a> Lowerer<'a> {
                     }
                 }
             };
+            self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
 
             rest = CExpr::Let(
                 rest_var,

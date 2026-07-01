@@ -1034,8 +1034,7 @@ impl<'a> Resolver<'a> {
             ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
                 self.resolve_expr(dict)
             }
-            ExprKind::DictRef { .. }
-            | ExprKind::ForeignCall { .. } => {}
+            ExprKind::DictRef { .. } | ExprKind::ForeignCall { .. } => {}
         }
     }
 

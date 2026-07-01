@@ -1078,9 +1078,9 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         match &expr.kind {
-            ExprKind::Lit { .. }
-            | ExprKind::Constructor { .. }
-            | ExprKind::DictRef { .. } => Some(()),
+            ExprKind::Lit { .. } | ExprKind::Constructor { .. } | ExprKind::DictRef { .. } => {
+                Some(())
+            }
             ExprKind::Var { name } => {
                 if !bound.contains(name) {
                     captures.entry(name.clone()).or_insert_with(|| expr.clone());

@@ -5,7 +5,82 @@ use crate::codegen::lower::*;
 use crate::typechecker::Type;
 use std::collections::HashSet;
 
+type DynamicHandlerVarInfo = (String, Vec<String>, bool);
+type SavedDynamicHandlerPatternVars = Vec<(String, Option<DynamicHandlerVarInfo>)>;
+
 impl<'a> Lowerer<'a> {
+    pub(crate) fn register_dynamic_handler_pattern_vars(
+        &mut self,
+        pat: &Pat,
+    ) -> SavedDynamicHandlerPatternVars {
+        let mut saved = Vec::new();
+        self.register_dynamic_handler_pattern_vars_inner(pat, &mut saved);
+        saved
+    }
+
+    fn register_dynamic_handler_pattern_vars_inner(
+        &mut self,
+        pat: &Pat,
+        saved: &mut SavedDynamicHandlerPatternVars,
+    ) {
+        match pat {
+            Pat::Var { id, name, .. } => {
+                if let Some(ty) = self.check_result.type_at_node.get(id)
+                    && let Some(effects) = self.dynamic_handler_info_from_type(ty)
+                {
+                    let previous = self
+                        .handle_dynamic_vars
+                        .insert(name.clone(), (core_var(name), effects, false));
+                    saved.push((name.clone(), previous));
+                }
+            }
+            Pat::Tuple { elements, .. } => {
+                for element in elements {
+                    self.register_dynamic_handler_pattern_vars_inner(element, saved);
+                }
+            }
+            Pat::Constructor { args, .. } => {
+                for arg in args {
+                    self.register_dynamic_handler_pattern_vars_inner(arg, saved);
+                }
+            }
+            Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+                for (_, field_pat) in fields {
+                    if let Some(field_pat) = field_pat {
+                        self.register_dynamic_handler_pattern_vars_inner(field_pat, saved);
+                    }
+                }
+            }
+            Pat::StringPrefix { rest, .. } => {
+                self.register_dynamic_handler_pattern_vars_inner(rest, saved);
+            }
+            Pat::BitStringPat { segments, .. } => {
+                for segment in segments {
+                    self.register_dynamic_handler_pattern_vars_inner(&segment.value, saved);
+                }
+            }
+            Pat::Or { patterns, .. } => {
+                for pattern in patterns {
+                    self.register_dynamic_handler_pattern_vars_inner(pattern, saved);
+                }
+            }
+            Pat::Wildcard { .. } | Pat::Lit { .. } | Pat::ListPat { .. } | Pat::ConsPat { .. } => {}
+        }
+    }
+
+    pub(crate) fn restore_dynamic_handler_pattern_vars(
+        &mut self,
+        saved: SavedDynamicHandlerPatternVars,
+    ) {
+        for (name, previous) in saved.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.handle_dynamic_vars.insert(name, previous);
+            } else {
+                self.handle_dynamic_vars.remove(&name);
+            }
+        }
+    }
+
     /// Bind each element to a fresh variable, then build a tuple.
     /// Used for both tuple literals and record/constructor field lists.
     /// Lower a `do { Pat <- expr ... success } else { arms }` expression.

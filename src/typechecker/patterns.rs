@@ -22,6 +22,7 @@ impl Checker {
                     },
                     *id,
                 );
+                self.record_type(*id, ty);
                 self.record_type_at_span(*span, ty);
                 self.lsp.node_spans.insert(*id, *span);
                 self.lsp.definitions.push((*id, name.clone(), *span));

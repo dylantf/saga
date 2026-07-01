@@ -318,7 +318,11 @@ impl<'a> Lowerer<'a> {
                                 self.direct_hof_value_bindings
                                     .insert(name.clone(), specialization.clone())
                             });
+                        let saved_handler_vars = pat_opt
+                            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
+                            .unwrap_or_default();
                         let rest_ce = self.lower_block_with_return_k(rest, return_k);
+                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         if let Some((name, _)) = hof_binding {
                             if let Some(saved) = saved_hof_binding {
                                 self.direct_hof_value_bindings.insert(name, saved);
@@ -389,6 +393,8 @@ impl<'a> Lowerer<'a> {
                 let arms_ce: Vec<CArm> = arms
                     .iter()
                     .map(|arm| {
+                        let saved_handler_vars =
+                            self.register_dynamic_handler_pattern_vars(&arm.pattern);
                         let pat = self.lower_pat(
                             &arm.pattern,
                             &self.constructor_atoms,
@@ -396,6 +402,7 @@ impl<'a> Lowerer<'a> {
                         );
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr_value(g));
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
+                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         CArm {
                             pat,
                             guard: guard_ce,
@@ -709,7 +716,11 @@ impl<'a> Lowerer<'a> {
                     } else {
                         // Normal statement: evaluate, bind, then rest with K
                         let val_ce = self.lower_expr(value_expr);
+                        let saved_handler_vars = pat_opt
+                            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
+                            .unwrap_or_default();
                         let rest_ce = self.lower_block_with_k(rest, k_var);
+                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         let (var, rest_ce) = match pat_opt {
                             Some(p) => self.destructure_pat(p, rest_ce),
                             None => (self.fresh(), rest_ce),

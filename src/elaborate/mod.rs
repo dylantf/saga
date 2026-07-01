@@ -22,8 +22,7 @@ pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use crate::ast::*;
 pub(crate) use crate::token::{Span, StringKind};
 pub(crate) use crate::typechecker::{
-    CheckResult, ImplInfo, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo,
-    Type,
+    CheckResult, ImplInfo, RecordInfo, ResolvedValue, TraitEvidence, TraitInfo, Type,
 };
 
 mod dict_params;

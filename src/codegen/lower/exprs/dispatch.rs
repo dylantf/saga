@@ -181,12 +181,17 @@ impl<'a> Lowerer<'a> {
                 }
                 let effect_return_k =
                     is_effectful_lambda.then(|| CExpr::Var("_ReturnK".to_string()));
+                let mut saved_handler_vars = Vec::new();
+                for param in params {
+                    saved_handler_vars.extend(self.register_dynamic_handler_pattern_vars(param));
+                }
                 let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
                 {
                     self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
                     self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                 };
+                self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 self.current_evidence = saved_evidence;
                 // If lambda has complex params (tuples, constructors), wrap
                 // the body in a case expression for destructuring. The
@@ -750,7 +755,6 @@ impl<'a> Lowerer<'a> {
             ExprKind::HandlerExpr { body } => self.lower_handler_expr_to_tuple(body),
 
             ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),
-
 
             // StringInterpolation should be desugared before reaching the lowerer,
             // but keep a fallback just in case.
