@@ -1,0 +1,41 @@
+module FileTest
+
+import Std.BitString as BitString
+import Std.DateTime (NaiveDateTime)
+import Std.File (File, RegularFile, fs)
+import Std.Test (Testing, describe, test, assert_eq, assert_true)
+
+fun run_file : (Unit -> a needs {File}) -> a
+run_file f = f () with fs
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Std.File" (fun () -> {
+    test "read_bytes and info use the real filesystem handler" (fun () -> {
+      let path = "/tmp/saga-stdlib-file-info-test.txt"
+      let _ = run_file (fun () -> File.write! path "hello")
+
+      let bytes = run_file (fun () -> File.read_bytes! path)
+      case bytes {
+        Ok body -> assert_eq (BitString.to_string body) (Ok "hello")
+        Err _ -> assert_true False
+      }
+
+      let info = run_file (fun () -> File.info! path)
+      case info {
+        Ok value -> {
+          case value.kind {
+            RegularFile -> assert_true True
+            _ -> assert_true False
+          }
+          assert_eq value.size 5
+          assert_true (value.modified.year >= 2020)
+        }
+        Err _ -> assert_true False
+      }
+
+      let _ = run_file (fun () -> File.delete! path)
+      assert_true True
+    })
+  })
+}

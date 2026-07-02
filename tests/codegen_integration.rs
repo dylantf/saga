@@ -3743,6 +3743,8 @@ import Std.File (File, fs)
 
 main () = {
   let _ = File.write! "/tmp/saga-file-io-test.txt" "hello"
+  let _ = File.read_bytes! "/tmp/saga-file-io-test.txt"
+  let _ = File.info! "/tmp/saga-file-io-test.txt"
   File.exists! "/tmp/saga-file-io-test.txt"
 } with fs
 "#;
@@ -3750,6 +3752,14 @@ main () = {
     assert!(
         out.contains("call 'std_file_bridge':'write_file'"),
         "Std.File.fs should lower write through std_file_bridge\n{out}"
+    );
+    assert!(
+        out.contains("call 'std_file_bridge':'read_file'"),
+        "Std.File.fs should lower read_bytes through std_file_bridge\n{out}"
+    );
+    assert!(
+        out.contains("call 'std_file_bridge':'file_info'"),
+        "Std.File.fs should lower info through std_file_bridge\n{out}"
     );
     assert!(
         out.contains("call 'std_file_bridge':'file_exists'"),
@@ -3762,6 +3772,10 @@ main () = {
     assert!(
         !out.contains("apply 'file_exists'/1"),
         "Std.File.fs should not lower exists as a local _script function\n{out}"
+    );
+    assert!(
+        !out.contains("apply 'file_info'/1"),
+        "Std.File.fs should not lower info as a local _script function\n{out}"
     );
     assert_core_compiles(&out);
 }

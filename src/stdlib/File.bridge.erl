@@ -1,5 +1,7 @@
 -module(std_file_bridge).
--export([read_file/1, write_file/2, append_file/2, delete_file/1, file_exists/1]).
+-export([read_file/1, write_file/2, append_file/2, delete_file/1, file_exists/1, file_info/1]).
+
+-include_lib("kernel/include/file.hrl").
 
 read_file(Path) ->
     case file:read_file(Path) of
@@ -27,6 +29,28 @@ delete_file(Path) ->
 
 file_exists(Path) ->
     filelib:is_file(Path).
+
+file_info(Path) ->
+    case file:read_file_info(Path, [{time, universal}]) of
+        {ok, Info} -> {ok, map_file_info(Info)};
+        {error, Reason} -> {error, map_error(Reason)}
+    end.
+
+map_file_info(Info) ->
+    #file_info{
+        type = Type,
+        size = Size,
+        mtime = {{Y, Mo, D}, {H, Mi, S}}
+    } = Info,
+    {std_file_FileInfo,
+        map_file_kind(Type),
+        Size,
+        {std_datetime_NaiveDateTime, Y, Mo, D, H, Mi, S, 0}}.
+
+map_file_kind(regular) -> {std_file_RegularFile};
+map_file_kind(directory) -> {std_file_Directory};
+map_file_kind(symlink) -> {std_file_Symlink};
+map_file_kind(Other) -> {std_file_OtherFileKind, atom_to_binary(Other)}.
 
 map_error(enoent) -> {'std_file_NotFound'};
 map_error(eacces) -> {'std_file_PermissionDenied'};
