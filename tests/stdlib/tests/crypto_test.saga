@@ -1,0 +1,38 @@
+module CryptoTest
+
+import Std.BitString as BitString
+import Std.Crypto as Crypto
+import Std.Test (Testing, describe, test, assert_eq, assert_true)
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Std.Crypto" (fun () -> {
+    test "base64url encodes without padding and decodes" (fun () -> {
+      let encoded = Crypto.base64url_encode (BitString.from_string "hello?")
+      assert_eq encoded "aGVsbG8_"
+      case Crypto.base64url_decode encoded {
+        Ok bytes -> assert_eq (BitString.to_string bytes) (Ok "hello?")
+        Err _ -> assert_true False
+      }
+      assert_eq (Crypto.base64url_decode "a") (Err "invalid_base64url")
+    })
+
+    test "hmac_sha256 matches a known vector" (fun () -> {
+      let key = BitString.from_string "key"
+      let data = BitString.from_string "The quick brown fox jumps over the lazy dog"
+      let digest = Crypto.hmac_sha256 key data
+      let encoded = Crypto.base64url_encode digest
+      assert_eq encoded "97yD9DBThCSxMpjmqm-xQ-9NWaFJRhdZl0edvC0aPNg"
+    })
+
+    test "secure_equal compares bytes" (fun () -> {
+      let key = BitString.from_string "secret"
+      let a = Crypto.hmac_sha256 key (BitString.from_string "one")
+      let b = Crypto.hmac_sha256 key (BitString.from_string "one")
+      let c = Crypto.hmac_sha256 key (BitString.from_string "two")
+      assert_true (Crypto.secure_equal a b)
+      assert_eq (Crypto.secure_equal a c) False
+      assert_eq (Crypto.secure_equal a (BitString.from_string "short")) False
+    })
+  })
+}

@@ -152,6 +152,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Int", include_str!("../../stdlib/Int.saga")),
     ("Std.Float", include_str!("../../stdlib/Float.saga")),
     ("Std.String", include_str!("../../stdlib/String.saga")),
+    ("Std.Crypto", include_str!("../../stdlib/Crypto.saga")),
     ("Std.Regex", include_str!("../../stdlib/Regex.saga")),
     ("Std.Tuple", include_str!("../../stdlib/Tuple.saga")),
     ("Std.Actor", include_str!("../../stdlib/Actor.saga")),

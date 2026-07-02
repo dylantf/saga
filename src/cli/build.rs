@@ -385,6 +385,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../stdlib/String.bridge.erl"),
         ),
         (
+            "std_crypto_bridge.erl",
+            include_str!("../stdlib/Crypto.bridge.erl"),
+        ),
+        (
             "std_int_bridge.erl",
             include_str!("../stdlib/Int.bridge.erl"),
         ),

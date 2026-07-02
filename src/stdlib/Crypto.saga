@@ -1,0 +1,18 @@
+#@ Cryptographic byte helpers.
+module Std.Crypto
+
+#@ Compute HMAC-SHA256 for `data` using `key`.
+@external("erlang", "std_crypto_bridge", "hmac_sha256")
+pub fun hmac_sha256 : (key: BitString) -> (data: BitString) -> BitString
+
+#@ Encode bytes as unpadded base64url.
+@external("erlang", "std_crypto_bridge", "base64url_encode")
+pub fun base64url_encode : BitString -> String
+
+#@ Decode unpadded or padded base64url.
+@external("erlang", "std_crypto_bridge", "base64url_decode")
+pub fun base64url_decode : String -> Result BitString String
+
+#@ Compare byte strings without early exit.
+@external("erlang", "std_crypto_bridge", "secure_equal")
+pub fun secure_equal : BitString -> BitString -> Bool
