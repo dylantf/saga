@@ -794,6 +794,19 @@ impl<'a> Lowerer<'a> {
     fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
         let (_, source_module_name) = Self::source_module_info(program, module_name);
 
+        // Public schemes for `source_module_name`'s own functions. Used to shape
+        // these imported/foreign funs from their *origin* module's type, not from
+        // `self.check_result.env` (the module currently being lowered). Looking up
+        // the bare `name` in the current env is wrong: if the importing module
+        // defines a function that shares this name, we'd pick up the wrong scheme
+        // and, e.g., miss the CPS arity expansion for an effectful callee — see
+        // the aliased effect re-export bug.
+        let origin_schemes: HashMap<String, crate::typechecker::Scheme> = self
+            .ctx
+            .module_semantics(&source_module_name)
+            .map(|semantics| semantics.codegen_info.exports.iter().cloned().collect())
+            .unwrap_or_default();
+
         let mut pending_annotations: HashMap<String, PendingAnnotation> = HashMap::new();
         for decl in program {
             if let Decl::FunSignature {
@@ -844,24 +857,18 @@ impl<'a> Lowerer<'a> {
                         effects: Vec::new(),
                         param_absorbed_effects: HashMap::new(),
                     });
+                let origin_scheme = origin_schemes.get(name);
                 let mut base_arity = params.len() + count_lambda_params(body);
                 // Use annotation arity for eta-reduced functions (same fix as mod.rs)
-                if let Some(scheme) = self.check_result.env.get(name) {
-                    let declared = super::util::arity_and_effects_from_type(
-                        &self.check_result.sub.apply(&scheme.ty),
-                    )
-                    .0;
+                if let Some(scheme) = origin_scheme {
+                    let declared = super::util::arity_and_effects_from_type(&scheme.ty).0;
                     if declared > base_arity {
                         base_arity = declared;
                     }
                 }
-                let shape = self
-                    .check_result
-                    .env
-                    .get(name)
+                let shape = origin_scheme
                     .map(|scheme| {
-                        let ty = self.check_result.sub.apply(&scheme.ty);
-                        RuntimeFunctionShape::from_type(&ty, |effects| {
+                        RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
                             self.canonicalize_effects(effects)
                         })
                     })
@@ -877,13 +884,8 @@ impl<'a> Lowerer<'a> {
                     });
                 let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
                 let arity = shape.expanded_arity(base_arity);
-                let param_types = self
-                    .check_result
-                    .env
-                    .get(name)
-                    .map(|scheme| {
-                        util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty))
-                    })
+                let param_types = origin_scheme
+                    .map(|scheme| util::param_types_from_type(&scheme.ty))
                     .unwrap_or_default();
                 let canonical = format!("{}.{}", source_module_name, name);
                 self.fun_info.entry(canonical).or_insert(FunInfo {
@@ -892,10 +894,7 @@ impl<'a> Lowerer<'a> {
                     is_open_row,
                     param_absorbed_effects,
                     param_types,
-                    dict_param_count: self
-                        .check_result
-                        .env
-                        .get(name)
+                    dict_param_count: origin_scheme
                         .map(|scheme| util::dict_param_count(&scheme.constraints))
                         .unwrap_or(0),
                 });
