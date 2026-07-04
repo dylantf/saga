@@ -152,7 +152,18 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::Lambda { params, body, .. } => {
-                let all_simple = params.iter().all(|p| {
+                let mut flattened_params: Vec<Pat> = params.clone();
+                let mut flattened_body = body.as_ref();
+                while let ExprKind::Lambda {
+                    params,
+                    body: nested_body,
+                } = &flattened_body.kind
+                {
+                    flattened_params.extend(params.iter().cloned());
+                    flattened_body = nested_body.as_ref();
+                }
+
+                let all_simple = flattened_params.iter().all(|p| {
                     matches!(
                         p,
                         Pat::Var { .. }
@@ -163,7 +174,7 @@ impl<'a> Lowerer<'a> {
                             }
                     )
                 });
-                let mut param_vars = lower_params(params);
+                let mut param_vars = lower_params(&flattened_params);
                 let mut is_effectful_lambda = false;
                 let shape = self.lambda_effect_context.take();
                 let saved_evidence = self.current_evidence.clone();
@@ -182,14 +193,18 @@ impl<'a> Lowerer<'a> {
                 let effect_return_k =
                     is_effectful_lambda.then(|| CExpr::Var("_ReturnK".to_string()));
                 let mut saved_handler_vars = Vec::new();
-                for param in params {
+                for param in &flattened_params {
                     saved_handler_vars.extend(self.register_dynamic_handler_pattern_vars(param));
                 }
-                let body_ce = if is_effectful_lambda && !matches!(body.kind, ExprKind::Block { .. })
+                let body_ce = if is_effectful_lambda
+                    && !matches!(flattened_body.kind, ExprKind::Block { .. })
                 {
-                    self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
+                    self.lower_terminal_effectful_expr_with_return_k(
+                        flattened_body,
+                        effect_return_k.clone(),
+                    )
                 } else {
-                    self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
+                    self.lower_expr_with_installed_return_k(flattened_body, effect_return_k.clone())
                 };
                 self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 self.current_evidence = saved_evidence;
@@ -199,7 +214,7 @@ impl<'a> Lowerer<'a> {
                 // (when present for effectful lambdas) stay outside the
                 // destructure pattern.
                 let body_ce = if !all_simple {
-                    let user_param_vars: &[String] = &param_vars[..params.len()];
+                    let user_param_vars: &[String] = &param_vars[..flattened_params.len()];
                     let scrutinee = if user_param_vars.len() == 1 {
                         CExpr::Var(user_param_vars[0].clone())
                     } else {
@@ -210,15 +225,15 @@ impl<'a> Lowerer<'a> {
                                 .collect(),
                         )
                     };
-                    let pat = if params.len() == 1 {
+                    let pat = if flattened_params.len() == 1 {
                         self.lower_pat(
-                            &params[0],
+                            &flattened_params[0],
                             &self.constructor_atoms,
                             self.handler_origin_module(),
                         )
                     } else {
                         CPat::Tuple(
-                            params
+                            flattened_params
                                 .iter()
                                 .map(|p| {
                                     self.lower_pat(

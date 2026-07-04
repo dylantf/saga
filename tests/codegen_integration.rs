@@ -3339,6 +3339,36 @@ main () = dbg (show (increment 6))
 }
 
 #[test]
+fn curried_lambda_let_application_runs() {
+    let src = r#"
+main () = {
+  let add = fun x -> fun y -> x + y
+  add 1 2
+}
+"#;
+    assert_runs_and_stdout_contains(src, &["3"]);
+}
+
+#[test]
+fn curried_lambda_record_field_application_runs() {
+    let src = r#"
+record Box {
+  f: Int -> Int -> Int,
+}
+
+make_box = Box {
+  f: fun x -> fun y -> x + y,
+}
+
+main () = {
+  let box = make_box
+  box.f 1 2
+}
+"#;
+    assert_runs_and_stdout_contains(src, &["3"]);
+}
+
+#[test]
 fn pure_partial_application_emits_lambda() {
     let src = r#"
 fun add : Int -> Int -> Int
