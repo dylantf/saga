@@ -813,11 +813,17 @@ impl<'a> Lowerer<'a> {
         let qualified_call = collect_qualified_call(expr);
         if let Some((module, func_name, head, args)) = qualified_call {
             let qualified = format!("{}.{}", module, func_name);
-            if self.is_known_constructor(&qualified) || self.is_known_constructor(func_name) {
+            let resolved_ctor = self.resolved_constructor_name_for(head.id, &qualified);
+            let ctor_name = if self.is_known_constructor(&qualified) {
+                qualified.as_str()
+            } else {
+                resolved_ctor.as_str()
+            };
+            if self.is_known_constructor(ctor_name) || self.is_known_constructor(func_name) {
                 let origin = self
-                    .constructor_origin_module_for(head.id, func_name)
+                    .constructor_origin_module_for(head.id, ctor_name)
                     .map(str::to_string);
-                return self.lower_ctor_with_origin(func_name, args, origin.as_deref());
+                return self.lower_ctor_with_origin(ctor_name, args, origin.as_deref());
             }
             if let Some(resolved) = self.resolved.get(&head.id)
                 && let super::super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } =

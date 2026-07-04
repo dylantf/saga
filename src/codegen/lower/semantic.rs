@@ -288,6 +288,23 @@ impl<'a> Lowerer<'a> {
             .or_else(|| self.handler_origin_module())
     }
 
+    pub(super) fn resolved_constructor_name_for(
+        &self,
+        node_id: crate::ast::NodeId,
+        fallback: &str,
+    ) -> String {
+        self.carried_constructors
+            .get(&node_id)
+            .cloned()
+            .or_else(|| {
+                self.check_result
+                    .resolution
+                    .constructor(node_id)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
     /// Check whether a name refers to a known constructor, accounting for
     /// the current handler origin module if lowering imported handler code.
     pub(super) fn is_known_constructor(&self, name: &str) -> bool {

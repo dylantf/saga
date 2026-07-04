@@ -897,6 +897,11 @@ impl<'a> Resolver<'a> {
                         },
                     );
                 }
+                if let Some(resolved) = self.scope.resolve_constructor(&qualified) {
+                    self.result
+                        .constructors
+                        .insert(expr.id, resolved.to_string());
+                }
             }
             ExprKind::App { func, arg } => {
                 self.resolve_expr(func);

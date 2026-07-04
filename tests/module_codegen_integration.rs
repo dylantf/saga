@@ -959,6 +959,57 @@ main () = M.add 1 2
     assert_contains(&out, "call 'math':'add'");
 }
 
+#[test]
+fn qualified_constructor_alias_collision_uses_written_qualifier() {
+    let a_src = r#"module A
+
+pub type Method =
+  | GET
+  | POST
+
+pub record Request {
+  method: Method,
+}
+
+pub fun make : Request
+make = Request { method: GET }
+"#;
+    let ab_src = r#"module A.B
+
+pub type Method =
+  | GET
+  | POST
+"#;
+    let main_src = r#"module Main
+
+import A as One (GET, make)
+import A.B as Two (GET)
+
+main () = {
+  let request = One.make
+  (request.method, One.GET, Two.GET)
+}
+"#;
+
+    with_temp_project_files(
+        &[("lib/A.saga", a_src), ("lib/A/B.saga", ab_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_eq!(
+                out.matches("{'a_GET'}").count(),
+                1,
+                "One.GET should lower to A.GET exactly once in Main\n{out}"
+            );
+            assert_eq!(
+                out.matches("{'a_b_GET'}").count(),
+                1,
+                "Two.GET should lower to A.B.GET exactly once in Main\n{out}"
+            );
+        },
+    );
+}
+
 // ---- Exposed (unqualified) imports ----
 
 #[test]

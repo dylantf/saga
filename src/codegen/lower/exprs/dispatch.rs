@@ -365,11 +365,17 @@ impl<'a> Lowerer<'a> {
             ExprKind::QualifiedName { module, name, .. } => {
                 // Check if this is a qualified constructor with no args (e.g. M.Nothing)
                 let qualified = format!("{}.{}", module, name);
-                if self.is_known_constructor(&qualified) || self.is_known_constructor(name) {
+                let resolved_ctor = self.resolved_constructor_name_for(expr.id, &qualified);
+                let ctor_name = if self.is_known_constructor(&qualified) {
+                    qualified.as_str()
+                } else {
+                    resolved_ctor.as_str()
+                };
+                if self.is_known_constructor(ctor_name) || self.is_known_constructor(name) {
                     let origin = self
-                        .constructor_origin_module_for(expr.id, name)
+                        .constructor_origin_module_for(expr.id, ctor_name)
                         .map(str::to_string);
-                    return self.lower_ctor_with_origin(name, vec![], origin.as_deref());
+                    return self.lower_ctor_with_origin(ctor_name, vec![], origin.as_deref());
                 }
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
                     self.lower_resolved_value_ref(expr.id, resolved)
