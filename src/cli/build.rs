@@ -11,7 +11,8 @@ use super::cache::{
     compare_dependency_fingerprints, compare_input_fingerprints, content_hash, file_mtime,
     input_fingerprint_changes, missing_output_artifact, module_artifacts_ready,
     module_interface_fingerprint, project_dependency_fingerprints, project_input_fingerprints,
-    relative_source_path, script_input_fingerprints, write_build_manifest,
+    relative_source_path, script_input_fingerprints, unexpected_output_artifact,
+    write_build_manifest,
 };
 use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
@@ -156,6 +157,15 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
         );
         return None;
     }
+    if let Some(unexpected) = unexpected_output_artifact(&build_dir, &manifest) {
+        trace_cache_event(
+            "script",
+            profile,
+            "miss",
+            &format!("unexpected artifact: {unexpected}"),
+        );
+        return None;
+    }
     if !stdlib_cache_is_complete(&stdlib_dir, &stdlib_fingerprint) {
         trace_cache_event("script", profile, "miss", "stdlib cache incomplete");
         return None;
@@ -219,6 +229,15 @@ pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBu
             profile,
             "miss",
             &format!("artifact missing: {missing}"),
+        );
+        return None;
+    }
+    if let Some(unexpected) = unexpected_output_artifact(&build_dir, &manifest) {
+        trace_cache_event(
+            "project",
+            profile,
+            "miss",
+            &format!("unexpected artifact: {unexpected}"),
         );
         return None;
     }
@@ -983,6 +1002,22 @@ fn module_artifact_for_source(
     }
 }
 
+fn bridge_output_artifacts(inputs: &[BuildInputFingerprint]) -> Vec<String> {
+    let mut artifacts: Vec<String> = inputs
+        .iter()
+        .filter(|input| input.path.ends_with(".erl"))
+        .filter_map(|input| {
+            Path::new(&input.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| format!("{stem}.beam"))
+        })
+        .collect();
+    artifacts.sort();
+    artifacts.dedup();
+    artifacts
+}
+
 fn plan_project_rebuild(
     build_dir: &Path,
     previous_manifest: Option<&BuildManifest>,
@@ -1006,6 +1041,9 @@ fn plan_project_rebuild(
     {
         return ProjectRebuildPlan::Full;
     }
+    if unexpected_output_artifact(build_dir, previous).is_some() {
+        return ProjectRebuildPlan::Full;
+    }
 
     let changes = input_fingerprint_changes(&previous.input_fingerprints, current_inputs);
     if !changes.added.is_empty() || !changes.removed.is_empty() {
@@ -1025,6 +1063,11 @@ fn plan_project_rebuild(
         .iter()
         .map(|artifact| (artifact.module_name.as_str(), artifact))
         .collect();
+    let previous_module_names: HashSet<&str> = previous_by_module.keys().copied().collect();
+    let current_module_names: HashSet<&str> = current_by_module.keys().copied().collect();
+    if previous_module_names != current_module_names {
+        return ProjectRebuildPlan::Full;
+    }
     let mut emit_modules = HashSet::new();
     let mut changed_modules = HashSet::new();
     let mut bridge_inputs = Vec::new();
@@ -1408,6 +1451,7 @@ pub fn build_project_ext(
         .iter()
         .map(|artifact| artifact.beam.clone())
         .collect();
+    output_artifacts.extend(bridge_output_artifacts(&current_inputs));
     output_artifacts.sort();
 
     let current_stdlib_fingerprint = stdlib_fingerprint();
@@ -1771,6 +1815,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bridge_output_artifacts_are_derived_from_erl_inputs() {
+        assert_eq!(
+            bridge_output_artifacts(&[
+                input("src/native.erl", "one"),
+                input("lib/other.erl", "two"),
+                input("src/Main.saga", "three"),
+                input("src/native.erl", "one"),
+            ]),
+            vec!["native.beam".to_string(), "other.beam".to_string()]
+        );
+    }
+
     fn write_all_stdlib_beams(stdlib_dir: &Path) {
         for beam in expected_stdlib_beams() {
             fs::write(stdlib_dir.join(beam), "").unwrap();
@@ -2129,6 +2186,89 @@ mod tests {
                     stdlib_fingerprint: "stdlib",
                     profile: "dev",
                     dependency_fingerprints: &current_deps,
+                    custom_main: false,
+                },
+            ),
+            ProjectRebuildPlan::Full
+        ));
+        let _ = fs::remove_dir_all(build_dir);
+    }
+
+    #[test]
+    fn project_rebuild_plan_falls_back_to_full_when_module_set_changes() {
+        let build_dir = test_root("module-set-change");
+        let previous_artifacts = vec![
+            artifact("OldName", "src/Renamed.saga", "old", "old-iface"),
+            artifact("Main", "src/Main.saga", "main", "main-iface"),
+        ];
+        write_artifacts(&build_dir, &previous_artifacts);
+        let previous = manifest(
+            vec![
+                input("project.toml", "config"),
+                input("src/Renamed.saga", "old"),
+                input("src/Main.saga", "main"),
+            ],
+            previous_artifacts,
+        );
+        let current_inputs = vec![
+            input("project.toml", "config"),
+            input("src/Renamed.saga", "new"),
+            input("src/Main.saga", "main"),
+        ];
+        let current_artifacts = vec![
+            artifact("NewName", "src/Renamed.saga", "new", "new-iface"),
+            artifact("Main", "src/Main.saga", "main", "main-iface"),
+        ];
+
+        assert!(matches!(
+            plan_project_rebuild(
+                &build_dir,
+                Some(&previous),
+                &current_inputs,
+                &current_artifacts,
+                &imports(&[("NewName", &[]), ("Main", &["NewName"])]),
+                ProjectRebuildOptions {
+                    stdlib_fingerprint: "stdlib",
+                    profile: "dev",
+                    dependency_fingerprints: &[],
+                    custom_main: false,
+                },
+            ),
+            ProjectRebuildPlan::Full
+        ));
+        let _ = fs::remove_dir_all(build_dir);
+    }
+
+    #[test]
+    fn project_rebuild_plan_falls_back_to_full_for_unexpected_beams() {
+        let build_dir = test_root("unexpected-beam");
+        let previous_artifacts = vec![artifact("Main", "src/Main.saga", "main", "main-iface")];
+        write_artifacts(&build_dir, &previous_artifacts);
+        fs::write(build_dir.join("old_module.beam"), "").unwrap();
+        let previous = manifest(
+            vec![
+                input("project.toml", "config"),
+                input("src/Main.saga", "main"),
+            ],
+            previous_artifacts,
+        );
+        let current_inputs = vec![
+            input("project.toml", "config"),
+            input("src/Main.saga", "main"),
+        ];
+        let current_artifacts = vec![artifact("Main", "src/Main.saga", "main", "main-iface")];
+
+        assert!(matches!(
+            plan_project_rebuild(
+                &build_dir,
+                Some(&previous),
+                &current_inputs,
+                &current_artifacts,
+                &imports(&[("Main", &[])]),
+                ProjectRebuildOptions {
+                    stdlib_fingerprint: "stdlib",
+                    profile: "dev",
+                    dependency_fingerprints: &[],
                     custom_main: false,
                 },
             ),

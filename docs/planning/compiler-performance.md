@@ -277,6 +277,11 @@ Progress:
   include lock metadata and installed `ebin` / `priv` artifacts. Dependency
   changes conservatively force a full project rebuild instead of reusing module
   artifacts across a changed dependency boundary.
+- 2026-07-04: upgraded build manifests to version 8 with stricter output
+  artifact validation. Project bridge `.erl` outputs are now part of expected
+  output artifacts, and cache validation rejects unexpected stale `.beam` files
+  left in `_build/<profile>`. The partial rebuild planner also falls back to a
+  full clean rebuild when stale beams are present.
 - Remaining gap: dependency artifacts are fingerprinted but not yet stored in a
   separate persistent artifact cache keyed by dependency source and package
   metadata.
@@ -325,6 +330,10 @@ Progress:
   fingerprints, so the incremental project manifest has a dependency-level
   invalidation boundary in addition to project source and emitted module
   artifact metadata.
+- 2026-07-04: upgraded build manifests to version 8 so the manifest also owns
+  stale-beam cleanup. If the previous build contains a Beam file that is not in
+  the current expected output set, the next build takes the full clean path
+  instead of preserving that artifact through a partial rebuild.
 
 ### Phase 5: Partial Rebuilds
 

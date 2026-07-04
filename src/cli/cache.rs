@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 pub(super) const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
-pub(super) const BUILD_MANIFEST_VERSION: u32 = 7;
+pub(super) const BUILD_MANIFEST_VERSION: u32 = 8;
 
 /// Build manifest written to `_build/<profile>/.manifest` for cache invalidation.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -814,6 +814,31 @@ pub(super) fn missing_output_artifact(
         .cloned()
 }
 
+pub(super) fn unexpected_output_artifact(
+    build_dir: &Path,
+    manifest: &BuildManifest,
+) -> Option<String> {
+    let expected: BTreeSet<&str> = manifest
+        .output_artifacts
+        .iter()
+        .map(|artifact| artifact.as_str())
+        .collect();
+    let entries = fs::read_dir(build_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "beam") {
+            continue;
+        }
+        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !expected.contains(filename) {
+            return Some(filename.to_string());
+        }
+    }
+    None
+}
+
 pub(super) fn module_artifacts_ready(
     build_dir: &Path,
     manifest: &BuildManifest,
@@ -1092,6 +1117,35 @@ mod tests {
 
         write(&root.join("app_worker.beam"), "");
         assert_eq!(missing_output_artifact(&root, &manifest), None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unexpected_output_artifact_rejects_untracked_beams() {
+        let root = test_root("unexpected-outputs");
+        let manifest = BuildManifest {
+            manifest_version: BUILD_MANIFEST_VERSION,
+            entry_module: "main".to_string(),
+            source_file: "project.toml".to_string(),
+            source_mtime: 0,
+            compiler_version: BUILD_HASH.to_string(),
+            profile: "dev".to_string(),
+            stdlib_fingerprint: "stdlib".to_string(),
+            input_fingerprints: vec![fingerprint("project.toml", "abc")],
+            dependency_fingerprints: Vec::new(),
+            output_artifacts: vec!["main.beam".to_string()],
+            module_artifacts: vec![],
+        };
+
+        write(&root.join("main.beam"), "");
+        assert_eq!(unexpected_output_artifact(&root, &manifest), None);
+
+        write(&root.join("old_module.beam"), "");
+        assert_eq!(
+            unexpected_output_artifact(&root, &manifest),
+            Some("old_module.beam".to_string())
+        );
 
         let _ = fs::remove_dir_all(root);
     }
