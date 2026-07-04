@@ -563,16 +563,4 @@ impl<'a> Lowerer<'a> {
         self.handler_arm_effect_for_module(module_name, arm.id)
             .map(|resolved| self.canonical_effect_lookup(resolved))
     }
-
-    pub(super) fn handler_arm_matches_effect_op_for_module(
-        &self,
-        arm: &HandlerArm,
-        source_module: Option<&str>,
-        eff: &str,
-        op: &str,
-    ) -> bool {
-        let module_name = source_module.unwrap_or_else(|| self.current_semantic_module_name());
-        self.resolved_handler_arm_effect_for_module(arm, module_name)
-            .is_some_and(|resolved| resolved == eff && arm.op_name == op)
-    }
 }

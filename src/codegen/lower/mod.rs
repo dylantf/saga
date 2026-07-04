@@ -70,6 +70,7 @@ pub(super) struct QualifiedCallSite<'a> {
 pub(crate) struct StaticTailResumeOp {
     arm: HandlerArm,
     source_module: Option<String>,
+    effect_name: Option<String>,
     captures: Vec<(String, Expr)>,
 }
 

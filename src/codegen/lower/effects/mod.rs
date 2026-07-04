@@ -54,6 +54,7 @@ pub(crate) enum OpHandlerPlan {
     Static {
         arm: HandlerArm,
         source_module: Option<String>,
+        effect_name: String,
         handler_canonical: String,
         captures: Vec<(String, Expr)>,
     },

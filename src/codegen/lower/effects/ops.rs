@@ -143,6 +143,7 @@ impl<'a> Lowerer<'a> {
         // `param_vars` slots so `DictMethodAccess` references in the body resolve.
         let dict_names: Vec<String> = self
             .effect_for_handler_arm(&plan.arm, plan.source_module.as_deref())
+            .or_else(|| plan.effect_name.clone())
             .and_then(|eff| {
                 self.effect_defs
                     .get(&eff)
@@ -280,6 +281,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn static_tail_resume_plan_for_op_handler(
         &self,
         plan: &OpHandlerPlan,
+        effect_name: &str,
     ) -> Option<crate::codegen::lower::StaticTailResumeOp> {
         match plan {
             OpHandlerPlan::Inline { arms } if arms.len() == 1 => {
@@ -288,6 +290,7 @@ impl<'a> Lowerer<'a> {
                     crate::codegen::lower::StaticTailResumeOp {
                         arm,
                         source_module: None,
+                        effect_name: Some(effect_name.to_string()),
                         captures: Vec::new(),
                     },
                 )
@@ -295,6 +298,7 @@ impl<'a> Lowerer<'a> {
             OpHandlerPlan::Static {
                 arm,
                 source_module,
+                effect_name,
                 handler_canonical,
                 captures,
             } if !self.is_beam_native_handler_canonical(handler_canonical)
@@ -308,6 +312,7 @@ impl<'a> Lowerer<'a> {
                     crate::codegen::lower::StaticTailResumeOp {
                         arm,
                         source_module: source_module.clone(),
+                        effect_name: Some(effect_name.clone()),
                         captures: captures.clone(),
                     },
                 )

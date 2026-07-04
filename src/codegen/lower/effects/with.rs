@@ -134,7 +134,7 @@ impl<'a> Lowerer<'a> {
                     .as_ref()
                     .is_some_and(NamedHandlerItem::has_return_clause);
             if !handler_has_return_clause
-                && let Some(static_plan) = self.static_tail_resume_plan_for_op_handler(&plan)
+                && let Some(static_plan) = self.static_tail_resume_plan_for_op_handler(&plan, eff)
             {
                 self.static_tail_resume_ops.insert(key.clone(), static_plan);
             }
@@ -257,7 +257,7 @@ impl<'a> Lowerer<'a> {
             inherited_return_k.clone(),
         );
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (_eff, op, var_name, plan) in &op_vars {
+        for (eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
                 OpHandlerPlan::Inline { arms } => self.build_inline_op_handler_fun(arms),
                 OpHandlerPlan::Static {
@@ -268,9 +268,15 @@ impl<'a> Lowerer<'a> {
                 OpHandlerPlan::Static {
                     arm,
                     source_module,
+                    effect_name,
                     captures,
                     ..
-                } => self.build_op_handler_fun(arm, source_module.as_deref(), captures),
+                } => self.build_op_handler_fun_for_effect(
+                    arm,
+                    source_module.as_deref(),
+                    captures,
+                    Some(effect_name),
+                ),
                 OpHandlerPlan::Conditional {
                     cond_var,
                     then_arm,
@@ -278,6 +284,7 @@ impl<'a> Lowerer<'a> {
                     else_arm,
                     else_source,
                 } => self.build_conditional_handler_fun(
+                    eff,
                     cond_var,
                     then_arm.as_ref(),
                     then_source.as_deref(),
@@ -468,9 +475,20 @@ impl<'a> Lowerer<'a> {
         source_module: Option<&str>,
         captures: &[(String, Expr)],
     ) -> CExpr {
+        self.build_op_handler_fun_for_effect(arm, source_module, captures, None)
+    }
+
+    pub(crate) fn build_op_handler_fun_for_effect(
+        &mut self,
+        arm: &HandlerArm,
+        source_module: Option<&str>,
+        captures: &[(String, Expr)],
+        effect_hint: Option<&str>,
+    ) -> CExpr {
         let has_resume = arm.body.contains_resume();
         let op_info = self
             .effect_for_handler_arm(arm, source_module)
+            .or_else(|| effect_hint.map(str::to_string))
             .and_then(|effect_name| {
                 self.effect_defs
                     .get(&effect_name)

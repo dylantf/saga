@@ -26,9 +26,14 @@ impl<'a> Lowerer<'a> {
             .collect();
 
         let mut tuple_elements = Vec::new();
-        for (_eff, op) in &handler_ops {
+        for (eff, op) in &handler_ops {
             if let Some(arm) = arms_by_op.get(op.as_str()) {
-                tuple_elements.push(self.build_op_handler_fun(arm, None, &[]));
+                tuple_elements.push(self.build_op_handler_fun_for_effect(
+                    arm,
+                    None,
+                    &[],
+                    Some(eff),
+                ));
             } else {
                 // Passthrough: identity continuation
                 let k_param = self.fresh();
@@ -62,12 +67,13 @@ impl<'a> Lowerer<'a> {
         let handler_ops = self.effect_handler_ops(&info.effects);
 
         let mut tuple_elements = Vec::new();
-        for (_eff, op) in &handler_ops {
+        for (eff, op) in &handler_ops {
             if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                tuple_elements.push(self.build_op_handler_fun(
+                tuple_elements.push(self.build_op_handler_fun_for_effect(
                     arm,
                     info.source_module.as_deref(),
                     &info.captures,
+                    Some(eff),
                 ));
             } else {
                 let k_param = self.fresh();
@@ -230,16 +236,73 @@ impl<'a> Lowerer<'a> {
     ) -> Option<(HandlerArm, Option<String>)> {
         info.arms
             .iter()
-            .find(|arm| {
-                self.handler_arm_matches_effect_op_for_module(
-                    arm,
-                    info.source_module.as_deref(),
-                    eff,
-                    op,
-                )
-            })
+            .find(|arm| self.static_handler_arm_matches_effect_op(info, arm, eff, op))
             .cloned()
             .map(|arm| (arm, info.source_module.clone()))
+    }
+
+    fn static_handler_arm_matches_effect_op(
+        &self,
+        info: &crate::codegen::lower::HandlerInfo,
+        arm: &HandlerArm,
+        eff: &str,
+        op: &str,
+    ) -> bool {
+        if arm.op_name != op {
+            return false;
+        }
+
+        let module_name = info
+            .source_module
+            .as_deref()
+            .unwrap_or_else(|| self.current_semantic_module_name());
+        if let Some(resolved) = self.resolved_handler_arm_effect_for_module(arm, module_name) {
+            return resolved == eff;
+        }
+
+        self.handler_arm_fallback_matches_effect_op(info, arm, eff)
+    }
+
+    fn handler_arm_fallback_matches_effect_op(
+        &self,
+        info: &crate::codegen::lower::HandlerInfo,
+        arm: &HandlerArm,
+        eff: &str,
+    ) -> bool {
+        if let Some(qualifier) = arm.qualifier.as_deref()
+            && !self.effect_name_matches_qualifier(eff, qualifier, info.source_module.as_deref())
+        {
+            return false;
+        }
+
+        let mut matches = info.effects.iter().filter(|candidate| {
+            self.effect_defs
+                .get(candidate.as_str())
+                .is_some_and(|effect| effect.ops.contains_key(&arm.op_name))
+        });
+        match (matches.next(), matches.next()) {
+            (Some(candidate), None) => candidate == eff,
+            _ => false,
+        }
+    }
+
+    fn effect_name_matches_qualifier(
+        &self,
+        eff: &str,
+        qualifier: &str,
+        source_module: Option<&str>,
+    ) -> bool {
+        if eff == qualifier || eff.rsplit('.').next() == Some(qualifier) {
+            return true;
+        }
+        if let Some(canonical) = self.effect_canonical.get(qualifier)
+            && canonical == eff
+        {
+            return true;
+        }
+        source_module
+            .map(|module| format!("{module}.{qualifier}"))
+            .is_some_and(|canonical| canonical == eff)
     }
 
     pub(crate) fn dynamic_tuple_element_expr(
@@ -281,6 +344,7 @@ impl<'a> Lowerer<'a> {
                     OpHandlerPlan::Static {
                         arm,
                         source_module,
+                        effect_name: eff.to_string(),
                         handler_canonical: canonical.clone(),
                         captures: info.captures.clone(),
                     }
@@ -351,6 +415,7 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn build_conditional_handler_fun(
         &mut self,
+        effect_name: &str,
         cond_var: &str,
         then_arm: Option<&HandlerArm>,
         then_source: Option<&str>,
@@ -358,12 +423,12 @@ impl<'a> Lowerer<'a> {
         else_source: Option<&str>,
     ) -> CExpr {
         let then_fun = if let Some(arm) = then_arm {
-            self.build_op_handler_fun(arm, then_source, &[])
+            self.build_op_handler_fun_for_effect(arm, then_source, &[], Some(effect_name))
         } else {
             self.build_passthrough_handler_fun()
         };
         let else_fun = if let Some(arm) = else_arm {
-            self.build_op_handler_fun(arm, else_source, &[])
+            self.build_op_handler_fun_for_effect(arm, else_source, &[], Some(effect_name))
         } else {
             self.build_passthrough_handler_fun()
         };

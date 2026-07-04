@@ -4531,3 +4531,180 @@ fn cross_module_effectful_trait_call_requires_effect() {
         errors
     );
 }
+
+#[test]
+fn saga_test_build_uses_real_imported_console_handler_arms() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "saga-console-test-handler-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::create_dir_all(root.join("lib")).expect("create lib");
+    fs::create_dir_all(root.join("tests")).expect("create tests");
+
+    fs::write(
+        root.join("project.toml"),
+        r#"[project]
+name = "console-test-handler"
+
+[library]
+module = "Routerish"
+expose = ["Routerish"]
+
+[bin]
+main = "src/Main.saga"
+"#,
+    )
+    .expect("write project.toml");
+    fs::write(
+        root.join("lib/Routerish.saga"),
+        r#"module Routerish
+
+pub effect Skip {
+  fun skip : Unit -> a
+}
+
+pub type Request = Request String String
+pub type Response = Response Int String
+
+pub fun request : String -> String -> Request
+request method path = Request method path
+
+pub fun response : Int -> String -> Response
+response code body = Response code body
+
+pub fun status : Response -> Int
+status resp = case resp {
+  Response code _ -> code
+}
+
+pub fun route : String -> String -> (Request -> Response needs {..e}) -> Request -> Response needs {Skip, ..e}
+route method path inner req =
+  case req {
+    Request req_method req_path ->
+      if req_method == method && req_path == path then inner req
+      else skip! ()
+  }
+
+pub fun choose : List (Request -> Response needs {Skip, ..e}) -> Request -> Response needs {..e}
+choose routes req = case routes {
+  [] -> Response 404 "missing"
+  r :: rest -> r req with {
+    skip () = choose rest req
+  }
+}
+"#,
+    )
+    .expect("write Routerish.saga");
+    fs::write(
+        root.join("src/Demoish.saga"),
+        r#"module Demoish
+
+import Std.IO (Stdio, console, println)
+import Routerish (Request, Response, route, choose, response)
+
+pub effect Parser {
+  fun parse : Unit -> Result String String
+}
+
+fun page : Request -> Response
+page _ = response 200 "page"
+
+fun html : Int -> String -> Response
+html code body = response code body
+
+fun submit : Request -> Response needs {Parser, Stdio}
+submit _ = case parse! () {
+  Ok rendered -> {
+    println ("[form] submitted values:\n" <> rendered)
+    html 200 ("submitted: " <> rendered)
+  }
+  Err msg -> {
+    println ("[form] decode error: " <> msg)
+    html 400 msg
+  }
+}
+
+pub fun app : Request -> Response needs {Parser}
+app req = {
+  req
+  |> choose [
+    route "GET" "/" page,
+    route "POST" "/" submit,
+  ]
+} with console
+
+pub fun to_handler : (Request -> Response needs {Parser}) -> Request -> Response
+to_handler inner req = inner req with {
+  parse () = resume (Ok "name = Alice")
+}
+"#,
+    )
+    .expect("write Demoish.saga");
+    fs::write(
+        root.join("src/Main.saga"),
+        r#"module Main
+
+import Demoish (app, to_handler)
+import Routerish (request, status)
+
+main () = {
+  let req = request "POST" "/"
+  let resp = to_handler app req
+  status resp
+}
+"#,
+    )
+    .expect("write Main.saga");
+    fs::write(
+        root.join("tests/ReproTest.saga"),
+        r#"module ReproTest
+
+import Std.Test (Testing, describe, test, assert_eq)
+import Demoish (app, to_handler)
+import Routerish (request, status)
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () =
+  describe "console handler in test build" (fun () -> {
+    test "uses the imported console handler arms" (fun () -> {
+      let req = request "POST" "/"
+      let resp = to_handler app req
+      assert_eq (status resp) 200
+    })
+  })
+"#,
+    )
+    .expect("write ReproTest.saga");
+
+    let binary = option_env!("CARGO_BIN_EXE_saga")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/saga"));
+    let output = std::process::Command::new(binary)
+        .arg("test")
+        .current_dir(&root)
+        .output()
+        .expect("run saga test");
+    let core = fs::read_to_string(root.join("_build/test/demoish.core")).unwrap_or_default();
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "saga test failed\nstdout:\n{}\nstderr:\n{}\ncore:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        core
+    );
+    assert!(
+        core.contains("call 'io':'format'"),
+        "expected real console print handler in test core:\n{core}"
+    );
+    assert!(
+        !core.contains("apply _Cor90('unit')"),
+        "console print handler regressed to one-arity passthrough:\n{core}"
+    );
+}

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{Expr, ExprKind};
+use crate::ast::{self, Expr, ExprKind, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 
@@ -9,6 +9,63 @@ use super::util::{self, collect_ctor_call};
 use super::{EvidenceCtx, Lowerer};
 
 impl<'a> Lowerer<'a> {
+    fn direct_lambda_arity(expr: &Expr) -> Option<usize> {
+        let ExprKind::Lambda { params, body } = &expr.kind else {
+            return None;
+        };
+        let mut arity = params.len();
+        let mut current = body.as_ref();
+        while let ExprKind::Lambda {
+            params,
+            body: nested_body,
+        } = &current.kind
+        {
+            arity += params.len();
+            current = nested_body.as_ref();
+        }
+        Some(arity)
+    }
+
+    fn lower_curried_lambda_for_expected_arity(
+        &mut self,
+        expr: &Expr,
+        expected_ty: &crate::typechecker::Type,
+    ) -> Option<CExpr> {
+        let (expected_arity, effects) = util::arity_and_effects_from_type(expected_ty);
+        if expected_arity == 0 || !effects.is_empty() {
+            return None;
+        }
+        let actual_arity = Self::direct_lambda_arity(expr)?;
+        if expected_arity >= actual_arity {
+            return None;
+        }
+
+        let ExprKind::Lambda { params, body } = &expr.kind else {
+            return None;
+        };
+        if params.len() != expected_arity
+            || !params.iter().all(|p| {
+                matches!(
+                    p,
+                    Pat::Var { .. }
+                        | Pat::Wildcard { .. }
+                        | Pat::Lit {
+                            value: ast::Lit::Unit,
+                            ..
+                        }
+                )
+            })
+        {
+            return None;
+        }
+
+        let param_vars = super::pats::lower_params(params);
+        Some(CExpr::Fun(
+            param_vars,
+            Box::new(self.lower_expr_value(body)),
+        ))
+    }
+
     fn lower_constructor_function_value(
         &mut self,
         name: &str,
@@ -309,6 +366,12 @@ impl<'a> Lowerer<'a> {
                 && let Some(ctor_fun) = self.lower_constructor_function_value(name, expected_ty)
             {
                 return ctor_fun;
+            }
+
+            if let Some(curried_lambda) =
+                self.lower_curried_lambda_for_expected_arity(expr, expected_ty)
+            {
+                return curried_lambda;
             }
 
             if let Some((ctor_name, args)) = collect_ctor_call(expr) {
