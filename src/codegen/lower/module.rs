@@ -965,72 +965,66 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Wraps a function body with ETS table creation for `saga_ref_store`.
-    /// Emits: `fun(Args...) -> let _ = ets:new(saga_ref_store, [set, public, named_table]) in <original body>`
+    /// Wraps a function body with idempotent ETS table initialization for `saga_ref_store`.
     fn wrap_with_ets_init(body: CExpr) -> CExpr {
-        // Unwrap the outer Fun to inject the let-binding inside
-        match body {
-            CExpr::Fun(params, inner_body) => {
-                let ets_init = CExpr::Call(
-                    "ets".to_string(),
-                    "new".to_string(),
-                    vec![
-                        CExpr::Lit(CLit::Atom("saga_ref_store".into())),
-                        CExpr::Cons(
-                            Box::new(CExpr::Lit(CLit::Atom("set".into()))),
-                            Box::new(CExpr::Cons(
-                                Box::new(CExpr::Lit(CLit::Atom("public".into()))),
-                                Box::new(CExpr::Cons(
-                                    Box::new(CExpr::Lit(CLit::Atom("named_table".into()))),
-                                    Box::new(CExpr::Nil),
-                                )),
-                            )),
-                        ),
-                    ],
-                );
-                CExpr::Fun(
-                    params,
-                    Box::new(CExpr::Let(
-                        "_EtsRefInit".to_string(),
-                        Box::new(ets_init),
-                        inner_body,
-                    )),
-                )
-            }
-            other => other,
-        }
+        Self::wrap_with_named_ets_init(body, "saga_ref_store", "_EtsRefInit")
     }
 
-    /// Wraps a function body with ETS table creation for `saga_vec_store`.
+    /// Wraps a function body with idempotent ETS table initialization for `saga_vec_store`.
     fn wrap_with_vec_init(body: CExpr) -> CExpr {
+        Self::wrap_with_named_ets_init(body, "saga_vec_store", "_EtsVecInit")
+    }
+
+    /// Emits:
+    /// `case ets:whereis(Table) of undefined -> ets:new(Table, [set, public, named_table]); _ -> Table end`
+    fn named_ets_init(table_name: &str) -> CExpr {
+        let table = CExpr::Lit(CLit::Atom(table_name.into()));
+        let table_options = CExpr::Cons(
+            Box::new(CExpr::Lit(CLit::Atom("set".into()))),
+            Box::new(CExpr::Cons(
+                Box::new(CExpr::Lit(CLit::Atom("public".into()))),
+                Box::new(CExpr::Cons(
+                    Box::new(CExpr::Lit(CLit::Atom("named_table".into()))),
+                    Box::new(CExpr::Nil),
+                )),
+            )),
+        );
+
+        CExpr::Case(
+            Box::new(CExpr::Call(
+                "ets".to_string(),
+                "whereis".to_string(),
+                vec![table.clone()],
+            )),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("undefined".into())),
+                    guard: None,
+                    body: CExpr::Call(
+                        "ets".to_string(),
+                        "new".to_string(),
+                        vec![table.clone(), table_options],
+                    ),
+                },
+                CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: table,
+                },
+            ],
+        )
+    }
+
+    fn wrap_with_named_ets_init(body: CExpr, table_name: &str, binding_name: &str) -> CExpr {
         match body {
-            CExpr::Fun(params, inner_body) => {
-                let ets_init = CExpr::Call(
-                    "ets".to_string(),
-                    "new".to_string(),
-                    vec![
-                        CExpr::Lit(CLit::Atom("saga_vec_store".into())),
-                        CExpr::Cons(
-                            Box::new(CExpr::Lit(CLit::Atom("set".into()))),
-                            Box::new(CExpr::Cons(
-                                Box::new(CExpr::Lit(CLit::Atom("public".into()))),
-                                Box::new(CExpr::Cons(
-                                    Box::new(CExpr::Lit(CLit::Atom("named_table".into()))),
-                                    Box::new(CExpr::Nil),
-                                )),
-                            )),
-                        ),
-                    ],
-                );
-                CExpr::Fun(
-                    params,
-                    Box::new(CExpr::Let(
-                        "_EtsVecInit".to_string(),
-                        Box::new(ets_init),
-                        inner_body,
-                    )),
-                )
-            }
+            CExpr::Fun(params, inner_body) => CExpr::Fun(
+                params,
+                Box::new(CExpr::Let(
+                    binding_name.to_string(),
+                    Box::new(Self::named_ets_init(table_name)),
+                    inner_body,
+                )),
+            ),
             other => other,
         }
     }

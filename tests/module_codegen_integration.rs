@@ -4780,8 +4780,49 @@ main () = run ()
         |checker, main_program| {
             let main_core = emit_from_program(main_program, "main", checker);
             assert!(
-                main_core.contains("call 'ets':'new'"),
-                "entry module should initialize saga_ref_store for dependency ets_ref use:\n{main_core}"
+                main_core.contains("call 'ets':'whereis'")
+                    && main_core.contains("'saga_ref_store'")
+                    && main_core.contains("<'undefined'>")
+                    && main_core.contains("call 'ets':'new'"),
+                "entry module should idempotently initialize saga_ref_store for dependency ets_ref use:\n{main_core}"
+            );
+        },
+    );
+}
+
+#[test]
+fn entry_initializes_beam_vec_used_only_by_dependency() {
+    let lib_src = r#"
+module Lib
+
+import Std.Vec (Vec, beam_vec)
+
+pub fun run : Unit -> Unit
+run () = {
+  let v = vec_new! ()
+  vec_push! v 1
+  ()
+} with beam_vec
+"#;
+    let main_src = r#"
+module Main
+
+import Lib (run)
+
+main () = run ()
+"#;
+
+    with_temp_project_files(
+        &[("src/Lib.saga", lib_src)],
+        main_src,
+        |checker, main_program| {
+            let main_core = emit_from_program(main_program, "main", checker);
+            assert!(
+                main_core.contains("call 'ets':'whereis'")
+                    && main_core.contains("'saga_vec_store'")
+                    && main_core.contains("<'undefined'>")
+                    && main_core.contains("call 'ets':'new'"),
+                "entry module should idempotently initialize saga_vec_store for dependency beam_vec use:\n{main_core}"
             );
         },
     );
