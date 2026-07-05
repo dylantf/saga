@@ -17,9 +17,34 @@ tests () = {
       assert_eq (Crypto.base64url_decode "a") (Err "invalid_base64url")
     })
 
+    test "base64 encodes with padding and decodes" (fun () -> {
+      let encoded = Crypto.base64_encode (BitString.from_string "hello?")
+      assert_eq encoded "aGVsbG8/"
+      case Crypto.base64_decode encoded {
+        Ok bytes -> assert_eq (BitString.to_string bytes) (Ok "hello?")
+        Err _ -> assert_true False
+      }
+      case Crypto.base64_decode "aGVsbG8/" {
+        Ok bytes -> assert_eq (BitString.to_string bytes) (Ok "hello?")
+        Err _ -> assert_true False
+      }
+      case Crypto.base64_decode "aGVsbG8" {
+        Ok bytes -> assert_eq (BitString.to_string bytes) (Ok "hello")
+        Err _ -> assert_true False
+      }
+      assert_eq (Crypto.base64_decode "a") (Err "invalid_base64")
+      assert_eq (Crypto.base64_decode "aGVsbG8_") (Err "invalid_base64")
+    })
+
+    test "sha1_digest matches a known vector" (fun () -> {
+      let digest = Crypto.sha1_digest (BitString.from_string "abc")
+      assert_eq (Crypto.base64_encode digest) "qZk+NkcGgWq6PiVxeFDCbJzQ2J0="
+    })
+
     test "hmac_sha256 matches a known vector" (fun () -> {
       let key = BitString.from_string "key"
-      let data = BitString.from_string "The quick brown fox jumps over the lazy dog"
+      let data =
+        BitString.from_string "The quick brown fox jumps over the lazy dog"
       let digest = Crypto.hmac_sha256 key data
       let encoded = Crypto.base64url_encode digest
       assert_eq encoded "97yD9DBThCSxMpjmqm-xQ-9NWaFJRhdZl0edvC0aPNg"

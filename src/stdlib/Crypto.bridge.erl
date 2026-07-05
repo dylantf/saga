@@ -1,5 +1,13 @@
 -module(std_crypto_bridge).
--export([hmac_sha256/2, base64url_encode/1, base64url_decode/1, secure_equal/2]).
+-export([
+    hmac_sha256/2,
+    base64url_encode/1,
+    base64url_decode/1,
+    base64_encode/1,
+    base64_decode/1,
+    sha1_digest/1,
+    secure_equal/2
+]).
 
 hmac_sha256(Key, Data) ->
     crypto:mac(hmac, sha256, Key, Data).
@@ -23,6 +31,24 @@ base64url_decode(Text) ->
         false ->
             {error, <<"invalid_base64url">>}
     end.
+
+base64_encode(Bin) ->
+    base64:encode(Bin).
+
+base64_decode(Text) ->
+    case valid_base64(Text) of
+        true ->
+            try
+                {ok, base64:decode(add_base64_padding(Text))}
+            catch
+                _:_ -> {error, <<"invalid_base64">>}
+            end;
+        false ->
+            {error, <<"invalid_base64">>}
+    end.
+
+sha1_digest(Data) ->
+    crypto:hash(sha, Data).
 
 secure_equal(A, B) ->
     SizeA = byte_size(A),
@@ -57,6 +83,21 @@ valid_base64url_byte(Byte) ->
         orelse (Byte >= $0 andalso Byte =< $9)
         orelse Byte =:= $-
         orelse Byte =:= $_
+        orelse Byte =:= $=.
+
+valid_base64(Text) ->
+    byte_size(Text) rem 4 =/= 1 andalso valid_base64_bytes(binary_to_list(Text)).
+
+valid_base64_bytes([]) -> true;
+valid_base64_bytes([Byte | Rest]) ->
+    valid_base64_byte(Byte) andalso valid_base64_bytes(Rest).
+
+valid_base64_byte(Byte) ->
+    (Byte >= $A andalso Byte =< $Z)
+        orelse (Byte >= $a andalso Byte =< $z)
+        orelse (Byte >= $0 andalso Byte =< $9)
+        orelse Byte =:= $+
+        orelse Byte =:= $/
         orelse Byte =:= $=.
 
 add_base64_padding(Bin) ->

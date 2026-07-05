@@ -13,6 +13,21 @@ pub fun base64url_encode : BitString -> String
 @external("erlang", "std_crypto_bridge", "base64url_decode")
 pub fun base64url_decode : String -> Result BitString String
 
+#@ Encode bytes as standard padded base64.
+@external("erlang", "std_crypto_bridge", "base64_encode")
+pub fun base64_encode : BitString -> String
+
+#@ Decode standard padded or unpadded base64.
+@external("erlang", "std_crypto_bridge", "base64_decode")
+pub fun base64_decode : String -> Result BitString String
+
+#@ Compute the SHA-1 digest for `data`.
+#@
+#@ SHA-1 is kept for protocols that require it, such as WebSocket handshakes;
+#@ prefer stronger hashes for new security-sensitive designs.
+@external("erlang", "std_crypto_bridge", "sha1_digest")
+pub fun sha1_digest : BitString -> BitString
+
 #@ Compare byte strings without early exit.
 @external("erlang", "std_crypto_bridge", "secure_equal")
 pub fun secure_equal : BitString -> BitString -> Bool
