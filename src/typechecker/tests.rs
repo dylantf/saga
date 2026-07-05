@@ -645,6 +645,22 @@ fn effect_propagates_through_function_call() {
 }
 
 #[test]
+fn effect_propagates_through_later_unannotated_function_call() {
+    // `foo` is checked before `bar`, so the call initially sees only `bar`'s
+    // pre-bound type variable. The row tail emitted by that call must survive
+    // until `bar` is inferred as effectful.
+    let c = check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = bar x\nbar x = fail! \"oops\"",
+    )
+    .expect("unannotated caller should infer effects from later callee");
+    assert!(
+        fun_effects(&c, "foo").iter().any(|e| e.contains("Fail")),
+        "foo should infer propagated {{Fail}}, got: {:?}",
+        fun_effects(&c, "foo")
+    );
+}
+
+#[test]
 fn effect_propagation_with_needs_declared() {
     check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun bar : (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfun foo : (x: Int) -> Int needs {Fail}\nfoo x = bar x",
@@ -891,6 +907,29 @@ fn with_subtracts_only_handled_effect() {
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = { dbg msg; resume () }\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
     )
     .expect("unannotated foo should infer the unhandled remainder");
+    let effs = fun_effects(&c, "foo");
+    assert!(
+        effs.iter().any(|e| e.contains("Fail")),
+        "foo should infer remaining {{Fail}}, got: {:?}",
+        effs
+    );
+    assert!(
+        !effs.iter().any(|e| e.contains("Log")),
+        "Log should be subtracted by `with console`, got: {:?}",
+        effs
+    );
+}
+
+#[test]
+fn with_preserves_residual_effect_from_later_unannotated_function() {
+    let c = check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
+         effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
+         handler console for Log {\n  log msg = { dbg msg; resume () }\n}\n\
+         foo () = bar () with console\n\
+         bar () = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+    )
+    .expect("with should preserve later callee's unhandled residual effect");
     let effs = fun_effects(&c, "foo");
     assert!(
         effs.iter().any(|e| e.contains("Fail")),

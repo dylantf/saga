@@ -1132,9 +1132,7 @@ impl<'a> Lowerer<'a> {
                                 } else {
                                     format!("{}_{}", erlang_mod, ctor)
                                 };
-                                self.constructor_atoms
-                                    .entry(qualified)
-                                    .or_insert(atom);
+                                self.constructor_atoms.entry(qualified).or_insert(atom);
                             }
                         }
                         crate::ast::Decl::RecordDef { name, .. } => {

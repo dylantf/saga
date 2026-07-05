@@ -4751,3 +4751,38 @@ tests () =
         "console print handler regressed to one-arity passthrough:\n{core}"
     );
 }
+
+#[test]
+fn entry_initializes_ets_ref_used_only_by_dependency() {
+    let lib_src = r#"
+module Lib
+
+import Std.Ref (Ref, ets_ref)
+
+pub fun run : Unit -> Unit
+run () = {
+  let r = new! 1
+  let _ = get! r
+  ()
+} with ets_ref
+"#;
+    let main_src = r#"
+module Main
+
+import Lib (run)
+
+main () = run ()
+"#;
+
+    with_temp_project_files(
+        &[("src/Lib.saga", lib_src)],
+        main_src,
+        |checker, main_program| {
+            let main_core = emit_from_program(main_program, "main", checker);
+            assert!(
+                main_core.contains("call 'ets':'new'"),
+                "entry module should initialize saga_ref_store for dependency ets_ref use:\n{main_core}"
+            );
+        },
+    );
+}

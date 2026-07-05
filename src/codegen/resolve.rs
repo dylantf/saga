@@ -73,9 +73,7 @@ pub fn build_constructor_atoms(
                 for variant in variants {
                     let ctor = &variant.node.name;
                     let mangled = format!("{}_{}", module_name, ctor);
-                    let atom = beam_override(ctor)
-                        .map(str::to_string)
-                        .unwrap_or(mangled);
+                    let atom = beam_override(ctor).map(str::to_string).unwrap_or(mangled);
                     atoms.insert(format!("{}.{}", source_module, ctor), atom);
                 }
             }

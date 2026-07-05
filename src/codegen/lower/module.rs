@@ -895,8 +895,22 @@ impl<'a> Lowerer<'a> {
             });
         }
 
-        // If the program uses ets_ref, prepend ETS table creation to the entry function.
-        if self.check_result.needs_ets_ref_table
+        let needs_ets_ref_table = self.check_result.needs_ets_ref_table
+            || self
+                .check_result
+                .module_check_results()
+                .values()
+                .any(|result| result.needs_ets_ref_table);
+        let needs_vec_table = self.check_result.needs_vec_table
+            || self
+                .check_result
+                .module_check_results()
+                .values()
+                .any(|result| result.needs_vec_table);
+
+        // If this program or one of its dependencies uses ets_ref, prepend ETS
+        // table creation to the entry function.
+        if needs_ets_ref_table
             && let Some(entry_def) = fun_defs
                 .iter_mut()
                 .find(|f| f.name == "main" || f.name == "tests")
@@ -904,8 +918,9 @@ impl<'a> Lowerer<'a> {
             entry_def.body = Self::wrap_with_ets_init(entry_def.body.clone());
         }
 
-        // If the program uses beam_vec, prepend ETS table creation for saga_vec_store.
-        if self.check_result.needs_vec_table
+        // If this program or one of its dependencies uses beam_vec, prepend ETS
+        // table creation for saga_vec_store.
+        if needs_vec_table
             && let Some(entry_def) = fun_defs
                 .iter_mut()
                 .find(|f| f.name == "main" || f.name == "tests")

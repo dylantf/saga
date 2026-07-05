@@ -39,6 +39,280 @@ fn timed_typecheck_phase<T>(module: Option<&str>, phase: &str, f: impl FnOnce() 
     result
 }
 
+struct FunGroup<'a> {
+    name: String,
+    clauses: Vec<&'a Decl>,
+    first_index: usize,
+}
+
+fn collect_local_fun_deps(
+    expr: &ast::Expr,
+    local_funs: &std::collections::HashSet<String>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use ast::ExprKind;
+
+    match &expr.kind {
+        ExprKind::Var { name } => {
+            if local_funs.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        ExprKind::App { func, arg } => {
+            collect_local_fun_deps(func, local_funs, out);
+            collect_local_fun_deps(arg, local_funs, out);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            collect_local_fun_deps(left, local_funs, out);
+            collect_local_fun_deps(right, local_funs, out);
+        }
+        ExprKind::UnaryMinus { expr }
+        | ExprKind::FieldAccess { expr, .. }
+        | ExprKind::Ascription { expr, .. }
+        | ExprKind::Resume { value: expr } => collect_local_fun_deps(expr, local_funs, out),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_local_fun_deps(cond, local_funs, out);
+            collect_local_fun_deps(then_branch, local_funs, out);
+            collect_local_fun_deps(else_branch, local_funs, out);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_local_fun_deps(scrutinee, local_funs, out);
+            for arm in arms {
+                if let Some(guard) = &arm.node.guard {
+                    collect_local_fun_deps(guard, local_funs, out);
+                }
+                collect_local_fun_deps(&arm.node.body, local_funs, out);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for stmt in stmts {
+                match &stmt.node {
+                    ast::Stmt::Let { value, .. } | ast::Stmt::Expr(value) => {
+                        collect_local_fun_deps(value, local_funs, out);
+                    }
+                    ast::Stmt::LetFun { guard, body, .. } => {
+                        if let Some(guard) = guard {
+                            collect_local_fun_deps(guard, local_funs, out);
+                        }
+                        collect_local_fun_deps(body, local_funs, out);
+                    }
+                }
+            }
+        }
+        ExprKind::Lambda { body, .. } => collect_local_fun_deps(body, local_funs, out),
+        ExprKind::RecordCreate { fields, .. }
+        | ExprKind::AnonRecordCreate { fields }
+        | ExprKind::RecordBuild { fields, .. } => {
+            for (_, _, value) in fields {
+                collect_local_fun_deps(value, local_funs, out);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            collect_local_fun_deps(record, local_funs, out);
+            for (_, _, value) in fields {
+                collect_local_fun_deps(value, local_funs, out);
+            }
+        }
+        ExprKind::EffectCall { args, .. } | ExprKind::Tuple { elements: args } => {
+            for arg in args {
+                collect_local_fun_deps(arg, local_funs, out);
+            }
+        }
+        ExprKind::With { expr, handler } => {
+            collect_local_fun_deps(expr, local_funs, out);
+            collect_handler_local_fun_deps(handler, local_funs, out);
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (_, value) in bindings {
+                collect_local_fun_deps(value, local_funs, out);
+            }
+            collect_local_fun_deps(success, local_funs, out);
+            for arm in else_arms {
+                if let Some(guard) = &arm.node.guard {
+                    collect_local_fun_deps(guard, local_funs, out);
+                }
+                collect_local_fun_deps(&arm.node.body, local_funs, out);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for arm in arms {
+                if let Some(guard) = &arm.node.guard {
+                    collect_local_fun_deps(guard, local_funs, out);
+                }
+                collect_local_fun_deps(&arm.node.body, local_funs, out);
+            }
+            if let Some((timeout, body)) = after_clause {
+                collect_local_fun_deps(timeout, local_funs, out);
+                collect_local_fun_deps(body, local_funs, out);
+            }
+        }
+        ExprKind::BitString { segments } => {
+            for segment in segments {
+                collect_local_fun_deps(&segment.value, local_funs, out);
+            }
+        }
+        ExprKind::HandlerExpr { body } => {
+            for arm in &body.arms {
+                collect_local_fun_deps(&arm.node.body, local_funs, out);
+                if let Some(finally_block) = &arm.node.finally_block {
+                    collect_local_fun_deps(finally_block, local_funs, out);
+                }
+            }
+            if let Some(return_clause) = &body.return_clause {
+                collect_local_fun_deps(&return_clause.body, local_funs, out);
+                if let Some(finally_block) = &return_clause.finally_block {
+                    collect_local_fun_deps(finally_block, local_funs, out);
+                }
+            }
+        }
+        ExprKind::Pipe { segments, .. }
+        | ExprKind::PipeBack { segments }
+        | ExprKind::ComposeForward { segments } => {
+            for segment in segments {
+                collect_local_fun_deps(&segment.node, local_funs, out);
+            }
+        }
+        ExprKind::BinOpChain { segments, .. } => {
+            for segment in segments {
+                collect_local_fun_deps(&segment.node, local_funs, out);
+            }
+        }
+        ExprKind::ListLit { elements } => {
+            for element in elements {
+                collect_local_fun_deps(element, local_funs, out);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            collect_local_fun_deps(head, local_funs, out);
+            collect_local_fun_deps(tail, local_funs, out);
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let ast::StringPart::Expr(expr) = part {
+                    collect_local_fun_deps(expr, local_funs, out);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            collect_local_fun_deps(body, local_funs, out);
+            for qualifier in qualifiers {
+                match qualifier {
+                    ast::ComprehensionQualifier::Generator(_, expr)
+                    | ast::ComprehensionQualifier::Let(_, expr)
+                    | ast::ComprehensionQualifier::Guard(expr) => {
+                        collect_local_fun_deps(expr, local_funs, out);
+                    }
+                }
+            }
+        }
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            collect_local_fun_deps(dict, local_funs, out);
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                collect_local_fun_deps(arg, local_funs, out);
+            }
+        }
+        ExprKind::Lit { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictRef { .. } => {}
+    }
+}
+
+fn collect_handler_local_fun_deps(
+    handler: &ast::Handler,
+    local_funs: &std::collections::HashSet<String>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let ast::Handler::Inline { items, .. } = handler else {
+        return;
+    };
+    for item in items {
+        match &item.node {
+            ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
+                collect_local_fun_deps(&arm.body, local_funs, out);
+                if let Some(finally_block) = &arm.finally_block {
+                    collect_local_fun_deps(finally_block, local_funs, out);
+                }
+            }
+            ast::HandlerItem::Named(_) => {}
+        }
+    }
+}
+
+fn topological_fun_order(groups: &[FunGroup<'_>]) -> Vec<usize> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        Visiting,
+        Done,
+    }
+
+    fn visit(idx: usize, deps: &[Vec<usize>], marks: &mut [Option<Mark>], order: &mut Vec<usize>) {
+        match marks[idx] {
+            Some(Mark::Done) => return,
+            Some(Mark::Visiting) => return,
+            None => {}
+        }
+        marks[idx] = Some(Mark::Visiting);
+        for dep in &deps[idx] {
+            visit(*dep, deps, marks, order);
+        }
+        marks[idx] = Some(Mark::Done);
+        order.push(idx);
+    }
+
+    let local_funs: std::collections::HashSet<String> =
+        groups.iter().map(|group| group.name.clone()).collect();
+    let index_by_name: HashMap<&str, usize> = groups
+        .iter()
+        .enumerate()
+        .map(|(idx, group)| (group.name.as_str(), idx))
+        .collect();
+    let mut deps = vec![Vec::<usize>::new(); groups.len()];
+    for (idx, group) in groups.iter().enumerate() {
+        let mut names = std::collections::HashSet::new();
+        for clause in &group.clauses {
+            let Decl::FunBinding { guard, body, .. } = clause else {
+                continue;
+            };
+            if let Some(guard) = guard {
+                collect_local_fun_deps(guard, &local_funs, &mut names);
+            }
+            collect_local_fun_deps(body, &local_funs, &mut names);
+        }
+        let mut dep_indices: Vec<usize> = names
+            .into_iter()
+            .filter(|name| name != &group.name)
+            .filter_map(|name| index_by_name.get(name.as_str()).copied())
+            .collect();
+        dep_indices.sort_by_key(|dep| groups[*dep].first_index);
+        dep_indices.dedup();
+        deps[idx] = dep_indices;
+    }
+
+    let mut marks = vec![None; groups.len()];
+    let mut order = Vec::with_capacity(groups.len());
+    for idx in 0..groups.len() {
+        visit(idx, &deps, &mut marks, &mut order);
+    }
+    order
+}
+
 impl Checker {
     pub(crate) fn build_effect_row_from_refs(
         &mut self,
@@ -262,6 +536,8 @@ impl Checker {
         let mut errors: Vec<Diagnostic> = Vec::new();
         timed_typecheck_phase(module.as_deref(), "body_pass", || {
             let mut i = 0;
+            let mut fun_groups = Vec::new();
+            let mut non_fun_indices = Vec::new();
             while i < program.len() {
                 if let Decl::FunBinding { name, .. } = &program[i] {
                     // Collect all consecutive clauses with the same name
@@ -277,47 +553,64 @@ impl Checker {
                         break;
                     }
                     let clauses: Vec<&Decl> = program[start..i].iter().collect();
-                    let fun_var = fun_vars[&name].clone();
-                    let annotation = match annotations.get(&name) {
-                        Some((ty, span, row)) => FunctionAnnotation {
-                            ty: Some(ty),
-                            span: Some(*span),
-                            effect_row: Some(row),
-                        },
-                        None => FunctionAnnotation {
-                            ty: None,
-                            span: None,
-                            effect_row: None,
-                        },
-                    };
-                    let where_cons = annotation_constraints
-                        .get(&name)
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]);
-                    if let Err(e) =
-                        self.check_fun_clauses(&name, &clauses, &fun_var, annotation, where_cons)
-                    {
-                        errors.push(e);
-                        // Clear pending constraints for this function -- they may reference
-                        // unresolved types from the error site and would produce cascading errors
-                        self.trait_state.pending_constraints.clear();
-                    }
-                    // Drain any additional errors collected during block inference
-                    let has_errors = self
-                        .collected_diagnostics
-                        .iter()
-                        .any(|d| matches!(d.severity, crate::typechecker::Severity::Error));
-                    if has_errors {
-                        self.trait_state.pending_constraints.clear();
-                    }
-                    errors.extend(self.drain_errors());
+                    fun_groups.push(FunGroup {
+                        name,
+                        clauses,
+                        first_index: start,
+                    });
                 } else {
-                    if let Err(e) = self.check_decl(&program[i]) {
-                        errors.push(e);
-                    }
-                    errors.extend(self.drain_errors());
+                    non_fun_indices.push(i);
                     i += 1;
                 }
+            }
+
+            for idx in non_fun_indices {
+                if let Err(e) = self.check_decl(&program[idx]) {
+                    errors.push(e);
+                }
+                errors.extend(self.drain_errors());
+            }
+
+            for group_idx in topological_fun_order(&fun_groups) {
+                let group = &fun_groups[group_idx];
+                let fun_var = fun_vars[&group.name].clone();
+                let annotation = match annotations.get(&group.name) {
+                    Some((ty, span, row)) => FunctionAnnotation {
+                        ty: Some(ty),
+                        span: Some(*span),
+                        effect_row: Some(row),
+                    },
+                    None => FunctionAnnotation {
+                        ty: None,
+                        span: None,
+                        effect_row: None,
+                    },
+                };
+                let where_cons = annotation_constraints
+                    .get(&group.name)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                if let Err(e) = self.check_fun_clauses(
+                    &group.name,
+                    &group.clauses,
+                    &fun_var,
+                    annotation,
+                    where_cons,
+                ) {
+                    errors.push(e);
+                    // Clear pending constraints for this function -- they may reference
+                    // unresolved types from the error site and would produce cascading errors.
+                    self.trait_state.pending_constraints.clear();
+                }
+                // Drain any additional errors collected during block inference.
+                let has_errors = self
+                    .collected_diagnostics
+                    .iter()
+                    .any(|d| matches!(d.severity, crate::typechecker::Severity::Error));
+                if has_errors {
+                    self.trait_state.pending_constraints.clear();
+                }
+                errors.extend(self.drain_errors());
             }
         });
 
