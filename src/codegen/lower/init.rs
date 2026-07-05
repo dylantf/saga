@@ -945,11 +945,10 @@ impl<'a> Lowerer<'a> {
         // Register anonymous record types found in record field types and expressions.
         Self::collect_anon_records_from_program(program, &mut self.record_fields);
 
-        // Pre-register qualified constructor atoms for every compiled module.
-        // Public bare entries are already registered by build_constructor_atoms,
-        // but generic fold and imported handlers can inline producer code that
-        // references private constructors. Qualified entries preserve the
-        // producer module without shadowing local bare names or BEAM overrides.
+        // Pre-register canonical constructor atoms for every compiled module.
+        // Generic fold and imported handlers can inline producer code that
+        // references private constructors; canonical entries preserve the
+        // producer module without any bare-name collision path.
         self.register_all_module_ctors();
 
         pending_annotations
@@ -1127,13 +1126,15 @@ impl<'a> Lowerer<'a> {
                         crate::ast::Decl::TypeDef { variants, .. } => {
                             for variant in variants {
                                 let ctor = &variant.node.name;
-                                if Self::is_beam_override_ctor(ctor) {
-                                    continue;
-                                }
                                 let qualified = format!("{}.{}", source_module, ctor);
+                                let atom = if Self::is_beam_override_ctor(ctor) {
+                                    Self::beam_override_ctor_atom(ctor).to_string()
+                                } else {
+                                    format!("{}_{}", erlang_mod, ctor)
+                                };
                                 self.constructor_atoms
                                     .entry(qualified)
-                                    .or_insert_with(|| format!("{}_{}", erlang_mod, ctor));
+                                    .or_insert(atom);
                             }
                         }
                         crate::ast::Decl::RecordDef { name, .. } => {
@@ -1162,5 +1163,21 @@ impl<'a> Lowerer<'a> {
                 | "Killed"
                 | "Noproc"
         )
+    }
+
+    fn beam_override_ctor_atom(name: &str) -> &'static str {
+        match name {
+            "Ok" => "ok",
+            "Err" => "error",
+            "Just" => "just",
+            "Nothing" => "nothing",
+            "True" => "true",
+            "False" => "false",
+            "Normal" => "normal",
+            "Shutdown" => "shutdown",
+            "Killed" => "killed",
+            "Noproc" => "noproc",
+            _ => unreachable!("not a BEAM override constructor: {name}"),
+        }
     }
 }

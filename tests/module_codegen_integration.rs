@@ -3178,6 +3178,49 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 }
 
 #[test]
+fn imported_same_named_constructor_uses_current_module_resolution() {
+    let alpha = r#"module Alpha
+
+pub type Method = GET deriving (Show)
+"#;
+    let beta = r#"module Beta
+
+pub type Method = GET deriving (Show)
+"#;
+    let polluter = r#"module Polluter
+
+import Beta (GET)
+
+pub fun touch : Unit -> String
+touch () = show GET
+"#;
+    let main = r#"module Main
+
+import Alpha (GET)
+import Polluter (touch)
+
+pub fun main : Unit -> String
+main () = show GET
+"#;
+
+    let out = with_temp_project_files(
+        &[
+            ("Alpha.saga", alpha),
+            ("Beta.saga", beta),
+            ("Polluter.saga", polluter),
+        ],
+        main,
+        |checker, program| emit_from_program(program, "main", checker),
+    );
+
+    assert_contains(&out, "{'alpha_GET'}");
+    assert!(
+        !out.contains("{'beta_GET'}"),
+        "Main.GET lowered with Beta's constructor atom:\n{out}"
+    );
+}
+
+#[test]
 fn record_constructors_mangled() {
     // Test that record constructors get mangled when used in expressions
     let main_src = "

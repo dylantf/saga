@@ -71,7 +71,7 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
                         .map(|(v, _)| v.clone()),
                     _ => None,
                 })
-                .unwrap_or_else(|| name.to_string());
+                .unwrap_or_else(|| super::canonicalize_constructor_name(name).to_string());
             SPat::Constructor(ctor, vec![])
         }
         Pat::Lit {

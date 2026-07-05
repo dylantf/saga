@@ -31,7 +31,7 @@ impl<'a> Lowerer<'a> {
             }
             _ => {}
         }
-        match name {
+        match bare_name {
             "Cons" if args.len() == 2 => {
                 let head_var = self.fresh();
                 let tail_var = self.fresh();
@@ -56,7 +56,7 @@ impl<'a> Lowerer<'a> {
                 // lambda args inherit a `lambda_effect_context` and get the
                 // proper CPS expansion (evidence + _ReturnK).
                 let field_tys: Vec<Option<crate::typechecker::Type>> = {
-                    let scheme = self.check_result.constructors.get(name);
+                    let scheme = self.constructor_scheme_for(name);
                     if let Some(scheme) = scheme {
                         let mut tys = Vec::new();
                         let mut current = &scheme.ty;
@@ -172,7 +172,7 @@ impl<'a> Lowerer<'a> {
         origin_module: Option<&str>,
     ) -> CExpr {
         let bare = name.rsplit('.').next().unwrap_or(name);
-        let is_cons = name == "Cons" && args.len() == 2;
+        let is_cons = bare == "Cons" && args.len() == 2;
         let is_bare_atom = args.is_empty()
             && (matches!(bare, "Nil" | "True" | "False")
                 || crate::codegen::lower::beam_interop::exit_reason_bare_atom(bare).is_some());
@@ -185,7 +185,7 @@ impl<'a> Lowerer<'a> {
 
         let field_tys: Vec<Option<crate::typechecker::Type>> = if is_cons {
             vec![None, None]
-        } else if let Some(scheme) = self.check_result.constructors.get(name) {
+        } else if let Some(scheme) = self.constructor_scheme_for(name) {
             let mut tys = Vec::new();
             let mut current = &scheme.ty;
             while let crate::typechecker::Type::Fun(param, ret, _) = current {

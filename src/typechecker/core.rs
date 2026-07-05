@@ -182,10 +182,41 @@ pub const BUILTIN_TYPE_CANONICAL: &[(&str, &str)] = &[
     ("ExitReason", "Std.Actor.ExitReason"),
 ];
 
+/// Maps bare builtin constructor names to their canonical forms.
+pub const BUILTIN_CONSTRUCTOR_CANONICAL: &[(&str, &str)] = &[
+    ("Nil", "Std.List.Nil"),
+    ("Cons", "Std.List.Cons"),
+    ("True", "Std.Bool.True"),
+    ("False", "Std.Bool.False"),
+    ("Just", "Std.Maybe.Just"),
+    ("Nothing", "Std.Maybe.Nothing"),
+    ("Ok", "Std.Result.Ok"),
+    ("Err", "Std.Result.Err"),
+    ("Lt", "Std.Base.Lt"),
+    ("Eq", "Std.Base.Eq"),
+    ("Gt", "Std.Base.Gt"),
+    ("Normal", "Std.Actor.Normal"),
+    ("Shutdown", "Std.Actor.Shutdown"),
+    ("Killed", "Std.Actor.Killed"),
+    ("Noproc", "Std.Actor.Noproc"),
+    ("Error", "Std.Actor.Error"),
+    ("Other", "Std.Actor.Other"),
+];
+
 /// Resolve a bare builtin type name to its canonical form.
 /// Returns the input unchanged if it's not a known builtin.
 pub fn canonicalize_type_name(name: &str) -> &str {
     BUILTIN_TYPE_CANONICAL
+        .iter()
+        .find(|(bare, _)| *bare == name)
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(name)
+}
+
+/// Resolve a bare builtin constructor name to its canonical form.
+/// Returns the input unchanged if it's not a known builtin constructor.
+pub fn canonicalize_constructor_name(name: &str) -> &str {
+    BUILTIN_CONSTRUCTOR_CANONICAL
         .iter()
         .find(|(bare, _)| *bare == name)
         .map(|(_, canonical)| *canonical)

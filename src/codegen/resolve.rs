@@ -18,8 +18,7 @@ use crate::ast::{self, ComprehensionQualifier, Decl, Expr, ExprKind, NodeId, Pat
 use crate::codegen::lower::init::extract_external;
 use crate::typechecker::{ModuleCodegenInfo, ResolutionResult as FrontResolutionResult};
 
-/// Map from constructor name -> mangled Erlang atom.
-/// Contains both bare ("NotFound") and qualified ("Std.File.NotFound") entries.
+/// Map from canonical constructor name -> mangled Erlang atom.
 pub type ConstructorAtoms = HashMap<String, String>;
 
 /// BEAM convention overrides: constructors that map to specific Erlang atoms
@@ -48,18 +47,23 @@ pub fn build_constructor_atoms(
     module_name: &str,
     program: &Program,
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
-    prelude_imports: &[Decl],
+    _prelude_imports: &[Decl],
 ) -> ConstructorAtoms {
     let mut atoms = ConstructorAtoms::new();
     let source_module = source_module_name(program, module_name);
 
-    // Register BEAM overrides (these win over any module-prefixed version)
-    for name in &[
-        "Ok", "Err", "Just", "Nothing", "True", "False", "Normal", "Shutdown", "Killed", "Noproc",
-    ] {
-        if let Some(atom) = beam_override(name) {
-            atoms.insert(name.to_string(), atom.to_string());
-        }
+    for (bare, canonical) in crate::typechecker::BUILTIN_CONSTRUCTOR_CANONICAL {
+        let erlang_mod = canonical
+            .rsplit_once('.')
+            .map(|(module, _)| {
+                let path: Vec<String> = module.split('.').map(String::from).collect();
+                module_name_to_erlang(&path)
+            })
+            .unwrap_or_else(|| module_name.to_string());
+        let atom = beam_override(bare)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{}_{}", erlang_mod, bare));
+        atoms.insert((*canonical).to_string(), atom);
     }
 
     // Local type constructors: TypeDef variants
@@ -69,33 +73,17 @@ pub fn build_constructor_atoms(
                 for variant in variants {
                     let ctor = &variant.node.name;
                     let mangled = format!("{}_{}", module_name, ctor);
-                    if !atoms.contains_key(ctor) {
-                        atoms.insert(ctor.clone(), mangled.clone());
-                    }
-                    atoms.insert(format!("{}.{}", source_module, ctor), mangled);
+                    let atom = beam_override(ctor)
+                        .map(str::to_string)
+                        .unwrap_or(mangled);
+                    atoms.insert(format!("{}.{}", source_module, ctor), atom);
                 }
             }
             Decl::RecordDef { name, .. } => {
                 let mangled = format!("{}_{}", module_name, name);
-                if !atoms.contains_key(name) {
-                    atoms.insert(name.clone(), mangled.clone());
-                }
                 atoms.insert(format!("{}.{}", source_module, name), mangled);
             }
             _ => {}
-        }
-    }
-
-    // Build a map of module name -> import alias from import declarations
-    let mut import_aliases: HashMap<String, String> = HashMap::new();
-    for decl in prelude_imports.iter().chain(program.iter()) {
-        if let Decl::Import {
-            module_path,
-            alias: Some(a),
-            ..
-        } = decl
-        {
-            import_aliases.insert(module_path.join("."), a.clone());
         }
     }
 
@@ -103,44 +91,26 @@ pub fn build_constructor_atoms(
     for (mod_name, info) in codegen_info {
         let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
         let erlang_name = module_name_to_erlang(&mod_path);
-        let last_segment = mod_path.last().map(|s| s.as_str()).unwrap_or("");
-        let alias = import_aliases
-            .get(mod_name)
-            .map(|s| s.as_str())
-            .unwrap_or(last_segment);
 
-        for (type_name, ctors) in &info.type_constructors {
+        for (_, ctors) in &info.type_constructors {
             for ctor in ctors {
-                let ctor_erlang_name = info
+                let canonical = info
                     .export_origins
                     .iter()
                     .find(|(surface, _)| surface == ctor)
-                    .and_then(|(_, origin)| origin.rsplit_once('.').map(|(module, _)| module))
-                    .map(|module| {
+                    .map(|(_, origin)| origin.clone())
+                    .unwrap_or_else(|| format!("{}.{}", mod_name, ctor));
+                let ctor_erlang_name = canonical
+                    .rsplit_once('.')
+                    .map(|(module, _)| {
                         let path: Vec<String> = module.split('.').map(String::from).collect();
                         module_name_to_erlang(&path)
                     })
                     .unwrap_or_else(|| erlang_name.clone());
-                // Register bare name (e.g. "NotFound") if not already taken by a local def
-                if !atoms.contains_key(ctor) {
-                    if let Some(atom) = beam_override(ctor) {
-                        atoms.insert(ctor.to_string(), atom.to_string());
-                    } else {
-                        atoms.insert(ctor.to_string(), format!("{}_{}", ctor_erlang_name, ctor));
-                    }
-                }
-                // Register qualified forms for disambiguation:
-                // "Std.File.NotFound" and "File.NotFound"
-                if beam_override(ctor).is_none() {
-                    let mangled = format!("{}_{}", ctor_erlang_name, ctor);
-                    atoms.insert(format!("{}.{}", mod_name, ctor), mangled.clone());
-                    // Also register alias-qualified: "File.NotFound"
-                    if !alias.is_empty() {
-                        atoms.insert(format!("{}.{}", alias, ctor), mangled.clone());
-                    }
-                    // Also register type-qualified: "FileError.NotFound"
-                    atoms.insert(format!("{}.{}", type_name, ctor), mangled);
-                }
+                let atom = beam_override(ctor)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}_{}", ctor_erlang_name, ctor));
+                atoms.insert(canonical, atom);
             }
         }
     }

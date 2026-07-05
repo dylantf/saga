@@ -278,6 +278,7 @@ impl Folder<'_> {
         // val -> …` that would hide the constructor from floating); a constructor
         // parameter becomes a single-arm `case`. Patterns are exhaustive for the
         // dispatched type (the impl method typechecked).
+        self.carry_param_constructor_names(params, source_module);
         Some(bind_subpats(params, args, &new_body))
     }
 
@@ -402,6 +403,23 @@ impl Folder<'_> {
         }
         let fresh_body =
             self.freshen_with_carry(body, resolution, record_types, constructors, source_module);
+        self.carry_param_constructor_names(params, source_module);
         Some(bind_subpats(params, &args, &fresh_body))
+    }
+
+    fn carry_param_constructor_names(&mut self, params: &[Pat], source_module: Option<&str>) {
+        let Some(module) = source_module else {
+            return;
+        };
+        for param in params {
+            let mut param = param.clone();
+            let mut ctor_names = Vec::new();
+            collect_pat_constructor_names(&mut param, &mut ctor_names);
+            for name in ctor_names {
+                self.carried_constructor_names
+                    .entry(name)
+                    .or_insert_with(|| module.to_string());
+            }
+        }
     }
 }

@@ -50,40 +50,44 @@ impl Lowerer<'_> {
                     .map(|p| self.lower_pat(p, constructor_atoms, origin_module))
                     .collect(),
             ),
-            Pat::Constructor { id, name, args, .. } => match name.as_str() {
-                "Cons" if args.len() == 2 => CPat::Cons(
-                    Box::new(self.lower_pat(&args[0], constructor_atoms, origin_module)),
-                    Box::new(self.lower_pat(&args[1], constructor_atoms, origin_module)),
-                ),
-                "Nil" if args.is_empty() => CPat::Nil,
-                // Booleans are bare atoms to match Erlang's native true/false
-                "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
-                "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
-                _ if args.is_empty()
-                    && super::beam_interop::exit_reason_bare_atom(name).is_some() =>
-                {
-                    CPat::Lit(CLit::Atom(
-                        super::beam_interop::exit_reason_bare_atom(name)
-                            .unwrap()
-                            .to_string(),
-                    ))
+            Pat::Constructor { id, name, args, .. } => {
+                let resolved_name = self.resolved_constructor_name_for(*id, name);
+                let bare_name = resolved_name.rsplit('.').next().unwrap_or(&resolved_name);
+                match bare_name {
+                    "Cons" if args.len() == 2 => CPat::Cons(
+                        Box::new(self.lower_pat(&args[0], constructor_atoms, origin_module)),
+                        Box::new(self.lower_pat(&args[1], constructor_atoms, origin_module)),
+                    ),
+                    "Nil" if args.is_empty() => CPat::Nil,
+                    // Booleans are bare atoms to match Erlang's native true/false
+                    "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
+                    "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
+                    _ if args.is_empty()
+                        && super::beam_interop::exit_reason_bare_atom(bare_name).is_some() =>
+                    {
+                        CPat::Lit(CLit::Atom(
+                            super::beam_interop::exit_reason_bare_atom(bare_name)
+                                .unwrap()
+                                .to_string(),
+                        ))
+                    }
+                    _ => {
+                        let atom = mangle_ctor_atom(
+                            &resolved_name,
+                            constructor_atoms,
+                            self.carried_constructor_origin_module(*id)
+                                .or_else(|| self.carried_constructor_name_origin_module(name))
+                                .or(origin_module),
+                        );
+                        let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
+                        elems.extend(
+                            args.iter()
+                                .map(|p| self.lower_pat(p, constructor_atoms, origin_module)),
+                        );
+                        CPat::Tuple(elems)
+                    }
                 }
-                _ => {
-                    let atom = mangle_ctor_atom(
-                        name,
-                        constructor_atoms,
-                        self.carried_constructor_origin_module(*id)
-                            .or_else(|| self.carried_constructor_name_origin_module(name))
-                            .or(origin_module),
-                    );
-                    let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
-                    elems.extend(
-                        args.iter()
-                            .map(|p| self.lower_pat(p, constructor_atoms, origin_module)),
-                    );
-                    CPat::Tuple(elems)
-                }
-            },
+            }
             Pat::Record {
                 id,
                 name,
@@ -92,8 +96,12 @@ impl Lowerer<'_> {
                 ..
             } => {
                 // Records are tagged tuples in declared field order.
+                let ctor_name = self
+                    .current_record_type_name(*id)
+                    .and_then(|name| self.canonical_constructor_key_for(name))
+                    .unwrap_or_else(|| self.resolved_constructor_name_for(*id, name));
                 let atom = mangle_ctor_atom(
-                    name,
+                    &ctor_name,
                     constructor_atoms,
                     self.carried_constructor_origin_module(*id)
                         .or_else(|| self.carried_constructor_name_origin_module(name))

@@ -91,10 +91,11 @@ impl<'a> Lowerer<'a> {
             ExprKind::App { .. } => self.lower_app_expr(expr),
 
             ExprKind::Constructor { name, .. } => {
+                let ctor_name = self.resolved_constructor_name_for(expr.id, name);
                 let origin = self
-                    .constructor_origin_module_for(expr.id, name)
+                    .constructor_origin_module_for(expr.id, &ctor_name)
                     .map(str::to_string);
-                self.lower_ctor_with_origin(name, vec![], origin.as_deref())
+                self.lower_ctor_with_origin(&ctor_name, vec![], origin.as_deref())
             }
 
             ExprKind::BinOp {
@@ -362,20 +363,15 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
-            ExprKind::QualifiedName { module, name, .. } => {
-                // Check if this is a qualified constructor with no args (e.g. M.Nothing)
-                let qualified = format!("{}.{}", module, name);
-                let resolved_ctor = self.resolved_constructor_name_for(expr.id, &qualified);
-                let ctor_name = if self.is_known_constructor(&qualified) {
-                    qualified.as_str()
-                } else {
-                    resolved_ctor.as_str()
-                };
-                if self.is_known_constructor(ctor_name) || self.is_known_constructor(name) {
+            ExprKind::QualifiedName { name, .. } => {
+                // Check if this node resolved to a qualified constructor with no args.
+                if let Some(ctor_name) = self.maybe_resolved_constructor_name_for(expr.id)
+                    && self.is_known_constructor(&ctor_name)
+                {
                     let origin = self
-                        .constructor_origin_module_for(expr.id, ctor_name)
+                        .constructor_origin_module_for(expr.id, &ctor_name)
                         .map(str::to_string);
-                    return self.lower_ctor_with_origin(ctor_name, vec![], origin.as_deref());
+                    return self.lower_ctor_with_origin(&ctor_name, vec![], origin.as_deref());
                 }
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
                     self.lower_resolved_value_ref(expr.id, resolved)
@@ -432,8 +428,12 @@ impl<'a> Lowerer<'a> {
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
+                let ctor_name = self
+                    .current_record_type_name(expr.id)
+                    .and_then(|name| self.canonical_constructor_key_for(name))
+                    .unwrap_or_else(|| self.resolved_constructor_name_for(expr.id, name));
                 let atom = util::mangle_ctor_atom(
-                    name,
+                    &ctor_name,
                     &self.constructor_atoms,
                     self.handler_origin_module(),
                 );

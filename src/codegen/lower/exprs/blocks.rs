@@ -501,11 +501,12 @@ impl<'a> Lowerer<'a> {
                         self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
                     })
                 {
+                    let resolved_ctor = self.resolved_constructor_name_for(head.id, ctor_name);
                     let origin = self
-                        .constructor_origin_module_for(head.id, ctor_name)
+                        .constructor_origin_module_for(head.id, &resolved_ctor)
                         .map(str::to_string);
                     return self.lower_ctor_with_k_origin(
-                        ctor_name,
+                        &resolved_ctor,
                         args,
                         k_var,
                         origin.as_deref(),
@@ -607,11 +608,17 @@ impl<'a> Lowerer<'a> {
             fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
 
         let tag = match name {
-            Some(rname) => crate::codegen::lower::util::mangle_ctor_atom(
-                rname,
-                &self.constructor_atoms,
-                self.handler_origin_module(),
-            ),
+            Some(rname) => {
+                let ctor_name = self
+                    .current_record_type_name(node_id)
+                    .and_then(|name| self.canonical_constructor_key_for(name))
+                    .unwrap_or_else(|| self.resolved_constructor_name_for(node_id, rname));
+                crate::codegen::lower::util::mangle_ctor_atom(
+                    &ctor_name,
+                    &self.constructor_atoms,
+                    self.handler_origin_module(),
+                )
+            }
             None => {
                 let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
                 crate::ast::anon_record_tag(&names)

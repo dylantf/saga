@@ -1024,10 +1024,10 @@ impl Elaborator {
 
         // Map operator to: (compare_result == Ctor) or (compare_result != Ctor)
         let (eq_op, ctor_name) = match op {
-            BinOp::Lt => (BinOp::Eq, "Lt"),
-            BinOp::Gt => (BinOp::Eq, "Gt"),
-            BinOp::LtEq => (BinOp::NotEq, "Gt"),
-            BinOp::GtEq => (BinOp::NotEq, "Lt"),
+            BinOp::Lt => (BinOp::Eq, "Std.Base.Lt"),
+            BinOp::Gt => (BinOp::Eq, "Std.Base.Gt"),
+            BinOp::LtEq => (BinOp::NotEq, "Std.Base.Gt"),
+            BinOp::GtEq => (BinOp::NotEq, "Std.Base.Lt"),
             _ => unreachable!(),
         };
 

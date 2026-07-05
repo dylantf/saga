@@ -5,7 +5,7 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 
 use super::evidence;
-use super::util::{self, collect_ctor_call};
+use super::util::{self, collect_ctor_call_with_head};
 use super::{EvidenceCtx, Lowerer};
 
 impl<'a> Lowerer<'a> {
@@ -81,9 +81,10 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
+        let bare = name.rsplit('.').next().unwrap_or(name);
         let atom =
             util::mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
-        let value = if name == "Cons" && params.len() == 2 {
+        let value = if bare == "Cons" && params.len() == 2 {
             CExpr::Cons(
                 Box::new(CExpr::Var(params[0].clone())),
                 Box::new(CExpr::Var(params[1].clone())),
@@ -363,7 +364,10 @@ impl<'a> Lowerer<'a> {
         if let Some(expected_ty) = expected_ty {
             if let ExprKind::Constructor { name, .. } = &expr.kind
                 && matches!(expected_ty, crate::typechecker::Type::Fun(_, _, _))
-                && let Some(ctor_fun) = self.lower_constructor_function_value(name, expected_ty)
+                && let Some(ctor_fun) = {
+                    let ctor_name = self.resolved_constructor_name_for(expr.id, name);
+                    self.lower_constructor_function_value(&ctor_name, expected_ty)
+                }
             {
                 return ctor_fun;
             }
@@ -374,7 +378,8 @@ impl<'a> Lowerer<'a> {
                 return curried_lambda;
             }
 
-            if let Some((ctor_name, args)) = collect_ctor_call(expr) {
+            if let Some((head, ctor_name, args)) = collect_ctor_call_with_head(expr) {
+                let resolved_ctor = self.resolved_constructor_name_for(head.id, ctor_name);
                 let bare = crate::typechecker::bare_type_name(match expected_ty {
                     crate::typechecker::Type::Con(name, _) => name,
                     _ => "",
@@ -384,7 +389,7 @@ impl<'a> Lowerer<'a> {
                     && let Some(elem_ty) = type_args.first()
                 {
                     match (
-                        ctor_name.rsplit('.').next().unwrap_or(ctor_name),
+                        resolved_ctor.rsplit('.').next().unwrap_or(&resolved_ctor),
                         args.as_slice(),
                     ) {
                         ("Nil", []) => return CExpr::Nil,
@@ -414,7 +419,7 @@ impl<'a> Lowerer<'a> {
 
                 if bare != "List"
                     && let Some(arg_tys) =
-                        self.constructor_arg_types_from_expected(ctor_name, expected_ty)
+                        self.constructor_arg_types_from_expected(&resolved_ctor, expected_ty)
                 {
                     let mut vars = Vec::new();
                     let mut bindings = Vec::new();
@@ -426,7 +431,7 @@ impl<'a> Lowerer<'a> {
                         bindings.push((var, val));
                     }
                     let atom = util::mangle_ctor_atom(
-                        ctor_name,
+                        &resolved_ctor,
                         &self.constructor_atoms,
                         self.handler_origin_module(),
                     );
@@ -541,8 +546,12 @@ impl<'a> Lowerer<'a> {
                         vars.push(var.clone());
                         bindings.push((var, val));
                     }
+                    let ctor_name = self
+                        .current_record_type_name(expr.id)
+                        .and_then(|name| self.canonical_constructor_key_for(name))
+                        .unwrap_or_else(|| self.resolved_constructor_name_for(expr.id, name));
                     let atom = util::mangle_ctor_atom(
-                        name,
+                        &ctor_name,
                         &self.constructor_atoms,
                         self.handler_origin_module(),
                     );

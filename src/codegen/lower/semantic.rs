@@ -200,7 +200,7 @@ impl<'a> Lowerer<'a> {
         ) {
             return None;
         }
-        let scheme = self.check_result.constructors.get(ctor_name)?;
+        let scheme = self.constructor_scheme_for(ctor_name)?;
         let mut param_tys = Vec::new();
         let mut current = &scheme.ty;
         while let crate::typechecker::Type::Fun(param, ret, _) = current {
@@ -269,9 +269,6 @@ impl<'a> Lowerer<'a> {
         {
             return None;
         }
-        if self.constructor_atoms.contains_key(bare) {
-            return None;
-        }
         self.carried_constructor_names
             .get(bare)
             .map(String::as_str)
@@ -293,6 +290,20 @@ impl<'a> Lowerer<'a> {
         node_id: crate::ast::NodeId,
         fallback: &str,
     ) -> String {
+        self.maybe_resolved_constructor_name_for(node_id)
+            .or_else(|| self.canonical_constructor_key_for(fallback))
+            .unwrap_or_else(|| {
+                panic!(
+                    "codegen: constructor `{fallback}` at node {node_id:?} reached lowering \
+                     without canonical constructor resolution"
+                )
+            })
+    }
+
+    pub(super) fn maybe_resolved_constructor_name_for(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<String> {
         self.carried_constructors
             .get(&node_id)
             .cloned()
@@ -302,20 +313,58 @@ impl<'a> Lowerer<'a> {
                     .constructor(node_id)
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| fallback.to_string())
+            .and_then(|name| {
+                if name.contains('.') {
+                    Some(name)
+                } else {
+                    self.canonical_constructor_key_for(&name)
+                }
+            })
+    }
+
+    pub(super) fn canonical_constructor_key_for(&self, name: &str) -> Option<String> {
+        if name.contains('.') {
+            return Some(name.to_string());
+        }
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        let builtin = crate::typechecker::canonicalize_constructor_name(bare);
+        if builtin != bare {
+            return Some(builtin.to_string());
+        }
+        let current = format!("{}.{}", self.current_source_module, bare);
+        if self.constructor_atoms.contains_key(&current) {
+            return Some(current);
+        }
+        if let Some(module) = self
+            .carried_constructor_name_origin_module(name)
+            .or_else(|| self.handler_origin_module())
+        {
+            let canonical = format!("{module}.{bare}");
+            if self.constructor_atoms.contains_key(&canonical) {
+                return Some(canonical);
+            }
+        }
+        None
+    }
+
+    pub(super) fn constructor_scheme_for(
+        &self,
+        canonical_name: &str,
+    ) -> Option<&crate::typechecker::Scheme> {
+        self.check_result
+            .constructors
+            .get(canonical_name)
+            .or_else(|| {
+                canonical_name
+                    .strip_prefix(&format!("{}.", self.current_source_module))
+                    .and_then(|bare| self.check_result.constructors.get(bare))
+            })
     }
 
     /// Check whether a name refers to a known constructor, accounting for
     /// the current handler origin module if lowering imported handler code.
     pub(super) fn is_known_constructor(&self, name: &str) -> bool {
-        if self.constructor_atoms.contains_key(name) {
-            return true;
-        }
-        if let Some(origin) = self.handler_origin_module() {
-            let qualified = format!("{}.{}", origin, name);
-            return self.constructor_atoms.contains_key(&qualified);
-        }
-        false
+        self.constructor_atoms.contains_key(name)
     }
 
     pub(super) fn front_resolution_for_module(

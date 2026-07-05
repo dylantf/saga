@@ -546,7 +546,12 @@ pub(crate) fn derive_ord(
 
             let body = if arity == 0 {
                 // Same nullary constructor: always Eq
-                Expr::synth(span, ExprKind::Constructor { name: "Eq".into() })
+                Expr::synth(
+                    span,
+                    ExprKind::Constructor {
+                        name: "Std.Base.Eq".into(),
+                    },
+                )
             } else {
                 // Compare fields left-to-right, short-circuit on non-Eq
                 build_field_compare(&a_vars, &b_vars, span)
@@ -707,7 +712,12 @@ pub(crate) fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Sp
     assert!(!a_vars.is_empty());
 
     // Start from the last field and build inward
-    let mut result = Expr::synth(span, ExprKind::Constructor { name: "Eq".into() });
+    let mut result = Expr::synth(
+        span,
+        ExprKind::Constructor {
+            name: "Std.Base.Eq".into(),
+        },
+    );
 
     for i in (0..a_vars.len()).rev() {
         let cmp_call = Expr::synth(
@@ -753,7 +763,7 @@ pub(crate) fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Sp
                         Annotated::bare(CaseArm {
                             pattern: Pat::Constructor {
                                 id: NodeId::fresh(),
-                                name: "Eq".into(),
+                                name: "Std.Base.Eq".into(),
                                 args: vec![],
                                 span,
                             },

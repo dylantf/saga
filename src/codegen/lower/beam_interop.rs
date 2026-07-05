@@ -1217,6 +1217,10 @@ const EXIT_REASON_ATOMS: &[(&str, &str)] = &[
     ("Noproc", "noproc"),
 ];
 
+fn exit_reason_ctor(name: &str) -> String {
+    format!("Std.Actor.{name}")
+}
+
 /// If `ctor_name` is a nullary ExitReason variant, return the raw Erlang atom.
 /// Used by constructor and pattern lowering to emit bare atoms instead of
 /// wrapped tuples.
@@ -1238,8 +1242,8 @@ pub fn build_exit_reason_to_erlang(
     constructor_atoms: &HashMap<String, String>,
     fresh: &mut dyn FnMut() -> String,
 ) -> CExpr {
-    let error_atom = mangle_ctor_atom("Error", constructor_atoms, None);
-    let other_atom = mangle_ctor_atom("Other", constructor_atoms, None);
+    let error_atom = mangle_ctor_atom(&exit_reason_ctor("Error"), constructor_atoms, None);
+    let other_atom = mangle_ctor_atom(&exit_reason_ctor("Other"), constructor_atoms, None);
 
     let mut arms: Vec<CArm> = Vec::new();
 
@@ -1292,12 +1296,12 @@ pub fn build_exit_reason_from_erlang(
     constructor_atoms: &HashMap<String, String>,
     fresh: &mut dyn FnMut() -> String,
 ) -> CExpr {
-    let normal = mangle_ctor_atom("Normal", constructor_atoms, None);
-    let shutdown = mangle_ctor_atom("Shutdown", constructor_atoms, None);
-    let killed = mangle_ctor_atom("Killed", constructor_atoms, None);
-    let noproc = mangle_ctor_atom("Noproc", constructor_atoms, None);
-    let error = mangle_ctor_atom("Error", constructor_atoms, None);
-    let other = mangle_ctor_atom("Other", constructor_atoms, None);
+    let normal = mangle_ctor_atom(&exit_reason_ctor("Normal"), constructor_atoms, None);
+    let shutdown = mangle_ctor_atom(&exit_reason_ctor("Shutdown"), constructor_atoms, None);
+    let killed = mangle_ctor_atom(&exit_reason_ctor("Killed"), constructor_atoms, None);
+    let noproc = mangle_ctor_atom(&exit_reason_ctor("Noproc"), constructor_atoms, None);
+    let error = mangle_ctor_atom(&exit_reason_ctor("Error"), constructor_atoms, None);
+    let other = mangle_ctor_atom(&exit_reason_ctor("Other"), constructor_atoms, None);
 
     let other_var = fresh();
     let fmt_var = fresh();

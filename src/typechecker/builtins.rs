@@ -1,9 +1,17 @@
-use super::{Checker, ImplInfo, Scheme, TraitInfo, Type, canonicalize_type_name};
+use super::{
+    Checker, ImplInfo, Scheme, TraitInfo, Type, canonicalize_constructor_name,
+    canonicalize_type_name,
+};
 
 impl Checker {
     /// Helper to get the canonical name of a builtin type.
     fn ct(bare: &str) -> String {
         canonicalize_type_name(bare).to_string()
+    }
+
+    /// Helper to get the canonical name of a builtin constructor.
+    fn cc(bare: &str) -> String {
+        canonicalize_constructor_name(bare).to_string()
     }
 
     pub(crate) fn register_builtins(&mut self) {
@@ -100,7 +108,7 @@ impl Checker {
             _ => unreachable!(),
         };
         self.constructors.insert(
-            "Nil".into(),
+            Self::cc("Nil"),
             Scheme {
                 forall: vec![a_id],
                 constraints: vec![],
@@ -115,7 +123,7 @@ impl Checker {
         };
         let list_a = Type::Con(Self::ct("List"), vec![a.clone()]);
         self.constructors.insert(
-            "Cons".into(),
+            Self::cc("Cons"),
             Scheme {
                 forall: vec![a_id],
                 constraints: vec![],
@@ -125,7 +133,7 @@ impl Checker {
 
         // Bool constructors
         self.constructors.insert(
-            "True".into(),
+            Self::cc("True"),
             Scheme {
                 forall: vec![],
                 constraints: vec![],
@@ -133,7 +141,7 @@ impl Checker {
             },
         );
         self.constructors.insert(
-            "False".into(),
+            Self::cc("False"),
             Scheme {
                 forall: vec![],
                 constraints: vec![],
@@ -144,11 +152,11 @@ impl Checker {
         // Built-in ADT variant maps (for exhaustiveness checking)
         self.adt_variants.insert(
             Self::ct("List"),
-            vec![("Nil".into(), 0), ("Cons".into(), 2)],
+            vec![(Self::cc("Nil"), 0), (Self::cc("Cons"), 2)],
         );
         self.adt_variants.insert(
             Self::ct("Bool"),
-            vec![("True".into(), 0), ("False".into(), 0)],
+            vec![(Self::cc("True"), 0), (Self::cc("False"), 0)],
         );
 
         // Built-in type arities

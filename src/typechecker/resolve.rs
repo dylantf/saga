@@ -382,7 +382,14 @@ impl<'a> Resolver<'a> {
         if let Some(canonical) = self.locals.constructors.get(name) {
             return Some(canonical.clone());
         }
-        self.scope.resolve_constructor(name).map(|s| s.to_string())
+        if let Some(imported) = self.scope.resolve_constructor(name) {
+            return Some(imported.to_string());
+        }
+        let builtin = super::canonicalize_constructor_name(name);
+        if builtin != name || name.contains('.') {
+            return Some(builtin.to_string());
+        }
+        None
     }
 
     fn resolve_type_name(&self, name: &str) -> Option<String> {

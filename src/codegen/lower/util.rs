@@ -4,29 +4,17 @@ use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
 
 /// Look up a constructor's mangled Erlang atom from the pre-computed table.
-/// Constructor names should already be resolved to the exact atom-table key.
-///
-/// When `origin_module` is set (e.g. lowering an imported handler body),
-/// the lookup tries the source module's qualified entry first, then falls
-/// through to the normal bare-name path. Only constructors that actually
-/// belong to the origin module will have a qualified entry in the table;
-/// prelude constructors (Ok, Err, etc.) with BEAM overrides will not, so
-/// they correctly fall through to their override atoms.
+/// Constructor names must already be resolved to the exact canonical
+/// atom-table key.
 pub(super) fn mangle_ctor_atom(
     name: &str,
     constructor_atoms: &HashMap<String, String>,
-    origin_module: Option<&str>,
+    _origin_module: Option<&str>,
 ) -> String {
-    if let Some(origin) = origin_module {
-        let qualified = format!("{}.{}", origin, name);
-        if let Some(atom) = constructor_atoms.get(&qualified) {
-            return atom.clone();
-        }
-    }
     if let Some(atom) = constructor_atoms.get(name) {
         return atom.clone();
     }
-    name.to_string()
+    panic!("codegen: unresolved constructor atom key `{name}`")
 }
 
 pub(super) fn lower_lit(lit: &Lit) -> CLit {
