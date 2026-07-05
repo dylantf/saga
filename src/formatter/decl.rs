@@ -37,7 +37,9 @@ fn format_deriving_clause(deriving: &[DeriveSpec]) -> String {
 
 pub fn format_import(path: &[String], alias: &Option<String>, exposing: &Option<Exposing>) -> Doc {
     let mut d = Doc::text(format!("import {}", path.join(".")));
-    if let Some(a) = alias {
+    if let Some(a) = alias
+        && path.last() != Some(a)
+    {
         d = d.append(Doc::text(format!(" as {}", a)));
     }
     match exposing {

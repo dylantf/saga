@@ -321,10 +321,18 @@ fn normalize_decl(d: &mut Decl) {
             }
         }
         Decl::Import {
-            id, exposing, span, ..
+            id,
+            module_path,
+            alias,
+            exposing,
+            span,
+            ..
         } => {
             *id = NID;
             *span = S;
+            if alias.as_ref() == module_path.last() {
+                *alias = None;
+            }
             match exposing {
                 Some(Exposing::Items(items)) => {
                     for item in items {
@@ -1387,6 +1395,24 @@ fn lambda_long_breaks_after_arrow() {
 #[test]
 fn import_simple() {
     assert_eq!(fmt80("import Std.List"), "import Std.List\n");
+}
+
+#[test]
+fn import_redundant_alias_is_removed() {
+    assert_eq!(fmt80("import Foo.Bar as Bar"), "import Foo.Bar\n");
+}
+
+#[test]
+fn import_redundant_alias_with_exposing_is_removed() {
+    assert_eq!(
+        fmt80("import Foo.Bar as Bar (baz)"),
+        "import Foo.Bar (baz)\n"
+    );
+}
+
+#[test]
+fn import_non_redundant_alias_is_kept() {
+    assert_eq!(fmt80("import Foo.Bar as B"), "import Foo.Bar as B\n");
 }
 
 #[test]
