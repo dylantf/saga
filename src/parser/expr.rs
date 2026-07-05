@@ -509,7 +509,8 @@ impl Parser {
                 };
 
                 // Qualified record create: `A.Animal { field: val }`
-                // Uses unqualified type name, consistent with how `A.Circle(5)` -> Constructor("Circle").
+                // Preserve the qualifier so formatting can round-trip the
+                // source even when the type is not imported unqualified.
                 // Guarded by `no_brace_app` so `case A.Foo { ... }` parses as
                 // case-over-qualified-name, not case over a record literal.
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
@@ -525,7 +526,7 @@ impl Parser {
                         id: self.next_id(),
                         span,
                         kind: ExprKind::RecordCreate {
-                            name,
+                            name: format!("{}.{}", module, name),
                             fields,
                             record_name: None,
                         },
@@ -602,7 +603,7 @@ impl Parser {
                         id: self.next_id(),
                         span,
                         kind: ExprKind::RecordCreate {
-                            name,
+                            name: format!("{}.{}", extended_module, name),
                             fields,
                             record_name: None,
                         },

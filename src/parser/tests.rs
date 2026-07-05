@@ -1354,6 +1354,51 @@ fn record_create_simple() {
 }
 
 #[test]
+fn qualified_record_create_preserves_qualifier() {
+    let expr = parse_expr("Http.Request { method: \"GET\" }");
+    match expr {
+        Expr {
+            kind: ExprKind::RecordCreate { name, fields, .. },
+            ..
+        } => {
+            assert_eq!(name, "Http.Request");
+            assert_eq!(fields.len(), 1);
+        }
+        _ => panic!("expected RecordCreate, got {:?}", expr),
+    }
+}
+
+#[test]
+fn qualified_record_create_preserves_repeated_last_segment() {
+    let expr = parse_expr("Bar.Bar { value: 1 }");
+    match expr {
+        Expr {
+            kind: ExprKind::RecordCreate { name, fields, .. },
+            ..
+        } => {
+            assert_eq!(name, "Bar.Bar");
+            assert_eq!(fields.len(), 1);
+        }
+        _ => panic!("expected RecordCreate, got {:?}", expr),
+    }
+}
+
+#[test]
+fn multi_segment_qualified_record_create_preserves_qualifier() {
+    let expr = parse_expr("SagaHttp.Http.Request { method: \"GET\" }");
+    match expr {
+        Expr {
+            kind: ExprKind::RecordCreate { name, fields, .. },
+            ..
+        } => {
+            assert_eq!(name, "SagaHttp.Http.Request");
+            assert_eq!(fields.len(), 1);
+        }
+        _ => panic!("expected RecordCreate, got {:?}", expr),
+    }
+}
+
+#[test]
 fn record_create_single_field() {
     let expr = parse_expr("Point { x: 1 }");
     match expr {

@@ -1180,6 +1180,30 @@ fn record_create_short_stays_on_one_line() {
 }
 
 #[test]
+fn qualified_record_create_preserves_qualifier() {
+    assert_eq!(
+        fmt80("f x = Http.Request { method: \"GET\" }"),
+        "f x = Http.Request { method: \"GET\" }\n"
+    );
+}
+
+#[test]
+fn qualified_record_create_preserves_repeated_last_segment() {
+    assert_eq!(
+        fmt80("f x = Bar.Bar { value: 1 }"),
+        "f x = Bar.Bar { value: 1 }\n"
+    );
+}
+
+#[test]
+fn multi_segment_qualified_record_create_preserves_qualifier() {
+    assert_eq!(
+        fmt80("f x = SagaHttp.Http.Request { method: \"GET\" }"),
+        "f x = SagaHttp.Http.Request { method: \"GET\" }\n"
+    );
+}
+
+#[test]
 fn record_create_long_breaks_fields() {
     let src = "f x = SomeRecord { first_field: some_long_value, second_field: another_long_value }";
     let result = fmt(src, 50);
