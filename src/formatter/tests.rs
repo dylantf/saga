@@ -1080,7 +1080,26 @@ fn fun_sig_long_arrow_chain_breaks_arrows() {
         fmt80(
             "pub fun table_as : String -> Table table row insert required_cols optional_cols -> Table table row insert required_cols optional_cols"
         ),
-        "pub fun table_as : String\n  -> Table table row insert required_cols optional_cols\n  -> Table table row insert required_cols optional_cols\n"
+        "pub fun table_as :\n     String\n  -> Table table row insert required_cols optional_cols\n  -> Table table row insert required_cols optional_cols\n"
+    );
+}
+
+#[test]
+fn fun_sig_long_name_breaks_after_colon() {
+    let src = "fun stream_multipart_part : MultipartOptions -> String -> MultipartStreamState -> acc -> (String -> String -> acc -> Result acc MultipartError) -> (MultipartFilePart -> acc -> Result (acc, Handler MultipartSink) MultipartError) -> Result (MultipartStreamState, acc) MultipartError needs {BodyReader}";
+    assert_eq!(
+        fmt(src, 80),
+        "fun stream_multipart_part :\n     MultipartOptions\n  -> String\n  -> MultipartStreamState\n  -> acc\n  -> (String -> String -> acc -> Result acc MultipartError)\n  -> (MultipartFilePart -> acc -> Result (acc, Handler MultipartSink) MultipartError)\n  -> Result (MultipartStreamState, acc) MultipartError\n  needs {BodyReader}\n"
+    );
+}
+
+#[test]
+fn fun_sig_broken_header_keeps_flat_arrow_chain_at_two_spaces() {
+    let src =
+        "pub fun form_values_with : UrlEncodedOptions -> Request -> Result FormValues FormError";
+    assert_eq!(
+        fmt(src, 80),
+        "pub fun form_values_with :\n  UrlEncodedOptions -> Request -> Result FormValues FormError\n"
     );
 }
 
@@ -1311,16 +1330,24 @@ fn with_named_handler_short_stays_on_one_line() {
 }
 
 #[test]
-fn with_named_handler_long_breaks_before_with() {
+fn with_named_handler_long_stays_attached_to_expression() {
     let src = "f x = some_very_long_function_call x y z with some_long_handler_name";
     let result = fmt(src, 50);
     assert!(
-        result.contains("with some_long_handler_name"),
-        "result: {}",
+        result.contains("some_very_long_function_call x y z with some_long_handler_name"),
+        "with should stay on the expression line: {}",
         result
     );
-    // with breaks to its own line (indented under the expression)
-    assert!(result.contains("\n"), "should be multi-line: {}", result);
+    assert!(
+        !result.contains("\n  with some_long_handler_name"),
+        "with must not break away from its expression: {}",
+        result
+    );
+    assert_eq!(
+        try_parse_normalized(src),
+        try_parse_normalized(&result),
+        "formatted named with should preserve the AST"
+    );
 }
 
 #[test]

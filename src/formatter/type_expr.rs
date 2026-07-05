@@ -172,6 +172,68 @@ pub fn format_fun_type(
 
 /// Format just the arrow chain: A -> B -> C
 pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr) -> Doc {
+    format_arrow_chain_with_tail_indent(params, return_type, 2)
+}
+
+/// Format a top-level signature arrow chain whose first item should align with
+/// the type text after later arrows:
+///
+/// This is used by top-level function signatures so a long name can break after
+/// the colon without hiding the first parameter:
+///
+/// ```text
+/// fun f :
+///      A
+///   -> B
+/// ```
+///
+/// If the arrow chain still fits by itself, it keeps the normal two-space
+/// continuation indent:
+///
+/// ```text
+/// fun f :
+///   A -> B
+/// ```
+pub fn format_arrow_chain_signature_continuation(
+    params: &[(String, TypeExpr)],
+    return_type: &TypeExpr,
+) -> Doc {
+    let mut iter = arrow_chain_parts(params, return_type).into_iter();
+    let Some(first) = iter.next() else {
+        return Doc::Nil;
+    };
+    let tail = iter.fold(Doc::Nil, |acc, part| {
+        docs![acc, Doc::line(), Doc::text("-> "), part]
+    });
+    Doc::nest(
+        2,
+        docs![
+            Doc::line(),
+            Doc::group(docs![
+                Doc::if_break(Doc::text("   "), Doc::Nil),
+                first,
+                tail
+            ])
+        ],
+    )
+}
+
+fn format_arrow_chain_with_tail_indent(
+    params: &[(String, TypeExpr)],
+    return_type: &TypeExpr,
+    tail_indent: usize,
+) -> Doc {
+    let mut iter = arrow_chain_parts(params, return_type).into_iter();
+    let Some(first) = iter.next() else {
+        return Doc::Nil;
+    };
+    let tail = iter.fold(Doc::Nil, |acc, part| {
+        docs![acc, Doc::line(), Doc::text("-> "), part]
+    });
+    Doc::group(docs![first, Doc::nest(tail_indent, tail)])
+}
+
+fn arrow_chain_parts(params: &[(String, TypeExpr)], return_type: &TypeExpr) -> Vec<Doc> {
     let mut parts: Vec<Doc> = params
         .iter()
         .map(|(label, ty)| {
@@ -209,14 +271,7 @@ pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr)
         _ => format_type_expr(return_type),
     };
     parts.push(ret_doc);
-    let mut iter = parts.into_iter();
-    let Some(first) = iter.next() else {
-        return Doc::Nil;
-    };
-    let tail = iter.fold(Doc::Nil, |acc, part| {
-        docs![acc, Doc::line(), Doc::text("-> "), part]
-    });
-    Doc::group(docs![first, Doc::nest(2, tail)])
+    parts
 }
 
 /// Format `needs {Effect1, Effect2}` if non-empty.

@@ -160,15 +160,15 @@ fn format_decl(decl: &Decl) -> Doc {
                     .append(Doc::hardline());
             }
 
-            let mut sig_head = Doc::Nil;
+            let mut sig_prefix = Doc::Nil;
             if *public {
-                sig_head = sig_head.append(Doc::text("pub "));
+                sig_prefix = sig_prefix.append(Doc::text("pub "));
             }
-            sig_head = docs![
-                sig_head,
-                Doc::text(format!("fun {} : ", name)),
-                format_arrow_chain(params, return_type)
-            ];
+            sig_prefix = sig_prefix.append(Doc::text(format!("fun {} :", name)));
+            let sig_head = Doc::group(docs![
+                sig_prefix,
+                format_arrow_chain_signature_continuation(params, return_type)
+            ]);
             let needs = format_needs(effects, effect_row_var);
             let where_doc = if where_clause.is_empty() {
                 Doc::Nil

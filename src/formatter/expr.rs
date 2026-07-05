@@ -381,11 +381,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 Handler::Named(..) if is_block_like(expr) => {
                     docs![expr_doc, Doc::text(" with "), handler_doc]
                 }
-                // Named handler: try one line, break before with if too long
-                Handler::Named(..) => Doc::group(docs![
-                    expr_doc,
-                    Doc::nest(2, docs![Doc::line(), Doc::text("with "), handler_doc])
-                ]),
+                // Named handler: keep `with` attached to its expression.
+                // Newlines terminate expression parsing in this position, so
+                // breaking before `with` changes the program.
+                Handler::Named(..) => Doc::group(docs![expr_doc, Doc::text(" with "), handler_doc]),
             }
         }
 
