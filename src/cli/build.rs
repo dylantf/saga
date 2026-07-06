@@ -807,7 +807,8 @@ pub fn exec_erl_with_timeout(
         entry_module
     );
     let mut cmd = std::process::Command::new("erl");
-    cmd.arg("-noshell")
+    cmd.arg("+Bd")
+        .arg("-noshell")
         .arg("-pa")
         .arg(stdlib_dir)
         .arg("-pa")
