@@ -282,7 +282,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             let body = format_braced_body(&body_items, dangling_trivia);
             docs![
                 Doc::text("case "),
-                format_expr(scrutinee),
+                Doc::flat(format_expr(scrutinee)),
                 Doc::text(" {"),
                 Doc::nest(2, body),
                 Doc::hardline(),

@@ -933,6 +933,18 @@ fn fun_binding_case_body_stays_on_eq_line() {
     );
 }
 
+#[test]
+fn case_scrutinee_application_stays_parseable_when_long() {
+    let src = "decode rows = case load_rel_entries conn prepared.relations rows slots {\n  Err err -> Err err\n  Ok entries -> decode_rows prepared.decode (Core.rel_data_of entries) rows\n}";
+    let formatted = fmt(src, 60);
+    assert!(
+        formatted.contains("case load_rel_entries conn prepared.relations rows slots {"),
+        "case scrutinee application should stay attached: {}",
+        formatted
+    );
+    assert_eq!(try_parse_normalized(src), try_parse_normalized(&formatted));
+}
+
 // --- Let bindings (declarations) ---
 
 #[test]
