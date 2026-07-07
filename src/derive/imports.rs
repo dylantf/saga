@@ -1,6 +1,6 @@
 use super::*;
 use crate::ast::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Pre-derive summaries for names visible from imports. This is intentionally
@@ -97,28 +97,14 @@ pub(crate) fn collect_summaries_from_imports(
         } = decl
         {
             let module_name = module_path.join(".");
-            let source = if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
-                src.to_string()
-            } else if let Some(map) = module_map {
-                match map.get(&module_name).and_then(|p| {
-                    source_overlay
-                        .get(p)
-                        .cloned()
-                        .or_else(|| std::fs::read_to_string(p).ok())
-                }) {
-                    Some(s) => s,
-                    None => continue,
-                }
-            } else {
+            let Some(summary) = module_summary_for_import(
+                module_path,
+                module_map,
+                source_overlay,
+                &mut HashSet::new(),
+            ) else {
                 continue;
             };
-            let Ok(tokens) = crate::lexer::Lexer::new(&source).lex() else {
-                continue;
-            };
-            let Ok(prog) = crate::parser::Parser::new(tokens).parse_program() else {
-                continue;
-            };
-            let summary = module_summary(&prog);
             // Unqualified `import A.B.C` brings names into scope under the last
             // path segment (`C.name`), so the derive scope must register that
             // prefix too — otherwise an imported trait referenced by its short
@@ -134,6 +120,110 @@ pub(crate) fn collect_summaries_from_imports(
                 &summary,
             );
         }
+    }
+}
+
+fn module_summary_for_import(
+    module_path: &[String],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+    source_overlay: &HashMap<PathBuf, String>,
+    visiting: &mut HashSet<String>,
+) -> Option<ModuleSummary> {
+    let module_name = module_path.join(".");
+    if !visiting.insert(module_name.clone()) {
+        return None;
+    }
+    let source = module_source(module_path, module_map, source_overlay)?;
+    let tokens = crate::lexer::Lexer::new(&source).lex().ok()?;
+    let prog = crate::parser::Parser::new(tokens).parse_program().ok()?;
+    let mut summary = module_summary(&prog);
+    merge_public_reexport_summaries(&prog, module_map, source_overlay, visiting, &mut summary);
+    visiting.remove(&module_name);
+    Some(summary)
+}
+
+fn module_source(
+    module_path: &[String],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+    source_overlay: &HashMap<PathBuf, String>,
+) -> Option<String> {
+    if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
+        return Some(src.to_string());
+    }
+    let module_name = module_path.join(".");
+    let map = module_map?;
+    map.get(&module_name).and_then(|p| {
+        source_overlay
+            .get(p)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(p).ok())
+    })
+}
+
+fn merge_public_reexport_summaries(
+    program: &[Decl],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+    source_overlay: &HashMap<PathBuf, String>,
+    visiting: &mut HashSet<String>,
+    summary: &mut ModuleSummary,
+) {
+    for decl in program {
+        let Decl::Import {
+            module_path,
+            exposing: Some(exposing),
+            ..
+        } = decl
+        else {
+            continue;
+        };
+        let Some(imported) =
+            module_summary_for_import(module_path, module_map, source_overlay, visiting)
+        else {
+            continue;
+        };
+        merge_public_reexport_summary(summary, exposing, &imported);
+    }
+}
+
+fn merge_public_reexport_summary(
+    summary: &mut ModuleSummary,
+    exposing: &crate::ast::Exposing,
+    imported: &ModuleSummary,
+) {
+    match exposing {
+        crate::ast::Exposing::All { public: true, .. } => {
+            merge_all(&mut summary.traits, &imported.traits);
+            merge_all(&mut summary.types, &imported.types);
+            merge_all(&mut summary.records, &imported.records);
+        }
+        crate::ast::Exposing::All { public: false, .. } => {}
+        crate::ast::Exposing::Items(items) => {
+            for item in items.iter().filter(|item| item.public) {
+                let surface = item.surface_name();
+                merge_one(&mut summary.traits, &imported.traits, &item.name, surface);
+                merge_one(&mut summary.types, &imported.types, &item.name, surface);
+                merge_one(&mut summary.records, &imported.records, &item.name, surface);
+            }
+        }
+    }
+}
+
+fn merge_all<T: Clone>(target: &mut HashMap<String, T>, source: &HashMap<String, T>) {
+    for (name, info) in source {
+        target.entry(name.clone()).or_insert_with(|| info.clone());
+    }
+}
+
+fn merge_one<T: Clone>(
+    target: &mut HashMap<String, T>,
+    source: &HashMap<String, T>,
+    origin: &str,
+    surface: &str,
+) {
+    if let Some(info) = source.get(origin) {
+        target
+            .entry(surface.to_string())
+            .or_insert_with(|| info.clone());
     }
 }
 

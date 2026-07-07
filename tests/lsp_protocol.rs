@@ -2145,6 +2145,106 @@ import Kraken.Core (C
 }
 
 #[test]
+fn diagnostics_preserve_trait_defaults_through_barrel_reexport() {
+    let root = temp_project("barrel-reexport-trait-default-diagnostic");
+    let dep_root = root.join("deps/kraken");
+    let dep_src = dep_root.join("src/Kraken");
+    let main_path = root.join("src/Schema.saga");
+    std::fs::create_dir_all(&dep_src).expect("create dependency src");
+    std::fs::write(
+        root.join("project.toml"),
+        "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+    )
+    .expect("write app project.toml");
+    std::fs::write(
+        dep_root.join("project.toml"),
+        "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Db\", \"Kraken.Core\"]
+",
+    )
+    .expect("write dependency project.toml");
+    std::fs::write(
+        dep_src.join("Core.saga"),
+        "\
+module Kraken.Core
+
+pub trait ColumnSet cols {
+  fun columns : String -> cols
+  fun column_names : cols -> List (String, String)
+  column_names _cols = []
+}
+",
+    )
+    .expect("write core module");
+    std::fs::write(
+        dep_src.join("Db.saga"),
+        "\
+module Kraken.Db
+
+import Kraken.Core (pub ..)
+",
+    )
+    .expect("write db barrel module");
+
+    let source = "\
+module Schema
+
+import Kraken.Db (ColumnSet)
+
+pub record Users {
+  id: String
+}
+
+impl ColumnSet for Users {
+  columns source = Users { id: source }
+}
+";
+    std::fs::write(&main_path, source).expect("write schema module");
+
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = file_uri(&main_path);
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    let errors: Vec<_> = params["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter(|diagnostic| diagnostic["severity"].as_i64() == Some(1))
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        errors.is_empty(),
+        "barrel re-exported trait default should satisfy omitted method, got {errors:?}"
+    );
+}
+
+#[test]
 fn diagnostics_accept_barrel_reexported_trait_impl_constraint() {
     let root = temp_project("barrel-reexported-trait-impl-diagnostic");
     let dep_root = root.join("deps/kraken");
