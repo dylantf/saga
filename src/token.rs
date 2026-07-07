@@ -165,6 +165,10 @@ pub struct Spanned {
     /// at top-level nesting (outside parens/brackets). Used by the parser
     /// to stop greedy parsing (e.g. type application) at line boundaries.
     pub preceded_by_newline: bool,
+    /// True if the line boundary before this token was an explicit semicolon.
+    pub preceded_by_semicolon: bool,
+    /// Zero-based source column where this token starts.
+    pub column: usize,
 }
 
 impl PartialEq for Spanned {

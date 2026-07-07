@@ -412,9 +412,15 @@ impl Parser {
     /// Function application: `f x y` -> App(App(f, x), y)
     /// Greedily consumes arguments while the next token can start a primary.
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
+        let head_column = self.next_column();
         let mut expr = self.parse_postfix()?;
 
-        while self.can_start_primary() && !self.next_on_new_line() {
+        while self.can_start_primary()
+            && (!self.next_on_new_line()
+                || (!self.next_after_semicolon()
+                    && !self.next_starts_blank_line()
+                    && self.next_column() >= head_column + 2))
+        {
             let arg = self.parse_postfix()?;
             let span = expr.span.to(arg.span);
             expr = Expr {
@@ -936,6 +942,8 @@ impl Parser {
                                 leading_trivia: Vec::new(),
                                 trailing_comment: None,
                                 preceded_by_newline: false,
+                                preceded_by_semicolon: false,
+                                column: 0,
                             });
                             let mut sub = crate::parser::Parser::new(tokens);
                             let hole_expr = sub.parse_expr(0)?;

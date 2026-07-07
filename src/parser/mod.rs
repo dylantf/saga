@@ -165,6 +165,21 @@ impl Parser {
         self.tokens[self.pos].preceded_by_newline
     }
 
+    pub(super) fn next_after_semicolon(&self) -> bool {
+        self.tokens[self.pos].preceded_by_semicolon
+    }
+
+    pub(super) fn next_starts_blank_line(&self) -> bool {
+        self.tokens[self.pos]
+            .leading_trivia
+            .iter()
+            .any(|t| matches!(t, Trivia::BlankLines(_)))
+    }
+
+    pub(super) fn next_column(&self) -> usize {
+        self.tokens[self.pos].column
+    }
+
     // Determines whether the next token can start a primary expression.
     // Used by parse_application to know when to keep consuming arguments.
     pub(super) fn can_start_primary(&self) -> bool {

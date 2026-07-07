@@ -962,10 +962,9 @@ fn let_stmt_short_stays_on_one_line() {
 fn let_stmt_long_breaks_after_eq() {
     let src = "main () = {\n  let result = some_very_long_function applied_to arguments\n}";
     let result = fmt(src, 40);
-    // Let binding breaks after =, but application stays on one line
     assert_eq!(
         result,
-        "main () = {\n  let result =\n    some_very_long_function applied_to arguments\n}\n"
+        "main () = {\n  let result =\n    some_very_long_function\n      applied_to\n      arguments\n}\n"
     );
 }
 
@@ -1132,14 +1131,20 @@ fn app_short_stays_on_one_line() {
 }
 
 #[test]
-fn app_long_stays_on_one_line() {
-    // Applications never break across lines (newlines terminate application parsing)
+fn app_long_breaks_as_multiline_call() {
     let src = "f x = some_long_function first_argument second_argument third_argument";
-    let result = fmt(src, 40);
-    assert!(
-        result.contains("some_long_function first_argument second_argument third_argument"),
-        "app should stay on one line: {}",
-        result
+    assert_eq!(
+        fmt(src, 40),
+        "f x =\n  some_long_function\n    first_argument\n    second_argument\n    third_argument\n"
+    );
+}
+
+#[test]
+fn app_with_many_lambda_args_breaks_as_multiline_call() {
+    let src = "gear_seshes = Db.has_many_through sesh_gear seshes sesh_row (fun g -> g.id) (fun sg -> sg.gear_id) (fun sg -> sg.sesh_id) (fun s -> s.id)";
+    assert_eq!(
+        fmt(src, 80),
+        "gear_seshes =\n  Db.has_many_through\n    sesh_gear\n    seshes\n    sesh_row\n    (fun g -> g.id)\n    (fun sg -> sg.gear_id)\n    (fun sg -> sg.sesh_id)\n    (fun s -> s.id)\n"
     );
 }
 
@@ -1366,7 +1371,7 @@ fn with_named_handler_long_stays_attached_to_expression() {
     let src = "f x = some_very_long_function_call x y z with some_long_handler_name";
     let result = fmt(src, 50);
     assert!(
-        result.contains("some_very_long_function_call x y z with some_long_handler_name"),
+        result.contains("z with some_long_handler_name"),
         "with should stay on the expression line: {}",
         result
     );
@@ -1982,13 +1987,12 @@ fn ascription_not_double_parened() {
 // --- Application ---
 
 #[test]
-fn app_never_breaks_across_lines() {
+fn app_breaks_across_lines_when_too_narrow() {
     let src = "f x = some_function arg1 arg2 arg3";
     let result = fmt(src, 20);
-    // Even at narrow width, app stays on one line
     assert!(
-        result.contains("some_function arg1 arg2 arg3"),
-        "app should not break: {}",
+        result.contains("some_function\n    arg1\n    arg2\n    arg3"),
+        "app should break one argument per line: {}",
         result
     );
 }

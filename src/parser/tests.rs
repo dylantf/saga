@@ -334,6 +334,62 @@ fn application_curried() {
 }
 
 #[test]
+fn application_multiline_indented_args() {
+    let expr = parse_expr("f\n  x\n  y");
+    match expr {
+        Expr {
+            kind: ExprKind::App { func, arg, .. },
+            ..
+        } => {
+            assert!(matches!(*arg, Expr { kind: ExprKind::Var { name, .. }, .. } if name == "y"));
+            assert!(matches!(
+                *func,
+                Expr {
+                    kind: ExprKind::App { .. },
+                    ..
+                }
+            ));
+        }
+        _ => panic!("expected nested App, got {:?}", expr),
+    }
+}
+
+#[test]
+fn application_multiline_same_column_stops_at_line_boundary() {
+    let program = parse("a n = f\nb n = x");
+    assert_eq!(program.len(), 2);
+    assert!(matches!(
+        &program[0],
+        Decl::FunBinding {
+            body: Expr {
+                kind: ExprKind::Var { name },
+                ..
+            },
+            ..
+        } if name == "f"
+    ));
+}
+
+#[test]
+fn application_does_not_cross_semicolon_boundary() {
+    let program = parse("main () = { f; x }");
+    let Decl::FunBinding { body, .. } = &program[0] else {
+        panic!("expected function binding");
+    };
+    let ExprKind::Block { stmts, .. } = &body.kind else {
+        panic!("expected block body");
+    };
+    assert_eq!(stmts.len(), 2);
+    assert!(matches!(
+        &stmts[0].node,
+        Stmt::Expr(Expr {
+            kind: ExprKind::Var { name },
+            ..
+        }) if name == "f"
+    ));
+}
+
+#[test]
 fn application_binds_tighter_than_binop() {
     // f x + g y should parse as (f x) + (g y)
     let expr = parse_expr("f x + g y");

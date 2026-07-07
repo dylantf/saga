@@ -175,14 +175,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 return docs![prefix, Doc::text(" "), lhs, body_doc, suffix];
             }
 
-            // Applications never break across lines - newlines terminate
-            // application parsing, so breaking would change semantics.
-            // Users can wrap in parens to force multi-line if needed.
             let mut d = func_doc;
             for a in &args {
-                d = d.append(Doc::text(" ")).append(format_expr_atom(a));
+                d = d.append(Doc::line()).append(format_expr_atom(a));
             }
-            d
+            Doc::group(Doc::nest(2, d))
         }
 
         ExprKind::BinOp { op, .. } => {
@@ -246,13 +243,21 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     parts.push(linebreak.clone());
                     parts.push(Doc::text("else if "));
                 }
-                parts.push(format_expr(c));
+                parts.push(Doc::flat(format_expr(c)));
                 parts.push(Doc::text(" then "));
-                parts.push(format_expr(t));
+                if is_block_like(t) {
+                    parts.push(format_expr(t));
+                } else {
+                    parts.push(Doc::flat(format_expr(t)));
+                }
             }
             parts.push(linebreak);
             parts.push(Doc::text("else "));
-            parts.push(format_expr(final_else));
+            if is_block_like(final_else) {
+                parts.push(format_expr(final_else));
+            } else {
+                parts.push(Doc::flat(format_expr(final_else)));
+            }
 
             let result = docs_from_vec(parts);
             if force_multiline {

@@ -176,12 +176,19 @@ impl Lexer {
         }
     }
 
+    fn column_at(&self, pos: usize) -> usize {
+        self.source[..pos]
+            .rfind('\n')
+            .map_or(pos, |line_start| pos - line_start - 1)
+    }
+
     fn emit(
         &self,
         token: Token,
         start: usize,
         leading_trivia: Vec<Trivia>,
         preceded_by_newline: bool,
+        preceded_by_semicolon: bool,
     ) -> Spanned {
         Spanned {
             token,
@@ -192,6 +199,8 @@ impl Lexer {
             leading_trivia,
             trailing_comment: None,
             preceded_by_newline,
+            preceded_by_semicolon,
+            column: self.column_at(start),
         }
     }
 
@@ -513,6 +522,8 @@ impl Lexer {
                             leading_trivia: t.leading_trivia,
                             trailing_comment: t.trailing_comment,
                             preceded_by_newline: t.preceded_by_newline,
+                            preceded_by_semicolon: t.preceded_by_semicolon,
+                            column: t.column,
                         })
                         .collect();
                     parts.push(InterpPart::Hole(hole_tokens));
@@ -725,6 +736,8 @@ impl Lexer {
                             leading_trivia: t.leading_trivia,
                             trailing_comment: t.trailing_comment,
                             preceded_by_newline: t.preceded_by_newline,
+                            preceded_by_semicolon: t.preceded_by_semicolon,
+                            column: t.column,
                         })
                         .collect();
                     parts.push(InterpPart::Hole(hole_tokens));
@@ -743,6 +756,7 @@ impl Lexer {
         // Track whether we've seen a newline since the last significant token.
         // Start of file counts as "after newline" so first-line comments are leading.
         let mut seen_newline = true;
+        let mut seen_semicolon = false;
         // Track consecutive newlines for blank line detection.
         // We count "empty lines" - a newline when we already saw one counts as a blank line.
         let mut prev_was_newline = true; // start of file
@@ -759,11 +773,12 @@ impl Lexer {
                         start,
                         std::mem::take(&mut pending_trivia),
                         seen_newline && self.nesting == 0,
+                        seen_semicolon && self.nesting == 0,
                     );
                     tokens.push(spanned);
                     return Ok(tokens);
                 }
-                Some('\n') | Some(';') => {
+                Some('\n') => {
                     self.advance();
                     if prev_was_newline {
                         // Consecutive newline = blank line
@@ -775,7 +790,15 @@ impl Lexer {
                         }
                     }
                     seen_newline = true;
+                    seen_semicolon = false;
                     prev_was_newline = true;
+                    continue;
+                }
+                Some(';') => {
+                    self.advance();
+                    seen_newline = true;
+                    seen_semicolon = true;
+                    prev_was_newline = false;
                     continue;
                 }
                 Some('#') => {
@@ -812,6 +835,7 @@ impl Lexer {
             // This mirrors the old Terminator behavior: newlines at nesting depth 0
             // signal line boundaries to the parser.
             let newline_flag = seen_newline && self.nesting == 0;
+            let semicolon_flag = seen_semicolon && self.nesting == 0;
 
             let trivia = std::mem::take(&mut pending_trivia);
 
@@ -825,7 +849,7 @@ impl Lexer {
                     } else {
                         self.read_string()?
                     };
-                    let spanned = self.emit(tok, start, trivia, newline_flag);
+                    let spanned = self.emit(tok, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('$') if self.peek_next() == Some('"') => {
@@ -841,12 +865,12 @@ impl Lexer {
                         self.advance(); // "
                         self.read_interp_string(start)?
                     };
-                    let spanned = self.emit(tok, start, trivia, newline_flag);
+                    let spanned = self.emit(tok, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some(ch) if ch.is_ascii_digit() => {
                     let tok = self.read_number();
-                    let spanned = self.emit(tok, start, trivia, newline_flag);
+                    let spanned = self.emit(tok, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 // @"..." raw string or @"""...""" raw multiline string
@@ -862,13 +886,13 @@ impl Lexer {
                         self.advance(); // @
                         self.read_raw_string(start)?
                     };
-                    let spanned = self.emit(tok, start, trivia, newline_flag);
+                    let spanned = self.emit(tok, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 // Bare @ (not followed by ") - annotation marker
                 Some('@') => {
                     self.advance();
-                    let spanned = self.emit(Token::At, start, trivia, newline_flag);
+                    let spanned = self.emit(Token::At, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
@@ -882,7 +906,7 @@ impl Lexer {
                         self.advance(); // consume '!'
                         tok = Token::EffectCall(name);
                     }
-                    let spanned = self.emit(tok, start, trivia, newline_flag);
+                    let spanned = self.emit(tok, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
 
@@ -890,91 +914,125 @@ impl Lexer {
                 Some('-') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::Arrow, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::Arrow, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('|') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::Pipe, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::Pipe, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('<') if self.peek_next() == Some('<') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::ComposeBack, start, trivia, newline_flag);
+                    let spanned = self.emit(
+                        Token::ComposeBack,
+                        start,
+                        trivia,
+                        newline_flag,
+                        semicolon_flag,
+                    );
                     tokens.push(spanned);
                 }
                 Some('<') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::Concat, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::Concat, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('<') if self.peek_next() == Some('|') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::PipeBack, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::PipeBack, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('=') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::EqEq, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::EqEq, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('!') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::NotEq, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::NotEq, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('<') if self.peek_next() == Some('-') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::LeftArrow, start, trivia, newline_flag);
+                    let spanned = self.emit(
+                        Token::LeftArrow,
+                        start,
+                        trivia,
+                        newline_flag,
+                        semicolon_flag,
+                    );
                     tokens.push(spanned);
                 }
                 Some('<') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::LtEq, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::LtEq, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('>') if self.peek_next() == Some('>') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::ComposeForward, start, trivia, newline_flag);
+                    let spanned = self.emit(
+                        Token::ComposeForward,
+                        start,
+                        trivia,
+                        newline_flag,
+                        semicolon_flag,
+                    );
                     tokens.push(spanned);
                 }
                 Some('>') if self.peek_next() == Some('=') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::GtEq, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::GtEq, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('&') if self.peek_next() == Some('&') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::And, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::And, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some(':') if self.peek_next() == Some(':') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::DoubleColon, start, trivia, newline_flag);
+                    let spanned = self.emit(
+                        Token::DoubleColon,
+                        start,
+                        trivia,
+                        newline_flag,
+                        semicolon_flag,
+                    );
                     tokens.push(spanned);
                 }
                 Some('.') if self.peek_next() == Some('.') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::DotDot, start, trivia, newline_flag);
+                    let spanned =
+                        self.emit(Token::DotDot, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 Some('|') if self.peek_next() == Some('|') => {
                     self.advance();
                     self.advance();
-                    let spanned = self.emit(Token::Or, start, trivia, newline_flag);
+                    let spanned = self.emit(Token::Or, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
 
@@ -1027,13 +1085,14 @@ impl Lexer {
                             });
                         }
                     };
-                    let spanned = self.emit(tok, start, trivia, newline_flag);
+                    let spanned = self.emit(tok, start, trivia, newline_flag, semicolon_flag);
                     tokens.push(spanned);
                 }
                 None => unreachable!(), // handled at top of loop
             }
 
             seen_newline = false;
+            seen_semicolon = false;
         }
     }
 }
