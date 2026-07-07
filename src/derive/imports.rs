@@ -465,7 +465,7 @@ pub(crate) fn merge_summary_import(
 ) {
     let exposed_surface = |name: &str| -> Option<String> {
         match exposing {
-            None => Some(name.to_string()),
+            None => None,
             Some(e) => e.surface_name_for_origin(name),
         }
     };

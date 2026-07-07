@@ -2200,7 +2200,8 @@ import Kraken.Core (pub ..)
     let source = "\
 module Schema
 
-import Kraken.Db (ColumnSet)
+import Kraken.Core (ColumnSet)
+import Kraken.Db
 
 pub record Users {
   id: String
