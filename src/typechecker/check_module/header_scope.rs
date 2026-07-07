@@ -96,6 +96,9 @@ pub(crate) fn scope_for_header_imports(
 ) -> Result<ScopeMap, String> {
     let mut scope = ScopeMap::default();
     for import in &header.imports {
+        if !headers.contains_key(&import.module) {
+            continue;
+        }
         let prefix = import
             .alias
             .as_deref()

@@ -7242,6 +7242,56 @@ main () = ()
 }
 
 #[test]
+fn cyclic_import_headers_resolve_external_imports_through_exports() {
+    let external = r#"
+module External
+
+pub record Ext {
+  value: Int
+}
+"#;
+    let a = r#"
+module A
+import External (Ext)
+import B (BThing)
+
+pub record ARec {
+  ext: Ext,
+  b: BThing,
+}
+"#;
+    let b = r#"
+module B
+import A (ARec)
+import External (Ext)
+
+pub type BThing = BThing
+
+pub fun get_ext : ARec -> Ext
+get_ext a = a.ext
+"#;
+    let main = r#"
+module Main
+import A
+import B
+import External
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    check_with_project_files(
+        &[
+            ("src/External.saga", external),
+            ("src/A.saga", a),
+            ("src/B.saga", b),
+        ],
+        main,
+    )
+    .expect("SCC headers should resolve non-SCC imports through normal exports");
+}
+
+#[test]
 fn type_reexport_carries_origin_trait_impls() {
     let query = r#"
 module Kraken.Query

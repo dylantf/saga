@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use super::header_scope::scope_for_header_imports;
+use super::import_scope::{resolve_import, synthesize_all_exposed};
 use super::{
-    HeaderEffectRef, HeaderFunction, HeaderTraitBound, HeaderTraitRef, HeaderTypeDecl,
-    HeaderTypeExpr, HeaderTypeParam, ModuleHeader,
+    HeaderEffectRef, HeaderExposing, HeaderFunction, HeaderTraitBound, HeaderTraitRef,
+    HeaderTypeDecl, HeaderTypeExpr, HeaderTypeParam, ModuleHeader,
 };
 use crate::ast::{Decl, NodeId};
 use crate::token::Span;
@@ -37,7 +38,7 @@ impl Checker {
         let lsp_info = self.active_header_lsp_info(&headers);
 
         for (module_name, header) in &headers {
-            let scope = HeaderRegistrationScope::new(module_name, header, &headers)?;
+            let scope = self.header_registration_scope(module_name, header, &headers)?;
             let lsp = lsp_info.get(module_name);
             self.register_header_type_stubs(module_name, header);
             self.register_header_docs(module_name, lsp);
@@ -46,7 +47,7 @@ impl Checker {
         }
 
         for (module_name, header) in &headers {
-            let scope = HeaderRegistrationScope::new(module_name, header, &headers)?;
+            let scope = self.header_registration_scope(module_name, header, &headers)?;
             self.register_header_functions(module_name, header, &scope, lsp_info.get(module_name));
         }
 
@@ -54,6 +55,43 @@ impl Checker {
             .registered_canonical
             .extend(headers.keys().cloned());
         Ok(())
+    }
+
+    fn header_registration_scope(
+        &mut self,
+        module_name: &str,
+        header: &ModuleHeader,
+        headers: &HashMap<String, ModuleHeader>,
+    ) -> Result<HeaderRegistrationScope, String> {
+        let mut imports = scope_for_header_imports(header, headers)?;
+        for import in &header.imports {
+            if headers.contains_key(&import.module) {
+                continue;
+            }
+            let module_path: Vec<String> = import.module.split('.').map(str::to_string).collect();
+            let exports = self
+                .load_module(&module_path, HEADER_SPAN)
+                .map_err(|diagnostic| diagnostic.message)?;
+            let prefix = import
+                .alias
+                .as_deref()
+                .unwrap_or_else(|| import.module.rsplit('.').next().unwrap_or(&import.module));
+            let exposed_items = match import.exposing.as_ref() {
+                Some(HeaderExposing::All { public }) => {
+                    Some(synthesize_all_exposed(&exports, *public))
+                }
+                Some(HeaderExposing::Items(items)) => Some(header_exposed_items_to_ast(items)),
+                _ => None,
+            };
+            let import_scope =
+                resolve_import(&exports, &import.module, prefix, exposed_items.as_deref())?;
+            imports.merge(&import_scope);
+        }
+        Ok(HeaderRegistrationScope::from_imports(
+            module_name,
+            header,
+            imports,
+        ))
     }
 
     fn active_header_lsp_info(
@@ -473,12 +511,7 @@ impl Checker {
 }
 
 impl HeaderRegistrationScope {
-    fn new(
-        module_name: &str,
-        header: &ModuleHeader,
-        headers: &HashMap<String, ModuleHeader>,
-    ) -> Result<Self, String> {
-        let imports = scope_for_header_imports(header, headers)?;
+    fn from_imports(module_name: &str, header: &ModuleHeader, imports: ScopeMap) -> Self {
         let local_types = header
             .types
             .keys()
@@ -495,14 +528,26 @@ impl HeaderRegistrationScope {
             .keys()
             .map(|name| (name.clone(), canonical_join(module_name, name)))
             .collect();
-        Ok(HeaderRegistrationScope {
+        HeaderRegistrationScope {
             module_name: module_name.to_string(),
             imports,
             local_types,
             local_traits,
             local_effects,
-        })
+        }
     }
+}
+
+fn header_exposed_items_to_ast(items: &[super::HeaderExposedItem]) -> Vec<crate::ast::ExposedItem> {
+    items
+        .iter()
+        .map(|item| crate::ast::ExposedItem {
+            name: item.name.clone(),
+            alias: item.alias.clone(),
+            public: item.public,
+            span: HEADER_SPAN,
+        })
+        .collect()
 }
 
 fn header_type_param_vars(checker: &mut Checker, params: &[HeaderTypeParam]) -> Vec<(String, u32)> {
