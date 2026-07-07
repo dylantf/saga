@@ -410,8 +410,8 @@ from_row () = Normalized {
 }
 
 #[test]
-fn project_base_checker_warms_dependency_exports() {
-    let root = temp_project("dependency-warmup");
+fn project_base_checker_resolves_dependency_modules_without_warming_exports() {
+    let root = temp_project("dependency-map-only");
     let dep_root = root.join("deps/kraken");
     let dep_src = dep_root.join("src");
     std::fs::create_dir_all(&dep_src).expect("create dependency src");
@@ -454,8 +454,14 @@ answer () = 42
     let _ = std::fs::remove_dir_all(&root);
 
     assert!(
-        result.module_exports().contains_key("Kraken.Core"),
-        "dependency exports were not warmed"
+        checker
+            .module_map()
+            .is_some_and(|module_map| module_map.contains_key("Kraken.Core")),
+        "dependency module map was not resolved"
+    );
+    assert!(
+        !result.module_exports().contains_key("Kraken.Core"),
+        "dependency exports should not be warmed by the LSP base checker"
     );
 }
 
@@ -693,6 +699,7 @@ go () = {
   let _ = apply Lib.b
   ()
 }
+
 ";
     std::fs::write(&main_path, main_text).expect("write Main.saga");
     let main_uri = Url::from_file_path(&main_path).unwrap();

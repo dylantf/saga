@@ -589,6 +589,20 @@ impl ModuleContext {
 }
 
 impl CheckResult {
+    /// Clone the parts of a result that are useful as a cached LSP snapshot.
+    ///
+    /// Project-level LSP caches keep one of these per recently checked source
+    /// module. Retaining recursive module products here makes each cached
+    /// interface hold on to transitive dependency ASTs and CheckResults.
+    pub fn clone_for_lsp_snapshot(&self) -> Self {
+        let mut result = self.clone_without_module_results();
+        result.modules.source_overlay.clear();
+        result.modules.module_graph = None;
+        result.modules.codegen_info.clear();
+        result.modules.programs.clear();
+        result
+    }
+
     fn clone_without_module_results(&self) -> Self {
         Self {
             env: self.env.clone(),

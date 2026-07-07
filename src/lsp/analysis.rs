@@ -308,7 +308,7 @@ pub(super) fn collect_module_interface_updates(
             interface_fingerprint: module_interface_fingerprint(exports),
             exports: exports.clone(),
             codegen_info: check.codegen_info().get(module_name).cloned(),
-            check_result: check.module_check_results().get(module_name).cloned(),
+            check_result: None,
             next_var: checker.next_var_watermark(),
             is_current: false,
         });
@@ -334,7 +334,7 @@ pub(super) fn collect_module_interface_updates(
             interface_fingerprint: module_interface_fingerprint(&exports),
             exports,
             codegen_info: None,
-            check_result: Some(check.clone()),
+            check_result: Some(check.clone_for_lsp_snapshot()),
             next_var: checker.next_var_watermark(),
             is_current: true,
         });

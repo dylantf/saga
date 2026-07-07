@@ -245,7 +245,7 @@ fn checker_for_analysis(
         None,
         &Vec::new(),
         &built,
-        &built.to_result(),
+        &built.to_lsp_result(),
         &source_overlay,
         &HashMap::new(),
         false,
@@ -332,26 +332,8 @@ pub(super) fn checker_base_for_project(
         {
             eprintln!("[LSP] Warning: failed to resolve dependencies: {e}");
         }
-        warm_dependency_modules(&mut checker, root);
     }
     Ok(checker)
-}
-
-fn warm_dependency_modules(checker: &mut typechecker::Checker, root: &Path) {
-    let mut dependency_modules: Vec<String> = checker
-        .module_map()
-        .into_iter()
-        .flat_map(|module_map| module_map.iter())
-        .filter(|(_, path)| !is_local_project_module_path(root, path))
-        .map(|(module, _)| module.clone())
-        .collect();
-    dependency_modules.sort();
-
-    for module in dependency_modules {
-        if let Err(e) = checker.try_load_module_by_name(&module) {
-            eprintln!("[LSP] Warning: failed to warm dependency module '{module}': {e}");
-        }
-    }
 }
 
 pub(super) fn prepare_checker_for_analysis(
