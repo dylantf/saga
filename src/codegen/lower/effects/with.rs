@@ -559,7 +559,13 @@ impl<'a> Lowerer<'a> {
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
         let saved_finally = self.current_handler_finally.take();
         let saved_source_module = self.current_handler_source_module.clone();
-        self.current_handler_source_module = source_module.map(str::to_string);
+        // An inline handler (`source_module == None`) nested inside an imported
+        // handler's body physically belongs to that imported module — inherit the
+        // enclosing origin rather than clobbering it to `None`, so constructors in
+        // the inline arm still canonicalize against the right module.
+        if let Some(source_module) = source_module {
+            self.current_handler_source_module = Some(source_module.to_string());
+        }
         if let Some(ref fb) = arm.finally_block {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
@@ -663,8 +669,10 @@ impl<'a> Lowerer<'a> {
 
         let prev_handler_k = self.current_handler_k.replace(k_var);
         let saved_finally = self.current_handler_finally.take();
+        // Multi-arm inline handlers are always source-module-less, but if nested
+        // inside an imported handler body their code belongs to that module —
+        // inherit the enclosing origin (see `build_op_handler_fun_for_effect`).
         let saved_source_module = self.current_handler_source_module.clone();
-        self.current_handler_source_module = None;
 
         let scrutinee = if runtime_param_count == 1 {
             CExpr::Var(param_vars[0].clone())
