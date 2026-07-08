@@ -76,6 +76,10 @@ struct ParseJobResult {
 struct AppliedParseResult {
     diagnostics: Vec<Diagnostic>,
     dependents: Vec<Url>,
+    /// True when this analysis produced the document's first semantic snapshot
+    /// since it was opened — i.e. the file just finished "loading". Used to log
+    /// a one-time per-file readiness message without spamming on every edit.
+    first_load: bool,
 }
 
 #[derive(Clone)]
@@ -91,6 +95,10 @@ struct SemanticSnapshot {
 struct SharedState {
     documents: Mutex<HashMap<Url, DocumentState>>,
     projects: Mutex<ProjectSemanticStore>,
+    /// Whether the client opted into server-initiated work-done progress
+    /// (`capabilities.window.workDoneProgress`). Set once at `initialize`.
+    /// Gates the analysis spinner; logging is unconditional.
+    client_supports_progress: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -149,6 +157,8 @@ fn apply_parse_result(
     let mut parsed_program = None;
     let document_is_dirty = document.dirty;
     let had_semantic = result.semantic.is_some();
+    let had_prior_semantic = document.semantic.is_some();
+    let first_load = had_semantic && !had_prior_semantic;
     if let Some(parse) = result.parse {
         debug_assert_eq!(parse.version, result.version);
         parsed_program = Some(parse.program.clone());
@@ -222,6 +232,7 @@ fn apply_parse_result(
     Some(AppliedParseResult {
         diagnostics: result.diagnostics,
         dependents,
+        first_load,
     })
 }
 
@@ -377,7 +388,16 @@ fn recheck_open_documents_in_project(
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let supports_progress = params
+            .capabilities
+            .window
+            .as_ref()
+            .and_then(|window| window.work_done_progress)
+            .unwrap_or(false);
+        self.shared
+            .client_supports_progress
+            .store(supports_progress, std::sync::atomic::Ordering::Relaxed);
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
