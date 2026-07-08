@@ -940,11 +940,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
                 self.imported_static_helper_expr_supported(expr, source_module, stack)
             }
-            ExprKind::Tuple { elements } => {
-                elements.iter().all(|element| {
-                    self.imported_static_helper_expr_supported(element, source_module, stack)
-                })
-            }
+            ExprKind::Tuple { elements } => elements.iter().all(|element| {
+                self.imported_static_helper_expr_supported(element, source_module, stack)
+            }),
             ExprKind::ListLit { elements, .. } => elements.iter().all(|element| {
                 self.imported_static_helper_expr_supported(&element.node, source_module, stack)
             }),

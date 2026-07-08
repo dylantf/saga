@@ -887,9 +887,7 @@ impl Expr {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
-            ExprKind::ListLit { elements, .. } => {
-                elements.iter().any(|e| e.node.contains_resume())
-            }
+            ExprKind::ListLit { elements, .. } => elements.iter().any(|e| e.node.contains_resume()),
             ExprKind::StringInterp { parts, .. } => parts
                 .iter()
                 .any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),

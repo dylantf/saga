@@ -967,6 +967,8 @@ struct ResolvedDeps {
     /// name. Kept out of `modules` so private names cannot collide with the
     /// consumer or with other deps.
     private: HashMap<String, typechecker::ModuleMap>,
+    /// Source dependency roots visited while resolving the dependency closure.
+    roots: HashSet<PathBuf>,
 }
 
 /// Inputs to a single recursive walk of a project's deps. The walking state
@@ -1004,6 +1006,7 @@ fn resolve_deps_recursive(
 
         let dep_path =
             resolve_dep_to_path(dep_name, dep_entry, config_dir, top_project_root, lockfile)?;
+        acc.roots.insert(dep_path.clone());
 
         // Cycle detection
         let dep_key = dep_path.to_string_lossy().to_string();
@@ -1166,7 +1169,7 @@ pub fn resolve_deps(
     checker: &mut typechecker::Checker,
     project_root: &Path,
     deps: &HashMap<String, DepEntry>,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
     let lockfile = Lockfile::load(project_root);
     let mut acc = ResolvedDeps::default();
     let mut resolving = HashSet::new();
@@ -1214,7 +1217,7 @@ pub fn resolve_deps(
         checker.set_private_modules(existing);
     }
 
-    Ok(())
+    Ok(acc.roots.into_iter().collect())
 }
 
 /// Collect the root paths of all direct dependencies (non-Hex only).

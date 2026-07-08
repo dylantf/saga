@@ -268,12 +268,14 @@ impl Checker {
                     format!("lex error in module '{}': {}", module_name, e.message),
                 )
             })?;
-            crate::parser::Parser::new(tokens).parse_program().map_err(|e| {
-                Diagnostic::error_at(
-                    span,
-                    format!("parse error in module '{}': {}", module_name, e.message),
-                )
-            })
+            crate::parser::Parser::new(tokens)
+                .parse_program()
+                .map_err(|e| {
+                    Diagnostic::error_at(
+                        span,
+                        format!("parse error in module '{}': {}", module_name, e.message),
+                    )
+                })
         })?;
         let imported = timed_import_phase(&module_name, "collect_imported_decls", || {
             let mut cache = self
@@ -346,8 +348,7 @@ impl Checker {
         mod_checker.modules.loading = self.modules.loading.clone();
         // Share the summary cache so this module's transitive imports reuse
         // summaries the parent already parsed (and vice versa).
-        mod_checker.modules.derive_summary_cache =
-            Arc::clone(&self.modules.derive_summary_cache);
+        mod_checker.modules.derive_summary_cache = Arc::clone(&self.modules.derive_summary_cache);
         mod_checker.current_module = Some(module_name.clone());
         mod_checker
             .check_program_inner(&mut program)

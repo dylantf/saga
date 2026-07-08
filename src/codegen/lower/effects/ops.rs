@@ -83,9 +83,9 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => true,
-            ExprKind::Tuple { elements } => {
-                elements.iter().all(Self::static_tail_resume_value_supported)
-            }
+            ExprKind::Tuple { elements } => elements
+                .iter()
+                .all(Self::static_tail_resume_value_supported),
             ExprKind::ListLit { elements, .. } => elements
                 .iter()
                 .all(|element| Self::static_tail_resume_value_supported(&element.node)),

@@ -118,7 +118,13 @@ pub fn collect_imported_decls_cached(
     if let Ok(prelude_tokens) = crate::lexer::Lexer::new(PRELUDE_SRC).lex()
         && let Ok(prelude_program) = crate::parser::Parser::new(prelude_tokens).parse_program()
     {
-        collect_summaries_from_imports(&prelude_program, module_map, source_overlay, cache, &mut out);
+        collect_summaries_from_imports(
+            &prelude_program,
+            module_map,
+            source_overlay,
+            cache,
+            &mut out,
+        );
     }
 
     collect_summaries_from_imports(program, module_map, source_overlay, cache, &mut out);

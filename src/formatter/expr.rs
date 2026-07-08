@@ -609,8 +609,10 @@ pub fn format_expr(expr: &Expr) -> Doc {
                     Doc::text("]")
                 ]
             } else {
-                let elem_docs: Vec<Doc> =
-                    elements.iter().map(|element| format_expr(&element.node)).collect();
+                let elem_docs: Vec<Doc> = elements
+                    .iter()
+                    .map(|element| format_expr(&element.node))
+                    .collect();
                 format_comma_list(Doc::text("["), "]", elem_docs)
             }
         }

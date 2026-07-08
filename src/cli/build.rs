@@ -1178,12 +1178,16 @@ pub fn build_project_ext(
     }
 
     // Resolve dependencies and merge their modules into the module map
-    timed_build_phase("project", "resolve_deps", || {
-        if let Some(deps) = &config.deps
-            && let Err(e) = project_config::resolve_deps(&mut checker, &project_root, deps)
-        {
-            eprintln!("Error resolving dependencies: {}", e);
-            std::process::exit(1);
+    let dependency_roots = timed_build_phase("project", "resolve_deps", || {
+        let Some(deps) = &config.deps else {
+            return Vec::new();
+        };
+        match project_config::resolve_deps(&mut checker, &project_root, deps) {
+            Ok(roots) => roots,
+            Err(e) => {
+                eprintln!("Error resolving dependencies: {}", e);
+                std::process::exit(1);
+            }
         }
     });
 
@@ -1523,16 +1527,11 @@ pub fn build_project_ext(
     }
 
     if rebuild_plan.is_full() {
-        // Copy project-specific bridge (.erl) files into build dir.
-        // Skip deps that have their own ebin/ — they're already on the code path.
-        // Copy bridge (.erl) files from project root and deps without their own ebin/
+        // Copy project-specific bridge (.erl) files into the build dir.
+        // Include transitive source deps so a direct dependency can rely on a
+        // bridge-owning dependency without forcing consumers to list it too.
         let mut bridge_roots: Vec<&Path> = vec![&project_root];
-        let dep_roots = config
-            .deps
-            .as_ref()
-            .map(|deps| project_config::dep_root_paths(&project_root, deps))
-            .unwrap_or_default();
-        for dep_root in &dep_roots {
+        for dep_root in &dependency_roots {
             if !dep_root.join("ebin").exists() {
                 bridge_roots.push(dep_root);
             }
