@@ -116,7 +116,7 @@ pub(super) fn lower_head_debug_label(head: &Expr) -> String {
         ExprKind::PipeBack { segments } => format!("pipe-back/{}", segments.len()),
         ExprKind::ComposeForward { segments } => format!("compose-forward/{}", segments.len()),
         ExprKind::Cons { .. } => "cons".to_string(),
-        ExprKind::ListLit { elements } => format!("list/{}", elements.len()),
+        ExprKind::ListLit { elements, .. } => format!("list/{}", elements.len()),
         ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
         ExprKind::ListComprehension { qualifiers, .. } => {
             format!("list-comprehension/{}", qualifiers.len())

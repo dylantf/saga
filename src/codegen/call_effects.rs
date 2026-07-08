@@ -1422,7 +1422,7 @@ fn head_debug_label(head: &Expr) -> String {
         ExprKind::PipeBack { .. } => "pipe-back".to_string(),
         ExprKind::ComposeForward { .. } => "compose-forward".to_string(),
         ExprKind::Cons { .. } => "cons".to_string(),
-        ExprKind::ListLit { elements } => format!("list/{}", elements.len()),
+        ExprKind::ListLit { elements, .. } => format!("list/{}", elements.len()),
         ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
         ExprKind::ListComprehension { qualifiers, .. } => {
             format!("list-comprehension/{}", qualifiers.len())

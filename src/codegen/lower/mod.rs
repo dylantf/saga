@@ -746,9 +746,12 @@ impl<'a> Lowerer<'a> {
                         .return_clause()
                         .is_some_and(|rc| Self::contains_direct_effect_call(&rc.body))
             }
-            ExprKind::Tuple { elements, .. } | ExprKind::ListLit { elements } => {
+            ExprKind::Tuple { elements, .. } => {
                 elements.iter().any(Self::contains_direct_effect_call)
             }
+            ExprKind::ListLit { elements, .. } => elements
+                .iter()
+                .any(|element| Self::contains_direct_effect_call(&element.node)),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
                 .iter()
                 .any(|(_, _, field)| Self::contains_direct_effect_call(field)),

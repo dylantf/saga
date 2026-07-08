@@ -152,11 +152,14 @@ fn visit_expr_for_arms(expr: &Expr, out: &mut HandlerAnalysis) {
                 visit_expr_for_arms(field_expr, out);
             }
         }
-        ExprKind::EffectCall { args, .. }
-        | ExprKind::Tuple { elements: args }
-        | ExprKind::ListLit { elements: args } => {
+        ExprKind::EffectCall { args, .. } | ExprKind::Tuple { elements: args } => {
             for arg in args {
                 visit_expr_for_arms(arg, out);
+            }
+        }
+        ExprKind::ListLit { elements, .. } => {
+            for arg in elements {
+                visit_expr_for_arms(&arg.node, out);
             }
         }
         ExprKind::Resume { value } => visit_expr_for_arms(value, out),
@@ -389,11 +392,14 @@ fn walk_count(expr: &Expr, count: &mut usize) {
                 walk_count(field_expr, count);
             }
         }
-        ExprKind::EffectCall { args, .. }
-        | ExprKind::Tuple { elements: args }
-        | ExprKind::ListLit { elements: args } => {
+        ExprKind::EffectCall { args, .. } | ExprKind::Tuple { elements: args } => {
             for arg in args {
                 walk_count(arg, count);
+            }
+        }
+        ExprKind::ListLit { elements, .. } => {
+            for arg in elements {
+                walk_count(&arg.node, count);
             }
         }
         ExprKind::With { expr, .. } => walk_count(expr, count),

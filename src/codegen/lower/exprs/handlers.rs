@@ -378,9 +378,12 @@ impl<'a> Lowerer<'a> {
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => true,
             ExprKind::Ascription { expr, .. } => Self::handler_factory_arg_supported(expr),
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+            ExprKind::Tuple { elements } => {
                 elements.iter().all(Self::handler_factory_arg_supported)
             }
+            ExprKind::ListLit { elements, .. } => elements
+                .iter()
+                .all(|element| Self::handler_factory_arg_supported(&element.node)),
             _ => false,
         }
     }

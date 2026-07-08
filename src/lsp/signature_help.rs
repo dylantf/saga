@@ -252,9 +252,12 @@ fn find_call_in_expr(expr: &Expr, offset: usize) -> Option<ActiveCall> {
             })
         }),
         ExprKind::Lambda { body, .. } => find_call_in_expr(body, offset),
-        ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+        ExprKind::Tuple { elements } => elements
             .iter()
             .find_map(|expr| find_call_in_expr(expr, offset)),
+        ExprKind::ListLit { elements, .. } => elements
+            .iter()
+            .find_map(|expr| find_call_in_expr(&expr.node, offset)),
         ExprKind::BinOp { left, right, .. } => {
             find_call_in_expr(left, offset).or_else(|| find_call_in_expr(right, offset))
         }

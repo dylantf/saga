@@ -1,4 +1,4 @@
-use super::expr::format_expr;
+use super::expr::{format_expr, is_layout_sensitive_app};
 use super::helpers::{
     docs_from_vec, format_annotated_body, format_braced_body, format_doc_preamble,
     format_handler_arm, format_lit_raw, format_trailing, format_trivia,
@@ -114,7 +114,19 @@ pub fn format_fun_binding(
 /// the whole thing doesn't fit on one line.
 pub fn format_binding(lhs: Doc, body: &Expr) -> Doc {
     let body_doc = format_expr(body);
-    if is_block_like(body) {
+    if is_layout_sensitive_app(body) {
+        Doc::group(docs![
+            lhs,
+            Doc::text(" ="),
+            Doc::nest(
+                2,
+                docs![
+                    Doc::line(),
+                    Doc::if_break(body_doc.clone(), Doc::flat(body_doc))
+                ]
+            )
+        ])
+    } else if is_block_like(body) {
         // { and case stay on the = line; the body handles its own breaking
         docs![lhs, Doc::text(" = "), body_doc]
     } else {
@@ -147,7 +159,10 @@ pub(super) fn is_block_like(expr: &Expr) -> bool {
         ExprKind::Pipe { .. } => false,
         ExprKind::BinOp { .. } | ExprKind::BinOpChain { .. } => true,
         // Lists and tuples stay on the = line - they handle their own breaking
-        ExprKind::ListLit { elements } => !elements.is_empty(),
+        ExprKind::ListLit {
+            elements,
+            dangling_trivia,
+        } => !elements.is_empty() || !dangling_trivia.is_empty(),
         ExprKind::Tuple { .. } => true,
         // Named record creates stay on = line
         ExprKind::RecordCreate { .. } | ExprKind::AnonRecordCreate { .. } => true,

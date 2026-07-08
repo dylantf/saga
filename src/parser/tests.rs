@@ -2996,7 +2996,7 @@ fn normal_list_still_works() {
         } => {
             assert_eq!(elements.len(), 2);
             assert!(matches!(
-                &elements[0],
+                &elements[0].node,
                 Expr {
                     kind: ExprKind::Lit {
                         value: Lit::Int(_, 1)
@@ -3005,7 +3005,7 @@ fn normal_list_still_works() {
                 }
             ));
             assert!(matches!(
-                &elements[1],
+                &elements[1].node,
                 Expr {
                     kind: ExprKind::Lit {
                         value: Lit::Int(_, 2)

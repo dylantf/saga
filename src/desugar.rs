@@ -297,9 +297,9 @@ fn desugar_expr(expr: &mut Expr) {
             desugar_expr(head);
             desugar_expr(tail);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                desugar_expr(e);
+                desugar_expr(&mut e.node);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
@@ -445,7 +445,7 @@ fn desugar_expr(expr: &mut Expr) {
             };
         }
         ExprKind::ListLit { .. } => {
-            let ExprKind::ListLit { elements } =
+            let ExprKind::ListLit { elements, .. } =
                 std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit })
             else {
                 unreachable!()
@@ -455,7 +455,7 @@ fn desugar_expr(expr: &mut Expr) {
             } else {
                 // Build from right to left: Nil, then wrap each element
                 let mut result = Expr::synth(span, ExprKind::Constructor { name: "Nil".into() });
-                for elem in elements.into_iter().rev() {
+                for elem in elements.into_iter().rev().map(|ann| ann.node) {
                     let elem_span = elem.span;
                     let cons = Expr::synth(
                         elem_span,
@@ -819,9 +819,9 @@ pub fn freshen_expr_ids(expr: &mut Expr) {
             freshen_expr_ids(head);
             freshen_expr_ids(tail);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                freshen_expr_ids(e);
+                freshen_expr_ids(&mut e.node);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
@@ -1125,9 +1125,9 @@ pub fn retarget_expr_spans(expr: &mut Expr, target: Span) {
             retarget_expr_spans(head, target);
             retarget_expr_spans(tail, target);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                retarget_expr_spans(e, target);
+                retarget_expr_spans(&mut e.node, target);
             }
         }
         ExprKind::StringInterp { parts, .. } => {

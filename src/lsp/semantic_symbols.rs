@@ -658,9 +658,14 @@ fn add_expr_type_symbols(
         ast::ExprKind::Resume { value } => {
             add_expr_type_symbols(index, uri, line_index, source, value, check);
         }
-        ast::ExprKind::Tuple { elements } | ast::ExprKind::ListLit { elements } => {
+        ast::ExprKind::Tuple { elements } => {
             for element in elements {
                 add_expr_type_symbols(index, uri, line_index, source, element, check);
+            }
+        }
+        ast::ExprKind::ListLit { elements, .. } => {
+            for element in elements {
+                add_expr_type_symbols(index, uri, line_index, source, &element.node, check);
             }
         }
         ast::ExprKind::Do {

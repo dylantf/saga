@@ -83,9 +83,12 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => true,
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+            ExprKind::Tuple { elements } => {
+                elements.iter().all(Self::static_tail_resume_value_supported)
+            }
+            ExprKind::ListLit { elements, .. } => elements
                 .iter()
-                .all(Self::static_tail_resume_value_supported),
+                .all(|element| Self::static_tail_resume_value_supported(&element.node)),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
                 .iter()
                 .all(|(_, _, value)| Self::static_tail_resume_value_supported(value)),

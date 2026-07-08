@@ -861,9 +861,14 @@ mod tests {
                 walk_handler(handler, ids);
             }
             ExprKind::Resume { value } => walk(value, ids),
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+            ExprKind::Tuple { elements } => {
                 for e in elements {
                     walk(e, ids);
+                }
+            }
+            ExprKind::ListLit { elements, .. } => {
+                for e in elements {
+                    walk(&e.node, ids);
                 }
             }
             ExprKind::Do {

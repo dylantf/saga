@@ -704,9 +704,9 @@ pub(crate) fn child_exprs_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             out.push(head);
             out.push(tail);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                out.push(e);
+                out.push(&mut e.node);
             }
         }
         ExprKind::StringInterp { parts, .. } => {

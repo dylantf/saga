@@ -540,9 +540,13 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
             normalize_expr(head);
             normalize_expr(tail);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit {
+            elements,
+            dangling_trivia,
+        } => {
+            dangling_trivia.clear();
             for e in elements.iter_mut() {
-                normalize_expr(e);
+                normalize_annotated(e, normalize_expr);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
@@ -945,6 +949,23 @@ fn case_scrutinee_application_stays_parseable_when_long() {
     assert_eq!(try_parse_normalized(src), try_parse_normalized(&formatted));
 }
 
+#[test]
+fn long_application_with_list_breaks_after_equals_first() {
+    let src = "router req = choose [static_dir \"/static\" \"src/static\", mount \"/timing\" Timing.app, fun r -> home r] req with {fs}";
+    let formatted = fmt(src, 60);
+    assert!(
+        formatted.contains("router req =\n  choose"),
+        "application should break after = before breaking arguments: {}",
+        formatted
+    );
+    assert!(
+        !formatted.contains("router req = choose\n"),
+        "application must not leave the head on the = line: {}",
+        formatted
+    );
+    assert_eq!(try_parse_normalized(src), try_parse_normalized(&formatted));
+}
+
 // --- Let bindings (declarations) ---
 
 #[test]
@@ -1064,6 +1085,60 @@ fn leading_comment_preserved() {
         fmt80("# a comment\nlet x = 42"),
         "# a comment\nlet x = 42\n"
     );
+}
+
+#[test]
+fn list_comment_before_first_item_preserved() {
+    assert_eq!(
+        fmt80("let xs = [\n  # before first\n  1\n]"),
+        "let xs = [\n  # before first\n  1,\n]\n"
+    );
+}
+
+#[test]
+fn list_comment_between_items_preserved() {
+    assert_eq!(
+        fmt80("let xs = [1,\n  # before second\n  2]"),
+        "let xs = [\n  1,\n  # before second\n  2,\n]\n"
+    );
+}
+
+#[test]
+fn list_dangling_comment_before_close_preserved() {
+    assert_eq!(
+        fmt80("let xs = [\n  # empty\n]"),
+        "let xs = [\n  # empty\n]\n"
+    );
+}
+
+#[test]
+fn list_trailing_comments_on_elements_and_commas_preserved() {
+    assert_eq!(
+        fmt80("let xs = [1, # one\n  2 # two\n]"),
+        "let xs = [\n  1, # one\n  2, # two\n]\n"
+    );
+}
+
+#[test]
+fn commented_choose_application_preserves_comments_and_reparses() {
+    let src = "fun router : Request -> Response needs {RequestParserConfig}\nrouter req = choose [\n  # static_dir \"/static\" \"src/static\",\n  # mount \"/timing\" Timing.app,\n  fun r -> home r,\n] req with {fs}";
+    let formatted = fmt(src, 80);
+    assert!(
+        formatted.contains("router req =\n  choose"),
+        "application should break after = before breaking list: {}",
+        formatted
+    );
+    assert!(
+        formatted.contains("# static_dir \"/static\" \"src/static\","),
+        "first comment was dropped: {}",
+        formatted
+    );
+    assert!(
+        formatted.contains("# mount \"/timing\" Timing.app,"),
+        "second comment was dropped: {}",
+        formatted
+    );
+    assert_eq!(try_parse_normalized(src), try_parse_normalized(&formatted));
 }
 
 // --- Fun signatures ---

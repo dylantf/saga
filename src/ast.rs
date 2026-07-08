@@ -768,8 +768,14 @@ pub enum ExprKind {
     /// `x :: xs` -- cons (desugars to App(App(Constructor("Cons"), x), xs))
     Cons { head: Box<Expr>, tail: Box<Expr> },
 
-    /// `[1, 2, 3]` or `[]` -- list literal (desugars to nested Cons/Nil)
-    ListLit { elements: Vec<Expr> },
+    /// `[1, 2, 3]` or `[]` -- list literal (desugars to nested Cons/Nil).
+    /// Elements are annotated so the formatter can preserve comments inside
+    /// the delimited list before this surface form is desugared away.
+    ListLit {
+        elements: Vec<Annotated<Expr>>,
+        /// Comments before the closing `]` with no following element.
+        dangling_trivia: Vec<Trivia>,
+    },
 
     /// `$"hello {name}"` -- interpolated string (desugars to show/concat chain)
     StringInterp {
@@ -881,7 +887,9 @@ impl Expr {
                 segments.iter().any(|s| s.node.contains_resume())
             }
             ExprKind::Cons { head, tail } => head.contains_resume() || tail.contains_resume(),
-            ExprKind::ListLit { elements } => elements.iter().any(|e| e.contains_resume()),
+            ExprKind::ListLit { elements, .. } => {
+                elements.iter().any(|e| e.node.contains_resume())
+            }
             ExprKind::StringInterp { parts, .. } => parts
                 .iter()
                 .any(|p| matches!(p, StringPart::Expr(e) if e.contains_resume())),

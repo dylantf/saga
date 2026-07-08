@@ -191,9 +191,9 @@ fn collect_local_fun_deps(
                 collect_local_fun_deps(&segment.node, local_funs, out);
             }
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for element in elements {
-                collect_local_fun_deps(element, local_funs, out);
+                collect_local_fun_deps(&element.node, local_funs, out);
             }
         }
         ExprKind::Cons { head, tail } => {

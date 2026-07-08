@@ -344,9 +344,14 @@ pub(super) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 visit(&return_clause.body);
             }
         }
-        ExprKind::Tuple { elements, .. } | ExprKind::ListLit { elements } => {
+        ExprKind::Tuple { elements, .. } => {
             for element in elements {
                 visit(element);
+            }
+        }
+        ExprKind::ListLit { elements, .. } => {
+            for element in elements {
+                visit(&element.node);
             }
         }
         ExprKind::RecordCreate { fields, .. }

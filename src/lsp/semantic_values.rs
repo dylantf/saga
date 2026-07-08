@@ -238,9 +238,14 @@ impl LocalBindingDefinitionCollector {
                 self.collect_handler(handler);
             }
             ast::ExprKind::Resume { value } => self.collect_expr(value),
-            ast::ExprKind::Tuple { elements } | ast::ExprKind::ListLit { elements } => {
+            ast::ExprKind::Tuple { elements } => {
                 for element in elements {
                     self.collect_expr(element);
+                }
+            }
+            ast::ExprKind::ListLit { elements, .. } => {
+                for element in elements {
+                    self.collect_expr(&element.node);
                 }
             }
             ast::ExprKind::Do {
@@ -583,9 +588,14 @@ fn collect_expr_value_definition_nodes(expr: &ast::Expr, out: &mut HashSet<ast::
             collect_handler_value_definition_nodes(handler, out);
         }
         ast::ExprKind::Resume { value } => collect_expr_value_definition_nodes(value, out),
-        ast::ExprKind::Tuple { elements } | ast::ExprKind::ListLit { elements } => {
+        ast::ExprKind::Tuple { elements } => {
             for element in elements {
                 collect_expr_value_definition_nodes(element, out);
+            }
+        }
+        ast::ExprKind::ListLit { elements, .. } => {
+            for element in elements {
+                collect_expr_value_definition_nodes(&element.node, out);
             }
         }
         ast::ExprKind::Do {

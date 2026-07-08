@@ -70,6 +70,17 @@ pub fn flatten_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     (current, args)
 }
 
+/// Expressions whose internal line breaks can change parsing if they appear on
+/// the same source line as `=`, `->`, etc. If these break, their caller should
+/// break before the whole expression first so continuation indentation is safe.
+pub fn is_layout_sensitive_app(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::App { .. } => true,
+        ExprKind::With { expr, .. } => is_layout_sensitive_app(expr),
+        _ => false,
+    }
+}
+
 fn format_binary_chain(segments: &[Annotated<Expr>], op: &str) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     for (i, seg) in segments.iter().enumerate() {
@@ -571,11 +582,35 @@ pub fn format_expr(expr: &Expr) -> Doc {
         ExprKind::Cons { head, tail } => {
             docs![format_expr(head), Doc::text(" :: "), format_expr(tail)]
         }
-        ExprKind::ListLit { elements } => {
-            if elements.is_empty() {
+        ExprKind::ListLit {
+            elements,
+            dangling_trivia,
+        } => {
+            let has_trivia = !dangling_trivia.is_empty()
+                || elements.iter().any(|element| {
+                    !element.leading_trivia.is_empty() || element.trailing_comment.is_some()
+                });
+            if elements.is_empty() && !has_trivia {
                 Doc::text("[]")
+            } else if has_trivia {
+                let mut body_items = Vec::new();
+                for element in elements {
+                    body_items.push(Doc::hardline());
+                    body_items.push(format_trivia(&element.leading_trivia));
+                    body_items.push(format_expr(&element.node));
+                    body_items.push(Doc::text(","));
+                    body_items.push(format_trailing(&element.trailing_comment));
+                }
+                let body = format_braced_body(&body_items, dangling_trivia);
+                docs![
+                    Doc::text("["),
+                    Doc::nest(2, body),
+                    Doc::hardline(),
+                    Doc::text("]")
+                ]
             } else {
-                let elem_docs: Vec<Doc> = elements.iter().map(format_expr).collect();
+                let elem_docs: Vec<Doc> =
+                    elements.iter().map(|element| format_expr(&element.node)).collect();
                 format_comma_list(Doc::text("["), "]", elem_docs)
             }
         }

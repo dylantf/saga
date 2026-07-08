@@ -928,7 +928,7 @@ fn resolve_expr(
         }
         ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                resolve_expr(e, scope, map, front_resolution);
+                resolve_expr(&e.node, scope, map, front_resolution);
             }
         }
     }

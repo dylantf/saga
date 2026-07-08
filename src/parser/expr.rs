@@ -1057,14 +1057,19 @@ impl Parser {
                     // Empty list
                     if matches!(self.peek(), Token::RBracket) {
                         let end = self.tokens[self.pos].span;
+                        let dangling_trivia = self.take_leading_trivia(self.pos);
                         self.advance();
                         return Ok(Expr {
                             id: self.next_id(),
                             span: span.to(end),
-                            kind: ExprKind::ListLit { elements: vec![] },
+                            kind: ExprKind::ListLit {
+                                elements: vec![],
+                                dangling_trivia,
+                            },
                         });
                     }
 
+                    let first_start = self.pos;
                     let first = self.parse_expr(0)?;
 
                     if matches!(self.peek(), Token::Bar) {
@@ -1084,20 +1089,44 @@ impl Parser {
                     }
 
                     // Normal list literal
-                    let mut elements = vec![first];
+                    let first_trailing = self.take_trailing_comment(self.pos - 1);
+                    let mut elements = vec![Annotated {
+                        node: first,
+                        leading_trivia: self.take_leading_trivia(first_start),
+                        trailing_comment: first_trailing,
+                        trailing_trivia: vec![],
+                    }];
                     while matches!(self.peek(), Token::Comma) {
                         self.advance();
+                        if let Some(comment) = self.take_trailing_comment(self.pos - 1)
+                            && let Some(last) = elements.last_mut()
+                            && last.trailing_comment.is_none()
+                        {
+                            last.trailing_comment = Some(comment);
+                        }
                         if matches!(self.peek(), Token::RBracket) {
                             break; // trailing comma
                         }
-                        elements.push(self.parse_expr(0)?);
+                        let elem_start = self.pos;
+                        let elem = self.parse_expr(0)?;
+                        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                        elements.push(Annotated {
+                            node: elem,
+                            leading_trivia: self.take_leading_trivia(elem_start),
+                            trailing_comment,
+                            trailing_trivia: vec![],
+                        });
                     }
                     let end = self.tokens[self.pos].span;
+                    let dangling_trivia = self.take_leading_trivia(self.pos);
                     self.expect(Token::RBracket)?;
                     Ok(Expr {
                         id: self.next_id(),
                         span: span.to(end),
-                        kind: ExprKind::ListLit { elements },
+                        kind: ExprKind::ListLit {
+                            elements,
+                            dangling_trivia,
+                        },
                     })
                 })();
                 self.no_brace_app = saved_nba;

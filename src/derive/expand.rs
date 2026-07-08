@@ -446,9 +446,9 @@ pub(crate) fn qualify_free_vars(
             qualify_free_vars(head, module, module_values, trait_methods, bound);
             qualify_free_vars(tail, module, module_values, trait_methods, bound);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                qualify_free_vars(e, module, module_values, trait_methods, bound);
+                qualify_free_vars(&mut e.node, module, module_values, trait_methods, bound);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
@@ -696,9 +696,9 @@ pub(crate) fn qualify_ctor_refs(
             qualify_ctor_refs(head, module, module_constructors);
             qualify_ctor_refs(tail, module, module_constructors);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                qualify_ctor_refs(e, module, module_constructors);
+                qualify_ctor_refs(&mut e.node, module, module_constructors);
             }
         }
         ExprKind::StringInterp { parts, .. } => {

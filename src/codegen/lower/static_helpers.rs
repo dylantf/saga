@@ -287,9 +287,12 @@ impl<'a> Lowerer<'a> {
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
                 self.static_helper_expr_contains_covered_effect(expr, stack)
             }
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+            ExprKind::Tuple { elements } => elements
                 .iter()
                 .any(|element| self.static_helper_expr_contains_covered_effect(element, stack)),
+            ExprKind::ListLit { elements, .. } => elements.iter().any(|element| {
+                self.static_helper_expr_contains_covered_effect(&element.node, stack)
+            }),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
                 .iter()
                 .any(|(_, _, field)| self.static_helper_expr_contains_covered_effect(field, stack)),
@@ -408,9 +411,12 @@ impl<'a> Lowerer<'a> {
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
                 self.static_helper_expr_supported(expr, stack)
             }
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+            ExprKind::Tuple { elements } => elements
                 .iter()
                 .all(|element| self.static_helper_expr_supported(element, stack)),
+            ExprKind::ListLit { elements, .. } => elements
+                .iter()
+                .all(|element| self.static_helper_expr_supported(&element.node, stack)),
             ExprKind::RecordCreate { fields, .. }
             | ExprKind::AnonRecordCreate { fields }
             | ExprKind::RecordBuild { fields, .. } => fields
@@ -620,10 +626,21 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => self
                 .imported_static_helper_expr_used_static_ops(expr, source_module, stack, used_ops),
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+            ExprKind::Tuple { elements } => {
                 for element in elements {
                     self.imported_static_helper_expr_used_static_ops(
                         element,
+                        source_module,
+                        stack,
+                        used_ops,
+                    )?;
+                }
+                Some(())
+            }
+            ExprKind::ListLit { elements, .. } => {
+                for element in elements {
+                    self.imported_static_helper_expr_used_static_ops(
+                        &element.node,
                         source_module,
                         stack,
                         used_ops,
@@ -822,9 +839,12 @@ impl<'a> Lowerer<'a> {
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
                 Self::imported_static_helper_pure_expr_supported(expr)
             }
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+            ExprKind::Tuple { elements } => elements
                 .iter()
                 .all(Self::imported_static_helper_pure_expr_supported),
+            ExprKind::ListLit { elements, .. } => elements
+                .iter()
+                .all(|element| Self::imported_static_helper_pure_expr_supported(&element.node)),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
                 .iter()
                 .all(|(_, _, field)| Self::imported_static_helper_pure_expr_supported(field)),
@@ -920,11 +940,14 @@ impl<'a> Lowerer<'a> {
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
                 self.imported_static_helper_expr_supported(expr, source_module, stack)
             }
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+            ExprKind::Tuple { elements } => {
                 elements.iter().all(|element| {
                     self.imported_static_helper_expr_supported(element, source_module, stack)
                 })
             }
+            ExprKind::ListLit { elements, .. } => elements.iter().all(|element| {
+                self.imported_static_helper_expr_supported(&element.node, source_module, stack)
+            }),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
                 fields.iter().all(|(_, _, field)| {
                     self.imported_static_helper_expr_supported(field, source_module, stack)
@@ -1096,9 +1119,19 @@ impl<'a> Lowerer<'a> {
             ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
                 Self::collect_static_tail_resume_value_captures(expr, bound, captures)
             }
-            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+            ExprKind::Tuple { elements } => {
                 for element in elements {
                     Self::collect_static_tail_resume_value_captures(element, bound, captures)?;
+                }
+                Some(())
+            }
+            ExprKind::ListLit { elements, .. } => {
+                for element in elements {
+                    Self::collect_static_tail_resume_value_captures(
+                        &element.node,
+                        bound,
+                        captures,
+                    )?;
                 }
                 Some(())
             }

@@ -1348,9 +1348,9 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
             walk_expr(head, out);
             walk_expr(tail, out);
         }
-        ExprKind::ListLit { elements } => {
+        ExprKind::ListLit { elements, .. } => {
             for e in elements {
-                walk_expr(e, out);
+                walk_expr(&e.node, out);
             }
         }
         ExprKind::StringInterp { parts, .. } => {
