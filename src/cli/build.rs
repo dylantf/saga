@@ -1031,8 +1031,31 @@ fn plan_project_rebuild(
         return ProjectRebuildPlan::Full;
     }
     let Some(previous) = previous_manifest else {
+        if build_trace_enabled() {
+            eprintln!("[saga-build] full-rebuild reason=no_previous_manifest");
+        }
         return ProjectRebuildPlan::Full;
     };
+    if build_trace_enabled() {
+        let why = if previous.compiler_version != BUILD_HASH {
+            Some("compiler_version")
+        } else if previous.manifest_version != super::cache::BUILD_MANIFEST_VERSION {
+            Some("manifest_version")
+        } else if previous.profile != options.profile {
+            Some("profile")
+        } else if previous.stdlib_fingerprint != options.stdlib_fingerprint {
+            Some("stdlib_fingerprint")
+        } else if previous.dependency_fingerprints != options.dependency_fingerprints {
+            Some("dependency_fingerprints")
+        } else if previous.module_artifacts.is_empty() {
+            Some("empty_module_artifacts")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            eprintln!("[saga-build] full-rebuild reason={why}");
+        }
+    }
     if previous.compiler_version != BUILD_HASH
         || previous.manifest_version != super::cache::BUILD_MANIFEST_VERSION
         || previous.profile != options.profile
@@ -1042,12 +1065,21 @@ fn plan_project_rebuild(
     {
         return ProjectRebuildPlan::Full;
     }
-    if unexpected_output_artifact(build_dir, previous).is_some() {
+    if let Some(unexpected) = unexpected_output_artifact(build_dir, previous) {
+        if build_trace_enabled() {
+            eprintln!("[saga-build] full-rebuild reason=unexpected_output_artifact path={unexpected:?}");
+        }
         return ProjectRebuildPlan::Full;
     }
 
     let changes = input_fingerprint_changes(&previous.input_fingerprints, current_inputs);
     if !changes.added.is_empty() || !changes.removed.is_empty() {
+        if build_trace_enabled() {
+            eprintln!(
+                "[saga-build] full-rebuild reason=input_changes added={:?} removed={:?}",
+                changes.added, changes.removed
+            );
+        }
         return ProjectRebuildPlan::Full;
     }
 

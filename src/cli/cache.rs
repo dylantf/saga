@@ -611,6 +611,38 @@ pub(super) fn project_dependency_fingerprints(
     fingerprints
 }
 
+/// Collect the roots of every transitive path/git dependency, mirroring
+/// `collect_dependency_fingerprints_recursive`. The build compiles bridge
+/// (`.erl`) files from transitive source deps (see `bridge_roots` in the
+/// build driver), so input fingerprinting must walk the same transitive set —
+/// otherwise a transitive dep's `Foo.bridge.beam` is compiled but never listed
+/// as an expected output, and `unexpected_output_artifact` forces a full
+/// rebuild on every incremental build.
+fn collect_dependency_roots_recursive(
+    project_root: &Path,
+    config_dir: &Path,
+    deps: &HashMap<String, project_config::DepEntry>,
+    seen: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) {
+    for (name, dep) in deps {
+        if dep.is_hex() {
+            // Hex deps ship precompiled `ebin/` beams and are keyed opaquely by
+            // the dependency fingerprint, not by scanning their sources.
+            continue;
+        }
+        let root = dependency_root_for_fingerprint(project_root, config_dir, name, dep);
+        if !seen.insert(root.clone()) {
+            continue;
+        }
+        out.push(root.clone());
+        let dep_config = ProjectConfig::load(&root);
+        if let Some(transitive) = &dep_config.deps {
+            collect_dependency_roots_recursive(project_root, &root, transitive, seen, out);
+        }
+    }
+}
+
 pub(super) fn project_input_fingerprints(
     project_root: &Path,
     config: &ProjectConfig,
@@ -631,7 +663,18 @@ pub(super) fn project_input_fingerprints(
     }
 
     if let Some(deps) = &config.deps {
-        for dep_root in project_config::dep_root_paths(project_root, deps) {
+        // Walk transitively: the same set of source-dep roots the build copies
+        // and compiles bridge files from.
+        let mut dep_roots = Vec::new();
+        let mut seen = BTreeSet::new();
+        collect_dependency_roots_recursive(
+            project_root,
+            project_root,
+            deps,
+            &mut seen,
+            &mut dep_roots,
+        );
+        for dep_root in dep_roots {
             push_input_fingerprint(&mut inputs, project_root, &dep_root.join("project.toml"));
             push_input_fingerprint(&mut inputs, project_root, &dep_root.join("saga.lock"));
             for path in collect_source_root_files(&dep_root, &["src", "lib"], "saga") {
