@@ -632,6 +632,13 @@ pub struct ModuleContext {
     /// (via `register_module_canonical_exports` directly). Used to skip
     /// redundant re-registration.
     pub(crate) registered_canonical: HashSet<String>,
+    /// Memoized structural module summaries for derive-import collection,
+    /// shared across module loads (and their spawned module checkers) so the
+    /// same source isn't re-parsed once per importer. Keyed internally by
+    /// (module name, source hash), so it stays correct across edits in the LSP.
+    /// `Arc<Mutex<..>>` keeps `Checker: Send` (the LSP checks in `spawn_blocking`)
+    /// while letting a checker tree share one cache.
+    pub(crate) derive_summary_cache: Arc<std::sync::Mutex<crate::derive::ImportSummaryCache>>,
 }
 
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).

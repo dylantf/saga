@@ -429,6 +429,27 @@ impl Checker {
         self.modules.map.as_ref()
     }
 
+    /// Collect derive-import summaries through this checker's shared summary
+    /// cache, so repeated collection (every LSP keystroke) reuses parses
+    /// instead of re-reading and re-parsing every imported source.
+    pub fn collect_imported_decls_cached(
+        &self,
+        program: &[crate::ast::Decl],
+        source_overlay: &HashMap<std::path::PathBuf, String>,
+    ) -> crate::derive::ImportedDecls {
+        let mut cache = self
+            .modules
+            .derive_summary_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::derive::collect_imported_decls_cached(
+            program,
+            self.modules.map.as_ref(),
+            source_overlay,
+            &mut cache,
+        )
+    }
+
     pub fn module_map_mut(&mut self) -> Option<&mut check_module::ModuleMap> {
         self.modules.module_graph = None;
         self.modules.map.as_mut()

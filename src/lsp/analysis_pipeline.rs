@@ -486,11 +486,7 @@ pub(super) fn analyze_document(
                 checker.evict_module(&current_module);
             }
             let imported = timed(&mut timings.derive_imports, || {
-                derive::collect_imported_decls_with_sources(
-                    &program,
-                    checker.module_map(),
-                    &source_overlay,
-                )
+                checker.collect_imported_decls_cached(&program, &source_overlay)
             });
             trace(format!(
                 "analysis checkpoint uri={} version={version} stage=derive-imports-ok",

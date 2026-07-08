@@ -575,6 +575,8 @@ impl ModuleContext {
             loading: HashSet::new(),
             active_scc_headers: None,
             registered_canonical: HashSet::new(),
+            // Live build state, not part of the output snapshot: a fresh cache.
+            derive_summary_cache: Default::default(),
         }
     }
 

@@ -261,27 +261,39 @@ impl Checker {
             })?
         };
 
-        let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
-            Diagnostic::error_at(
-                span,
-                format!("lex error in module '{}': {}", module_name, e.message),
-            )
-        })?;
-        let mut program = crate::parser::Parser::new(tokens)
-            .parse_program()
-            .map_err(|e| {
+        let mut program = timed_import_phase(&module_name, "lex_parse", || {
+            let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
+                Diagnostic::error_at(
+                    span,
+                    format!("lex error in module '{}': {}", module_name, e.message),
+                )
+            })?;
+            crate::parser::Parser::new(tokens).parse_program().map_err(|e| {
                 Diagnostic::error_at(
                     span,
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
-            })?;
-        let imported = crate::derive::collect_imported_decls_with_sources(
-            &program,
-            self.modules.map.as_ref(),
-            &self.modules.source_overlay,
-        );
-        crate::derive::expand_derives(&mut program, &imported);
-        crate::desugar::desugar_program(&mut program);
+            })
+        })?;
+        let imported = timed_import_phase(&module_name, "collect_imported_decls", || {
+            let mut cache = self
+                .modules
+                .derive_summary_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            crate::derive::collect_imported_decls_cached(
+                &program,
+                self.modules.map.as_ref(),
+                &self.modules.source_overlay,
+                &mut cache,
+            )
+        });
+        timed_import_phase(&module_name, "expand_derives", || {
+            crate::derive::expand_derives(&mut program, &imported)
+        });
+        timed_import_phase(&module_name, "desugar", || {
+            crate::desugar::desugar_program(&mut program)
+        });
 
         self.modules
             .programs
@@ -332,6 +344,10 @@ impl Checker {
         mod_checker.modules.visibility = self.modules.visibility.clone();
         mod_checker.modules.private_modules = self.modules.private_modules.clone();
         mod_checker.modules.loading = self.modules.loading.clone();
+        // Share the summary cache so this module's transitive imports reuse
+        // summaries the parent already parsed (and vice versa).
+        mod_checker.modules.derive_summary_cache =
+            Arc::clone(&self.modules.derive_summary_cache);
         mod_checker.current_module = Some(module_name.clone());
         mod_checker
             .check_program_inner(&mut program)
@@ -511,11 +527,19 @@ impl Checker {
                         format!("parse error in module '{}': {}", module_name, e.message),
                     )
                 })?;
-            let imported = crate::derive::collect_imported_decls_with_sources(
-                &program,
-                self.modules.map.as_ref(),
-                &self.modules.source_overlay,
-            );
+            let imported = {
+                let mut cache = self
+                    .modules
+                    .derive_summary_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                crate::derive::collect_imported_decls_cached(
+                    &program,
+                    self.modules.map.as_ref(),
+                    &self.modules.source_overlay,
+                    &mut cache,
+                )
+            };
             crate::derive::expand_derives(&mut program, &imported);
             crate::desugar::desugar_program(&mut program);
             self.modules
@@ -713,6 +737,7 @@ impl Checker {
         mc.modules.visibility = self.modules.visibility.clone();
         mc.modules.private_modules = self.modules.private_modules.clone();
         mc.modules.base_trait_impls = self.modules.base_trait_impls.clone();
+        mc.modules.derive_summary_cache = Arc::clone(&self.modules.derive_summary_cache);
         mc
     }
 

@@ -1,7 +1,33 @@
 use super::*;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+
+/// Memoizes structural module summaries so a build doesn't re-parse the same
+/// module once per importer (the dominant cost of a cold typecheck: derive's
+/// import collection ran per module load and reparsed the whole prelude subtree
+/// plus every popular module each time).
+///
+/// Keyed by `(module_name, source_hash)`. Hashing the source makes the cache
+/// self-invalidating for the LSP: an edited module produces a different key and
+/// misses, so a stale summary is never reused.
+#[derive(Default)]
+pub struct ImportSummaryCache {
+    summaries: HashMap<(String, u64), ModuleSummary>,
+}
+
+impl ImportSummaryCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+fn hash_source(source: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Pre-derive summaries for names visible from imports. This is intentionally
 /// structural, not semantic resolution: derive uses it to emit qualified syntax,
@@ -66,6 +92,23 @@ pub fn collect_imported_decls_with_sources(
     module_map: Option<&crate::typechecker::ModuleMap>,
     source_overlay: &HashMap<PathBuf, String>,
 ) -> ImportedDecls {
+    // No shared cache: a throwaway one still dedupes re-parsing within this call
+    // (diamond imports), but callers on a hot path should pass a persistent
+    // cache via `collect_imported_decls_cached`.
+    collect_imported_decls_cached(
+        program,
+        module_map,
+        source_overlay,
+        &mut ImportSummaryCache::new(),
+    )
+}
+
+pub fn collect_imported_decls_cached(
+    program: &[Decl],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+    source_overlay: &HashMap<PathBuf, String>,
+    cache: &mut ImportSummaryCache,
+) -> ImportedDecls {
     let mut out = ImportedDecls::default();
 
     // Pull in everything the prelude imports first. This makes `Result`,
@@ -75,10 +118,10 @@ pub fn collect_imported_decls_with_sources(
     if let Ok(prelude_tokens) = crate::lexer::Lexer::new(PRELUDE_SRC).lex()
         && let Ok(prelude_program) = crate::parser::Parser::new(prelude_tokens).parse_program()
     {
-        collect_summaries_from_imports(&prelude_program, module_map, source_overlay, &mut out);
+        collect_summaries_from_imports(&prelude_program, module_map, source_overlay, cache, &mut out);
     }
 
-    collect_summaries_from_imports(program, module_map, source_overlay, &mut out);
+    collect_summaries_from_imports(program, module_map, source_overlay, cache, &mut out);
     out
 }
 
@@ -86,6 +129,7 @@ pub(crate) fn collect_summaries_from_imports(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
     source_overlay: &HashMap<PathBuf, String>,
+    cache: &mut ImportSummaryCache,
     out: &mut ImportedDecls,
 ) {
     for decl in program {
@@ -102,6 +146,7 @@ pub(crate) fn collect_summaries_from_imports(
                 module_map,
                 source_overlay,
                 &mut HashSet::new(),
+                cache,
             ) else {
                 continue;
             };
@@ -128,18 +173,42 @@ fn module_summary_for_import(
     module_map: Option<&crate::typechecker::ModuleMap>,
     source_overlay: &HashMap<PathBuf, String>,
     visiting: &mut HashSet<String>,
+    cache: &mut ImportSummaryCache,
 ) -> Option<ModuleSummary> {
     let module_name = module_path.join(".");
     if !visiting.insert(module_name.clone()) {
         return None;
     }
-    let source = module_source(module_path, module_map, source_overlay)?;
-    let tokens = crate::lexer::Lexer::new(&source).lex().ok()?;
-    let prog = crate::parser::Parser::new(tokens).parse_program().ok()?;
-    let mut summary = module_summary(&prog);
-    merge_public_reexport_summaries(&prog, module_map, source_overlay, visiting, &mut summary);
+    let result = (|| {
+        let source = module_source(module_path, module_map, source_overlay)?;
+        let key = (module_name.clone(), hash_source(&source));
+        if let Some(cached) = cache.summaries.get(&key) {
+            return Some(cached.clone());
+        }
+        let tokens = crate::lexer::Lexer::new(&source).lex().ok()?;
+        let prog = crate::parser::Parser::new(tokens).parse_program().ok()?;
+        let mut summary = module_summary(&prog);
+        // Track whether a reexport was skipped because it was mid-recursion (a
+        // reexport cycle). A summary truncated that way depends on the current
+        // `visiting` set, so it isn't safe to memoize — recompute it each time,
+        // matching the pre-cache behavior for that pathological case.
+        let mut truncated = false;
+        merge_public_reexport_summaries(
+            &prog,
+            module_map,
+            source_overlay,
+            visiting,
+            cache,
+            &mut summary,
+            &mut truncated,
+        );
+        if !truncated {
+            cache.summaries.insert(key, summary.clone());
+        }
+        Some(summary)
+    })();
     visiting.remove(&module_name);
-    Some(summary)
+    result
 }
 
 fn module_source(
@@ -160,12 +229,15 @@ fn module_source(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_public_reexport_summaries(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
     source_overlay: &HashMap<PathBuf, String>,
     visiting: &mut HashSet<String>,
+    cache: &mut ImportSummaryCache,
     summary: &mut ModuleSummary,
+    truncated: &mut bool,
 ) {
     for decl in program {
         let Decl::Import {
@@ -177,8 +249,12 @@ fn merge_public_reexport_summaries(
             continue;
         };
         let Some(imported) =
-            module_summary_for_import(module_path, module_map, source_overlay, visiting)
+            module_summary_for_import(module_path, module_map, source_overlay, visiting, cache)
         else {
+            // Skipped: either mid-recursion (reexport cycle) or unreadable.
+            // Either way this summary is now incomplete, so its caller must not
+            // memoize it.
+            *truncated = true;
             continue;
         };
         merge_public_reexport_summary(summary, exposing, &imported);
