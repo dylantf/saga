@@ -549,6 +549,7 @@ impl<'a> Lowerer<'a> {
                     .check_result
                     .module_check_results()
                     .get(name)
+                    .map(|result| result.as_ref())
                     .unwrap_or(self.check_result);
                 let cross_call_effects =
                     self.populate_call_effects_with_check(&compiled.elaborated, module_check);

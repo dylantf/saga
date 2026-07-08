@@ -45,7 +45,7 @@ fn timed_codegen_phase<T>(module: &str, phase: &str, f: impl FnOnce() -> T) -> T
 /// and pre-computed name resolution.
 #[derive(Clone, Default)]
 pub struct CompiledModule {
-    pub codegen_info: ModuleCodegenInfo,
+    pub codegen_info: std::sync::Arc<ModuleCodegenInfo>,
     pub elaborated: ast::Program,
     pub resolution: resolve::ResolutionMap,
     /// Front-end name resolution from the typechecker.
@@ -91,7 +91,7 @@ pub struct CodegenContext {
 /// storing them inside the owning context would be self-referential.
 pub struct PreparedEmitContext<'a> {
     pub ctx: &'a CodegenContext,
-    pub codegen_info: HashMap<String, ModuleCodegenInfo>,
+    pub codegen_info: HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     pub external_ctors: generic_fold::ExternalCtors<'a>,
     pub external_funs: generic_fold::ExternalFuns<'a>,
     pub module_resolution: resolve::ResolutionMap,
@@ -99,10 +99,10 @@ pub struct PreparedEmitContext<'a> {
 
 impl CodegenContext {
     /// Get codegen info for all modules (for backward compat with resolve/init).
-    pub fn codegen_info(&self) -> HashMap<String, ModuleCodegenInfo> {
+    pub fn codegen_info(&self) -> HashMap<String, std::sync::Arc<ModuleCodegenInfo>> {
         self.modules
             .iter()
-            .map(|(k, v)| (k.clone(), v.codegen_info.clone()))
+            .map(|(k, v)| (k.clone(), std::sync::Arc::clone(&v.codegen_info)))
             .collect()
     }
 
@@ -128,7 +128,7 @@ impl CodegenContext {
 
     pub fn module_semantics(&self, name: &str) -> Option<ModuleSemantics<'_>> {
         self.modules.get(name).map(|m| ModuleSemantics {
-            codegen_info: &m.codegen_info,
+            codegen_info: m.codegen_info.as_ref(),
             elaborated: &m.elaborated,
             resolution: &m.resolution,
             front_resolution: &m.front_resolution,
@@ -141,7 +141,7 @@ impl CodegenContext {
             (
                 name.as_str(),
                 ModuleSemantics {
-                    codegen_info: &m.codegen_info,
+                    codegen_info: m.codegen_info.as_ref(),
                     elaborated: &m.elaborated,
                     resolution: &m.resolution,
                     front_resolution: &m.front_resolution,
@@ -209,6 +209,7 @@ pub fn precompute_context_call_effects(
             let check_result = result
                 .module_check_results()
                 .get(&module_name)
+                .map(|module_result| module_result.as_ref())
                 .unwrap_or(result);
             let mut resolution = compiled.resolution.clone();
             for other in ctx.modules.values() {

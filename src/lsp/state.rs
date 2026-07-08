@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use saga::typechecker;
 use tower_lsp::lsp_types::{Location, Url};
@@ -99,9 +100,9 @@ pub(super) struct CachedModuleInterface {
     pub(super) path: Option<PathBuf>,
     pub(super) source_fingerprint: u64,
     pub(super) interface_fingerprint: u64,
-    pub(super) exports: typechecker::ModuleExports,
-    pub(super) codegen_info: Option<typechecker::ModuleCodegenInfo>,
-    pub(super) check_result: Option<typechecker::CheckResult>,
+    pub(super) exports: Arc<typechecker::ModuleExports>,
+    pub(super) codegen_info: Option<Arc<typechecker::ModuleCodegenInfo>>,
+    pub(super) check_result: Option<Arc<typechecker::CheckResult>>,
     /// Checker var-id watermark when this interface was harvested. All var ids
     /// in `exports`/`check_result` are below it, so a checker seeding this
     /// interface must advance its own counter past it to stay collision-free.
@@ -118,9 +119,9 @@ pub(super) struct ModuleInterfaceUpdate {
     pub(super) path: Option<PathBuf>,
     pub(super) source_fingerprint: u64,
     pub(super) interface_fingerprint: u64,
-    pub(super) exports: typechecker::ModuleExports,
-    pub(super) codegen_info: Option<typechecker::ModuleCodegenInfo>,
-    pub(super) check_result: Option<typechecker::CheckResult>,
+    pub(super) exports: Arc<typechecker::ModuleExports>,
+    pub(super) codegen_info: Option<Arc<typechecker::ModuleCodegenInfo>>,
+    pub(super) check_result: Option<Arc<typechecker::CheckResult>>,
     /// Checker var-id watermark at harvest time (see [`CachedModuleInterface`]).
     pub(super) next_var: u32,
     pub(super) is_current: bool,
@@ -170,10 +171,14 @@ impl ProjectSemanticStore {
         checker: typechecker::Checker,
     ) -> typechecker::Checker {
         let project = self.project_mut(project_root);
-        project
-            .base_checker
-            .get_or_insert_with(|| checker.clone())
-            .clone()
+        match &project.base_checker {
+            // Another analysis already stored a base; use that one.
+            Some(existing) => existing.clone(),
+            None => {
+                project.base_checker = Some(checker.clone());
+                checker
+            }
+        }
     }
 
     pub(super) fn update_file(
@@ -322,11 +327,15 @@ impl ProjectSemanticStore {
         project
             .module_interfaces
             .values()
-            .filter_map(|entry| entry.check_result.as_ref())
+            .filter_map(|entry| entry.check_result.as_deref())
             .find_map(|check| trait_method_signature_in_check(check, trait_name, method_name))
             .or_else(|| {
                 project.module_interfaces.values().find_map(|entry| {
-                    trait_method_signature_in_exports(&entry.exports, trait_name, method_name)
+                    trait_method_signature_in_exports(
+                        entry.exports.as_ref(),
+                        trait_name,
+                        method_name,
+                    )
                 })
             })
     }
@@ -341,11 +350,15 @@ impl ProjectSemanticStore {
         project
             .module_interfaces
             .values()
-            .filter_map(|entry| entry.check_result.as_ref())
+            .filter_map(|entry| entry.check_result.as_deref())
             .find_map(|check| effect_operation_signature_in_check(check, effect_name, op_name))
             .or_else(|| {
                 project.module_interfaces.values().find_map(|entry| {
-                    effect_operation_signature_in_exports(&entry.exports, effect_name, op_name)
+                    effect_operation_signature_in_exports(
+                        entry.exports.as_ref(),
+                        effect_name,
+                        op_name,
+                    )
                 })
             })
     }
@@ -414,7 +427,7 @@ impl ProjectSemanticStore {
             }
             checker.seed_module_cache(
                 module_name.clone(),
-                entry.exports.clone(),
+                Arc::clone(&entry.exports),
                 entry.codegen_info.clone(),
                 None,
                 entry.check_result.clone(),
@@ -502,14 +515,14 @@ impl ProjectSemanticStore {
     pub(super) fn module_exports_for_project(
         &self,
         project_root: &Option<PathBuf>,
-    ) -> HashMap<String, typechecker::ModuleExports> {
+    ) -> HashMap<String, Arc<typechecker::ModuleExports>> {
         self.projects
             .get(project_root)
             .map(|project| {
                 project
                     .module_interfaces
                     .iter()
-                    .map(|(module, entry)| (module.clone(), entry.exports.clone()))
+                    .map(|(module, entry)| (module.clone(), Arc::clone(&entry.exports)))
                     .collect()
             })
             .unwrap_or_default()

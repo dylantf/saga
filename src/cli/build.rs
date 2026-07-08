@@ -1271,8 +1271,8 @@ pub fn build_project_ext(
         // on them would append a second copy of each synthetic ImplDef, and
         // rechecking them here duplicates the import walk work the front end
         // already paid for.
-        let (mut program, from_cache) = if let Some(cached) = result.programs().get(module_name) {
-            (cached.clone(), true)
+        let program = if let Some(cached) = result.programs().get(module_name) {
+            std::sync::Arc::clone(cached)
         } else {
             let source = fs::read_to_string(&file_path).unwrap_or_else(|e| {
                 eprintln!("Error reading {}: {}", file_path.display(), e);
@@ -1282,13 +1282,19 @@ pub fn build_project_ext(
                 eprintln!("Lex error in module {}: {:?}", module_name, e);
                 std::process::exit(1);
             });
-            let program = parser::Parser::new(tokens)
+            let mut program = parser::Parser::new(tokens)
                 .parse_program()
                 .unwrap_or_else(|e| {
                     eprintln!("Parse error in module {}: {:?}", module_name, e);
                     std::process::exit(1);
                 });
-            (program, false)
+            let imported = derive::collect_imported_decls(&program, result.module_map());
+            let derive_errors = derive::expand_derives(&mut program, &imported);
+            desugar::desugar_program(&mut program);
+            for d in &derive_errors {
+                eprintln!("Error in module {}: {}", module_name, d.message);
+            }
+            std::sync::Arc::new(program)
         };
         imports_by_module.insert(module_name.clone(), module_imports(&program));
 
@@ -1306,27 +1312,23 @@ pub fn build_project_ext(
                 source: source_text,
             },
         );
-        if !from_cache {
-            let imported = derive::collect_imported_decls(&program, result.module_map());
-            let derive_errors = derive::expand_derives(&mut program, &imported);
-            desugar::desugar_program(&mut program);
-
-            for d in &derive_errors {
-                eprintln!("Error in module {}: {}", module_name, d.message);
-            }
-        }
         let cached_result = result.module_check_results().get(module_name);
-        let fallback_result = if cached_result.is_none() {
+        let (fallback_result, program) = if cached_result.is_none() {
             let mut mod_checker = timed_build_phase(module_name, "seed_module_checker", || {
                 checker.seeded_module_checker(Some(project_root.clone()), false)
             });
-            Some(timed_build_phase(module_name, "recheck_module", || {
-                mod_checker.check_program(&mut program)
-            }))
+            // Re-checking rewrites the AST in place (name resolution), so this
+            // path needs its own copy; elaboration below must see the checked AST.
+            let mut owned = program.as_ref().clone();
+            let rechecked = timed_build_phase(module_name, "recheck_module", || {
+                mod_checker.check_program(&mut owned)
+            });
+            (Some(rechecked), std::sync::Arc::new(owned))
         } else {
-            None
+            (None, program)
         };
         let mod_result = cached_result
+            .map(|cached| cached.as_ref())
             .or(fallback_result.as_ref())
             .expect("module result should be cached or recomputed");
         for w in mod_result.warnings() {
@@ -1442,7 +1444,10 @@ pub fn build_project_ext(
                 module_artifact_for_source(
                     module_name,
                     source_file,
-                    result.module_exports().get(*module_name),
+                    result
+                        .module_exports()
+                        .get(*module_name)
+                        .map(|exports| exports.as_ref()),
                 )
             })
         })
@@ -1490,15 +1495,15 @@ pub fn build_project_ext(
         let compiled = &compiled_modules[*module_name];
         let erlang_name = erlang_module_name(module_name);
         let sf = source_files.get(*module_name);
-        let check_result =
-            result
-                .module_check_results()
-                .get(*module_name)
-                .or(if *module_name == "Main" {
-                    Some(&result)
-                } else {
-                    None
-                });
+        let check_result = result
+            .module_check_results()
+            .get(*module_name)
+            .map(|cached| cached.as_ref())
+            .or(if *module_name == "Main" {
+                Some(&result)
+            } else {
+                None
+            });
         timed_build_phase(module_name, "emit_module", || {
             emit_module_prepared(
                 &erlang_name,

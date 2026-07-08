@@ -11,6 +11,8 @@ use super::{
     CheckRequest, SEMANTIC_DEBOUNCE_MS, SharedState, apply_parse_result, current_document,
 };
 
+const MAX_CONCURRENT_ANALYSES: usize = 2;
+
 pub(super) async fn debounce_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<CheckRequest>,
     tx_for_dependents: tokio::sync::mpsc::UnboundedSender<CheckRequest>,
@@ -23,6 +25,11 @@ pub(super) async fn debounce_loop(
     let mut pending: HashMap<Url, (i32, String, Option<PathBuf>, bool, Instant)> = HashMap::new();
     let mut in_flight: std::collections::HashSet<Url> = std::collections::HashSet::new();
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Url>();
+    // Each analysis job builds its own checker (a full clone of the project
+    // base), so unbounded parallelism multiplies peak memory by the number of
+    // open dependents. Two concurrent jobs keeps the editor responsive while
+    // bounding the peak.
+    let analysis_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES));
 
     loop {
         if pending.is_empty() && in_flight.is_empty() {
@@ -102,10 +109,26 @@ pub(super) async fn debounce_loop(
                     let tx = tx_for_dependents.clone();
                     let done = done_tx.clone();
                     let analysis_uri = uri.clone();
+                    let slots = Arc::clone(&analysis_slots);
                     trace(format!(
                         "analysis job start uri={uri} version={version} primary={is_primary}"
                     ));
                     tokio::spawn(async move {
+                        let Ok(_permit) = slots.acquire_owned().await else {
+                            let _ = done.send(uri);
+                            return;
+                        };
+                        // The document may have changed while waiting for a
+                        // slot; skip and let the re-enqueued request run.
+                        if current_document(&shared, &uri)
+                            .is_none_or(|current| current.version != version)
+                        {
+                            trace(format!(
+                                "skip stale analysis after slot wait uri={uri} request_version={version}"
+                            ));
+                            let _ = done.send(uri);
+                            return;
+                        }
                         let job_start = StdInstant::now();
                         let join_result = tokio::task::spawn_blocking(move || {
                             analyze_document(

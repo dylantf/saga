@@ -37,7 +37,7 @@ fn interface_update(module_name: &str, interface_fingerprint: u64) -> ModuleInte
         path: Some(PathBuf::from(format!("/tmp/{module_name}.saga"))),
         source_fingerprint: 1,
         interface_fingerprint,
-        exports: typechecker::ModuleExports::default(),
+        exports: std::sync::Arc::new(typechecker::ModuleExports::default()),
         codegen_info: None,
         check_result: None,
         next_var: 0,

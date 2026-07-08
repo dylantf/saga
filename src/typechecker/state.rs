@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::{
     CheckResult, Diagnostic, EffectRow, ModuleCodegenInfo, ModuleExports, ResolutionResult, Scheme,
@@ -600,15 +601,22 @@ pub struct ModuleContext {
     /// other packages or the consumer's own modules.
     pub private_modules: Option<HashMap<String, check_module::ModuleMap>>,
     /// Cache of already-typechecked modules: module name -> all public exports.
-    pub(crate) exports: HashMap<String, ModuleExports>,
+    ///
+    /// All module-cache products are write-once snapshots shared via `Arc`.
+    /// Checker clones and module-checker seeding copy pointers, not contents,
+    /// so a product exists in memory once no matter how many checkers or
+    /// nested `CheckResult`s hold it.
+    pub(crate) exports: HashMap<String, Arc<ModuleExports>>,
     /// Cache of codegen-relevant info for each typechecked module.
-    pub codegen_info: HashMap<String, ModuleCodegenInfo>,
+    pub codegen_info: HashMap<String, Arc<ModuleCodegenInfo>>,
     /// Cache of parsed programs for each typechecked module.
-    pub programs: HashMap<String, crate::ast::Program>,
+    pub programs: HashMap<String, Arc<crate::ast::Program>>,
     /// Cache of per-module CheckResults for elaboration (avoids re-typechecking).
-    pub check_results: HashMap<String, CheckResult>,
-    /// Cached checker state after prelude has been loaded.
-    pub(crate) prelude_snapshot: Option<Box<Checker>>,
+    pub check_results: HashMap<String, Arc<CheckResult>>,
+    /// Cached checker state after prelude has been loaded. Shared (not deep
+    /// copied) into module checkers so transitive non-builtin imports never
+    /// rebuild the prelude from scratch.
+    pub(crate) prelude_snapshot: Option<Arc<Checker>>,
     /// Trait impls from Std.saga (base layer). Shared with builtin module checkers
     /// so they can resolve constraints on primitives (e.g. Ord for Int).
     pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,

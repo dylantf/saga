@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::{Checker, Diagnostic, Scheme};
 use crate::token::Span;
@@ -101,7 +102,7 @@ impl Checker {
         // listed every name. This makes `(..)` equivalent by construction.
         let expanded: Option<Vec<crate::ast::ExposedItem>> = match exposing {
             Some(crate::ast::Exposing::All { public, .. }) => {
-                Some(synthesize_all_exposed(&exports, *public))
+                Some(synthesize_all_exposed(exports.as_ref(), *public))
             }
             _ => None,
         };
@@ -111,7 +112,13 @@ impl Checker {
             (Some(crate::ast::Exposing::All { .. }), Some(items)) => Some(items.as_slice()),
             (Some(crate::ast::Exposing::All { .. }), None) => unreachable!(),
         };
-        self.inject_exports(&exports, &module_name, &prefix, exposing_items, span)
+        self.inject_exports(
+            exports.as_ref(),
+            &module_name,
+            &prefix,
+            exposing_items,
+            span,
+        )
     }
 
     /// Parse, typecheck, and cache a module without injecting it into the
@@ -124,7 +131,7 @@ impl Checker {
         &mut self,
         module_path: &[String],
         span: Span,
-    ) -> Result<ModuleExports, Diagnostic> {
+    ) -> Result<Arc<ModuleExports>, Diagnostic> {
         let module_name = module_path.join(".");
 
         let is_builtin = builtin_module_source(module_path).is_some();
@@ -278,13 +285,17 @@ impl Checker {
 
         self.modules
             .programs
-            .insert(module_name.clone(), program.clone());
+            .insert(module_name.clone(), Arc::new(program.clone()));
 
         self.modules.loading.insert(module_name.clone());
 
         let mut mod_checker = if !is_builtin {
             self.ensure_prelude_snapshot(&project_root);
-            let mut mc = *self.modules.prelude_snapshot.as_ref().unwrap().clone();
+            let snapshot = self.modules.prelude_snapshot.as_ref().unwrap();
+            let mut mc = snapshot.as_ref().clone();
+            // Share the snapshot pointer so this module's own non-builtin
+            // imports reuse it instead of re-typechecking the whole prelude.
+            mc.modules.prelude_snapshot = Some(Arc::clone(snapshot));
             mc.next_var = self.next_var;
             mc
         } else {
@@ -334,13 +345,13 @@ impl Checker {
         // Update the stored program with the resolved AST (resolve_names ran during check)
         self.modules
             .programs
-            .insert(module_name.clone(), program.clone());
+            .insert(module_name.clone(), Arc::new(program.clone()));
 
         // Collect all public exports into a single struct
-        let exports = ModuleExports::collect(&program, &mod_checker);
+        let exports = Arc::new(ModuleExports::collect(&program, &mod_checker));
 
         // Cache the CheckResult for elaboration (avoids re-typechecking in compile_std_modules)
-        let mod_result = mod_checker.to_result();
+        let mod_result = Arc::new(mod_checker.to_result());
         self.modules
             .check_results
             .insert(module_name.clone(), mod_result);
@@ -371,18 +382,18 @@ impl Checker {
         let codegen_info = collect_codegen_info(
             &module_name,
             &program,
-            &exports,
+            exports.as_ref(),
             &mod_checker.effects,
             &mod_checker.scope_map,
         );
         self.modules
             .codegen_info
-            .insert(module_name.clone(), codegen_info);
+            .insert(module_name.clone(), Arc::new(codegen_info));
 
         // Cache the exports
         self.modules
             .exports
-            .insert(module_name.clone(), exports.clone());
+            .insert(module_name.clone(), Arc::clone(&exports));
 
         // After loading any Std module, merge its exported impls into the base
         // snapshot so later builtin module checkers inherit impls from all
@@ -426,7 +437,41 @@ impl Checker {
         snapshot
             .check_program_inner(&mut prelude_program)
             .expect("prelude type errors");
-        self.modules.prelude_snapshot = Some(Box::new(snapshot));
+        // Merge the freshly checked stdlib products into this checker now.
+        // Previously they reached the parent lazily via the first module
+        // checker's merge-back; doing it eagerly lets the stored snapshot stay
+        // slim (module checkers get these caches from the parent, not the
+        // snapshot).
+        for (k, v) in &snapshot.modules.programs {
+            self.modules
+                .programs
+                .entry(k.clone())
+                .or_insert_with(|| Arc::clone(v));
+        }
+        for (k, v) in &snapshot.modules.exports {
+            self.modules
+                .exports
+                .entry(k.clone())
+                .or_insert_with(|| Arc::clone(v));
+        }
+        for (k, v) in &snapshot.modules.codegen_info {
+            self.modules
+                .codegen_info
+                .entry(k.clone())
+                .or_insert_with(|| Arc::clone(v));
+        }
+        for (k, v) in &snapshot.modules.check_results {
+            self.modules
+                .check_results
+                .entry(k.clone())
+                .or_insert_with(|| Arc::clone(v));
+        }
+        if snapshot.next_var > self.next_var {
+            self.next_var = snapshot.next_var;
+        }
+        snapshot.modules.programs.clear();
+        snapshot.modules.check_results.clear();
+        self.modules.prelude_snapshot = Some(Arc::new(snapshot));
     }
 
     fn load_module_scc(&mut self, modules: &[String], span: Span) -> Result<(), Diagnostic> {
@@ -475,7 +520,7 @@ impl Checker {
             crate::desugar::desugar_program(&mut program);
             self.modules
                 .programs
-                .insert(module_name.clone(), program.clone());
+                .insert(module_name.clone(), Arc::new(program.clone()));
             programs.insert(module_name.clone(), program);
         }
 
@@ -538,7 +583,9 @@ impl Checker {
             for (module_name, program, mod_checker) in &mut checked_modules {
                 mod_checker.modules.exports = self.modules.exports.clone();
                 let exports = ModuleExports::collect(program, mod_checker);
-                self.modules.exports.insert(module_name.clone(), exports);
+                self.modules
+                    .exports
+                    .insert(module_name.clone(), Arc::new(exports));
             }
         }
 
@@ -556,20 +603,20 @@ impl Checker {
                 })?;
             self.modules
                 .programs
-                .insert(module_name.clone(), program.clone());
+                .insert(module_name.clone(), Arc::new(program.clone()));
             self.modules
                 .check_results
-                .insert(module_name.clone(), mod_checker.to_result());
+                .insert(module_name.clone(), Arc::new(mod_checker.to_result()));
             let codegen_info = collect_codegen_info(
                 &module_name,
                 &program,
-                &exports,
+                exports.as_ref(),
                 &mod_checker.effects,
                 &mod_checker.scope_map,
             );
             self.modules
                 .codegen_info
-                .insert(module_name.clone(), codegen_info);
+                .insert(module_name.clone(), Arc::new(codegen_info));
             self.modules.exports.insert(module_name.clone(), exports);
         }
 
@@ -633,7 +680,8 @@ impl Checker {
     ) -> Checker {
         let mut mc = if !is_builtin {
             if let Some(ref snapshot) = self.modules.prelude_snapshot {
-                let mut mc = *snapshot.clone();
+                let mut mc = snapshot.as_ref().clone();
+                mc.modules.prelude_snapshot = Some(Arc::clone(snapshot));
                 if let Some(root) = project_root {
                     mc.modules.project_root = Some(root);
                 }

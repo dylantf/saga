@@ -398,7 +398,7 @@ fn build_signature(
     call: &ActiveCall,
     program: &[Decl],
     result: &CheckResult,
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
 ) -> Option<SignatureInformation> {
     build_from_semantic_call(call, result, project_exports)
         .or_else(|| build_from_annotation(&call.name, program))
@@ -412,7 +412,7 @@ fn build_signature(
 fn build_from_semantic_call(
     call: &ActiveCall,
     result: &CheckResult,
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
 ) -> Option<SignatureInformation> {
     let node_id = call.node_id?;
     if call.kind == ActiveCallKind::EffectOperation
@@ -438,7 +438,7 @@ fn build_from_semantic_call(
 fn build_from_member_name(
     name: &str,
     result: &CheckResult,
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
 ) -> Option<SignatureInformation> {
     if let Some((owner, member)) = name.rsplit_once('.') {
         return trait_method_signature_in_check(result, owner, member)
@@ -500,7 +500,7 @@ fn effect_operation_signature_for_member_in_check(
 }
 
 fn trait_method_signature_in_project(
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
     trait_name: &str,
     method_name: &str,
 ) -> Option<String> {
@@ -510,7 +510,7 @@ fn trait_method_signature_in_project(
 }
 
 fn effect_operation_signature_in_project(
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
     effect_name: &str,
     op_name: &str,
 ) -> Option<String> {
@@ -520,7 +520,7 @@ fn effect_operation_signature_in_project(
 }
 
 fn trait_method_signature_for_member_in_project(
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
     method_name: &str,
 ) -> Option<String> {
     project_exports?.values().find_map(|exports| {
@@ -542,7 +542,7 @@ fn trait_method_signature_for_member_in_project(
 }
 
 fn effect_operation_signature_for_member_in_project(
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
     op_name: &str,
 ) -> Option<String> {
     project_exports?.values().find_map(|exports| {
@@ -632,7 +632,7 @@ fn build_from_annotation(name: &str, program: &[Decl]) -> Option<SignatureInform
 fn scheme_for_name(
     name: &str,
     result: &CheckResult,
-    project_exports: Option<&HashMap<String, ModuleExports>>,
+    project_exports: Option<&HashMap<String, std::sync::Arc<ModuleExports>>>,
 ) -> Option<Scheme> {
     if let Some(scheme) = result
         .env

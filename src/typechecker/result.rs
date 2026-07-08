@@ -272,17 +272,23 @@ impl CheckResult {
     }
 
     /// Codegen info for all typechecked modules.
-    pub fn codegen_info(&self) -> &std::collections::HashMap<String, super::ModuleCodegenInfo> {
+    pub fn codegen_info(
+        &self,
+    ) -> &std::collections::HashMap<String, std::sync::Arc<super::ModuleCodegenInfo>> {
         &self.modules.codegen_info
     }
 
     /// Cached parsed programs for typechecked modules.
-    pub fn programs(&self) -> &std::collections::HashMap<String, crate::ast::Program> {
+    pub fn programs(
+        &self,
+    ) -> &std::collections::HashMap<String, std::sync::Arc<crate::ast::Program>> {
         &self.modules.programs
     }
 
     /// Cached per-module CheckResults (from typecheck_import, avoids re-typechecking).
-    pub fn module_check_results(&self) -> &std::collections::HashMap<String, CheckResult> {
+    pub fn module_check_results(
+        &self,
+    ) -> &std::collections::HashMap<String, std::sync::Arc<CheckResult>> {
         &self.modules.check_results
     }
 
@@ -420,7 +426,9 @@ impl CheckResult {
     }
 
     /// Cached module exports (module name -> exports) for all typechecked modules.
-    pub fn module_exports(&self) -> &std::collections::HashMap<String, super::ModuleExports> {
+    pub fn module_exports(
+        &self,
+    ) -> &std::collections::HashMap<String, std::sync::Arc<super::ModuleExports>> {
         &self.modules.exports
     }
 
@@ -546,7 +554,7 @@ impl CheckResult {
 impl ModuleContext {
     fn clone_for_result_with_check_results(
         &self,
-        check_results: HashMap<String, CheckResult>,
+        check_results: HashMap<String, std::sync::Arc<CheckResult>>,
     ) -> Self {
         Self {
             project_root: self.project_root.clone(),
@@ -572,15 +580,6 @@ impl ModuleContext {
 
     fn clone_for_result(&self) -> Self {
         self.clone_for_result_with_check_results(self.check_results.clone())
-    }
-
-    fn clone_for_lsp_result(&self) -> Self {
-        let check_results = self
-            .check_results
-            .iter()
-            .map(|(name, result)| (name.clone(), result.clone_without_module_results()))
-            .collect();
-        self.clone_for_result_with_check_results(check_results)
     }
 
     fn clone_without_module_results(&self) -> Self {
@@ -650,11 +649,11 @@ impl Checker {
 
     /// Extract a result optimized for LSP snapshots.
     ///
-    /// The LSP only needs direct imported module facts for navigation and
-    /// hovers. Keeping recursively nested per-module CheckResults makes each
-    /// keystroke clone the transitive project graph.
+    /// Per-module CheckResults are shared via `Arc`, so carrying the full
+    /// module-result map costs pointer copies; this is now identical to
+    /// `to_result` and kept as a separate entry point for call-site clarity.
     pub fn to_lsp_result(&self) -> CheckResult {
-        self.to_result_with_modules(self.modules.clone_for_lsp_result())
+        self.to_result()
     }
 
     fn to_result_with_modules(&self, modules: ModuleContext) -> CheckResult {

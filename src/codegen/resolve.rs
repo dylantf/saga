@@ -46,7 +46,7 @@ fn beam_override(name: &str) -> Option<&'static str> {
 pub fn build_constructor_atoms(
     module_name: &str,
     program: &Program,
-    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     _prelude_imports: &[Decl],
 ) -> ConstructorAtoms {
     let mut atoms = ConstructorAtoms::new();
@@ -451,7 +451,7 @@ fn collect_pat_vars_into(pat: &Pat, vars: &mut HashSet<String>) {
 pub fn resolve_names(
     module_name: &str,
     program: &Program,
-    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     prelude_imports: &[Decl],
     front_resolution: &FrontResolutionResult,
     extra_module_funs: &HashMap<String, ResolvedSymbol>,
@@ -464,7 +464,9 @@ pub fn resolve_names(
         &mut scope,
         &local_funs,
         &source_module_name,
-        codegen_info.get(&source_module_name),
+        codegen_info
+            .get(&source_module_name)
+            .map(|info| info.as_ref()),
     );
     let effect_op_counts = build_effect_op_counts(codegen_info);
     // Canonical-form qualified entries are driven by what's been *loaded*
@@ -1051,7 +1053,7 @@ fn register_local_scope_funs(
 }
 
 fn build_effect_op_counts(
-    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
 ) -> HashMap<String, usize> {
     let mut effect_op_counts: HashMap<String, usize> = HashMap::new();
     for info in codegen_info.values() {
@@ -1150,7 +1152,7 @@ fn export_origin<'a>(
 /// loaded. Imports only add bare/alias surface on top (see
 /// `register_import_aliases`).
 fn register_canonical_qualified_scope(
-    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     source_module_name: &str,
     effect_op_counts: &HashMap<String, usize>,
     qualified_scope: &mut HashMap<String, ScopedName>,
@@ -1194,7 +1196,7 @@ fn register_canonical_qualified_scope(
 fn register_import_aliases(
     program: &Program,
     prelude_imports: &[Decl],
-    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     local_funs: &HashMap<String, usize>,
     effect_op_counts: &HashMap<String, usize>,
     scope: &mut HashMap<String, ScopedName>,
@@ -1271,7 +1273,7 @@ fn register_import_aliases(
 }
 
 fn register_trait_impl_dicts(
-    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     scope: &mut HashMap<String, ScopedName>,
 ) {
     for (mod_name, info) in codegen_info {

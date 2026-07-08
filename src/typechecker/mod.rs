@@ -161,7 +161,16 @@ impl Checker {
             .filter(|d| matches!(d, crate::ast::Decl::Import { .. }))
             .collect();
 
-        checker.modules.prelude_snapshot = Some(Box::new(checker.clone()));
+        // The snapshot exists to seed fresh module checkers with post-prelude
+        // inference state (env, traits, impls, scope_map) plus the exports
+        // cache. Its parsed programs and per-module CheckResults are never
+        // read through the snapshot — this checker keeps the originals and
+        // seeds module checkers from them directly — so drop them to keep the
+        // snapshot (and every checker clone that carries it) slim.
+        let mut snapshot = checker.clone();
+        snapshot.modules.programs.clear();
+        snapshot.modules.check_results.clear();
+        checker.modules.prelude_snapshot = Some(std::sync::Arc::new(snapshot));
         Ok(checker)
     }
 
@@ -450,10 +459,10 @@ impl Checker {
     pub fn seed_module_cache(
         &mut self,
         module_name: String,
-        exports: ModuleExports,
-        codegen_info: Option<ModuleCodegenInfo>,
-        program: Option<crate::ast::Program>,
-        check_result: Option<CheckResult>,
+        exports: std::sync::Arc<ModuleExports>,
+        codegen_info: Option<std::sync::Arc<ModuleCodegenInfo>>,
+        program: Option<std::sync::Arc<crate::ast::Program>>,
+        check_result: Option<std::sync::Arc<CheckResult>>,
     ) {
         self.modules.exports.insert(module_name.clone(), exports);
         if let Some(codegen_info) = codegen_info {

@@ -196,7 +196,7 @@ struct QualifiedImportActionInput<'a> {
     name: &'a str,
     current_module: Option<&'a str>,
     uri: &'a Url,
-    module_exports: &'a HashMap<String, ModuleExports>,
+    module_exports: &'a HashMap<String, std::sync::Arc<ModuleExports>>,
     module_prefix_index: &'a HashMap<String, Vec<String>>,
     explicit_imports: &'a HashSet<String>,
     implicit_imports: &'a HashSet<String>,
@@ -244,7 +244,7 @@ struct SymbolSource {
 }
 
 fn build_symbol_index(
-    module_exports: &HashMap<String, ModuleExports>,
+    module_exports: &HashMap<String, std::sync::Arc<ModuleExports>>,
 ) -> HashMap<String, Vec<SymbolSource>> {
     let mut index: HashMap<String, Vec<SymbolSource>> = HashMap::new();
     for (module_name, exports) in module_exports {
@@ -294,7 +294,7 @@ fn build_symbol_index(
 }
 
 fn build_module_prefix_index(
-    module_exports: &HashMap<String, ModuleExports>,
+    module_exports: &HashMap<String, std::sync::Arc<ModuleExports>>,
     module_map: Option<&typechecker::ModuleMap>,
 ) -> HashMap<String, Vec<String>> {
     let mut index: HashMap<String, Vec<String>> = HashMap::new();

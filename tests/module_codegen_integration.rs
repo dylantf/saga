@@ -69,7 +69,10 @@ fn emit_from_program(
     let result = checker.to_result();
     // Use module-specific CheckResult when available (has correct type_at_node),
     // falling back to the top-level result for the main module.
-    let module_result = result.module_check_results().get(&original_module_name);
+    let module_result = result
+        .module_check_results()
+        .get(&original_module_name)
+        .map(|r| r.as_ref());
     let elaborated = elaborate::elaborate_module(
         program,
         module_result.unwrap_or(&result),

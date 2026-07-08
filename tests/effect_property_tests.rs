@@ -206,7 +206,7 @@ fn build_stdlib() -> PathBuf {
             continue;
         };
         let erl_name = name.to_lowercase().replace('.', "_");
-        let mod_result = result.module_check_results().get(&name);
+        let mod_result = result.module_check_results().get(&name).map(|r| r.as_ref());
         let core = codegen::emit_module_with_context(
             &erl_name,
             &m.elaborated,
@@ -315,7 +315,10 @@ fn emit_program(
         })
         .unwrap_or_default();
     let result = checker.to_result();
-    let module_result = result.module_check_results().get(&original_module_name);
+    let module_result = result
+        .module_check_results()
+        .get(&original_module_name)
+        .map(|r| r.as_ref());
     let elaborated = elaborate::elaborate_module(
         program,
         module_result.unwrap_or(&result),
