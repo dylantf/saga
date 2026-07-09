@@ -6,6 +6,8 @@
     base64_encode/1,
     base64_decode/1,
     sha1_digest/1,
+    sha256_digest/1,
+    strong_rand_bytes/1,
     secure_equal/2
 ]).
 
@@ -49,6 +51,12 @@ base64_decode(Text) ->
 
 sha1_digest(Data) ->
     crypto:hash(sha, Data).
+
+sha256_digest(Data) ->
+    crypto:hash(sha256, Data).
+
+strong_rand_bytes(N) ->
+    crypto:strong_rand_bytes(N).
 
 secure_equal(A, B) ->
     SizeA = byte_size(A),
