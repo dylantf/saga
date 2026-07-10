@@ -308,6 +308,15 @@ impl<'a> Lowerer<'a> {
             .get(&node_id)
             .cloned()
             .or_else(|| {
+                // When lowering an imported handler's arm body, the node
+                // belongs to the defining module's AST; its resolution — not
+                // the current module's — knows the constructor. NodeIds are
+                // globally unique, so a foreign lookup can't collide.
+                self.front_resolution_for_module(self.current_semantic_module_name())
+                    .and_then(|r| r.constructor(node_id))
+                    .map(str::to_string)
+            })
+            .or_else(|| {
                 self.check_result
                     .resolution
                     .constructor(node_id)
@@ -476,17 +485,27 @@ impl<'a> Lowerer<'a> {
         &self,
         node_id: crate::ast::NodeId,
     ) -> Option<String> {
+        let module_name = self.current_semantic_module_name();
         let normalize_lookup = |lookup_name: &str| {
             if self.handle_dynamic_vars.contains_key(lookup_name)
                 || self.handle_cond_vars.contains_key(lookup_name)
                 || self.handler_defs.contains_key(lookup_name)
             {
-                lookup_name.to_string()
-            } else {
-                self.resolve_handler_name(lookup_name)
+                return lookup_name.to_string();
             }
+            // A bare name resolved in the handler's defining module (e.g. a
+            // private handler installed inside an imported handler's arm)
+            // canonicalizes against that module. The global bare-name map
+            // below only knows public handlers and can't see it.
+            if !lookup_name.contains('.') {
+                let qualified = format!("{}.{}", module_name, lookup_name);
+                if self.handler_defs.contains_key(&qualified) {
+                    return qualified;
+                }
+            }
+            self.resolve_handler_name(lookup_name)
         };
-        self.front_resolution_for_module(self.current_semantic_module_name())
+        self.front_resolution_for_module(module_name)
             .and_then(|r| r.handler_ref(node_id).or_else(|| r.value(node_id)))
             .map(|resolved| match resolved {
                 crate::typechecker::ResolvedValue::Local { name, .. } => normalize_lookup(name),

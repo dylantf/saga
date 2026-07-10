@@ -87,13 +87,15 @@ impl<'a> Lowerer<'a> {
             }
             // Effect call args are generally not CPS-expanded — the handler
             // arm receives the callback as a plain value. However, if the op's
-            // parameter declares effects that are NOT already available in the
-            // enclosing scope's handler params, the lambda needs its own handler
-            // params so the handler arm can supply them via lower_effectful_var_call.
-            //
-            // If the callback's effects ARE in scope (e.g. spawn's callback
-            // needs {Actor} and Actor handler params are already threaded), the
-            // lambda captures them via closure — no extra params needed.
+            // parameter declares absorbed effects, the lambda always gets its
+            // own evidence/continuation params: the handler arm invokes it via
+            // lower_effectful_var_call with the evidence the *handler* chooses
+            // (it may install its own handler around the call, e.g. a nested
+            // `with`), so capturing the caller's in-scope evidence would both
+            // mismatch the arm's CPS calling convention and pin the callback
+            // to the wrong handler. BEAM-native effects (e.g. spawn's Actor)
+            // are the exception below: their context comes from direct erlang
+            // calls, not handler params.
             let saved_ctx = self.lambda_effect_context.take();
             let saved_direct_ops = self.direct_ops.clone();
             if let Some(ref pae) = op_param_absorbed
@@ -103,14 +105,6 @@ impl<'a> Lowerer<'a> {
                 for eff in effs {
                     let ops = self.effect_handler_ops(std::slice::from_ref(eff));
                     if ops.is_empty() {
-                        continue;
-                    }
-                    let already_in_scope = self
-                        .current_evidence
-                        .as_ref()
-                        .map(|ctx| ctx.is_open || ctx.layout.tags().iter().any(|t| t == eff))
-                        .unwrap_or(false);
-                    if already_in_scope {
                         continue;
                     }
                     // The op being called declares this effect as absorbed on

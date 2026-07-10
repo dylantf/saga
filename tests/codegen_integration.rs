@@ -449,6 +449,43 @@ main () = {
 }
 
 #[test]
+fn effect_op_callback_param_cps_expands_even_when_effect_already_in_scope() {
+    // An effect op whose parameter absorbs an effect (`Unit -> Int needs
+    // {Base}`) is always invoked CPS-style by the handler arm — with the
+    // evidence the HANDLER chooses. The call site used to skip the callback's
+    // CPS expansion when the absorbed effect was already in the caller's own
+    // evidence (here `go` needs {Base, Work2}), producing a 1-arity closure
+    // that crashed with "function called with 3 arguments" when the arm
+    // invoked it.
+    let src = r#"
+effect Base {
+  fun base_value : Int -> Int
+}
+
+effect Work2 {
+  fun scoped : (Unit -> Int needs {Base}) -> Int
+}
+
+handler base_h for Base {
+  base_value input = resume (input + 1)
+}
+
+handler h for Work2 needs {Base} {
+  scoped body = resume (body ())
+}
+
+fun go : Unit -> Int needs {Base, Work2}
+go () = Work2.scoped! (fun () -> base_value! 1)
+
+main () = {
+  go () with h
+} with base_h
+"#;
+
+    assert_runs_and_stdout_contains(src, &["2"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {

@@ -1,0 +1,31 @@
+module Repro.Query
+
+import Repro.Runtime (Base, Runner, RunError, RunFailed, run_scoped)
+
+pub effect Work {
+  fun value : Int -> Int
+  fun scoped : Int
+    -> (Unit -> Result a e needs {Work})
+    -> Result a (RunError e)
+}
+
+fun lower_value : Int -> Int needs {Base}
+lower_value input = base_value! input
+
+# This private handler is valid in its defining module. Its scoped arm rejects a
+# nested scope without invoking the callback, matching the original transaction
+# body handler.
+handler inner for Work needs {Base} {
+  value input = resume (lower_value input)
+  scoped _input _body = resume Err RunFailed
+}
+
+# outer is public and therefore may be installed by another module. Lowering its
+# scoped arm at that use site must retain inner as Repro.Query.inner.
+pub handler outer for Work needs {Base, Runner} {
+  value input = resume (lower_value input)
+  scoped _input body = {
+    let result = run_scoped (fun () -> body () with inner)
+    resume result
+  }
+}

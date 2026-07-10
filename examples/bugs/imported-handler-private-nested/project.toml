@@ -1,0 +1,16 @@
+[project]
+name = "imported-handler-private-nested"
+
+[bin]
+main = "src/Main.saga"
+
+[library]
+module = "Repro"
+expose = ["Repro.Query", "Repro.Runtime"]
+
+# [library]
+# module = "ImportedHandlerPrivateNested"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

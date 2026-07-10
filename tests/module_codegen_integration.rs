@@ -4830,3 +4830,136 @@ main () = run ()
         },
     );
 }
+
+#[test]
+fn imported_public_handler_installing_private_nested_handler_runs_on_beam() {
+    // Regression for cross-module handler expansion losing the defining
+    // module's canonical names: a public handler's arm installs a PRIVATE
+    // handler from its own module (`with inner`), and a consumer module
+    // installs the public handler. Lowering `outer`'s arm at the consumer's
+    // with-site used to look up bare `inner` (panicking with "unknown handler
+    // item"), and the private arm's constructors (RunFailed — defined in a
+    // module the handler's module imports, not in Main) failed to
+    // canonicalize through the defining module's resolution.
+    let runtime = r#"module Nested.Runtime
+
+pub effect Base {
+  fun base_value : Int -> Int
+}
+
+pub effect Runner {
+  fun run : (Unit -> Result a e needs {Base}) -> Result a (RunError e)
+}
+
+pub type RunError e =
+  | RunFailed
+  | Aborted e
+
+pub fun run_scoped : (Unit -> Result a e needs {Base})
+  -> Result a (RunError e)
+  needs {Runner}
+run_scoped body = run! body
+"#;
+
+    let query = r#"module Nested.Query
+
+import Nested.Runtime (Base, Runner, RunError, RunFailed, run_scoped)
+
+pub effect Work {
+  fun value : Int -> Int
+  fun scoped : Int
+    -> (Unit -> Result a e needs {Work})
+    -> Result a (RunError e)
+}
+
+fun lower_value : Int -> Int needs {Base}
+lower_value input = base_value! input
+
+handler inner for Work needs {Base} {
+  value input = resume (lower_value input)
+  scoped _input _body = resume Err RunFailed
+}
+
+pub handler outer for Work needs {Base, Runner} {
+  value input = resume (lower_value input)
+  scoped _input body = {
+    let result = run_scoped (fun () -> body () with inner)
+    resume result
+  }
+}
+"#;
+
+    let main = r#"module Main
+
+import Nested.Query (Work, outer)
+import Nested.Runtime (Base, Runner, RunError, RunFailed, Aborted)
+
+handler base_h for Base {
+  base_value input = resume (input + 1)
+}
+
+handler runner_h for Runner needs {Base} {
+  run body = {
+    let result = body ()
+    let mapped = case result {
+      Ok(value) -> Ok(value)
+      Err(e) -> Err(Aborted e)
+    }
+    resume mapped
+  }
+}
+
+fun via_value : Int -> Result Int (RunError String) needs {Base, Runner}
+via_value input = Work.scoped! input (fun () -> Ok (Work.value! 41)) with outer
+
+fun via_abort : Int -> Result Int (RunError String) needs {Base, Runner}
+via_abort input = Work.scoped! input (fun () -> Err "stop") with outer
+
+# Encode outcomes as Ints: the test env has no stdlib beams, so no Show.
+fun describe : Result Int (RunError String) -> Int
+describe result =
+  case result {
+    Ok(n) -> n
+    Err(RunFailed) -> 1
+    Err(Aborted(_)) -> 2
+  }
+
+pub fun run : Unit -> Int
+run () = {
+  let r1 = via_value 1
+  let r2 = via_abort 1
+  describe r1 * 100 + describe r2
+} with { runner_h, base_h }
+"#;
+
+    with_temp_project_files(
+        &[
+            ("src/Nested/Runtime.saga", runtime),
+            ("src/Nested/Query.saga", query),
+        ],
+        main,
+        |checker, program| {
+            let result = checker.to_result();
+            let runtime_program = result
+                .programs()
+                .get("Nested.Runtime")
+                .expect("Nested.Runtime module not found");
+            let query_program = result
+                .programs()
+                .get("Nested.Query")
+                .expect("Nested.Query module not found");
+            let runtime_core = emit_from_program(runtime_program, "nested_runtime", checker);
+            let query_core = emit_from_program(query_program, "nested_query", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[
+                    ("nested_runtime", &runtime_core),
+                    ("nested_query", &query_core),
+                    ("main", &main_core),
+                ],
+                "io:format(\"~p~n\", [main:run(unit)]), init:stop().",
+                &["4202"],
+            );
+        },
+    );
+}

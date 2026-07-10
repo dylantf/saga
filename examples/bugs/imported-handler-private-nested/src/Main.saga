@@ -1,0 +1,26 @@
+module Main
+
+import Repro.Query (Work, outer)
+import Repro.Runtime (Base, Runner, RunError)
+
+# Repro: an imported public handler contains an operation arm that installs a
+# private named handler from its defining module.
+#
+# saga check succeeds. saga build currently panics while lowering outer:
+#
+#   internal lowering error: unknown handler item 'inner' (canonical: inner)
+#
+# The private handler is registered as Repro.Query.inner, but when outer is
+# expanded at this cross-module with site the nested reference resolves to the
+# bare name inner.
+#
+# Expected: this compiles, and lowering preserves the defining module's canonical
+# handler name for nested named-handler references.
+#
+# Moving the run_scoped callback into an ordinary private helper in Repro.Query
+# makes the project compile, because the nested handler is then lowered in its
+# defining module instead of while expanding outer here.
+fun reproduce : Int -> Result Int (RunError String) needs {Base, Runner}
+reproduce input = Repro.Query.Work.scoped! input (fun () -> Err "stop") with outer
+
+main () = ()
