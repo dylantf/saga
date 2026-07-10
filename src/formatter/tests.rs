@@ -1033,6 +1033,23 @@ fn pipe_with_comments_stays_multiline() {
     assert!(result.contains("|> add 1\n"));
 }
 
+#[test]
+fn pipe_map_lambda_with_record_build_stays_attached_to_map() {
+    let src = "build_insertable_sesh_gear n = n |> Gear.gear_ids |> List.map (fun gear_id -> build Db.Insert SeshGearRow { id: Db.insert_auto, sesh_id: Db.insert_value sesh_id, gear_id: Db.insert_value gear_id, })";
+    let result = fmt(src, 80);
+    assert!(
+        result.contains("|> List.map (fun gear_id -> build Db.Insert SeshGearRow {"),
+        "lambda argument should stay attached to List.map: {}",
+        result
+    );
+    assert!(
+        !result.contains("|> List.map\n"),
+        "List.map should not be split from its lambda argument: {}",
+        result
+    );
+    assert_eq!(try_parse_normalized(src), try_parse_normalized(&result));
+}
+
 // --- If-then-else ---
 
 #[test]

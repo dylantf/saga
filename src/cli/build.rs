@@ -1067,7 +1067,9 @@ fn plan_project_rebuild(
     }
     if let Some(unexpected) = unexpected_output_artifact(build_dir, previous) {
         if build_trace_enabled() {
-            eprintln!("[saga-build] full-rebuild reason=unexpected_output_artifact path={unexpected:?}");
+            eprintln!(
+                "[saga-build] full-rebuild reason=unexpected_output_artifact path={unexpected:?}"
+            );
         }
         return ProjectRebuildPlan::Full;
     }

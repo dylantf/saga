@@ -8,7 +8,7 @@ A functional programming language (ML/Elm-inspired) with algebraic effects and h
 
 ## Where to start (read before working)
 
-Pick the row that matches the task. Read `docs/compiler-overview.md` first for any compiler work — it's the phase map everything else hangs off of.
+Pick the row that matches the task. Read `docs/compiler-overview.md` first before starting new compiler work, it is a map of where everything lives.
 
 | Task                                   | Read first                                                                        |
 | -------------------------------------- | --------------------------------------------------------------------------------- |
