@@ -151,6 +151,9 @@ struct EffectOpInfo {
     runtime_param_positions: Vec<usize>,
     /// For callback parameters, the effects absorbed by that parameter.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// Callback parameters with an open effect row. Kept separately because
+    /// an open-only row has no named effects in `param_absorbed_effects`.
+    param_open_rows: std::collections::HashSet<usize>,
     /// Dictionary parameter names for the operation's own `where` constraints
     /// (e.g. `set : a -> Unit where {a: PgType}` yields `["__dict_PgType_a"]`).
     /// These are threaded as trailing op arguments at each call site and bound
@@ -312,6 +315,11 @@ pub struct Lowerer<'a> {
     /// Set by typed value-boundary lowering when a function value is placed
     /// into an effectful or open-row slot.
     lambda_effect_context: Option<CpsShape>,
+    /// For open-row callbacks passed directly to an effect operation, preserve
+    /// the evidence present at the perform site. Handler op closures do not
+    /// receive ambient evidence as a separate ABI argument, so the callback
+    /// must close over it while retaining the normal CPS callback arity.
+    lambda_captured_evidence: Option<EvidenceCtx>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -432,6 +440,7 @@ impl<'a> Lowerer<'a> {
             direct_hof_callback_params: HashMap::new(),
             direct_hof_value_bindings: HashMap::new(),
             lambda_effect_context: None,
+            lambda_captured_evidence: None,
             constructor_atoms,
             resolved: resolution.symbols,
             carried_record_types: resolution.carried_record_types,

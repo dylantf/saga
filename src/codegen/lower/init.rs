@@ -368,6 +368,22 @@ impl<'a> Lowerer<'a> {
                                 }
                             })
                             .collect();
+                        let param_open_rows = self
+                            .check_result
+                            .effects
+                            .get(&canonical_effect)
+                            .or_else(|| self.check_result.effects.get(name))
+                            .and_then(|info| info.ops.iter().find(|sig| sig.name == op.node.name))
+                            .map(|sig| {
+                                sig.params
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, (_, ty))| {
+                                        util::has_open_effect_row(ty).then_some(idx)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         ops.insert(
                             op.node.name.clone(),
                             super::EffectOpInfo {
@@ -383,6 +399,7 @@ impl<'a> Lowerer<'a> {
                                     })
                                     .collect(),
                                 param_absorbed_effects,
+                                param_open_rows,
                                 dict_param_names: crate::ast::op_dict_param_names(
                                     &op.node.where_clause,
                                 ),
@@ -431,6 +448,14 @@ impl<'a> Lowerer<'a> {
                                     (!effects.is_empty()).then_some((idx, effects))
                                 })
                                 .collect();
+                            let param_open_rows = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, (_, ty))| {
+                                    util::has_open_effect_row(ty).then_some(idx)
+                                })
+                                .collect();
                             (
                                 op.name.clone(),
                                 super::EffectOpInfo {
@@ -438,6 +463,7 @@ impl<'a> Lowerer<'a> {
                                     runtime_param_count: runtime_param_positions.len(),
                                     runtime_param_positions,
                                     param_absorbed_effects,
+                                    param_open_rows,
                                     dict_param_names: Vec::new(),
                                 },
                             )
@@ -586,6 +612,7 @@ impl<'a> Lowerer<'a> {
                                 runtime_param_count: op.runtime_param_count,
                                 runtime_param_positions: op.runtime_param_positions.clone(),
                                 param_absorbed_effects: op.param_absorbed_effects.clone(),
+                                param_open_rows: op.param_open_rows.clone(),
                                 dict_param_names: op.dict_param_names.clone(),
                             },
                         );
@@ -659,6 +686,7 @@ impl<'a> Lowerer<'a> {
                         runtime_param_count: op.runtime_param_count,
                         runtime_param_positions: op.runtime_param_positions.clone(),
                         param_absorbed_effects: op.param_absorbed_effects.clone(),
+                        param_open_rows: op.param_open_rows.clone(),
                         dict_param_names: op.dict_param_names.clone(),
                     },
                 );

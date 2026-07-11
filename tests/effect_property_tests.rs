@@ -1600,6 +1600,66 @@ result () = query_both () with {users, data}
 }
 
 #[test]
+fn neweffect_handler_factory_captures_dynamic_handler_and_forwards_open_row() {
+    let src = r#"
+type TxError e = TransactionFailed | RolledBack e
+
+effect Repo {
+  fun read : Unit -> String
+  fun transaction :
+    (Unit -> Result a e needs {..r})
+    -> Result a (TxError e)
+}
+
+neweffect AuthRepo = Repo
+
+fun empty_repo : Unit -> Handler Repo
+empty_repo () = handler for Repo {
+  read () = resume "base"
+  transaction body = case body () {
+    Ok value -> resume Ok value
+    Err error -> resume Err (RolledBack error)
+  }
+}
+
+fun transaction_with : Handler Repo
+  -> Handler AuthRepo
+  -> (Unit -> Result a e needs {AuthRepo, ..r})
+  -> Result a (TxError e)
+  needs {..r}
+transaction_with backend nested body =
+  Repo.transaction! (fun () -> body () with nested) with backend
+
+fun auth_repo : Handler Repo -> Handler AuthRepo
+auth_repo backend = handler for AuthRepo {
+  read () = resume (Repo.read! () with backend)
+  transaction body = {
+    let nested = handler for AuthRepo {
+      read () = resume (Repo.read! () with backend)
+      transaction _ = resume Err TransactionFailed
+    }
+    let value = transaction_with backend nested body
+    resume value
+  }
+}
+
+fun program : Unit -> Result String (TxError String) needs {AuthRepo}
+program () = AuthRepo.transaction! (fun () -> Ok (AuthRepo.read! ()))
+
+pub fun result : Unit -> String
+result () = {
+  let base = empty_repo ()
+  let auth = auth_repo base
+  case (program () with auth) {
+    Ok value -> value
+    Err _ -> "error"
+  }
+}
+"#;
+    check_result_string("neweffect_handler_factory_dynamic_open_row", src, "base");
+}
+
+#[test]
 fn cross_module_stdlib_fail_handler() {
     let lib = r#"module FailLib
 

@@ -18,6 +18,9 @@ pub struct EffectOpDef {
     pub runtime_param_positions: Vec<usize>,
     /// For callback parameters, the effects absorbed by that parameter.
     pub param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// Callback parameters whose function type carries an open effect row,
+    /// including open-only rows with no named effects.
+    pub param_open_rows: std::collections::HashSet<usize>,
     /// Dictionary parameter names for the op's own `where` constraints
     /// (e.g. `["__dict_PgType_a"]`). Threaded per call as trailing op args.
     pub dict_param_names: Vec<String>,
@@ -114,6 +117,16 @@ fn effect_param_absorbed_effects(op: &EffectOpSig) -> HashMap<usize, Vec<String>
         .filter_map(|(idx, (_, ty))| {
             let effs = collect_effects_from_fun_type(ty);
             (!effs.is_empty()).then_some((idx, effs))
+        })
+        .collect()
+}
+
+fn effect_param_open_rows(op: &EffectOpSig) -> std::collections::HashSet<usize> {
+    op.params
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (_, ty))| {
+            crate::codegen::lower::util::has_open_effect_row(ty).then_some(idx)
         })
         .collect()
 }
@@ -217,6 +230,12 @@ pub(super) fn collect_codegen_info(
                             .find(|sig| sig.name == op.node.name)
                             .map(effect_param_absorbed_effects)
                             .unwrap_or_default(),
+                        param_open_rows: effect_info
+                            .ops
+                            .iter()
+                            .find(|sig| sig.name == op.node.name)
+                            .map(effect_param_open_rows)
+                            .unwrap_or_default(),
                         dict_param_names: crate::ast::op_dict_param_names(&op.node.where_clause),
                     })
                     .collect();
@@ -258,6 +277,7 @@ pub(super) fn collect_codegen_info(
                             runtime_param_count: runtime_param_positions.len(),
                             runtime_param_positions,
                             param_absorbed_effects: effect_param_absorbed_effects(op),
+                            param_open_rows: effect_param_open_rows(op),
                             dict_param_names: Vec::new(),
                         }
                     })
