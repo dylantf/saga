@@ -120,6 +120,7 @@ fn desugar_decl(decl: &mut Decl) {
         | Decl::RecordDef { .. }
         | Decl::RecordBuilderDef { .. }
         | Decl::EffectDef { .. }
+        | Decl::NewEffect { .. }
         | Decl::TraitDef { .. }
         | Decl::Import { .. }
         | Decl::ModuleDecl { .. }

@@ -1555,6 +1555,51 @@ result () = (LogLib.shout "hi") with collect
 }
 
 #[test]
+fn cross_module_neweffects_have_distinct_evidence_slots() {
+    let lib = r#"module Repos
+
+type UserDb = UserDb
+type DataDb = DataDb
+
+effect Repo db {
+  fun execute : String -> String
+}
+
+pub neweffect UserRepo = Repo UserDb
+pub neweffect DataRepo = Repo DataDb
+
+pub fun query_both : Unit -> String needs {UserRepo, DataRepo}
+query_both () =
+  UserRepo.execute! "users" <> "|" <> DataRepo.execute! "data"
+"#;
+    let facade = r#"module RepoApi
+
+import Repos (pub ..)
+"#;
+    let main_src = r#"module Main
+
+import RepoApi (UserRepo, DataRepo, query_both)
+
+handler users for UserRepo {
+  execute query = resume ("U:" <> query)
+}
+
+handler data for DataRepo {
+  execute query = resume ("D:" <> query)
+}
+
+pub fun result : Unit -> String
+result () = query_both () with {users, data}
+"#;
+    check_cross_module(
+        "cross_module_neweffects_have_distinct_evidence_slots",
+        &[("lib/Repos.saga", lib), ("lib/RepoApi.saga", facade)],
+        main_src,
+        "U:users|D:data",
+    );
+}
+
+#[test]
 fn cross_module_stdlib_fail_handler() {
     let lib = r#"module FailLib
 

@@ -249,7 +249,7 @@ impl<'a> Lowerer<'a> {
     ) -> (HashMap<String, String>, HashMap<String, String>) {
         let mut effect_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
-            if let Decl::EffectDef { name, .. } = decl {
+            if let Decl::EffectDef { name, .. } | Decl::NewEffect { name, .. } = decl {
                 effect_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
             }
         }
@@ -389,6 +389,60 @@ impl<'a> Lowerer<'a> {
                             },
                         );
                     }
+                    self.effect_defs
+                        .insert(canonical_effect, EffectInfo { ops });
+                }
+                Decl::NewEffect { name, .. } => {
+                    let canonical_effect = format!("{}.{}", source_module_name, name);
+                    let effect_info = self
+                        .check_result
+                        .effects
+                        .get(&canonical_effect)
+                        .or_else(|| self.check_result.effects.get(name))
+                        .unwrap_or_else(|| panic!("missing neweffect info for {canonical_effect}"));
+                    let is_unit = |ty: &crate::typechecker::Type| {
+                        matches!(
+                            ty,
+                            crate::typechecker::Type::Con(n, args)
+                                if args.is_empty() && crate::typechecker::canonicalize_type_name(n)
+                                    == crate::typechecker::canonicalize_type_name("Unit")
+                        )
+                    };
+                    let ops = effect_info
+                        .ops
+                        .iter()
+                        .map(|op| {
+                            let runtime_param_positions: Vec<usize> = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, (_, ty))| (!is_unit(ty)).then_some(idx))
+                                .collect();
+                            let param_absorbed_effects = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, (_, ty))| {
+                                    let mut effects: Vec<String> =
+                                        crate::typechecker::effects_from_type(ty)
+                                            .into_iter()
+                                            .collect();
+                                    effects.sort();
+                                    (!effects.is_empty()).then_some((idx, effects))
+                                })
+                                .collect();
+                            (
+                                op.name.clone(),
+                                super::EffectOpInfo {
+                                    source_param_count: op.params.len(),
+                                    runtime_param_count: runtime_param_positions.len(),
+                                    runtime_param_positions,
+                                    param_absorbed_effects,
+                                    dict_param_names: Vec::new(),
+                                },
+                            )
+                        })
+                        .collect();
                     self.effect_defs
                         .insert(canonical_effect, EffectInfo { ops });
                 }

@@ -249,6 +249,19 @@ fn format_decl(decl: &Decl) -> Doc {
             dangling_trivia,
             ..
         } => format_effect_def(doc, *public, name, type_params, operations, dangling_trivia),
+        Decl::NewEffect {
+            public,
+            name,
+            source,
+            ..
+        } => {
+            let prefix = if *public { "pub " } else { "" };
+            let mut doc = Doc::text(format!("{prefix}neweffect {name} = {}", source.name));
+            for arg in &source.type_args {
+                doc = doc.append(Doc::text(" ")).append(format_type_expr(arg));
+            }
+            doc
+        }
         Decl::TraitDef {
             doc,
             public,

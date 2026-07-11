@@ -239,6 +239,18 @@ fn normalize_decl(d: &mut Decl) {
                 normalize_annotated(op, normalize_effect_op);
             }
         }
+        Decl::NewEffect {
+            id,
+            name_span,
+            source,
+            span,
+            ..
+        } => {
+            *id = NID;
+            *name_span = S;
+            *span = S;
+            normalize_effect_ref(source);
+        }
         Decl::HandlerDef {
             id,
             name_span,
@@ -2266,5 +2278,13 @@ fn round_trip_all_dy_files() {
         failures.is_empty(),
         "Round-trip failures:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn formats_neweffect_declaration() {
+    assert_eq!(
+        fmt("pub neweffect UserRepo=Repo UserDb", 80),
+        "pub neweffect UserRepo = Repo UserDb\n"
     );
 }

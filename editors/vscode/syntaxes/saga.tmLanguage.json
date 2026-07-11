@@ -99,12 +99,16 @@
     "keyword": {
       "patterns": [
         {
+          "name": "keyword.control.build.saga",
+          "match": "\\bbuild\\b(?=\\s+[A-Z][a-zA-Z0-9_']*(?:\\.[A-Z][a-zA-Z0-9_']*)*(?:\\s+[A-Z][a-zA-Z0-9_']*)?\\s*\\{)"
+        },
+        {
           "name": "keyword.control.saga",
           "match": "\\b(if|then|else|case|when|with|return)\\b"
         },
         {
           "name": "keyword.declaration.saga",
-          "match": "\\b(let|fun|pub|type|alias|opaque|record|effect|handler|trait|impl|module|import|needs|where|resume|deriving|synthesizes)\\b"
+          "match": "\\b(let|fun|pub|type|alias|opaque|record|effect|neweffect|handler|trait|impl|module|import|needs|where|resume|deriving|synthesizes)\\b"
         },
         {
           "name": "keyword.other.saga",

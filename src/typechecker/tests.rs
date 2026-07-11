@@ -8475,3 +8475,40 @@ bad () = build Selection User { name: name_p, age: age_p }
         err.message
     );
 }
+
+#[test]
+fn neweffect_is_nominal_and_two_instances_coexist() {
+    let src = r#"
+type UserDb = UserDb
+type DataDb = DataDb
+effect Repo db { fun execute : String -> String }
+neweffect UserRepo = Repo UserDb
+neweffect DataRepo = Repo DataDb
+handler users for UserRepo { execute q = resume q }
+handler data for DataRepo { execute q = resume q }
+fun both : Unit -> String needs {UserRepo, DataRepo}
+both () = UserRepo.execute! "u" <> DataRepo.execute! "d"
+main () = both () with {users, data}
+"#;
+    check(src).expect("distinct neweffects should coexist");
+}
+
+#[test]
+fn neweffect_does_not_substitute_for_source_effect() {
+    let src = r#"
+type UserDb = UserDb
+effect Repo db { fun execute : String -> String }
+neweffect UserRepo = Repo UserDb
+fun wrong : Unit -> String needs {Repo UserDb}
+wrong () = UserRepo.execute! "u"
+"#;
+    let err = match check(src) {
+        Ok(_) => panic!("neweffect must remain nominal"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("not declared") || err.message.contains("UserRepo"),
+        "unexpected diagnostic: {}",
+        err.message
+    );
+}

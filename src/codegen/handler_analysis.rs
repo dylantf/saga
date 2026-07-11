@@ -61,6 +61,7 @@ fn visit_decl(decl: &Decl, out: &mut HandlerAnalysis) {
         | Decl::RecordDef { .. }
         | Decl::RecordBuilderDef { .. }
         | Decl::EffectDef { .. }
+        | Decl::NewEffect { .. }
         | Decl::FunSignature { .. }
         | Decl::TraitDef { .. }
         | Decl::ImplDef { .. } => {}

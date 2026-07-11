@@ -25,6 +25,7 @@ pub enum Token {
     Opaque,
     Record,
     Effect,
+    NewEffect,
     Handler,
     With,
     Where,

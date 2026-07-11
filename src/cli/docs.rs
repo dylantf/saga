@@ -133,7 +133,9 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
             Decl::TypeAlias { public: true, .. } => types.push(decl),
             Decl::RecordDef { public: true, .. } => types.push(decl),
             Decl::FunSignature { public: true, .. } => functions.push(decl),
-            Decl::EffectDef { public: true, .. } => effects.push(decl),
+            Decl::EffectDef { public: true, .. } | Decl::NewEffect { public: true, .. } => {
+                effects.push(decl)
+            }
             Decl::HandlerDef { public: true, .. } => handlers.push(decl),
             Decl::TraitDef { public: true, .. } => traits.push(decl),
             _ => {}
@@ -348,6 +350,20 @@ fn format_derive_spec(spec: &DeriveSpec) -> String {
 }
 
 fn render_effect_decl(out: &mut String, decl: &Decl) {
+    if let Decl::NewEffect {
+        name, doc, source, ..
+    } = decl
+    {
+        writeln!(out, "### {}\n", name).unwrap();
+        writeln!(out, "```saga").unwrap();
+        write!(out, "neweffect {} = {}", name, source.name).unwrap();
+        for arg in &source.type_args {
+            write!(out, " {}", format_type_expr(arg)).unwrap();
+        }
+        writeln!(out, "\n```\n").unwrap();
+        render_doc(out, doc);
+        return;
+    }
     let Decl::EffectDef {
         name,
         doc,

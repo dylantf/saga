@@ -737,6 +737,7 @@ mod tests {
             | Decl::RecordDef { .. }
             | Decl::RecordBuilderDef { .. }
             | Decl::EffectDef { .. }
+            | Decl::NewEffect { .. }
             | Decl::TraitDef { .. }
             | Decl::Import { .. }
             | Decl::ModuleDecl { .. } => {}

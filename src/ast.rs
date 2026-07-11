@@ -195,6 +195,7 @@ pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
         | Decl::RecordDef { doc: d, .. }
         | Decl::RecordBuilderDef { doc: d, .. }
         | Decl::EffectDef { doc: d, .. }
+        | Decl::NewEffect { doc: d, .. }
         | Decl::HandlerDef { doc: d, .. }
         | Decl::TraitDef { doc: d, .. }
         | Decl::ImplDef { doc: d, .. }
@@ -430,6 +431,19 @@ pub enum Decl {
         operations: Vec<Annotated<EffectOp>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
+        span: Span,
+    },
+
+    /// `neweffect UserRepo = Repo UserDb`
+    /// A fresh nominal effect identity whose operation interface is inherited
+    /// from the instantiated source effect.
+    NewEffect {
+        id: NodeId,
+        doc: Vec<String>,
+        public: bool,
+        name: String,
+        name_span: Span,
+        source: EffectRef,
         span: Span,
     },
 

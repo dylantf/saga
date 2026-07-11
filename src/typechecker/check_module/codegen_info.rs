@@ -230,6 +230,44 @@ pub(super) fn collect_codegen_info(
                     type_param_count: type_params.len(),
                 });
             }
+            Decl::NewEffect { name, .. } => {
+                let canonical_effect = format!("{}.{}", module_name, name);
+                let effect_info = effects_map
+                    .get(&canonical_effect)
+                    .unwrap_or_else(|| panic!("missing neweffect info for {canonical_effect}"));
+                let is_unit = |ty: &Type| {
+                    matches!(
+                        ty,
+                        Type::Con(n, args) if args.is_empty()
+                            && canonicalize_type_name(n) == canonicalize_type_name("Unit")
+                    )
+                };
+                let ops = effect_info
+                    .ops
+                    .iter()
+                    .map(|op| {
+                        let runtime_param_positions: Vec<usize> = op
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, (_, ty))| (!is_unit(ty)).then_some(idx))
+                            .collect();
+                        EffectOpDef {
+                            name: op.name.clone(),
+                            source_param_count: op.params.len(),
+                            runtime_param_count: runtime_param_positions.len(),
+                            runtime_param_positions,
+                            param_absorbed_effects: effect_param_absorbed_effects(op),
+                            dict_param_names: Vec::new(),
+                        }
+                    })
+                    .collect();
+                effect_defs.push(EffectDef {
+                    name: canonical_effect,
+                    ops,
+                    type_param_count: 0,
+                });
+            }
             Decl::RecordDef {
                 public: true,
                 name,

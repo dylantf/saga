@@ -483,6 +483,13 @@ impl Checker {
                     };
                     self.scope_map.types.insert(name.clone(), canonical);
                 }
+                if let Decl::NewEffect { name, .. } = decl {
+                    let canonical = match &self.current_module {
+                        Some(module) => format!("{}.{}", module, name),
+                        None => name.clone(),
+                    };
+                    self.scope_map.effects.insert(name.clone(), canonical);
+                }
             }
         });
         timed_typecheck_phase(module.as_deref(), "register_active_scc_headers", || {
@@ -883,6 +890,15 @@ impl Checker {
             {
                 let plain_ops: Vec<_> = operations.iter().map(|a| &a.node).collect();
                 self.register_effect_ops(name, type_params, &plain_ops)
+                    .map_err(|e| vec![e])?;
+            }
+        }
+        // New effects are registered after ordinary effects have complete
+        // operation signatures. Their canonical name is fresh, while their
+        // operation types are instantiated from the source effect.
+        for decl in program {
+            if let Decl::NewEffect { name, source, .. } = decl {
+                self.register_new_effect(name, source)
                     .map_err(|e| vec![e])?;
             }
         }

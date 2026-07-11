@@ -3,7 +3,7 @@
   "displayName": "Saga LSP",
   "description": "LSP and syntax highlighting for the Saga programming language",
   "publisher": "dylantf",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "license": "MIT",
   "repository": {
     "type": "git",

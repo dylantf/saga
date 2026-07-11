@@ -183,6 +183,7 @@ impl Parser {
                     }
                     Token::Record => self.parse_record_def(true),
                     Token::Effect => self.parse_effect_def(true),
+                    Token::NewEffect => self.parse_new_effect(true),
                     Token::Handler => self.parse_handler_def(true),
                     Token::Trait => self.parse_trait_def(true),
                     _ => Err(ParseError {
@@ -196,6 +197,7 @@ impl Parser {
                 self.parse_fun_signature(false, start, vec![])
             }
             Token::Effect => self.parse_effect_def(false),
+            Token::NewEffect => self.parse_new_effect(false),
             Token::Handler => self.parse_handler_def(false),
             Token::Trait => self.parse_trait_def(false),
             Token::Impl => self.parse_impl_def(),
@@ -723,6 +725,24 @@ impl Parser {
             type_params,
             operations,
             span: start.to(end),
+        })
+    }
+
+    fn parse_new_effect(&mut self, public: bool) -> Result<Decl, ParseError> {
+        let start = self.tokens[self.pos].span;
+        self.advance(); // consume `neweffect`
+        let name_span = self.tokens[self.pos].span;
+        let name = self.expect_upper_ident()?;
+        self.expect(Token::Eq)?;
+        let source = self.parse_effect_ref()?;
+        Ok(Decl::NewEffect {
+            id: NodeId::fresh(),
+            doc: vec![],
+            public,
+            name,
+            name_span,
+            span: start.to(source.span),
+            source,
         })
     }
 
