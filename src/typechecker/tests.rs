@@ -8512,3 +8512,44 @@ wrong () = UserRepo.execute! "u"
         err.message
     );
 }
+
+#[test]
+fn handler_effect_type_canonicalizes_through_reexport_origin() {
+    let origin = r#"
+module Origin
+
+pub effect Repo {
+  fun exec : Unit -> String
+}
+
+pub handler empty for Repo {
+  exec () = resume "ok"
+}
+"#;
+    let facade = r#"
+module Facade
+import Origin (pub ..)
+"#;
+    let main = r#"
+module Main
+import Facade
+
+neweffect AppRepo = Facade.Repo
+
+fun adapt : Handler Facade.Repo -> Handler AppRepo
+adapt backend = handler for AppRepo {
+  exec () = resume (Facade.Repo.exec! () with backend)
+}
+
+main () = {
+  let repo = adapt Facade.empty
+  AppRepo.exec! () with repo
+}
+"#;
+
+    check_with_project_files(
+        &[("src/Origin.saga", origin), ("src/Facade.saga", facade)],
+        main,
+    )
+    .expect("nested Handler effect should canonicalize to the re-export origin");
+}

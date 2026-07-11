@@ -887,7 +887,7 @@ impl Checker {
                     let canonical_args = args
                         .into_iter()
                         .map(|arg| match arg {
-                            Type::Con(effect_name, effect_args) if !effect_name.contains('.') => {
+                            Type::Con(effect_name, effect_args) => {
                                 Type::Con(self.canonical_effect_name(&effect_name), effect_args)
                             }
                             other => other,
