@@ -77,7 +77,10 @@ impl<'a> Lowerer<'a> {
                         // (function param, let binding, lambda param, case binding, etc.).
                         // The resolver is authoritative — if it didn't resolve the name,
                         // it's not a module-level or imported function.
-                        if let Some(tuple) = self.lower_handler_def_to_tuple(name) {
+                        let handler_name = self
+                            .known_handler_binding_name(expr.id, name)
+                            .unwrap_or_else(|| name.clone());
+                        if let Some(tuple) = self.lower_handler_def_to_tuple(&handler_name) {
                             // Handler used as a value (e.g. returned from a function,
                             // passed as argument): convert to tuple-of-lambdas.
                             tuple
@@ -382,6 +385,16 @@ impl<'a> Lowerer<'a> {
                         .constructor_origin_module_for(expr.id, &ctor_name)
                         .map(str::to_string);
                     return self.lower_ctor_with_origin(&ctor_name, vec![], origin.as_deref());
+                }
+                // Named handlers are values, not zero-arity functions. In
+                // particular, an imported `Module.handler` passed as an
+                // argument must materialize its tuple of operation closures;
+                // ordinary callable resolution would otherwise emit a remote
+                // `handler/0` call that no module defines or exports.
+                if let Some(handler_name) = self.known_handler_binding_name(expr.id, name)
+                    && let Some(tuple) = self.lower_handler_def_to_tuple(&handler_name)
+                {
+                    return tuple;
                 }
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
                     self.lower_resolved_value_ref(expr.id, resolved)

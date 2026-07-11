@@ -83,6 +83,14 @@ impl<'a> Lowerer<'a> {
             .map(|f| f.arity);
         let has_static_call_target = total_arity.is_some()
             || fallback_erlang_module.is_some()
+            || self.imported_handler_function_source(lookup_name).is_some()
+            || self.current_value_ref(head.id).is_some_and(|value| {
+                matches!(
+                    value,
+                    crate::typechecker::ResolvedValue::Global { lookup_name }
+                        if lookup_name.contains('.')
+                )
+            })
             || self.resolved.get(&head.id).is_some_and(|resolved| {
                 matches!(
                     resolved.kind,
@@ -370,9 +378,17 @@ impl<'a> Lowerer<'a> {
             .call_effects
             .get(&app_id)
             .and_then(|info| info.cps_call_plan())?;
+        let callee = if let Some(source_module) = self.imported_handler_function_source(var_name) {
+            CpsCallee::Remote {
+                erlang_mod: Self::module_name_to_erlang(source_module),
+                name: var_name.rsplit('.').next().unwrap_or(var_name).to_string(),
+            }
+        } else {
+            CpsCallee::Value(CExpr::Var(core_var(var_name)))
+        };
         Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
             plan,
-            callee: CpsCallee::Value(CExpr::Var(core_var(var_name))),
+            callee,
             args,
             return_k,
             nested_pure_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
@@ -894,6 +910,29 @@ impl<'a> Lowerer<'a> {
             return call;
         }
 
+        // Imported static handler arms may contain calls to private helpers
+        // from their defining module. Those nodes can be freshened during
+        // elaboration and therefore absent from the consumer's backend
+        // resolution map. Emit a direct call to the recovered origin module.
+        if let Some((func_name, head_expr, args)) = fun_call.as_ref()
+            && let Some(source_module) = self.imported_handler_function_source(func_name)
+        {
+            let erlang_module = Self::module_name_to_erlang(source_module);
+            let lookup_name = format!("{source_module}.{func_name}");
+            if let Some(call) = self.lower_resolved_fun_call(ResolvedCallSite {
+                app_id: expr.id,
+                lookup_name: &lookup_name,
+                emit_name: func_name,
+                head: head_expr,
+                args,
+                return_k: None,
+                call_span: Some(&expr.span),
+                fallback_erlang_module: Some(&erlang_module),
+            }) {
+                return call;
+            }
+        }
+
         if let Some((var_name, _head, args)) = fun_call.as_ref()
             && let Some(call) = self.try_hof_direct_specialized_value_call(var_name, args, None)
         {
@@ -1129,6 +1168,14 @@ impl<'a> Lowerer<'a> {
             _ => {
                 if let Some(module) = fallback_erlang_module {
                     CExpr::Call(module.to_string(), func_name.to_string(), call_args)
+                } else if let Some(crate::typechecker::ResolvedValue::Global { lookup_name }) =
+                    self.current_value_ref(head_node_id)
+                    && let Some((module, name)) = lookup_name.rsplit_once('.')
+                {
+                    self.lower_local_fun_call(name, arity, call_args, Some(module))
+                } else if let Some(module) = self.imported_handler_function_source(func_name) {
+                    let name = func_name.rsplit('.').next().unwrap_or(func_name);
+                    self.lower_local_fun_call(name, arity, call_args, Some(module))
                 } else {
                     // Not in resolution map: local function or variable apply
                     CExpr::Apply(

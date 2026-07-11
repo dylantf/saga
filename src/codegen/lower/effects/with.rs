@@ -563,6 +563,7 @@ impl<'a> Lowerer<'a> {
         // handler's body physically belongs to that imported module — inherit the
         // enclosing origin rather than clobbering it to `None`, so constructors in
         // the inline arm still canonicalize against the right module.
+        let source_module = self.handler_arm_definition_module(arm.id).or(source_module);
         if let Some(source_module) = source_module {
             self.current_handler_source_module = Some(source_module.to_string());
         }

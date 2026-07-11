@@ -286,9 +286,11 @@ impl<'a> Lowerer<'a> {
             }
         }
         for (user_visible, canonical) in &self.check_result.scope_map.handlers {
-            handler_canonical
-                .entry(user_visible.clone())
-                .or_insert_with(|| canonical.clone());
+            // The active import scope is authoritative, especially for
+            // re-exported handlers: the same bare surface name may have been
+            // pre-seeded above from an arbitrary compiled module, while the
+            // scope map retains the true origin declaration.
+            handler_canonical.insert(user_visible.clone(), canonical.clone());
         }
 
         self.effect_canonical = effect_canonical.clone();
