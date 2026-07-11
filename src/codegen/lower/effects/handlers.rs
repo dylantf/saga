@@ -225,6 +225,16 @@ impl<'a> Lowerer<'a> {
         source_module: Option<&str>,
     ) -> Option<String> {
         let module_name = source_module.unwrap_or_else(|| self.current_semantic_module_name());
+        let applied = if module_name == self.current_source_module {
+            self.check_result.effect_at_node.get(&arm.id)
+        } else {
+            self.ctx
+                .module_semantics(module_name)
+                .and_then(|semantics| semantics.effect_at_node.get(&arm.id))
+        };
+        if let Some(entry) = applied {
+            return Some(self.canonicalize_effect(&crate::typechecker::applied_effect_key(entry)));
+        }
         self.resolved_handler_arm_effect_for_module(arm, module_name)
     }
 
@@ -256,8 +266,10 @@ impl<'a> Lowerer<'a> {
             .source_module
             .as_deref()
             .unwrap_or_else(|| self.current_semantic_module_name());
-        if let Some(resolved) = self.resolved_handler_arm_effect_for_module(arm, module_name) {
-            return resolved == eff;
+        if let Some(resolved) = self.effect_for_handler_arm(arm, Some(module_name)) {
+            return resolved == eff
+                || crate::typechecker::applied_effect_family(&resolved)
+                    == crate::typechecker::applied_effect_family(eff);
         }
 
         self.handler_arm_fallback_matches_effect_op(info, arm, eff)

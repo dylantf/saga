@@ -181,6 +181,18 @@ fn hash_string_vec_map<H: Hasher>(values: &HashMap<String, Vec<String>>, state: 
     hash_sorted_map(values, state, |value, state| value.hash(state));
 }
 
+fn hash_effect_entry_vec_map<H: Hasher>(
+    values: &HashMap<String, Vec<typechecker::EffectEntry>>,
+    state: &mut H,
+) {
+    hash_sorted_map(values, state, |entries, state| {
+        hash_vec(entries, state, |entry, state| {
+            entry.name.hash(state);
+            hash_vec(&entry.args, state, hash_type);
+        });
+    });
+}
+
 fn hash_sorted_map<K, V, H: Hasher>(
     values: &HashMap<K, V>,
     state: &mut H,
@@ -310,7 +322,7 @@ fn hash_impl_info<H: Hasher>(info: &typechecker::ImplInfo, state: &mut H) {
     }
     hash_vec(&info.trait_type_args, state, hash_type);
     info.target_type_param_ids.hash(state);
-    hash_string_vec_map(&info.method_effects, state);
+    hash_effect_entry_vec_map(&info.method_effects, state);
 }
 
 fn hash_effect_def_info<H: Hasher>(info: &typechecker::EffectDefInfo, state: &mut H) {

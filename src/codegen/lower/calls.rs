@@ -947,6 +947,15 @@ impl<'a> Lowerer<'a> {
                 .expect("effectful variable call should lower");
         }
 
+        if self.expr_is_effectful_call(expr)
+            && let Some((dict, trait_name, method_index, args)) =
+                super::util::collect_dict_method_call(expr)
+            && let Some(call) =
+                self.lower_dict_method_call(expr.id, dict, trait_name, method_index, &args, None)
+        {
+            return call;
+        }
+
         // Phase 2: pure trait method call with a statically-known, locally-
         // hoisted impl — call the hoisted method function directly instead of
         // building the dict tuple and extracting via `element/2`. Guarded to
@@ -1322,7 +1331,37 @@ impl<'a> Lowerer<'a> {
     ) -> (String, CExpr) {
         let var = self.fresh();
         let value = match &self.current_evidence {
-            Some(ctx) if is_row_forward => CExpr::Var(ctx.var.clone()),
+            Some(ctx) if is_row_forward => {
+                let selectors = callee_effects
+                    .iter()
+                    .map(|effect| {
+                        let exact = ctx.layout.tags().iter().position(|tag| tag == effect);
+                        let position = exact.or_else(|| {
+                            let family = crate::typechecker::applied_effect_family(effect);
+                            let matches = ctx
+                                .layout
+                                .tags()
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, tag)| {
+                                    crate::typechecker::applied_effect_family(tag) == family
+                                })
+                                .map(|(idx, _)| idx)
+                                .collect::<Vec<_>>();
+                            (matches.len() == 1).then_some(matches[0])
+                        });
+                        position.map_or_else(
+                            || CExpr::Lit(CLit::Atom(effect.clone())),
+                            |idx| CExpr::Lit(CLit::Int((idx + 1) as i64)),
+                        )
+                    })
+                    .collect();
+                evidence::reframe_evidence(
+                    CExpr::Var(ctx.var.clone()),
+                    ctx.layout.tags().len(),
+                    selectors,
+                )
+            }
             Some(ctx) if !ctx.is_open => {
                 // Project when the callee asks for fewer effects than the
                 // caller's static layout carries. The runtime helper handles

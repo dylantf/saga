@@ -163,17 +163,10 @@ impl Checker {
         if body_effs.is_empty() && declared_row.is_empty() {
             return Ok(());
         }
-        let declared = self.sub.apply_effect_row(declared_row);
+        let mut declared = self.sub.apply_effect_row(declared_row);
 
-        // A parameterized effect (e.g. `Fail e`) has a single runtime handler
-        // slot per family, so every use that reaches the same handler must agree
-        // on its type argument. Unify each body effect's args against the
-        // matching declared entry. This pins an unannotated `needs {Fail}` to
-        // the type the body actually uses (inference), and turns a forwarded mix
-        // like `Fail String` + `Fail Int` into a type error rather than a
-        // runtime payload-type crash. Done before the open-row short-circuit so
-        // named effects still pin even when the row also has a tail.
-        self.unify_effect_args_against_declared(body_effs, &declared, span)?;
+        self.match_effects_against_declared(body_effs, &declared, span)?;
+        declared = self.sub.apply_effect_row(&declared);
 
         // Open row: extras flow through the tail variable(s)
         if declared.is_open() {
@@ -182,8 +175,8 @@ impl Checker {
         // Closed row: every body effect must appear in declared
         let mut undeclared = Vec::new();
         for entry in &body_effs.effects {
-            if !declared.effects.iter().any(|e| e.matches(entry)) {
-                undeclared.push(entry.name.clone());
+            if !declared.effects.iter().any(|e| e.same_instantiation(entry)) {
+                undeclared.push(self.prettify_effect_entry(entry));
             }
         }
         if undeclared.is_empty() {
@@ -223,17 +216,8 @@ impl Checker {
         }
     }
 
-    /// Unify the type arguments of each body effect against the matching
-    /// declared (`needs`) entry of the same family. See the call site in
-    /// `check_effects_via_row` for the rationale: a parameterized effect maps to
-    /// one runtime handler slot, so all uses reaching it must share a type arg.
-    ///
-    /// A clash (two pinned, incompatible instantiations forwarded together, or a
-    /// body use that disagrees with the annotation) is reported as a single
-    /// effect-conflict error against the declaration's span. Genuinely
-    /// polymorphic uses (a body effect arg that is the function's own type
-    /// variable) unify var-to-var and stay generic.
-    fn unify_effect_args_against_declared(
+    /// Match body effects against compatible applied entries in a declaration.
+    fn match_effects_against_declared(
         &mut self,
         body_effs: &EffectRow,
         declared: &EffectRow,
@@ -241,24 +225,41 @@ impl Checker {
     ) -> Result<(), Diagnostic> {
         let applied_body = self.sub.apply_effect_row(body_effs);
         for entry in &applied_body.effects {
-            let Some(decl_entry) = declared.effects.iter().find(|d| d.matches(entry)) else {
+            let family_candidates: Vec<_> = declared
+                .effects
+                .iter()
+                .filter(|candidate| candidate.matches(entry))
+                .cloned()
+                .collect();
+            if family_candidates.is_empty() {
                 continue;
-            };
-            let decl_args = decl_entry.args.clone();
-            let body_args = entry.args.clone();
-            for (d, b) in decl_args.iter().zip(body_args.iter()) {
-                if self.unify(d, b).is_err() {
-                    let family = entry.name.rsplit('.').next().unwrap_or(&entry.name);
-                    return Err(Diagnostic::error_at(
-                        span,
-                        format!(
-                            "effect `{}` is used at conflicting types in the same scope. \
-A parameterized effect has a single handler, so all of its uses that reach that \
-handler must share one type argument. Handle the differing uses with separate \
-`with` blocks, or make them agree on a type.",
-                            family
-                        ),
-                    ));
+            }
+            let mut compatible = Vec::new();
+            for candidate in family_candidates {
+                let saved = self.sub.clone();
+                let ok = candidate.args.len() == entry.args.len()
+                    && candidate
+                        .args
+                        .iter()
+                        .zip(&entry.args)
+                        .all(|(decl_arg, body_arg)| self.unify(decl_arg, body_arg).is_ok());
+                self.sub = saved;
+                if ok {
+                    compatible.push(candidate);
+                }
+            }
+            if compatible.len() > 1 {
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "ambiguous effect application `{}`: it matches multiple entries in the declared effect row",
+                        self.prettify_effect_entry(entry)
+                    ),
+                ));
+            }
+            if let Some(candidate) = compatible.pop() {
+                for (decl_arg, body_arg) in candidate.args.iter().zip(&entry.args) {
+                    self.unify_at(decl_arg, body_arg, span)?;
                 }
             }
         }
@@ -681,18 +682,57 @@ handler must share one type argument. Handle the differing uses with separate \
 
         // Build the union of entries.
         //
-        // Unify type args of same-name entries across inputs while we walk;
-        // this MUST happen before binding tails so we never bind a tail to a
-        // row containing stale unification variables.
+        // Merge compatible applications while preserving incompatible concrete
+        // applications of the same family as independent row entries.
         let mut union: Vec<EffectEntry> = Vec::new();
         for row in &applied {
             for entry in &row.effects {
-                if let Some(existing) = union.iter().find(|e| e.matches(entry)) {
-                    let existing_args = existing.args.clone();
-                    for (existing_arg, new_arg) in existing_args.iter().zip(entry.args.iter()) {
-                        self.unify_at(existing_arg, new_arg, span)?;
+                if union
+                    .iter()
+                    .any(|existing| existing.same_instantiation(entry))
+                {
+                    continue;
+                }
+                let family_only_runtime = matches!(
+                    entry.name.rsplit('.').next().unwrap_or(&entry.name),
+                    "Actor" | "Process" | "Monitor" | "Link" | "Timer"
+                );
+                let mut merged = false;
+                for existing in &mut union {
+                    if !existing.matches(entry) || existing.args.len() != entry.args.len() {
+                        continue;
                     }
-                } else {
+                    let saved = self.sub.clone();
+                    let compatible = existing
+                        .args
+                        .iter()
+                        .zip(&entry.args)
+                        .all(|(a, b)| self.unify(a, b).is_ok());
+                    if compatible {
+                        existing.args = existing
+                            .args
+                            .iter()
+                            .map(|arg| self.sub.apply(arg))
+                            .collect();
+                        merged = true;
+                        break;
+                    }
+                    self.sub = saved;
+                    if family_only_runtime {
+                        let existing_args = existing.args.clone();
+                        for (a, b) in existing_args.iter().zip(&entry.args) {
+                            self.unify_at(a, b, span)?;
+                        }
+                        existing.args = existing
+                            .args
+                            .iter()
+                            .map(|arg| self.sub.apply(arg))
+                            .collect();
+                        merged = true;
+                        break;
+                    }
+                }
+                if !merged {
                     union.push(entry.clone());
                 }
             }
@@ -725,7 +765,7 @@ handler must share one type argument. Handle the differing uses with separate \
             }
             let extras: Vec<EffectEntry> = union
                 .iter()
-                .filter(|u| !row.effects.iter().any(|re| re.matches(u)))
+                .filter(|u| !row.effects.iter().any(|re| re.same_instantiation(u)))
                 .cloned()
                 .collect();
             for (i, &tail_id) in tail_ids.iter().enumerate() {

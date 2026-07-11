@@ -642,6 +642,88 @@ result () = {
 }
 
 #[test]
+fn trait_impls_preserve_distinct_applied_effects() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+trait Decode a {
+  fun decode : a -> Int needs {..e}
+}
+
+type TextInput = TextInput
+type IntInput = IntInput
+
+impl Decode for TextInput needs {Fail String} {
+  decode TextInput = fail! "text"
+}
+
+impl Decode for IntInput needs {Fail Int} {
+  decode IntInput = fail! 7
+}
+
+handler text_fail for Fail String {
+  fail _message = resume 10
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+pub fun result : Unit -> String
+result () = show ({ decode TextInput + decode IntInput } with {text_fail, int_fail})
+"#;
+    check_result_string("trait_impl_distinct_applied_effects", src, "42");
+}
+
+#[test]
+fn cross_module_trait_impls_preserve_distinct_applied_effects() {
+    let lib = r#"module Applied.Decode
+
+pub effect Fail e {
+  fun fail : e -> a
+}
+
+pub trait Decode a {
+  fun decode : a -> Int needs {..e}
+}
+
+pub type TextInput = TextInput
+pub type IntInput = IntInput
+
+impl Decode for TextInput needs {Fail String} {
+  decode TextInput = fail! "text"
+}
+
+impl Decode for IntInput needs {Fail Int} {
+  decode IntInput = fail! 7
+}
+"#;
+    let main_src = r#"module Main
+
+import Applied.Decode (Fail, Decode, TextInput, IntInput)
+
+handler text_fail for Fail String {
+  fail _message = resume 10
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+pub fun result : Unit -> String
+result () = show ({ decode TextInput + decode IntInput } with {text_fail, int_fail})
+"#;
+    check_cross_module(
+        "cross_module_trait_impl_distinct_applied_effects",
+        &[("lib/Applied/Decode.saga", lib)],
+        main_src,
+        "42",
+    );
+}
+
+#[test]
 fn nullary_effect_op_performs_immediately() {
     // A zero-parameter effect op (`fun number : Int`) is a saturated perform,
     // not an eta-reduced op reference. `number!` must run the handler and yield
@@ -1657,6 +1739,184 @@ result () = {
 }
 "#;
     check_result_string("neweffect_handler_factory_dynamic_open_row", src, "base");
+}
+
+#[test]
+fn distinct_applied_fail_effects_coexist() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+handler string_fail for Fail String {
+  fail _message = resume 10
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+pub fun result : Unit -> String
+result () = show ({ from_string () + from_int () } with {string_fail, int_fail})
+"#;
+    check_result_string("distinct_applied_fail_effects", src, "42");
+}
+
+#[test]
+fn nested_handler_replaces_only_matching_applied_effect() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+handler outer_string for Fail String {
+  fail _message = resume 1
+}
+
+handler inner_string for Fail String {
+  fail _message = resume 2
+}
+
+handler outer_int for Fail Int {
+  fail _code = resume 10
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+pub fun result : Unit -> String
+result () = show ({
+  let inner = from_string () with inner_string
+  inner + from_int ()
+} with {outer_string, outer_int})
+"#;
+    check_result_string("nested_applied_effect_shadow", src, "12");
+}
+
+#[test]
+fn applied_effect_handler_factory_coexists_with_sibling_application() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+fun make_string_fail : Int -> Handler (Fail String)
+make_string_fail fallback = handler for Fail String {
+  fail _message = resume fallback
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+pub fun result : Unit -> String
+result () = {
+  let string_fail = make_string_fail 10
+  show ({ from_string () + from_int () } with {string_fail, int_fail})
+}
+"#;
+    check_result_string("applied_effect_handler_factory", src, "42");
+}
+
+#[test]
+fn open_row_inner_handler_preserves_same_family_tail() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+handler outer_string for Fail String {
+  fail _message = resume 10
+}
+
+handler inner_string for Fail String {
+  fail _message = resume 2
+}
+
+handler outer_int for Fail Int {
+  fail _code = resume 32
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+fun wrapped : Unit -> Int needs {Fail String, ..r}
+wrapped () = (from_string () with inner_string) + from_int ()
+
+pub fun result : Unit -> String
+result () = show (wrapped () with {outer_string, outer_int})
+"#;
+    check_result_string("open_row_inner_applied_handler", src, "34");
+}
+
+#[test]
+fn cross_module_applied_effects_select_generic_open_row_slots() {
+    let lib = r#"module Applied.Repo
+
+pub type UsersDb = UsersDb
+pub type DataDb = DataDb
+
+pub effect Repo db {
+  fun get : db -> Int
+}
+
+pub effect Extra {
+  fun extra : Unit -> Int
+}
+
+pub fun generic_get : db -> Int needs {Repo db, ..r}
+generic_get db = get! db
+
+pub fun forward : db -> Int needs {Repo db, ..r}
+forward db = generic_get db
+
+pub fun use_users : Unit -> Int needs {Repo UsersDb, Extra, ..r}
+use_users () = generic_get UsersDb + extra! ()
+"#;
+    let main_src = r#"module Main
+
+import Applied.Repo (UsersDb, DataDb, Repo, Extra, use_users, forward)
+
+handler users_repo for Repo UsersDb {
+  get _db = resume 10
+}
+
+handler data_repo for Repo DataDb {
+  get _db = resume 32
+}
+
+handler extra_handler for Extra {
+  extra () = resume 100
+}
+
+pub fun result : Unit -> String
+result () =
+  show ({ use_users () + forward DataDb } with {users_repo, data_repo, extra_handler})
+"#;
+    check_cross_module(
+        "cross_module_applied_effects_generic_open_row",
+        &[("lib/Applied/Repo.saga", lib)],
+        main_src,
+        "142",
+    );
 }
 
 #[test]

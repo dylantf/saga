@@ -434,6 +434,13 @@ impl Checker {
                     .or_else(|| self.effect_for_op(name, resolved_qualifier.as_deref()))
                 {
                     let effect_args = self.current_effect_args(&effect_name);
+                    self.lsp.effect_at_node.insert(
+                        node_id,
+                        super::EffectEntry {
+                            name: effect_name.clone(),
+                            args: effect_args.clone(),
+                        },
+                    );
                     self.emit_effect(effect_name.clone(), effect_args);
                 }
                 Ok(ty)
@@ -1361,7 +1368,7 @@ impl Checker {
             if open_row_methods.is_empty() {
                 continue;
             }
-            let names: Vec<String> = match &head_method {
+            let entries: Vec<super::EffectEntry> = match &head_method {
                 // Direct trait-method call: discharge only if THAT method is
                 // open-row (a pure/closed sibling of an open-row method stays on
                 // the normal path).
@@ -1375,18 +1382,20 @@ impl Checker {
                 // Where-bound function call (`count_foos 42`): union the effects
                 // of the trait's open-row methods only.
                 _ => {
-                    let mut set: std::collections::BTreeSet<String> =
-                        std::collections::BTreeSet::new();
+                    let mut by_key: std::collections::BTreeMap<String, super::EffectEntry> =
+                        std::collections::BTreeMap::new();
                     for (mname, effs) in &info.method_effects {
                         if open_row_methods.contains(mname.as_str()) {
-                            set.extend(effs.iter().cloned());
+                            for entry in effs {
+                                by_key.insert(super::applied_effect_key(entry), entry.clone());
+                            }
                         }
                     }
-                    set.into_iter().collect()
+                    by_key.into_values().collect()
                 }
             };
-            for name in names {
-                self.emit_effect(name, vec![]);
+            for entry in entries {
+                self.emit_effect(entry.name, entry.args);
             }
         }
     }
@@ -1550,6 +1559,13 @@ impl Checker {
             }
             Some(super::HandlerInfo {
                 effects,
+                effect_entries: args
+                    .iter()
+                    .filter_map(|arg| match self.sub.apply(arg) {
+                        Type::Con(name, args) => Some(super::EffectEntry { name, args }),
+                        _ => None,
+                    })
+                    .collect(),
                 return_type: None,
                 needs_effects: super::EffectRow {
                     effects: vec![],

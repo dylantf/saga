@@ -1,5 +1,6 @@
 -module(std_evidence_bridge).
--export([find_evidence/2, insert_canonical/2, project_evidence/2]).
+-export([find_evidence/2, insert_canonical/2, insert_static/3,
+         project_evidence/2, reframe_evidence/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -10,14 +11,32 @@
 %% closed-row sites are expected to compute the index statically and use
 %% erlang:element/2 directly.
 find_evidence(Evidence, Tag) ->
-    find_evidence_at(Evidence, Tag, 1, tuple_size(Evidence)).
+    case find_evidence_at(Evidence, Tag, 1, tuple_size(Evidence)) of
+        {ok, OpTuple} -> OpTuple;
+        not_found -> find_unique_family_evidence(Evidence, Tag)
+    end.
 
-find_evidence_at(_Evidence, Tag, I, N) when I > N ->
-    erlang:error({evidence_tag_not_found, Tag});
+find_evidence_at(_Evidence, _Tag, I, N) when I > N -> not_found;
 find_evidence_at(Evidence, Tag, I, N) ->
     case element(I, Evidence) of
-        {Tag, OpTuple} -> OpTuple;
+        {Tag, OpTuple} -> {ok, OpTuple};
         _ -> find_evidence_at(Evidence, Tag, I + 1, N)
+    end.
+
+%% A handler installed inside code polymorphic in an effect argument cannot
+%% mint the caller's concrete applied tag: there is deliberately no runtime
+%% type witness.  Such slots are still safe to use when their effect family is
+%% unique in the frame.  Exact applied tags always win; multiple family
+%% matches remain an error rather than choosing by order.
+find_unique_family_evidence(Evidence, Tag) ->
+    Family = effect_family(Tag),
+    Matches = [Ops || I <- lists:seq(1, tuple_size(Evidence)),
+                       {EntryTag, Ops} <- [element(I, Evidence)],
+                       effect_family(EntryTag) =:= Family],
+    case Matches of
+        [OpTuple] -> OpTuple;
+        [] -> erlang:error({evidence_tag_not_found, Tag});
+        _ -> erlang:error({ambiguous_evidence_family, Family})
     end.
 
 %% Insert a new {Tag, OpTuple} entry at its canonical position. If an entry
@@ -35,10 +54,74 @@ insert_at([{Tag, _} = Old | Rest], NewTag, NewEntry, Acc) when Tag < NewTag ->
 insert_at([{Tag, _} = Old | Rest], NewTag, NewEntry, Acc) when Tag > NewTag ->
     list_to_tuple(lists:reverse([NewEntry | Acc]) ++ [Old | Rest]).
 
+%% Install a handler into an open evidence frame. Only the known positional
+%% prefix is canonicalized; globally sorting would move static slots behind
+%% unknown tail entries. An exact entry is removed from either part before the
+%% replacement is inserted into the prefix.
+insert_static(Evidence, StaticCount, {NewTag, _} = NewEntry) ->
+    Entries = tuple_to_list(Evidence),
+    {Prefix, Tail} = lists:split(StaticCount, Entries),
+    CleanPrefix = [Entry || {Tag, _} = Entry <- Prefix, Tag =/= NewTag],
+    CleanTail = [Entry || {Tag, _} = Entry <- Tail, Tag =/= NewTag],
+    NewPrefix = tuple_to_list(insert_at(CleanPrefix, NewTag, NewEntry, [])),
+    list_to_tuple(NewPrefix ++ CleanTail).
+
 %% Build a new evidence tuple containing only the named tags, in the order
 %% supplied (the caller is expected to pass them in canonical order).
 project_evidence(Evidence, Tags) ->
     list_to_tuple([entry_for(Evidence, T) || T <- Tags]).
+
+%% Build a callee-shaped open-row vector. Selectors identify the callee's
+%% positional static prefix: integers address the caller's own static prefix,
+%% while atoms select a concrete applied tag from the forwarded remainder.
+%% Every unselected caller entry follows as the callee's tagged open tail.
+reframe_evidence(Evidence, _StaticCount, Selectors) ->
+    SelectedPositions = unique_positions(
+        [selector_position(Evidence, S) || S <- Selectors]),
+    Selected = [element(I, Evidence) || I <- SelectedPositions],
+    Remaining = [element(I, Evidence)
+                 || I <- lists:seq(1, tuple_size(Evidence)),
+                    not lists:member(I, SelectedPositions)],
+    list_to_tuple(Selected ++ Remaining).
+
+unique_positions(Positions) -> unique_positions(Positions, []).
+
+unique_positions([], Acc) -> lists:reverse(Acc);
+unique_positions([Position | Rest], Acc) ->
+    case lists:member(Position, Acc) of
+        true -> unique_positions(Rest, Acc);
+        false -> unique_positions(Rest, [Position | Acc])
+    end.
+
+selector_position(Evidence, I) when is_integer(I), I >= 1,
+                                      I =< tuple_size(Evidence) -> I;
+selector_position(Evidence, Tag) when is_atom(Tag) ->
+    case entry_position(Evidence, Tag, 1, tuple_size(Evidence)) of
+        {ok, Position} -> Position;
+        not_found -> unique_family_position(Evidence, Tag)
+    end.
+
+entry_position(_Evidence, _Tag, I, N) when I > N -> not_found;
+entry_position(Evidence, Tag, I, N) ->
+    case element(I, Evidence) of
+        {Tag, _} -> {ok, I};
+        _ -> entry_position(Evidence, Tag, I + 1, N)
+    end.
+
+unique_family_position(Evidence, Tag) ->
+    Family = effect_family(Tag),
+    Matches = [I || I <- lists:seq(1, tuple_size(Evidence)),
+                    {EntryTag, _} <- [element(I, Evidence)],
+                    effect_family(EntryTag) =:= Family],
+    case Matches of
+        [Position] -> Position;
+        [] -> erlang:error({evidence_tag_not_found, Tag});
+        _ -> erlang:error({ambiguous_evidence_family, Family})
+    end.
+
+effect_family(Tag) ->
+    [Family | _] = binary:split(atom_to_binary(Tag, utf8), <<"<">>),
+    Family.
 
 entry_for(Evidence, Tag) ->
     entry_at(Evidence, Tag, 1, tuple_size(Evidence)).

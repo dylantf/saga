@@ -4138,10 +4138,8 @@ main () = parse \"x\" with { fail msg = String.length msg }",
 
 #[test]
 fn parameterized_effect_conflicting_instantiations_forwarded_is_error() {
-    // Two functions forward `Fail` at different type arguments (`String` and
-    // `Int`) into one caller. A parameterized effect has a single runtime
-    // handler slot per family, so this must be a type error rather than a
-    // silent runtime payload-type crash.
+    // A single inferred `Fail` entry cannot silently cover two distinct
+    // applications; callers must declare both slots explicitly.
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4162,10 +4160,47 @@ main () = both 1 with { fail msg = 0 }",
         result
             .as_ref()
             .err()
-            .map(|e| e.message.contains("conflicting types"))
+            .map(|e| e.message.contains("not declared"))
             .unwrap_or(false),
-        "expected an effect-conflict error, got: {:?}",
+        "expected an undeclared applied-effect error, got: {:?}",
         result.err()
+    );
+}
+
+#[test]
+fn parameterized_effect_distinct_declared_instantiations_coexist() {
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun fail_string : Unit -> Int needs {Fail String}
+fail_string () = fail! \"str\"
+fun fail_int : Unit -> Int needs {Fail Int}
+fail_int () = fail! 99
+fun both : Unit -> Int needs {Fail String, Fail Int}
+both () = fail_string () + fail_int ()",
+    );
+    assert!(
+        result.is_ok(),
+        "distinct applied effects should coexist, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn parameterized_effect_potentially_equal_instantiations_are_ambiguous() {
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun ambiguous : a -> b -> Unit needs {Fail a, Fail b}
+ambiguous _ _ = ()",
+    );
+    assert!(
+        result
+            .err()
+            .is_some_and(|error| error.message.contains("ambiguous overlapping")),
+        "potentially equal applied effects must be rejected"
     );
 }
 
@@ -4482,8 +4517,8 @@ effect Pg {
 }
 
 #[test]
-fn conflicting_duplicate_effect_requirements_are_rejected() {
-    let err = check(
+fn distinct_duplicate_effect_family_requirements_are_accepted() {
+    check(
         r#"
 import Std.Actor (Process, Actor)
 
@@ -4491,19 +4526,7 @@ fun mixed_actor_messages : Unit -> String needs {Process, Actor Unit, Actor Stri
 mixed_actor_messages () = "ok"
 "#,
     )
-    .err()
-    .expect("expected conflicting Actor effect error");
-
-    assert!(
-        err.message.contains("conflicting effect requirements"),
-        "expected conflict error, got: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains("Actor Unit") && err.message.contains("Actor String"),
-        "expected both Actor instantiations in error, got: {}",
-        err.message
-    );
+    .expect("distinct Actor applications should coexist");
 }
 
 #[test]
@@ -4547,7 +4570,7 @@ main () = {
 }
 
 #[test]
-fn with_rejects_mixed_effect_instantiations_for_named_handler() {
+fn named_handler_handles_only_its_applied_effect() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4571,17 +4594,17 @@ main () = {
 "#,
     )
     .err()
-    .expect("expected named handler to reject mixed Fail instantiations");
+    .expect("expected the unmatched Fail application to remain");
 
     assert!(
-        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
-        "expected both Fail instantiations in error, got: {}",
+        err.message.contains("cannot use `needs`"),
+        "expected residual effect at main, got: {}",
         err.message
     );
 }
 
 #[test]
-fn with_rejects_mixed_effect_instantiations_for_handler_binding() {
+fn handler_binding_handles_only_its_applied_effect() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4608,11 +4631,11 @@ main () = {
 "#,
     )
     .err()
-    .expect("expected handler binding to reject mixed Fail instantiations");
+    .expect("expected the unmatched Fail application to remain");
 
     assert!(
-        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
-        "expected both Fail instantiations in error, got: {}",
+        err.message.contains("cannot use `needs`"),
+        "expected residual effect at main, got: {}",
         err.message
     );
 }
@@ -6511,7 +6534,11 @@ fn trait_method_needs_survives_in_scheme() {
     let method = &trait_info.methods[0];
     let resolved = checker.sub.apply(&method.scheme.ty);
     let effects = super::effects_from_type(&resolved);
-    assert!(effects.contains("Fail"), "effects were {:?}", effects);
+    assert!(
+        effects.iter().any(|effect| effect.starts_with("Fail<")),
+        "effects were {:?}",
+        effects
+    );
     assert_eq!(method.effect_sig.effects, vec!["Fail".to_string()]);
     assert!(!method.effect_sig.is_open_row);
     assert_eq!(method.effect_sig.user_arity, 1);

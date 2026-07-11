@@ -54,12 +54,15 @@ impl RuntimeFunctionShape {
                 let fallback = fallback_ty
                     .map(|ty| RuntimeFunctionShape::from_type(ty, &mut canonicalize_effects));
                 let fallback_shape = fallback.and_then(|shape| shape.cps_shape());
-                let mut static_effects = canonicalize_effects(effects.clone());
-                if static_effects.is_empty()
-                    && let Some(shape) = &fallback_shape
-                {
-                    static_effects = shape.static_effects.clone();
-                }
+                // The occurrence type carries the caller's instantiation of
+                // parameterized effects; exported symbol metadata only carries
+                // the generic declaration. Prefer the occurrence whenever it
+                // is available so caller-side evidence projection selects the
+                // concrete applied slots.
+                let static_effects = fallback_shape
+                    .as_ref()
+                    .map(|shape| shape.static_effects.clone())
+                    .unwrap_or_else(|| canonicalize_effects(effects.clone()));
                 let is_open_row = fallback_shape.is_some_and(|shape| shape.is_open_row);
                 if static_effects.is_empty() && !is_open_row {
                     RuntimeFunctionShape::Pure

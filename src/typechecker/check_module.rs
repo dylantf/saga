@@ -402,6 +402,8 @@ impl Checker {
             exports.as_ref(),
             &mod_checker.effects,
             &mod_checker.scope_map,
+            &mod_checker.trait_state.impls,
+            &mod_checker.trait_state.traits,
         );
         self.modules
             .codegen_info
@@ -638,6 +640,8 @@ impl Checker {
                 exports.as_ref(),
                 &mod_checker.effects,
                 &mod_checker.scope_map,
+                &mod_checker.trait_state.impls,
+                &mod_checker.trait_state.traits,
             );
             self.modules
                 .codegen_info

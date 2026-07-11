@@ -65,6 +65,9 @@ pub struct TraitImplDict {
     /// uses it to thread evidence at trait method call sites that elaborated
     /// to `DictMethodAccess`. Empty when the impl has no `needs` clause.
     pub impl_effects: Vec<String>,
+    /// Applied effects performed by each trait method, in trait declaration
+    /// order. This preserves parameterized evidence across module boundaries.
+    pub method_effects: Vec<Vec<String>>,
 }
 
 /// Information about a module's exports needed by the lowerer/codegen.
@@ -146,6 +149,8 @@ pub(super) fn collect_codegen_info(
     exports: &ModuleExports,
     effects_map: &std::collections::HashMap<String, EffectDefInfo>,
     scope_map: &ScopeMap,
+    trait_impls: &std::collections::HashMap<(String, Vec<String>, String), super::super::ImplInfo>,
+    traits: &std::collections::HashMap<String, super::super::TraitInfo>,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     fn is_runtime_unit_param(ty: &crate::ast::TypeExpr) -> bool {
@@ -475,6 +480,32 @@ pub(super) fn collect_codegen_info(
                     .collect();
                 impl_effects.sort();
                 impl_effects.dedup();
+                let impl_key = (
+                    canonical_trait.clone(),
+                    canonical_trait_type_args.clone(),
+                    canonical_target_type.clone(),
+                );
+                let method_effects = traits
+                    .get(&canonical_trait)
+                    .map(|trait_info| {
+                        trait_info
+                            .methods
+                            .iter()
+                            .map(|method| {
+                                let mut effects = trait_impls
+                                    .get(&impl_key)
+                                    .and_then(|info| info.method_effects.get(&method.name))
+                                    .into_iter()
+                                    .flatten()
+                                    .map(super::super::applied_effect_key)
+                                    .collect::<Vec<_>>();
+                                effects.sort();
+                                effects.dedup();
+                                effects
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
                     trait_type_args: canonical_trait_type_args,
@@ -483,6 +514,7 @@ pub(super) fn collect_codegen_info(
                     arity,
                     param_constraints,
                     impl_effects,
+                    method_effects,
                 });
             }
             _ => {}

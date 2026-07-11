@@ -324,14 +324,9 @@ impl Checker {
             return Ok(EffectRow::closed(vec![]));
         }
 
-        let mut seen_effects: HashMap<String, Vec<Type>> = HashMap::new();
         let mut effect_refs = Vec::new();
         for e in effects {
             let args: Vec<Type> = self.convert_effect_ref_args(e, params_list);
-            let current_display = self.prettify_type(&Type::Con(
-                e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
-                args.clone(),
-            ));
             let name = self.resolved_effect_name(e.id, &e.name);
             if !self.effects.contains_key(&name) {
                 self.collected_diagnostics.push(Diagnostic::error_at(
@@ -339,25 +334,38 @@ impl Checker {
                     format!("undefined effect: {}", e.name),
                 ));
             }
-            if let Some(prev_args) = seen_effects.get(&name) {
-                if prev_args != &args {
-                    let previous_display = self.prettify_type(&Type::Con(
-                        e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
-                        prev_args.clone(),
-                    ));
+            if effect_refs
+                .iter()
+                .any(|seen: &EffectEntry| seen.name == name && seen.args == args)
+            {
+                continue;
+            }
+            for seen in effect_refs
+                .iter()
+                .filter(|seen: &&EffectEntry| seen.name == name)
+            {
+                let saved = self.sub.clone();
+                let overlaps = seen.args.len() == args.len()
+                    && seen
+                        .args
+                        .iter()
+                        .zip(&args)
+                        .all(|(left, right)| self.unify(left, right).is_ok());
+                self.sub = saved;
+                if overlaps {
                     return Err(Diagnostic::error_at(
                         e.span,
                         format!(
-                            "conflicting effect requirements in `needs`: `{}` and `{}` both refer to `{}`, but with different type arguments",
-                            previous_display,
-                            current_display,
+                            "ambiguous overlapping effect applications in `needs`: `{}` may be the same runtime slot as another `{}` entry",
+                            self.prettify_effect_entry(&EffectEntry {
+                                name: name.clone(),
+                                args: args.clone(),
+                            }),
                             e.name.rsplit('.').next().unwrap_or(&e.name),
                         ),
                     ));
                 }
-                continue;
             }
-            seen_effects.insert(name.clone(), args.clone());
             effect_refs.push(EffectEntry::unnamed(name, args));
         }
         let tails: Vec<Type> = effect_row_var

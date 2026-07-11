@@ -181,6 +181,11 @@ impl<'a> Lowerer<'a> {
                 Some(ctx) => CExpr::Var(ctx.var.clone()),
                 None => CExpr::Tuple(Vec::new()),
             };
+            let open_frame = saved_evidence.as_ref().is_some_and(|ctx| ctx.is_open);
+            let mut static_tags = saved_evidence
+                .as_ref()
+                .map(|ctx| ctx.layout.tags().to_vec())
+                .unwrap_or_default();
             for (eff, mut ops) in effect_to_ops {
                 ops.sort();
                 ops.dedup();
@@ -195,7 +200,19 @@ impl<'a> Lowerer<'a> {
                     .collect();
                 let entry =
                     crate::codegen::lower::evidence::build_evidence_entry(&eff, op_closures);
-                acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
+                if open_frame {
+                    acc = crate::codegen::lower::evidence::insert_static(
+                        acc,
+                        static_tags.len(),
+                        entry,
+                    );
+                    if !static_tags.contains(&eff) {
+                        static_tags.push(eff);
+                        static_tags.sort();
+                    }
+                } else {
+                    acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
+                }
             }
             let new_var = self.fresh();
             // Layout mirrors the value we built: union of the inherited

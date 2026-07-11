@@ -12,6 +12,7 @@ impl Checker {
     fn resolve_handled_effect_entries(
         &mut self,
         handled_families: &HashSet<String>,
+        explicitly_handled: &[EffectEntry],
         inner_effs: &EffectRow,
         span: Span,
     ) -> Result<Vec<EffectEntry>, Diagnostic> {
@@ -22,6 +23,29 @@ impl Checker {
             for entry in &inner_effs.effects {
                 if entry.name != *family {
                     continue;
+                }
+                let explicit_for_family: Vec<_> = explicitly_handled
+                    .iter()
+                    .filter(|handled| handled.name == *family)
+                    .collect();
+                if !explicit_for_family.is_empty() {
+                    let mut compatible = false;
+                    for handled in explicit_for_family {
+                        let saved = self.sub.clone();
+                        compatible = handled.args.len() == entry.args.len()
+                            && handled
+                                .args
+                                .iter()
+                                .zip(&entry.args)
+                                .all(|(a, b)| self.unify(a, b).is_ok());
+                        self.sub = saved;
+                        if compatible {
+                            break;
+                        }
+                    }
+                    if !compatible {
+                        continue;
+                    }
                 }
 
                 // Under nested handler semantics, one `with` layer still handles
@@ -200,12 +224,49 @@ impl Checker {
             }
         }
         let handled_families = self.handler_handled_effects(handler);
+        let explicitly_handled = match handler {
+            ast::Handler::Named(named) => {
+                let resolved_name = self.resolved_handler_name(named.id, &named.name);
+                self.handlers
+                    .get(&resolved_name)
+                    .cloned()
+                    .map(|info| {
+                        // Handler declarations are schemes too. Their applied
+                        // effect entries must be freshened per `with`, just as
+                        // the handler's return type is below; otherwise a
+                        // declaration-time `Fail a` variable can retain stale
+                        // substitutions and fail to match `Fail String`.
+                        let mapping: std::collections::HashMap<u32, Type> = info
+                            .forall
+                            .iter()
+                            .map(|&id| (id, self.fresh_var()))
+                            .collect();
+                        info.effect_entries
+                            .iter()
+                            .map(|entry| EffectEntry {
+                                name: entry.name.clone(),
+                                args: entry
+                                    .args
+                                    .iter()
+                                    .map(|arg| Self::replace_vars(arg, &mapping))
+                                    .collect(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            ast::Handler::Inline { .. } => Vec::new(),
+        };
         let raw_inner_effs = self.restore_effects(saved_effs);
         let inner_effs = self.sub.apply_effect_row(&raw_inner_effs);
         let inner_result = self.exit_scope(inner_scope);
         let outer_effect_cache = self.effect_meta.type_param_cache.clone();
-        let handled_entries =
-            self.resolve_handled_effect_entries(&handled_families, &inner_effs, expr.span)?;
+        let handled_entries = self.resolve_handled_effect_entries(
+            &handled_families,
+            &explicitly_handled,
+            &inner_effs,
+            expr.span,
+        )?;
         let inner_effs = self.sub.apply_effect_row(&inner_effs);
 
         let inner_effect_cache = inner_result.effect_cache;
@@ -385,6 +446,7 @@ impl Checker {
                                 .find(|e| e.name == sig.effect_name)
                                 .cloned()
                         {
+                            self.lsp.effect_at_node.insert(arm.id, entry.clone());
                             for (param_id, arg) in
                                 effect_info.type_params.iter().zip(entry.args.iter())
                             {

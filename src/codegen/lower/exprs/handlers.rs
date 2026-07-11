@@ -250,8 +250,14 @@ impl<'a> Lowerer<'a> {
         if let ExprKind::HandlerExpr { body } = &value.kind {
             let synthetic = format!("__handler_expr_{}", value.id.0);
             let semantic_module_name = self.current_semantic_module_name().to_string();
-            let canonical_effects =
-                self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects);
+            let canonical_effects = self
+                .check_result
+                .type_at_node
+                .get(&value.id)
+                .and_then(|ty| self.dynamic_handler_info_from_type(ty))
+                .unwrap_or_else(|| {
+                    self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects)
+                });
             self.handler_defs.insert(
                 synthetic.clone(),
                 crate::codegen::lower::HandlerInfo {
@@ -302,11 +308,18 @@ impl<'a> Lowerer<'a> {
             .and_then(|id| self.check_result.let_binding_handlers.get(&id))
             .or_else(|| self.check_result.handlers.get(name))
             .map(|info| {
-                let effects = info
-                    .effects
-                    .iter()
-                    .map(|e| self.canonicalize_effect(e))
-                    .collect();
+                let effects = if info.effect_entries.is_empty() {
+                    info.effects
+                        .iter()
+                        .map(|e| self.canonicalize_effect(e))
+                        .collect()
+                } else {
+                    info.effect_entries
+                        .iter()
+                        .map(crate::typechecker::applied_effect_key)
+                        .map(|effect| self.canonicalize_effect(&effect))
+                        .collect()
+                };
                 let has_return = info.return_type.is_some();
                 (effects, has_return)
             })
@@ -355,8 +368,14 @@ impl<'a> Lowerer<'a> {
             .source_module
             .as_deref()
             .unwrap_or_else(|| self.current_semantic_module_name());
-        let canonical_effects =
-            self.resolved_effect_refs_for_module(source_module, &factory.body.effects);
+        let canonical_effects = self
+            .check_result
+            .type_at_node
+            .get(&value.id)
+            .and_then(|ty| self.dynamic_handler_info_from_type(ty))
+            .unwrap_or_else(|| {
+                self.resolved_effect_refs_for_module(source_module, &factory.body.effects)
+            });
         self.handler_defs.insert(
             synthetic.clone(),
             crate::codegen::lower::HandlerInfo {
@@ -449,8 +468,14 @@ impl<'a> Lowerer<'a> {
             let effects: Vec<String> = args
                 .iter()
                 .filter_map(|arg| {
-                    if let Type::Con(effect_name, _) = arg {
-                        Some(self.canonicalize_effect(effect_name))
+                    if let Type::Con(effect_name, effect_args) = arg {
+                        let key = crate::typechecker::applied_effect_key(
+                            &crate::typechecker::EffectEntry {
+                                name: effect_name.clone(),
+                                args: effect_args.clone(),
+                            },
+                        );
+                        Some(self.canonicalize_effect(&key))
                     } else {
                         None
                     }

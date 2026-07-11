@@ -1,7 +1,7 @@
 use crate::ast::{self, TypeParam};
 use crate::token::Span;
 
-use super::{Checker, Diagnostic, ImplInfo, Scheme, TraitMethodEffectSig, Type};
+use super::{Checker, Diagnostic, EffectEntry, ImplInfo, Scheme, TraitMethodEffectSig, Type};
 
 fn trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
     let mut user_arity = 0;
@@ -697,7 +697,7 @@ impl Checker {
         // Per-method effect rows this impl performs, collected from each method
         // body's inferred effects below and stored on the `ImplInfo` so concrete
         // trait-method call sites can propagate the selected impl's effects.
-        let mut impl_method_effects: std::collections::HashMap<String, Vec<String>> =
+        let mut impl_method_effects: std::collections::HashMap<String, Vec<EffectEntry>> =
             std::collections::HashMap::new();
 
         for m in methods {
@@ -825,8 +825,9 @@ impl Checker {
             // Record this method's own effects (per-method precision: a pure
             // sibling of an effectful impl contributes nothing).
             {
-                let mut effs: Vec<String> = body_effects.iter().cloned().collect();
-                effs.sort();
+                let mut effs = self.sub.apply_effect_row(&body_effs).effects;
+                effs.sort_by_key(super::applied_effect_key);
+                effs.dedup_by(|left, right| left.same_instantiation(right));
                 impl_method_effects.insert(method_name.clone(), effs);
             }
 

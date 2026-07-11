@@ -390,6 +390,22 @@ impl Checker {
                         ));
                     }
                     belongs_to_declared = true;
+                    self.lsp.effect_at_node.insert(
+                        arm.id,
+                        EffectEntry {
+                            name: resolved_effect_name.clone(),
+                            args: info
+                                .type_params
+                                .iter()
+                                .map(|param| {
+                                    handler_type_mapping
+                                        .get(param)
+                                        .cloned()
+                                        .unwrap_or(Type::Var(*param))
+                                })
+                                .collect(),
+                        },
+                    );
                     // Record arm span -> (op definition span, source module) for LSP go-to-def (level 2)
                     if let Some(&op_span) = info.op_spans.get(&arm.op_name) {
                         self.lsp
@@ -697,8 +713,29 @@ impl Checker {
                     })
             })
             .collect();
+        let applied_effects: Vec<EffectEntry> = effect_names
+            .iter()
+            .filter_map(|effect_ref| {
+                let name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
+                let info = self.effects.get(&name)?;
+                Some(EffectEntry {
+                    name,
+                    args: info
+                        .type_params
+                        .iter()
+                        .map(|param| {
+                            handler_type_mapping
+                                .get(param)
+                                .cloned()
+                                .unwrap_or(Type::Var(*param))
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
         let info = HandlerInfo {
             effects: canonical_effects,
+            effect_entries: applied_effects,
             return_type: handler_return_type,
             needs_effects: all_handler_effs,
             forall,

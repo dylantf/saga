@@ -50,6 +50,8 @@ pub struct CompiledModule {
     pub resolution: resolve::ResolutionMap,
     /// Front-end name resolution from the typechecker.
     pub front_resolution: crate::typechecker::ResolutionResult,
+    /// Exact applied effect selected for effect calls and handler arms.
+    pub effect_at_node: HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     /// Per-call effect metadata produced by the call-effects pre-pass. Empty
     /// until the module has been lowered (the Lowerer populates this map and
     /// writes it back via `set_compiled_call_effects`). Read by the lowerer at
@@ -69,6 +71,7 @@ pub struct ModuleSemantics<'a> {
     pub elaborated: &'a ast::Program,
     pub resolution: &'a resolve::ResolutionMap,
     pub front_resolution: &'a crate::typechecker::ResolutionResult,
+    pub effect_at_node: &'a HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     pub optimization: &'a optimize::OptimizationFacts,
 }
 
@@ -132,6 +135,7 @@ impl CodegenContext {
             elaborated: &m.elaborated,
             resolution: &m.resolution,
             front_resolution: &m.front_resolution,
+            effect_at_node: &m.effect_at_node,
             optimization: &m.optimization,
         })
     }
@@ -145,6 +149,7 @@ impl CodegenContext {
                     elaborated: &m.elaborated,
                     resolution: &m.resolution,
                     front_resolution: &m.front_resolution,
+                    effect_at_node: &m.effect_at_node,
                     optimization: &m.optimization,
                 },
             )
@@ -185,6 +190,7 @@ pub fn compile_module_from_result(
         elaborated: normalized,
         resolution,
         front_resolution: mod_result.resolution.clone(),
+        effect_at_node: mod_result.effect_at_node.clone(),
         call_effects: call_effects::CallEffectMap::new(),
         call_effects_ready: false,
         optimization,

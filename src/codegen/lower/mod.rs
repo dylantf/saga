@@ -524,10 +524,13 @@ impl<'a> Lowerer<'a> {
 
     /// Resolve a bare effect name to its canonical form.
     fn canonicalize_effect(&self, bare: &str) -> String {
-        self.effect_canonical
-            .get(bare)
+        let family = crate::typechecker::applied_effect_family(bare);
+        let canonical = self
+            .effect_canonical
+            .get(family)
             .cloned()
-            .unwrap_or_else(|| bare.to_string())
+            .unwrap_or_else(|| family.to_string());
+        format!("{}{}", canonical, &bare[family.len()..])
     }
 
     /// Canonicalize a list of effect names from the type system (which uses bare names).
@@ -552,7 +555,8 @@ impl<'a> Lowerer<'a> {
     pub(super) fn effect_handler_ops(&self, effects: &[String]) -> Vec<(String, String)> {
         let mut ops = Vec::new();
         for eff_name in effects {
-            if let Some(info) = self.effect_defs.get(eff_name) {
+            let family = crate::typechecker::applied_effect_family(eff_name);
+            if let Some(info) = self.effect_defs.get(family) {
                 // Sort op names for deterministic ordering
                 let mut op_names: Vec<&String> = info.ops.keys().collect();
                 op_names.sort();
@@ -568,7 +572,11 @@ impl<'a> Lowerer<'a> {
     /// e.g. ("Std.Process.Process", "spawn") -> "_Handle_Std_Process_Process_spawn"
     /// Dots are replaced with underscores for valid Core Erlang variable names.
     pub(super) fn handler_param_name(effect: &str, op: &str) -> String {
-        format!("_Handle_{}_{}", effect.replace('.', "_"), op)
+        let effect = effect
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        format!("_Handle_{}_{}", effect, op)
     }
 
     /// Generate a fresh scoped handler binding name for a specific effect op.

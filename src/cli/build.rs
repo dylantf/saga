@@ -663,6 +663,11 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
+            if path.file_name().is_some_and(|name| {
+                name == "_build" || name == "deps" || name.to_string_lossy().starts_with('.')
+            }) {
+                continue;
+            }
             copy_bridges_from_dir(&path, build_dir, count)?;
         } else if path.extension().is_some_and(|ext| ext == "erl") {
             let filename = path.file_name().unwrap();
@@ -1418,6 +1423,7 @@ pub fn build_project_ext(
                 elaborated: normalized,
                 resolution,
                 front_resolution: mod_result.resolution.clone(),
+                effect_at_node: mod_result.effect_at_node.clone(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
                 call_effects_ready: false,
                 optimization,
@@ -1438,6 +1444,7 @@ pub fn build_project_ext(
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: result.resolution.clone(),
+                effect_at_node: result.effect_at_node.clone(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
                 call_effects_ready: false,
                 optimization: codegen::optimize::OptimizationFacts::default(),
@@ -1689,6 +1696,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
+            effect_at_node: result.effect_at_node.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
             call_effects_ready: false,
             optimization: codegen::optimize::OptimizationFacts::default(),

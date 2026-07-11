@@ -384,11 +384,14 @@ impl<'a> Populator<'a> {
     }
 
     fn canonicalize(&self, bare: &str) -> String {
-        self.inputs
+        let family = crate::typechecker::applied_effect_family(bare);
+        let canonical = self
+            .inputs
             .effect_canonical
-            .get(bare)
+            .get(family)
             .cloned()
-            .unwrap_or_else(|| bare.to_string())
+            .unwrap_or_else(|| family.to_string());
+        format!("{}{}", canonical, &bare[family.len()..])
     }
 
     fn canonicalize_effects(&self, effects: Vec<String>) -> Vec<String> {
@@ -1158,8 +1161,8 @@ impl<'a> Populator<'a> {
                 return pure();
             }
         };
-        if effects.is_empty()
-            && let Some(shape) = &resolved_cps_shape
+        if let Some(shape) = &resolved_cps_shape
+            && !shape.static_effects.is_empty()
         {
             effects = shape.static_effects.clone();
         }
@@ -1273,7 +1276,8 @@ impl<'a> Populator<'a> {
             // through bare; `effect_ops` is keyed canonically. Canonicalize
             // before lookup so the two stores agree.
             let canonical = self.canonicalize(eff);
-            if let Some(op_names) = self.inputs.effect_ops.get(&canonical) {
+            let family = crate::typechecker::applied_effect_family(&canonical);
+            if let Some(op_names) = self.inputs.effect_ops.get(family) {
                 for op in op_names {
                     out.push(OpKey {
                         effect: canonical.clone(),

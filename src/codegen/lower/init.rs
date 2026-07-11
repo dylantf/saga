@@ -476,11 +476,25 @@ impl<'a> Lowerer<'a> {
                 }
                 Decl::HandlerDef { name, body, .. } => {
                     let canonical_handler = format!("{}.{}", source_module_name, name);
+                    let applied_effects = self
+                        .check_result
+                        .env
+                        .get(&canonical_handler)
+                        .or_else(|| self.check_result.env.get(name))
+                        .map(|scheme| {
+                            util::handler_effects_from_type(
+                                &self.check_result.sub.apply(&scheme.ty),
+                            )
+                        })
+                        .filter(|effects| !effects.is_empty())
+                        .unwrap_or_else(|| {
+                            self.resolved_effect_refs_for_module(source_module_name, &body.effects)
+                        });
+                    let applied_effects = self.canonicalize_effects(applied_effects);
                     self.handler_defs.insert(
                         canonical_handler,
                         HandlerInfo {
-                            effects: self
-                                .resolved_effect_refs_for_module(source_module_name, &body.effects),
+                            effects: applied_effects,
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(source_module_name.to_string()),
@@ -657,8 +671,16 @@ impl<'a> Lowerer<'a> {
                     match decl {
                         Decl::HandlerDef { name, body, .. } => {
                             let canonical_handler = canonicalize_handler(name);
-                            let resolved_effects =
-                                self.resolved_effect_refs_for_module(mod_name, &body.effects);
+                            let resolved_effects = module_semantics
+                                .codegen_info
+                                .exports
+                                .iter()
+                                .find(|(export, _)| export == name)
+                                .map(|(_, scheme)| util::handler_effects_from_type(&scheme.ty))
+                                .filter(|effects| !effects.is_empty())
+                                .unwrap_or_else(|| {
+                                    self.resolved_effect_refs_for_module(mod_name, &body.effects)
+                                });
                             self.handler_defs
                                 .entry(canonical_handler)
                                 .or_insert(HandlerInfo {

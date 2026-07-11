@@ -84,6 +84,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 elaborated: Vec::new(),
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: Default::default(),
+                effect_at_node: Default::default(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
                 call_effects_ready: false,
                 optimization: codegen::optimize::OptimizationFacts::default(),
@@ -110,6 +111,11 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         entry.elaborated = normalized;
         entry.resolution = resolution;
         entry.front_resolution = front_resolution;
+        entry.effect_at_node = result
+            .module_check_results()
+            .get(&name)
+            .map(|module| module.effect_at_node.clone())
+            .unwrap_or_default();
     }
     let ctx = codegen::CodegenContext {
         modules,

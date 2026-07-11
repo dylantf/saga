@@ -256,7 +256,14 @@ impl<'a> Lowerer<'a> {
                     param_vars.len(),
                     trace_shape,
                 );
-                let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
+                let applied_effect = self
+                    .check_result
+                    .effect_at_node
+                    .get(&node_id)
+                    .map(crate::typechecker::applied_effect_key)
+                    .unwrap_or_else(|| effect_name.clone());
+                let applied_effect = self.canonicalize_effect(&applied_effect);
+                let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
 
                 let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
 
