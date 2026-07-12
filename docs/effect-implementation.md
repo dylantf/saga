@@ -75,9 +75,27 @@ The directional check runs after unification succeeds, comparing the resolved ar
 
 ### Absorption
 
-When a HOF parameter declares effects (e.g. `f: Unit -> a needs {Fail}`), calling the HOF with an effectful lambda doesn't propagate those effects to the caller. The parameter's declared effects are **absorbed** -- subtracted from the merged effect row.
+When a HOF handles a callback's declared effects internally, those effects do
+not escape to its caller. The callback's effects live on its arrow and are
+realized when the HOF invokes it; an enclosing `with` can discharge them before
+the HOF boundary.
 
-The absorption logic uses `resolve_var` (not full `apply`) on the parameter type to read only the statically declared effects, not effects captured by a row variable (`..e`). This ensures row-captured effects propagate to the caller while explicitly declared effects are absorbed.
+Call-site checking does not subtract callback effects from the HOF's declared
+result row. A named result effect is unconditional, even when the supplied
+callback is pure:
+
+```saga
+fun use_repo : (Unit -> a needs {Repo}) -> a needs {Repo}
+```
+
+If the result effects depend on the actual callback, that relationship must be
+expressed with a shared open row:
+
+```saga
+fun run : (Unit -> a needs {..e}) -> a needs {..e}
+```
+
+This prevents a pure callback from erasing an effect the HOF performs itself.
 
 ### Row Polymorphism
 
@@ -249,24 +267,39 @@ Transforms to Core Erlang where the function takes an evidence vector and a retu
 
 ### Evidence Vector Representation
 
-The evidence vector is a BEAM tuple of per-effect entries, sorted alphabetically by canonical effect tag:
+The evidence vector is a BEAM tuple of per-effect entries. Effect arguments
+are part of an entry's identity, so two applications of one family occupy
+independent slots:
 
 ```erlang
 {
-  {'Std.Fail.Fail',   {FailHandler}},
-  {'Std.IO.Stdio',    {EprintHandler, PrintHandler, ReadHandler}},
-  {'Std.State.State', {GetHandler, PutHandler}}
+  {'Std.Fail.Fail<Std.String.String>', {StringFailHandler}},
+  {'Std.Fail.Fail<Std.Int.Int>',       {IntFailHandler}},
+  {'Std.IO.Stdio',                     {EprintHandler, PrintHandler, ReadHandler}}
 }
 ```
 
-Each entry is `{EffectAtom, OpTuple}`. Within an `OpTuple`, op closures are sorted alphabetically by op name. The whole structure is canonical — index of an effect in the outer tuple, and index of an op in its inner tuple, are statically determined when the row is closed.
+Each entry is `{EffectAtom, OpTuple}`. Within an `OpTuple`, op closures are
+sorted alphabetically by op name. An initial closed-row vector is canonical.
+At a call boundary it can instead be reframed into the callee's static order,
+followed by the caller entries not selected for that prefix. Consequently the
+meaning of the vector is:
+
+```text
+{callee-shaped positional static prefix..., tagged forwarded remainder...}
+```
+
+This flat representation was chosen over a nested `{StaticSlots, OpenTail}`
+frame. It keeps the CPS function ABI unchanged while allowing a caller to
+select `Repo UsersDb` for a generic `Repo db` callee and forward
+`Repo DataDb` in the same vector.
 
 The vector is always tagged. Closed-row op calls technically don't need the tag (the static indices suffice), but tagging keeps cross-module ABI uniform and makes runtime panics self-describing.
 
 #### Op Call Lookup
 
 - **Closed row (statically known indices):** `element(OpIdx, element(2, element(EffectIdx, Evidence)))`. Three constant-time element loads.
-- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison. O(n) where n is the number of effects in scope, typically ≤5.
+- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison. Exact applied tags win. If a handler was installed by code polymorphic in its effect argument, a unique same-family entry may satisfy the lookup; zero matches or multiple matches error. O(n) where n is the number of effects in scope, typically ≤5.
 
 #### Extending Evidence at `with`
 
@@ -279,19 +312,28 @@ NewEvidence = call 'std_evidence_bridge':'insert_canonical'(
 apply Body(Args, NewEvidence, ReturnK)
 ```
 
-`insert_canonical` finds the right position by tag compare, builds a new tuple, replaces an existing entry if the tag already exists (innermost-wins semantics fall out without explicit mask machinery). The inherited evidence is unchanged.
+`insert_canonical` finds the right position by tag compare, builds a new tuple, replaces an existing entry if the tag already exists (innermost-wins semantics fall out without explicit mask machinery). The inherited evidence is unchanged. In an open frame, `insert_static/3` instead canonicalizes only the known positional prefix and leaves the unknown tagged tail in place; globally sorting an open frame would invalidate its static indices.
 
 #### Projection at Call Boundaries
 
-Effectful function calls thread evidence as a single argument followed by `_ReturnK`. When the callee declares a closed row that's a strict subset of the caller's row, the call site projects:
+Effectful function calls thread evidence as a single argument followed by
+`_ReturnK`. Closed-row callees can still use exact-tag projection. Generic and
+open-row calls use caller-side reframing:
 
 ```erlang
-NarrowedEvidence = call 'std_evidence_bridge':'project_evidence'(
-  Evidence, [<<"Std.Fail.Fail">>]),
-apply Callee(Args, NarrowedEvidence, ReturnK)
+CallEvidence = call 'std_evidence_bridge':'reframe_evidence'(
+  Evidence,
+  1,
+  [2]),  %% caller slot selected for the callee's first static requirement
+apply Callee(Args, CallEvidence, ReturnK)
 ```
 
-When the callee's row is open or matches the caller's exactly, evidence is forwarded unchanged. The projection cost is one tuple allocation per closed-row narrowing — comparable to today's per-op-arg appending but uniform across call shapes.
+Selectors are either one-based positions in the caller's static prefix or
+concrete applied-effect atoms found in its tagged remainder. Selected entries
+are ordered as the callee expects; every unselected entry is appended as its
+open tail. A generic callee therefore uses ordinary positional lookup and does
+not receive a runtime type witness. Reframing costs one tuple allocation at a
+cross-row call boundary.
 
 #### What Saga Doesn't Use From Koka
 
@@ -301,7 +343,7 @@ The convention is inspired by Koka's evidence passing (Xie & Leijen 2021), with 
 - **No marker integers.** No prompt mechanism.
 - **No mask levels.** Saga has no surface syntax for accessing shadowed outer handlers; innermost-wins covers all cases.
 - **No yield checks.** Saga's CPS is user-level; there's no equivalent of Koka's `is_yielding` flag.
-- **Projection only at closed-row narrowing**, not at every cross-row boundary. Koka projects via `@open` wrappers everywhere; Saga forwards unchanged when the callee row is open.
+- **Flat caller-side reframing**, rather than nested open wrappers. Koka projects via `@open` wrappers; Saga selects a positional static prefix and retains unselected entries as a tagged tail.
 
 These reductions cut roughly half the runtime apparatus a Koka-faithful implementation would need.
 
@@ -408,8 +450,8 @@ branch, not auditing every dispatcher.
 - `Pure` -- direct call; no evidence and no return continuation
 - `StaticOps` -- closed-row CPS call; evidence can be projected to the static
   effect set
-- `RowForwarded` -- open-row CPS call; caller evidence is forwarded unchanged,
-  with any static prefix still known for diagnostics/layout
+- `RowForwarded` -- open-row CPS call; caller evidence is reframed into the
+  callee's positional static prefix plus its unselected tagged tail
 
 `src/codegen/optimize.rs` records optional optimizer facts before lowering.
 Those facts are independent metadata that the lowerer may consume for direct
@@ -444,20 +486,20 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/call_effects.rs` -- `CallEffectInfo`, `CallEffectMap`, populator. The pre-pass that determines per-call evidence shape ahead of lowering.
 - `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
 - `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
-- `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `find_evidence`, `project_evidence`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
+- `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `insert_static`, `find_evidence`, `project_evidence`, `reframe_evidence`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
 - `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, call-site emission. Single helper for effectful calls regardless of head shape (Var, QualifiedName, DictMethodAccess, lambda).
 - `codegen/lower/effects.rs` -- `lower_effect_call` (op call lookup against evidence), `lower_with` (extends evidence via `insert_canonical`), `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_def_to_tuple`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- populates `FunInfo` (with `EvidenceLayout`) from type schemes via `arity_and_effects_from_type`.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `project_evidence/2` for the operations that don't inline cleanly.
+- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `project_evidence/2`, and `reframe_evidence/3` for the operations that don't inline cleanly.
 
 ### Optimization Opportunities
 
 Already in place:
 
 - **Pure functions:** no CPS transform at all -- compiled as normal Core Erlang functions with zero overhead. Pure-vs-effectful detection is centralized in `CallEffectInfo`.
-- **Row polymorphism:** row variables are resolved before codegen. No runtime cost; rows that survive to lowering are forwarded through `_Evidence` unchanged.
+- **Row polymorphism:** no runtime type witness or specialization is needed. The caller selects the instantiated static entries and forwards the remainder through `_Evidence`.
 - **Canonical-ordered indices:** for closed rows, op call sites emit static `element/2` loads rather than runtime atom comparisons. The runtime `find_evidence` helper is only used for open rows.
 - **Innermost-wins via canonical insertion:** same-effect nesting handled by tuple replacement, not mask machinery.
 - **Static tail-resume handler ops:** when a static handler arm is proven to

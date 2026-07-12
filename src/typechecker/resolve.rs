@@ -190,6 +190,25 @@ impl LocalModuleNames {
                             .insert(canonical.clone());
                     }
                 }
+                Decl::NewEffect { name, source, .. } => {
+                    let canonical = qualify(name);
+                    out.effects.insert(name.clone(), canonical.clone());
+                    let source_name = source.name.rsplit('.').next().unwrap_or(&source.name);
+                    for decl in program {
+                        if let Decl::EffectDef {
+                            name, operations, ..
+                        } = decl
+                            && name == source_name
+                        {
+                            for op in operations {
+                                out.effect_ops
+                                    .entry(op.node.name.clone())
+                                    .or_default()
+                                    .insert(canonical.clone());
+                            }
+                        }
+                    }
+                }
                 Decl::HandlerDef { name, .. } => {
                     out.handlers.insert(name.clone());
                     out.top_level_values.insert(name.clone());
@@ -767,6 +786,7 @@ impl<'a> Resolver<'a> {
                     self.resolve_where_clause(&op.node.where_clause);
                 }
             }
+            Decl::NewEffect { source, .. } => self.record_effect_ref(source),
             Decl::HandlerDef { body, .. } => self.resolve_handler_body(body),
             Decl::TraitDef {
                 id,
@@ -1217,6 +1237,7 @@ fn walk_decl(decl: &Decl, out: &mut HashMap<String, crate::token::Span>) {
         | Decl::RecordDef { .. }
         | Decl::RecordBuilderDef { .. }
         | Decl::EffectDef { .. }
+        | Decl::NewEffect { .. }
         | Decl::TraitDef { .. }
         | Decl::Import { .. }
         | Decl::ModuleDecl { .. } => {}

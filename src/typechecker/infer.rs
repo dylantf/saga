@@ -434,6 +434,13 @@ impl Checker {
                     .or_else(|| self.effect_for_op(name, resolved_qualifier.as_deref()))
                 {
                     let effect_args = self.current_effect_args(&effect_name);
+                    self.lsp.effect_at_node.insert(
+                        node_id,
+                        super::EffectEntry {
+                            name: effect_name.clone(),
+                            args: effect_args.clone(),
+                        },
+                    );
                     self.emit_effect(effect_name.clone(), effect_args);
                 }
                 Ok(ty)
@@ -797,10 +804,9 @@ impl Checker {
         // body is checked below. Emitting at the saturating arg inside this loop
         // would read an unbound row and silently drop the callback's effects
         // (e.g. `flat_map (fun x -> risky x) xs` where the list is the saturating
-        // arg). So we record the callee type at the saturation point and the
-        // absorbed entries from *all* callback args, then emit once at the end.
+        // arg). So we record the callee type at the saturation point, validate
+        // every callback argument, then emit once at the end.
         let mut saturation_callee: Option<Type> = None;
-        let mut absorbed_entries = Vec::<super::EffectEntry>::new();
 
         for (idx, (arg, app_expr)) in args.iter().zip(apps.iter()).enumerate() {
             let callee_ty = current_ty.clone();
@@ -830,11 +836,7 @@ impl Checker {
             let arg_ty = self.infer_arg_against(arg, &param_ty)?;
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
-            absorbed_entries.extend(self.apply_callback_argument_effects(
-                &arg_ty_pre,
-                &param_ty,
-                arg.span,
-            )?);
+            self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
             self.record_type(app_expr.id, &ret_ty);
             current_ty = ret_ty.clone();
 
@@ -864,17 +866,17 @@ impl Checker {
                 &deferred_lambda.param_ty,
                 deferred_lambda.arg_expr.span,
             )?;
-            absorbed_entries.extend(self.apply_callback_argument_effects(
+            self.apply_callback_argument_effects(
                 &arg_ty_pre,
                 &deferred_lambda.param_ty,
                 deferred_lambda.arg_expr.span,
-            )?);
+            )?;
         }
 
         // Now that deferred lambdas have bound any open effect rows, emit the
-        // saturated call's effects (callee row minus everything absorbed).
+        // saturated call's effects.
         if let Some(callee_ty) = saturation_callee {
-            self.emit_saturated_call_effects(&callee_ty, &absorbed_entries);
+            self.emit_saturated_call_effects(&callee_ty);
             self.emit_concrete_trait_impl_effects(head);
         }
 
@@ -1193,66 +1195,19 @@ impl Checker {
         actual_arg: &Type,
         expected_param: &Type,
         arg_span: Span,
-    ) -> Result<Vec<super::EffectEntry>, Diagnostic> {
+    ) -> Result<(), Diagnostic> {
         let resolved_param = self.sub.apply(expected_param);
         if let Type::Fun(_, _, _) = &resolved_param {
             self.check_callback_effect_subtype(actual_arg, &resolved_param, arg_span)?;
         }
-
-        // Closures no longer leak their effects at definition, so there is
-        // nothing to subtract from the *caller's* row. The one adjustment still
-        // required is to the HOF's *result* row: a HOF that names a concrete
-        // effect on both its callback parameter and its result (e.g.
-        // `run_forward : (Unit -> a needs {E,..e}) -> a needs {E,..e}`) only
-        // performs that effect by *running the callback*. If the actual lambda
-        // handled `E` internally (at a `with` inside the lambda), the HOF never
-        // performs `E` for this call, so `E` must be removed from the result
-        // row emitted at the saturated call site.
-        //
-        // Absorbed = effects the callback parameter is *declared* to accept
-        // minus effects the *actual* lambda still performs. Effects the lambda
-        // genuinely performs flow through the result row untouched; the caller's
-        // own direct uses of the same effect are never touched (we don't subtract
-        // from `effect_row`).
-        let declared = self.arrow_effect_entries(self.sub.resolve_var(expected_param));
-        let actual = self.arrow_effect_entries(self.sub.resolve_var(actual_arg));
-        let absorbed: Vec<super::EffectEntry> = declared
-            .into_iter()
-            .filter(|d| !actual.iter().any(|a| a.same_instantiation(d)))
-            .collect();
-        Ok(absorbed)
+        Ok(())
     }
 
-    /// Collect the effect entries on every arrow along a function type's spine
-    /// (deduped by instantiation). Empty for non-function types.
-    fn arrow_effect_entries(&self, ty: &Type) -> Vec<super::EffectEntry> {
-        let mut out: Vec<super::EffectEntry> = Vec::new();
-        let mut t = self.sub.apply(ty);
-        while let Type::Fun(_, ret, row) = t {
-            for entry in &row.effects {
-                let applied = super::EffectEntry {
-                    name: entry.name.clone(),
-                    args: entry.args.iter().map(|arg| self.sub.apply(arg)).collect(),
-                };
-                if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
-                    out.push(applied);
-                }
-            }
-            t = self.sub.apply(&ret);
-        }
-        out
-    }
-
-    fn emit_saturated_call_effects(
-        &mut self,
-        callee_ty: &Type,
-        absorbed_entries: &[super::EffectEntry],
-    ) {
+    fn emit_saturated_call_effects(&mut self, callee_ty: &Type) {
         let resolved_func = self.sub.apply(callee_ty);
         if let Type::Fun(_, _, row) = &resolved_func {
             let applied_row = self.sub.apply_effect_row(row);
-            let emitted_row = applied_row.subtract_entries(absorbed_entries);
-            self.emit_effects(&emitted_row);
+            self.emit_effects(&applied_row);
         }
     }
 
@@ -1361,7 +1316,7 @@ impl Checker {
             if open_row_methods.is_empty() {
                 continue;
             }
-            let names: Vec<String> = match &head_method {
+            let entries: Vec<super::EffectEntry> = match &head_method {
                 // Direct trait-method call: discharge only if THAT method is
                 // open-row (a pure/closed sibling of an open-row method stays on
                 // the normal path).
@@ -1375,18 +1330,20 @@ impl Checker {
                 // Where-bound function call (`count_foos 42`): union the effects
                 // of the trait's open-row methods only.
                 _ => {
-                    let mut set: std::collections::BTreeSet<String> =
-                        std::collections::BTreeSet::new();
+                    let mut by_key: std::collections::BTreeMap<String, super::EffectEntry> =
+                        std::collections::BTreeMap::new();
                     for (mname, effs) in &info.method_effects {
                         if open_row_methods.contains(mname.as_str()) {
-                            set.extend(effs.iter().cloned());
+                            for entry in effs {
+                                by_key.insert(super::applied_effect_key(entry), entry.clone());
+                            }
                         }
                     }
-                    set.into_iter().collect()
+                    by_key.into_values().collect()
                 }
             };
-            for name in names {
-                self.emit_effect(name, vec![]);
+            for entry in entries {
+                self.emit_effect(entry.name, entry.args);
             }
         }
     }
@@ -1550,6 +1507,13 @@ impl Checker {
             }
             Some(super::HandlerInfo {
                 effects,
+                effect_entries: args
+                    .iter()
+                    .filter_map(|arg| match self.sub.apply(arg) {
+                        Type::Con(name, args) => Some(super::EffectEntry { name, args }),
+                        _ => None,
+                    })
+                    .collect(),
                 return_type: None,
                 needs_effects: super::EffectRow {
                     effects: vec![],

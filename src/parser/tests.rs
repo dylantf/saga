@@ -3693,3 +3693,21 @@ fn build_remains_normal_identifier_without_record_build_shape() {
     };
     assert!(matches!(func.kind, ExprKind::Var { ref name } if name == "build"));
 }
+
+#[test]
+fn parses_public_neweffect() {
+    let program = parse("pub neweffect UserRepo = Repo UserDb");
+    let Decl::NewEffect {
+        public,
+        name,
+        source,
+        ..
+    } = &program[0]
+    else {
+        panic!("expected NewEffect")
+    };
+    assert!(*public);
+    assert_eq!(name, "UserRepo");
+    assert_eq!(source.name, "Repo");
+    assert_eq!(source.type_args.len(), 1);
+}

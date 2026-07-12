@@ -43,6 +43,9 @@ impl<'a> Lowerer<'a> {
                 Some(op.param_absorbed_effects.clone())
             }
         });
+        let op_param_open_rows = op_info
+            .map(|op| op.param_open_rows.clone())
+            .unwrap_or_default();
         // Trailing dictionary args appended by the elaborator for the op's own
         // `where` constraints are real runtime values (never `Unit` placeholders),
         // so they must not be counted toward unit-arg erasure.
@@ -97,12 +100,16 @@ impl<'a> Lowerer<'a> {
             // are the exception below: their context comes from direct erlang
             // calls, not handler params.
             let saved_ctx = self.lambda_effect_context.take();
+            let saved_captured_evidence = self.lambda_captured_evidence.take();
             let saved_direct_ops = self.direct_ops.clone();
-            if let Some(ref pae) = op_param_absorbed
-                && let Some(effs) = pae.get(&source_idx)
-            {
+            let absorbed_effects = op_param_absorbed
+                .as_ref()
+                .and_then(|pae| pae.get(&source_idx));
+            let has_open_row = op_param_open_rows.contains(&source_idx);
+            if absorbed_effects.is_some() || has_open_row {
                 let mut uncapturable: Vec<String> = Vec::new();
-                for eff in effs {
+                let mut uses_native_callback_context = false;
+                for eff in absorbed_effects.into_iter().flatten() {
                     let ops = self.effect_handler_ops(std::slice::from_ref(eff));
                     if ops.is_empty() {
                         continue;
@@ -115,6 +122,7 @@ impl<'a> Lowerer<'a> {
                     // explicit handler param. Mark the ops as `direct_ops` so any
                     // use in the lambda body lowers natively.
                     if let Some(handler_canonical) = self.beam_native_handler_for_effect(eff) {
+                        uses_native_callback_context = true;
                         for (e, op) in &ops {
                             self.direct_ops
                                 .insert(format!("{}.{}", e, op), handler_canonical.clone());
@@ -123,17 +131,22 @@ impl<'a> Lowerer<'a> {
                     }
                     uncapturable.push(eff.clone());
                 }
-                if !uncapturable.is_empty() {
+                let cps_open_row = has_open_row && !uses_native_callback_context;
+                if !uncapturable.is_empty() || cps_open_row {
                     self.lambda_effect_context = Some(CpsShape {
                         static_effects: uncapturable,
-                        is_open_row: false,
+                        is_open_row: cps_open_row,
                     });
+                    if cps_open_row {
+                        self.lambda_captured_evidence = self.current_evidence.clone();
+                    }
                 }
             }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));
             self.lambda_effect_context = saved_ctx;
+            self.lambda_captured_evidence = saved_captured_evidence;
             self.direct_ops = saved_direct_ops;
             bindings.push((v.clone(), ce));
             param_vars.push(v);
@@ -243,7 +256,14 @@ impl<'a> Lowerer<'a> {
                     param_vars.len(),
                     trace_shape,
                 );
-                let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
+                let applied_effect = self
+                    .check_result
+                    .effect_at_node
+                    .get(&node_id)
+                    .map(crate::typechecker::applied_effect_key)
+                    .unwrap_or_else(|| effect_name.clone());
+                let applied_effect = self.canonicalize_effect(&applied_effect);
+                let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
 
                 let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
 

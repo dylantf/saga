@@ -164,6 +164,13 @@ impl Elaborator {
                         .cloned()
                         .unwrap();
 
+                    let impl_key = (
+                        canonical_trait.clone(),
+                        canonical_trait_type_args.clone(),
+                        canonical_target_type.clone(),
+                    );
+                    let registered_impl = self.impl_infos.get(&impl_key).cloned();
+
                     let trait_info = self.traits.get(&canonical_trait).cloned();
 
                     // Build dict_params for conditional impls. The where-clause
@@ -237,7 +244,29 @@ impl Elaborator {
                                         body: Box::new(elab_body),
                                     },
                                 ));
-                                method_effects.push(trait_method.effect_sig.effects.clone());
+                                let mut effects = trait_method.effect_sig.effects.clone();
+                                if let Some(info) = &registered_impl
+                                    && let Some(entries) =
+                                        info.method_effects.get(&trait_method.name)
+                                {
+                                    effects.extend(
+                                        entries.iter().map(crate::typechecker::applied_effect_key),
+                                    );
+                                }
+                                let applied_families: std::collections::HashSet<String> = effects
+                                    .iter()
+                                    .filter(|effect| effect.contains('<'))
+                                    .map(|effect| {
+                                        crate::typechecker::applied_effect_family(effect)
+                                            .to_string()
+                                    })
+                                    .collect();
+                                effects.retain(|effect| {
+                                    effect.contains('<') || !applied_families.contains(effect)
+                                });
+                                effects.sort();
+                                effects.dedup();
+                                method_effects.push(effects);
                                 method_open_rows.push(trait_method.effect_sig.is_open_row);
                             }
                         }
@@ -250,15 +279,23 @@ impl Elaborator {
                     // no dict params are needed. The dict is still nullary.
                     let _ = type_params; // acknowledge but don't use for now
 
-                    let mut impl_effects: Vec<String> = needs
-                        .iter()
-                        .map(|e| {
-                            self.scope_map_effects
-                                .get(&e.name)
-                                .cloned()
-                                .unwrap_or_else(|| e.name.clone())
-                        })
-                        .collect();
+                    let mut impl_effects: Vec<String> = if registered_impl.is_some() {
+                        // Per-method inferred metadata above is both more
+                        // precise and retains applied effect arguments. The
+                        // old impl-wide family list is only a compatibility
+                        // fallback when no registered impl metadata exists.
+                        Vec::new()
+                    } else {
+                        needs
+                            .iter()
+                            .map(|e| {
+                                self.scope_map_effects
+                                    .get(&e.name)
+                                    .cloned()
+                                    .unwrap_or_else(|| e.name.clone())
+                            })
+                            .collect()
+                    };
                     impl_effects.sort();
                     impl_effects.dedup();
                     output.push(Decl::DictConstructor {

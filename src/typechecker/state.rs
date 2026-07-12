@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{
-    CheckResult, Diagnostic, EffectRow, ModuleCodegenInfo, ModuleExports, ResolutionResult, Scheme,
-    Substitution, Type, TypeAliasInfo, TypeEnv, check_module, result,
+    CheckResult, Diagnostic, EffectEntry, EffectRow, ModuleCodegenInfo, ModuleExports,
+    ResolutionResult, Scheme, Substitution, Type, TypeAliasInfo, TypeEnv, check_module, result,
 };
 use crate::ast::NodeId;
 use crate::token::Span;
@@ -59,6 +59,8 @@ pub type HandlerWhereConstraints = HashMap<(String, usize), Vec<(String, Vec<u32
 pub struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
+    /// Fully applied handled effects, used to select exact evidence slots.
+    pub effect_entries: Vec<EffectEntry>,
     /// Frozen return clause: (param_type, body_type). Sub-applied at register time so
     /// internal handler vars are resolved but forall vars remain free.
     pub return_type: Option<(Type, Type)>,
@@ -139,13 +141,13 @@ pub struct ImplInfo {
     /// Used to substitute call-site target args back into `trait_type_args`.
     pub target_type_param_ids: Vec<u32>,
     pub span: Option<Span>,
-    /// Per-method effect rows this impl performs: method name -> sorted effect
-    /// names. Populated in `register_impl` from each method body's inferred
+    /// Per-method effect rows this impl performs: method name -> resolved
+    /// applied effects. Populated in `register_impl` from each method body's inferred
     /// effects (per-method, not the impl-level `needs` union). Read at concrete
     /// trait-method call sites to propagate the selected impl's effects to the
     /// caller (the trait-effect-propagation bugfix). Travels cross-module via
     /// `ModuleExports.trait_impls`. See docs/planning/effect-polymorphic-traits.md.
-    pub method_effects: HashMap<String, Vec<String>>,
+    pub method_effects: HashMap<String, Vec<EffectEntry>>,
 }
 
 /// Evidence that a trait constraint was resolved during typechecking.
@@ -552,6 +554,8 @@ pub(crate) struct LspState {
     /// Types are stored unresolved (may contain type variables); apply `sub`
     /// at lookup time to get the final resolved type.
     pub type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// Exact applied effect performed by each effect-call expression.
+    pub effect_at_node: HashMap<crate::ast::NodeId, super::EffectEntry>,
     /// Per-span type information for Pat bindings.
     pub type_at_span: HashMap<Span, Type>,
     /// Resolution map: usage NodeId -> definition NodeId (for find-all-references).

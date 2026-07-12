@@ -642,6 +642,88 @@ result () = {
 }
 
 #[test]
+fn trait_impls_preserve_distinct_applied_effects() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+trait Decode a {
+  fun decode : a -> Int needs {..e}
+}
+
+type TextInput = TextInput
+type IntInput = IntInput
+
+impl Decode for TextInput needs {Fail String} {
+  decode TextInput = fail! "text"
+}
+
+impl Decode for IntInput needs {Fail Int} {
+  decode IntInput = fail! 7
+}
+
+handler text_fail for Fail String {
+  fail _message = resume 10
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+pub fun result : Unit -> String
+result () = show ({ decode TextInput + decode IntInput } with {text_fail, int_fail})
+"#;
+    check_result_string("trait_impl_distinct_applied_effects", src, "42");
+}
+
+#[test]
+fn cross_module_trait_impls_preserve_distinct_applied_effects() {
+    let lib = r#"module Applied.Decode
+
+pub effect Fail e {
+  fun fail : e -> a
+}
+
+pub trait Decode a {
+  fun decode : a -> Int needs {..e}
+}
+
+pub type TextInput = TextInput
+pub type IntInput = IntInput
+
+impl Decode for TextInput needs {Fail String} {
+  decode TextInput = fail! "text"
+}
+
+impl Decode for IntInput needs {Fail Int} {
+  decode IntInput = fail! 7
+}
+"#;
+    let main_src = r#"module Main
+
+import Applied.Decode (Fail, Decode, TextInput, IntInput)
+
+handler text_fail for Fail String {
+  fail _message = resume 10
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+pub fun result : Unit -> String
+result () = show ({ decode TextInput + decode IntInput } with {text_fail, int_fail})
+"#;
+    check_cross_module(
+        "cross_module_trait_impl_distinct_applied_effects",
+        &[("lib/Applied/Decode.saga", lib)],
+        main_src,
+        "42",
+    );
+}
+
+#[test]
 fn nullary_effect_op_performs_immediately() {
     // A zero-parameter effect op (`fun number : Int`) is a saturated perform,
     // not an eta-reduced op reference. `number!` must run the handler and yield
@@ -1555,6 +1637,289 @@ result () = (LogLib.shout "hi") with collect
 }
 
 #[test]
+fn cross_module_neweffects_have_distinct_evidence_slots() {
+    let lib = r#"module Repos
+
+type UserDb = UserDb
+type DataDb = DataDb
+
+effect Repo db {
+  fun execute : String -> String
+}
+
+pub neweffect UserRepo = Repo UserDb
+pub neweffect DataRepo = Repo DataDb
+
+pub fun query_both : Unit -> String needs {UserRepo, DataRepo}
+query_both () =
+  UserRepo.execute! "users" <> "|" <> DataRepo.execute! "data"
+"#;
+    let facade = r#"module RepoApi
+
+import Repos (pub ..)
+"#;
+    let main_src = r#"module Main
+
+import RepoApi (UserRepo, DataRepo, query_both)
+
+handler users for UserRepo {
+  execute query = resume ("U:" <> query)
+}
+
+handler data for DataRepo {
+  execute query = resume ("D:" <> query)
+}
+
+pub fun result : Unit -> String
+result () = query_both () with {users, data}
+"#;
+    check_cross_module(
+        "cross_module_neweffects_have_distinct_evidence_slots",
+        &[("lib/Repos.saga", lib), ("lib/RepoApi.saga", facade)],
+        main_src,
+        "U:users|D:data",
+    );
+}
+
+#[test]
+fn neweffect_handler_factory_captures_dynamic_handler_and_forwards_open_row() {
+    let src = r#"
+type TxError e = TransactionFailed | RolledBack e
+
+effect Repo {
+  fun read : Unit -> String
+  fun transaction :
+    (Unit -> Result a e needs {..r})
+    -> Result a (TxError e)
+}
+
+neweffect AuthRepo = Repo
+
+fun empty_repo : Unit -> Handler Repo
+empty_repo () = handler for Repo {
+  read () = resume "base"
+  transaction body = case body () {
+    Ok value -> resume Ok value
+    Err error -> resume Err (RolledBack error)
+  }
+}
+
+fun transaction_with : Handler Repo
+  -> Handler AuthRepo
+  -> (Unit -> Result a e needs {AuthRepo, ..r})
+  -> Result a (TxError e)
+  needs {..r}
+transaction_with backend nested body =
+  Repo.transaction! (fun () -> body () with nested) with backend
+
+fun auth_repo : Handler Repo -> Handler AuthRepo
+auth_repo backend = handler for AuthRepo {
+  read () = resume (Repo.read! () with backend)
+  transaction body = {
+    let nested = handler for AuthRepo {
+      read () = resume (Repo.read! () with backend)
+      transaction _ = resume Err TransactionFailed
+    }
+    let value = transaction_with backend nested body
+    resume value
+  }
+}
+
+fun program : Unit -> Result String (TxError String) needs {AuthRepo}
+program () = AuthRepo.transaction! (fun () -> Ok (AuthRepo.read! ()))
+
+pub fun result : Unit -> String
+result () = {
+  let base = empty_repo ()
+  let auth = auth_repo base
+  case (program () with auth) {
+    Ok value -> value
+    Err _ -> "error"
+  }
+}
+"#;
+    check_result_string("neweffect_handler_factory_dynamic_open_row", src, "base");
+}
+
+#[test]
+fn distinct_applied_fail_effects_coexist() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+handler string_fail for Fail String {
+  fail _message = resume 10
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+pub fun result : Unit -> String
+result () = show ({ from_string () + from_int () } with {string_fail, int_fail})
+"#;
+    check_result_string("distinct_applied_fail_effects", src, "42");
+}
+
+#[test]
+fn nested_handler_replaces_only_matching_applied_effect() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+handler outer_string for Fail String {
+  fail _message = resume 1
+}
+
+handler inner_string for Fail String {
+  fail _message = resume 2
+}
+
+handler outer_int for Fail Int {
+  fail _code = resume 10
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+pub fun result : Unit -> String
+result () = show ({
+  let inner = from_string () with inner_string
+  inner + from_int ()
+} with {outer_string, outer_int})
+"#;
+    check_result_string("nested_applied_effect_shadow", src, "12");
+}
+
+#[test]
+fn applied_effect_handler_factory_coexists_with_sibling_application() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+fun make_string_fail : Int -> Handler (Fail String)
+make_string_fail fallback = handler for Fail String {
+  fail _message = resume fallback
+}
+
+handler int_fail for Fail Int {
+  fail _code = resume 32
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+pub fun result : Unit -> String
+result () = {
+  let string_fail = make_string_fail 10
+  show ({ from_string () + from_int () } with {string_fail, int_fail})
+}
+"#;
+    check_result_string("applied_effect_handler_factory", src, "42");
+}
+
+#[test]
+fn open_row_inner_handler_preserves_same_family_tail() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+handler outer_string for Fail String {
+  fail _message = resume 10
+}
+
+handler inner_string for Fail String {
+  fail _message = resume 2
+}
+
+handler outer_int for Fail Int {
+  fail _code = resume 32
+}
+
+fun from_string : Unit -> Int needs {Fail String}
+from_string () = fail! "nope"
+
+fun from_int : Unit -> Int needs {Fail Int}
+from_int () = fail! 7
+
+fun wrapped : Unit -> Int needs {Fail String, ..r}
+wrapped () = (from_string () with inner_string) + from_int ()
+
+pub fun result : Unit -> String
+result () = show (wrapped () with {outer_string, outer_int})
+"#;
+    check_result_string("open_row_inner_applied_handler", src, "34");
+}
+
+#[test]
+fn cross_module_applied_effects_select_generic_open_row_slots() {
+    let lib = r#"module Applied.Repo
+
+pub type UsersDb = UsersDb
+pub type DataDb = DataDb
+
+pub effect Repo db {
+  fun get : db -> Int
+}
+
+pub effect Extra {
+  fun extra : Unit -> Int
+}
+
+pub fun generic_get : db -> Int needs {Repo db, ..r}
+generic_get db = get! db
+
+pub fun forward : db -> Int needs {Repo db, ..r}
+forward db = generic_get db
+
+pub fun use_users : Unit -> Int needs {Repo UsersDb, Extra, ..r}
+use_users () = generic_get UsersDb + extra! ()
+"#;
+    let main_src = r#"module Main
+
+import Applied.Repo (UsersDb, DataDb, Repo, Extra, use_users, forward)
+
+handler users_repo for Repo UsersDb {
+  get _db = resume 10
+}
+
+handler data_repo for Repo DataDb {
+  get _db = resume 32
+}
+
+handler extra_handler for Extra {
+  extra () = resume 100
+}
+
+pub fun result : Unit -> String
+result () =
+  show ({ use_users () + forward DataDb } with {users_repo, data_repo, extra_handler})
+"#;
+    check_cross_module(
+        "cross_module_applied_effects_generic_open_row",
+        &[("lib/Applied/Repo.saga", lib)],
+        main_src,
+        "142",
+    );
+}
+
+#[test]
 fn cross_module_stdlib_fail_handler() {
     let lib = r#"module FailLib
 
@@ -1652,6 +2017,53 @@ result () = {
         &[("lib/LogLib.saga", lib)],
         main_src,
         "u/v/fin",
+    );
+}
+
+#[test]
+fn reexported_handler_factory_can_use_private_nested_factory() {
+    let base = r#"module RepoBase
+
+pub effect Repo {
+  fun read : Unit -> Int
+  fun scope : (Unit -> Int needs {Repo}) -> Int
+}
+
+fun private_repo : Int -> Handler Repo
+private_repo n = handler for Repo {
+  read () = resume n
+  scope _body = resume 0
+}
+
+pub fun make_repo : Int -> Handler Repo
+make_repo n = handler for Repo {
+  read () = resume n
+  scope body = {
+    let nested = private_repo n
+    let value = body () with nested
+    resume value
+  }
+}
+"#;
+    let facade = r#"module RepoFacade
+
+import RepoBase (pub ..)
+"#;
+    let main_src = r#"module Main
+
+import RepoFacade (Repo, make_repo)
+
+pub fun result : Unit -> String
+result () = {
+  let repo = make_repo 40
+  show (Repo.scope! (fun () -> Repo.read! () + 2) with repo)
+}
+"#;
+    check_cross_module(
+        "reexported_handler_factory_private_nested_factory",
+        &[("lib/RepoBase.saga", base), ("lib/RepoFacade.saga", facade)],
+        main_src,
+        "42",
     );
 }
 

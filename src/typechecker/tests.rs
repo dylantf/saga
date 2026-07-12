@@ -4138,10 +4138,8 @@ main () = parse \"x\" with { fail msg = String.length msg }",
 
 #[test]
 fn parameterized_effect_conflicting_instantiations_forwarded_is_error() {
-    // Two functions forward `Fail` at different type arguments (`String` and
-    // `Int`) into one caller. A parameterized effect has a single runtime
-    // handler slot per family, so this must be a type error rather than a
-    // silent runtime payload-type crash.
+    // A single inferred `Fail` entry cannot silently cover two distinct
+    // applications; callers must declare both slots explicitly.
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4162,10 +4160,70 @@ main () = both 1 with { fail msg = 0 }",
         result
             .as_ref()
             .err()
-            .map(|e| e.message.contains("conflicting types"))
+            .map(|e| e.message.contains("not declared"))
             .unwrap_or(false),
-        "expected an effect-conflict error, got: {:?}",
+        "expected an undeclared applied-effect error, got: {:?}",
         result.err()
+    );
+}
+
+#[test]
+fn parameterized_effect_distinct_declared_instantiations_coexist() {
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun fail_string : Unit -> Int needs {Fail String}
+fail_string () = fail! \"str\"
+fun fail_int : Unit -> Int needs {Fail Int}
+fail_int () = fail! 99
+fun both : Unit -> Int needs {Fail String, Fail Int}
+both () = fail_string () + fail_int ()",
+    );
+    assert!(
+        result.is_ok(),
+        "distinct applied effects should coexist, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn free_effect_parameter_covers_fresh_recursive_instantiation() {
+    // The recursive reference instantiates the annotated free Actor parameter
+    // with a fresh variable. Boundary matching unifies that fresh variable
+    // with `a`; the final exact-row check must compare both rows after applying
+    // that substitution.
+    let result = check(
+        "effect E t {
+  fun touch : Unit -> Unit
+}
+fun acceptor_loop : Unit -> Unit -> Unit needs {E a}
+acceptor_loop _ value = {
+  touch! ()
+  acceptor_loop () value
+}",
+    );
+    assert!(
+        result.is_ok(),
+        "a free applied-effect parameter should cover its fresh recursive instantiation, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn parameterized_effect_potentially_equal_instantiations_are_ambiguous() {
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+fun ambiguous : a -> b -> Unit needs {Fail a, Fail b}
+ambiguous _ _ = ()",
+    );
+    assert!(
+        result
+            .err()
+            .is_some_and(|error| error.message.contains("ambiguous overlapping")),
+        "potentially equal applied effects must be rejected"
     );
 }
 
@@ -4482,8 +4540,8 @@ effect Pg {
 }
 
 #[test]
-fn conflicting_duplicate_effect_requirements_are_rejected() {
-    let err = check(
+fn distinct_duplicate_effect_family_requirements_are_accepted() {
+    check(
         r#"
 import Std.Actor (Process, Actor)
 
@@ -4491,19 +4549,7 @@ fun mixed_actor_messages : Unit -> String needs {Process, Actor Unit, Actor Stri
 mixed_actor_messages () = "ok"
 "#,
     )
-    .err()
-    .expect("expected conflicting Actor effect error");
-
-    assert!(
-        err.message.contains("conflicting effect requirements"),
-        "expected conflict error, got: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains("Actor Unit") && err.message.contains("Actor String"),
-        "expected both Actor instantiations in error, got: {}",
-        err.message
-    );
+    .expect("distinct Actor applications should coexist");
 }
 
 #[test]
@@ -4547,7 +4593,7 @@ main () = {
 }
 
 #[test]
-fn with_rejects_mixed_effect_instantiations_for_named_handler() {
+fn named_handler_handles_only_its_applied_effect() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4571,17 +4617,17 @@ main () = {
 "#,
     )
     .err()
-    .expect("expected named handler to reject mixed Fail instantiations");
+    .expect("expected the unmatched Fail application to remain");
 
     assert!(
-        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
-        "expected both Fail instantiations in error, got: {}",
+        err.message.contains("cannot use `needs`"),
+        "expected residual effect at main, got: {}",
         err.message
     );
 }
 
 #[test]
-fn with_rejects_mixed_effect_instantiations_for_handler_binding() {
+fn handler_binding_handles_only_its_applied_effect() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4608,11 +4654,11 @@ main () = {
 "#,
     )
     .err()
-    .expect("expected handler binding to reject mixed Fail instantiations");
+    .expect("expected the unmatched Fail application to remain");
 
     assert!(
-        err.message.contains("Fail AppError") && err.message.contains("Fail String"),
-        "expected both Fail instantiations in error, got: {}",
+        err.message.contains("cannot use `needs`"),
+        "expected residual effect at main, got: {}",
         err.message
     );
 }
@@ -5955,21 +6001,37 @@ pure_fn () = {
 }
 
 #[test]
-fn lambda_handling_own_effect_makes_hof_call_pure() {
-    // The callback discharges its own effect at an internal `with`, so a HOF
-    // that runs it inline performs nothing — even though the HOF's signature
-    // names the effect on both its callback parameter and its result. The
-    // caller is pure. (Absorbed = declared-callback minus actual-lambda effects,
-    // applied to the HOF's result row.)
+fn lambda_handling_own_effect_closes_polymorphic_hof_row() {
+    // Callback-dependent effects are represented by the shared open row. The
+    // callback discharges Tick internally, so `..e` closes to empty and the
+    // call is pure. A concrete named effect in the HOF result row would instead
+    // be unconditional.
     check(
         "effect Tick { fun tick : Unit -> Int }
 handler th for Tick { tick () = resume 1 }
-fun run_forward : (Unit -> Int needs {Tick, ..e}) -> Int needs {Tick, ..e}
+fun run_forward : (Unit -> Int needs {..e}) -> Int needs {..e}
 run_forward f = f ()
 fun caller : Unit -> Int
 caller () = run_forward (fun () -> tick! () with th)",
     )
     .unwrap();
+}
+
+#[test]
+fn pure_callback_does_not_erase_hof_own_effect() {
+    let result = check(
+        "effect Repo { fun read : Unit -> Int }
+fun with_repo : (Unit -> Int needs {Repo}) -> Int needs {Repo}
+with_repo k = read! () + k ()
+fun caller : Unit -> Int
+caller () = with_repo (fun () -> 1)",
+    );
+    assert!(
+        result
+            .err()
+            .is_some_and(|error| error.message.contains("Repo") && error.message.contains("needs")),
+        "a pure callback must not erase an effect performed by the HOF itself"
+    );
 }
 
 #[test]
@@ -6511,7 +6573,11 @@ fn trait_method_needs_survives_in_scheme() {
     let method = &trait_info.methods[0];
     let resolved = checker.sub.apply(&method.scheme.ty);
     let effects = super::effects_from_type(&resolved);
-    assert!(effects.contains("Fail"), "effects were {:?}", effects);
+    assert!(
+        effects.iter().any(|effect| effect.starts_with("Fail<")),
+        "effects were {:?}",
+        effects
+    );
     assert_eq!(method.effect_sig.effects, vec!["Fail".to_string()]);
     assert!(!method.effect_sig.is_open_row);
     assert_eq!(method.effect_sig.user_arity, 1);
@@ -8474,4 +8540,82 @@ bad () = build Selection User { name: name_p, age: age_p }
         "expected missing record builder diagnostic, got: {}",
         err.message
     );
+}
+
+#[test]
+fn neweffect_is_nominal_and_two_instances_coexist() {
+    let src = r#"
+type UserDb = UserDb
+type DataDb = DataDb
+effect Repo db { fun execute : String -> String }
+neweffect UserRepo = Repo UserDb
+neweffect DataRepo = Repo DataDb
+handler users for UserRepo { execute q = resume q }
+handler data for DataRepo { execute q = resume q }
+fun both : Unit -> String needs {UserRepo, DataRepo}
+both () = UserRepo.execute! "u" <> DataRepo.execute! "d"
+main () = both () with {users, data}
+"#;
+    check(src).expect("distinct neweffects should coexist");
+}
+
+#[test]
+fn neweffect_does_not_substitute_for_source_effect() {
+    let src = r#"
+type UserDb = UserDb
+effect Repo db { fun execute : String -> String }
+neweffect UserRepo = Repo UserDb
+fun wrong : Unit -> String needs {Repo UserDb}
+wrong () = UserRepo.execute! "u"
+"#;
+    let err = match check(src) {
+        Ok(_) => panic!("neweffect must remain nominal"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("not declared") || err.message.contains("UserRepo"),
+        "unexpected diagnostic: {}",
+        err.message
+    );
+}
+
+#[test]
+fn handler_effect_type_canonicalizes_through_reexport_origin() {
+    let origin = r#"
+module Origin
+
+pub effect Repo {
+  fun exec : Unit -> String
+}
+
+pub handler empty for Repo {
+  exec () = resume "ok"
+}
+"#;
+    let facade = r#"
+module Facade
+import Origin (pub ..)
+"#;
+    let main = r#"
+module Main
+import Facade
+
+neweffect AppRepo = Facade.Repo
+
+fun adapt : Handler Facade.Repo -> Handler AppRepo
+adapt backend = handler for AppRepo {
+  exec () = resume (Facade.Repo.exec! () with backend)
+}
+
+main () = {
+  let repo = adapt Facade.empty
+  AppRepo.exec! () with repo
+}
+"#;
+
+    check_with_project_files(
+        &[("src/Origin.saga", origin), ("src/Facade.saga", facade)],
+        main,
+    )
+    .expect("nested Handler effect should canonicalize to the re-export origin");
 }

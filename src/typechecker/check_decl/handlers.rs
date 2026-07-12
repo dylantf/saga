@@ -1,6 +1,84 @@
 use super::*;
 
 impl Checker {
+    pub(crate) fn register_new_effect(
+        &mut self,
+        name: &str,
+        source: &ast::EffectRef,
+    ) -> Result<(), Diagnostic> {
+        let source_name = self.resolved_effect_name(source.id, &source.name);
+        let source_info = self.effects.get(&source_name).cloned().ok_or_else(|| {
+            Diagnostic::error_at(source.span, format!("undefined effect: {}", source.name))
+        })?;
+        let args = self.convert_effect_ref_args(source, &mut vec![]);
+        if args.len() != source_info.type_params.len() {
+            return Err(Diagnostic::error_at(
+                source.span,
+                format!(
+                    "neweffect source `{}` expects {} type argument(s), got {}",
+                    source.name,
+                    source_info.type_params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mapping: std::collections::HashMap<u32, Type> =
+            source_info.type_params.iter().copied().zip(args).collect();
+        let canonical = self
+            .current_module
+            .as_ref()
+            .map(|module| format!("{}.{}", module, name))
+            .unwrap_or_else(|| name.to_string());
+        let ops = source_info
+            .ops
+            .iter()
+            .map(|op| EffectOpSig {
+                name: op.name.clone(),
+                effect_name: canonical.clone(),
+                params: op
+                    .params
+                    .iter()
+                    .map(|(label, ty)| (label.clone(), Self::replace_vars(ty, &mapping)))
+                    .collect(),
+                return_type: Self::replace_vars(&op.return_type, &mapping),
+                needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
+                constraints: op
+                    .constraints
+                    .iter()
+                    .map(|(tr, id, extra)| {
+                        let mapped_id = mapping
+                            .get(id)
+                            .and_then(|ty| match ty {
+                                Type::Var(id) => Some(*id),
+                                _ => None,
+                            })
+                            .unwrap_or(*id);
+                        (
+                            tr.clone(),
+                            mapped_id,
+                            extra
+                                .iter()
+                                .map(|ty| Self::replace_vars(ty, &mapping))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+        self.effects.insert(
+            canonical.clone(),
+            EffectDefInfo {
+                type_params: vec![],
+                ops,
+                op_spans: source_info.op_spans,
+                source_module: self.current_module.clone(),
+            },
+        );
+        self.type_arity.insert(canonical, 0);
+        self.type_arity.insert(name.to_string(), 0);
+        Ok(())
+    }
+
     /// Phase 1: Register effect name and type params (stub with empty ops).
     /// Called first for ALL effects so that forward references between effects
     /// (e.g. Process referencing Actor) resolve during op signature processing.
@@ -312,6 +390,22 @@ impl Checker {
                         ));
                     }
                     belongs_to_declared = true;
+                    self.lsp.effect_at_node.insert(
+                        arm.id,
+                        EffectEntry {
+                            name: resolved_effect_name.clone(),
+                            args: info
+                                .type_params
+                                .iter()
+                                .map(|param| {
+                                    handler_type_mapping
+                                        .get(param)
+                                        .cloned()
+                                        .unwrap_or(Type::Var(*param))
+                                })
+                                .collect(),
+                        },
+                    );
                     // Record arm span -> (op definition span, source module) for LSP go-to-def (level 2)
                     if let Some(&op_span) = info.op_spans.get(&arm.op_name) {
                         self.lsp
@@ -619,8 +713,29 @@ impl Checker {
                     })
             })
             .collect();
+        let applied_effects: Vec<EffectEntry> = effect_names
+            .iter()
+            .filter_map(|effect_ref| {
+                let name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
+                let info = self.effects.get(&name)?;
+                Some(EffectEntry {
+                    name,
+                    args: info
+                        .type_params
+                        .iter()
+                        .map(|param| {
+                            handler_type_mapping
+                                .get(param)
+                                .cloned()
+                                .unwrap_or(Type::Var(*param))
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
         let info = HandlerInfo {
             effects: canonical_effects,
+            effect_entries: applied_effects,
             return_type: handler_return_type,
             needs_effects: all_handler_effs,
             forall,

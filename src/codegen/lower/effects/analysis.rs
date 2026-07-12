@@ -394,7 +394,12 @@ impl<'a> Lowerer<'a> {
     /// so any use inside the lambda body lowers to a direct erlang call.
     pub(crate) fn beam_native_handler_for_effect(&self, effect: &str) -> Option<String> {
         for (canonical, info) in &self.handler_defs {
-            if !info.effects.iter().any(|e| e == effect) {
+            let family = crate::typechecker::applied_effect_family(effect);
+            if !info
+                .effects
+                .iter()
+                .any(|candidate| crate::typechecker::applied_effect_family(candidate) == family)
+            {
                 continue;
             }
             if let Some(module) = info.source_module.as_deref()

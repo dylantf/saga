@@ -31,6 +31,55 @@ impl<'a> Lowerer<'a> {
             })
     }
 
+    /// Imported static handler arms are lowered in the consumer module, but
+    /// their private helper calls still belong to the defining module. Some
+    /// elaboration paths freshen the call node id, so front-resolution lookup
+    /// is unavailable; retain a conservative name-based fallback against the
+    /// defining module's own elaborated declarations.
+    pub(super) fn imported_handler_function_source(&self, name: &str) -> Option<&str> {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        let has_fun = |semantics: &crate::codegen::ModuleSemantics<'_>| {
+            semantics.elaborated.iter().any(|decl| {
+                matches!(decl,
+                    crate::ast::Decl::FunSignature { name: declared, .. }
+                    | crate::ast::Decl::FunBinding { name: declared, .. }
+                    if declared == bare)
+            })
+        };
+        let source = self.handler_origin_module()?;
+        self.ctx
+            .module_semantics(source)
+            .as_ref()
+            .is_some_and(has_fun)
+            .then_some(source)
+    }
+
+    /// Recover the declaration module from the handler arm's stable source
+    /// identity. Re-export surfaces may label a public handler with the facade
+    /// module, but its arm body (and private references) still belongs to the
+    /// origin module.
+    pub(super) fn handler_arm_definition_module(&self, arm_id: crate::ast::NodeId) -> Option<&str> {
+        self.ctx
+            .modules_semantics()
+            .find_map(|(module, semantics)| {
+                semantics
+                    .elaborated
+                    .iter()
+                    .filter_map(|decl| match decl {
+                        crate::ast::Decl::HandlerDef { body, .. } => Some(body),
+                        _ => None,
+                    })
+                    .any(|body| {
+                        body.arms.iter().any(|arm| arm.node.id == arm_id)
+                            || body
+                                .return_clause
+                                .as_ref()
+                                .is_some_and(|arm| arm.id == arm_id)
+                    })
+                    .then_some(module)
+            })
+    }
+
     pub(super) fn resolved_fun_info(
         &self,
         node_id: crate::ast::NodeId,
@@ -48,7 +97,15 @@ impl<'a> Lowerer<'a> {
                 .fun_info
                 .get(&resolved.canonical_name)
                 .or_else(|| self.fun_info.get(fallback)),
-            None => None,
+            None => self
+                .current_value_ref(node_id)
+                .and_then(|value| match value {
+                    crate::typechecker::ResolvedValue::Global { lookup_name } => self
+                        .fun_info
+                        .get(lookup_name)
+                        .or_else(|| self.fun_info.get(fallback)),
+                    crate::typechecker::ResolvedValue::Local { .. } => None,
+                }),
         }
     }
 
@@ -240,6 +297,24 @@ impl<'a> Lowerer<'a> {
         self.current_handler_source_module
             .as_deref()
             .unwrap_or(&self.current_source_module)
+    }
+
+    /// Resolve a source node's inferred type against the module whose code is
+    /// currently being lowered. Imported handler arms retain their defining
+    /// module's NodeIds, so consulting only the consumer's CheckResult loses
+    /// types for private nested handler factories.
+    pub(super) fn semantic_type_at_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&crate::typechecker::Type> {
+        let module_name = self.current_semantic_module_name();
+        if module_name == self.current_source_module {
+            self.check_result.type_at_node.get(&node_id)
+        } else {
+            self.ctx
+                .module_semantics(module_name)
+                .and_then(|semantics| semantics.type_at_node.get(&node_id))
+        }
     }
 
     /// When lowering code from an imported handler, returns the handler's

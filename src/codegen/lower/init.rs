@@ -249,7 +249,7 @@ impl<'a> Lowerer<'a> {
     ) -> (HashMap<String, String>, HashMap<String, String>) {
         let mut effect_canonical: HashMap<String, String> = HashMap::new();
         for decl in program {
-            if let Decl::EffectDef { name, .. } = decl {
+            if let Decl::EffectDef { name, .. } | Decl::NewEffect { name, .. } = decl {
                 effect_canonical.insert(name.clone(), format!("{}.{}", source_module_name, name));
             }
         }
@@ -286,9 +286,11 @@ impl<'a> Lowerer<'a> {
             }
         }
         for (user_visible, canonical) in &self.check_result.scope_map.handlers {
-            handler_canonical
-                .entry(user_visible.clone())
-                .or_insert_with(|| canonical.clone());
+            // The active import scope is authoritative, especially for
+            // re-exported handlers: the same bare surface name may have been
+            // pre-seeded above from an arbitrary compiled module, while the
+            // scope map retains the true origin declaration.
+            handler_canonical.insert(user_visible.clone(), canonical.clone());
         }
 
         self.effect_canonical = effect_canonical.clone();
@@ -368,6 +370,22 @@ impl<'a> Lowerer<'a> {
                                 }
                             })
                             .collect();
+                        let param_open_rows = self
+                            .check_result
+                            .effects
+                            .get(&canonical_effect)
+                            .or_else(|| self.check_result.effects.get(name))
+                            .and_then(|info| info.ops.iter().find(|sig| sig.name == op.node.name))
+                            .map(|sig| {
+                                sig.params
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, (_, ty))| {
+                                        util::has_open_effect_row(ty).then_some(idx)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         ops.insert(
                             op.node.name.clone(),
                             super::EffectOpInfo {
@@ -383,6 +401,7 @@ impl<'a> Lowerer<'a> {
                                     })
                                     .collect(),
                                 param_absorbed_effects,
+                                param_open_rows,
                                 dict_param_names: crate::ast::op_dict_param_names(
                                     &op.node.where_clause,
                                 ),
@@ -392,13 +411,90 @@ impl<'a> Lowerer<'a> {
                     self.effect_defs
                         .insert(canonical_effect, EffectInfo { ops });
                 }
+                Decl::NewEffect { name, .. } => {
+                    let canonical_effect = format!("{}.{}", source_module_name, name);
+                    let effect_info = self
+                        .check_result
+                        .effects
+                        .get(&canonical_effect)
+                        .or_else(|| self.check_result.effects.get(name))
+                        .unwrap_or_else(|| panic!("missing neweffect info for {canonical_effect}"));
+                    let is_unit = |ty: &crate::typechecker::Type| {
+                        matches!(
+                            ty,
+                            crate::typechecker::Type::Con(n, args)
+                                if args.is_empty() && crate::typechecker::canonicalize_type_name(n)
+                                    == crate::typechecker::canonicalize_type_name("Unit")
+                        )
+                    };
+                    let ops = effect_info
+                        .ops
+                        .iter()
+                        .map(|op| {
+                            let runtime_param_positions: Vec<usize> = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, (_, ty))| (!is_unit(ty)).then_some(idx))
+                                .collect();
+                            let param_absorbed_effects = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, (_, ty))| {
+                                    let mut effects: Vec<String> =
+                                        crate::typechecker::effects_from_type(ty)
+                                            .into_iter()
+                                            .collect();
+                                    effects.sort();
+                                    (!effects.is_empty()).then_some((idx, effects))
+                                })
+                                .collect();
+                            let param_open_rows = op
+                                .params
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, (_, ty))| {
+                                    util::has_open_effect_row(ty).then_some(idx)
+                                })
+                                .collect();
+                            (
+                                op.name.clone(),
+                                super::EffectOpInfo {
+                                    source_param_count: op.params.len(),
+                                    runtime_param_count: runtime_param_positions.len(),
+                                    runtime_param_positions,
+                                    param_absorbed_effects,
+                                    param_open_rows,
+                                    dict_param_names: Vec::new(),
+                                },
+                            )
+                        })
+                        .collect();
+                    self.effect_defs
+                        .insert(canonical_effect, EffectInfo { ops });
+                }
                 Decl::HandlerDef { name, body, .. } => {
                     let canonical_handler = format!("{}.{}", source_module_name, name);
+                    let applied_effects = self
+                        .check_result
+                        .env
+                        .get(&canonical_handler)
+                        .or_else(|| self.check_result.env.get(name))
+                        .map(|scheme| {
+                            util::handler_effects_from_type(
+                                &self.check_result.sub.apply(&scheme.ty),
+                            )
+                        })
+                        .filter(|effects| !effects.is_empty())
+                        .unwrap_or_else(|| {
+                            self.resolved_effect_refs_for_module(source_module_name, &body.effects)
+                        });
+                    let applied_effects = self.canonicalize_effects(applied_effects);
                     self.handler_defs.insert(
                         canonical_handler,
                         HandlerInfo {
-                            effects: self
-                                .resolved_effect_refs_for_module(source_module_name, &body.effects),
+                            effects: applied_effects,
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(source_module_name.to_string()),
@@ -532,6 +628,7 @@ impl<'a> Lowerer<'a> {
                                 runtime_param_count: op.runtime_param_count,
                                 runtime_param_positions: op.runtime_param_positions.clone(),
                                 param_absorbed_effects: op.param_absorbed_effects.clone(),
+                                param_open_rows: op.param_open_rows.clone(),
                                 dict_param_names: op.dict_param_names.clone(),
                             },
                         );
@@ -574,8 +671,16 @@ impl<'a> Lowerer<'a> {
                     match decl {
                         Decl::HandlerDef { name, body, .. } => {
                             let canonical_handler = canonicalize_handler(name);
-                            let resolved_effects =
-                                self.resolved_effect_refs_for_module(mod_name, &body.effects);
+                            let resolved_effects = module_semantics
+                                .codegen_info
+                                .exports
+                                .iter()
+                                .find(|(export, _)| export == name)
+                                .map(|(_, scheme)| util::handler_effects_from_type(&scheme.ty))
+                                .filter(|effects| !effects.is_empty())
+                                .unwrap_or_else(|| {
+                                    self.resolved_effect_refs_for_module(mod_name, &body.effects)
+                                });
                             self.handler_defs
                                 .entry(canonical_handler)
                                 .or_insert(HandlerInfo {
@@ -605,6 +710,7 @@ impl<'a> Lowerer<'a> {
                         runtime_param_count: op.runtime_param_count,
                         runtime_param_positions: op.runtime_param_positions.clone(),
                         param_absorbed_effects: op.param_absorbed_effects.clone(),
+                        param_open_rows: op.param_open_rows.clone(),
                         dict_param_names: op.dict_param_names.clone(),
                     },
                 );

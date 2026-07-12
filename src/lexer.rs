@@ -324,6 +324,7 @@ impl Lexer {
             "opaque" => Token::Opaque,
             "record" => Token::Record,
             "effect" => Token::Effect,
+            "neweffect" => Token::NewEffect,
             "handler" => Token::Handler,
             "with" => Token::With,
             "where" => Token::Where,

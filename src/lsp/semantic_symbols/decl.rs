@@ -173,6 +173,26 @@ pub(super) fn add_decl_type_symbols(
                 );
             }
         }
+        ast::Decl::NewEffect {
+            name,
+            name_span,
+            doc,
+            source: effect_ref,
+            ..
+        } => {
+            let effect_name = type_definition_name(module_name, name);
+            add_semantic_symbol_definition(
+                index,
+                uri,
+                line_index,
+                source,
+                SemanticSymbolKind::Effect,
+                effect_name.clone(),
+                *name_span,
+            );
+            add_semantic_symbol_docs(index, SemanticSymbolKind::Effect, effect_name, doc);
+            add_effect_ref_symbol(index, uri, line_index, source, effect_ref, check);
+        }
         ast::Decl::HandlerDef {
             name,
             name_span,

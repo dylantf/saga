@@ -181,6 +181,11 @@ impl<'a> Lowerer<'a> {
                 Some(ctx) => CExpr::Var(ctx.var.clone()),
                 None => CExpr::Tuple(Vec::new()),
             };
+            let open_frame = saved_evidence.as_ref().is_some_and(|ctx| ctx.is_open);
+            let mut static_tags = saved_evidence
+                .as_ref()
+                .map(|ctx| ctx.layout.tags().to_vec())
+                .unwrap_or_default();
             for (eff, mut ops) in effect_to_ops {
                 ops.sort();
                 ops.dedup();
@@ -195,7 +200,19 @@ impl<'a> Lowerer<'a> {
                     .collect();
                 let entry =
                     crate::codegen::lower::evidence::build_evidence_entry(&eff, op_closures);
-                acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
+                if open_frame {
+                    acc = crate::codegen::lower::evidence::insert_static(
+                        acc,
+                        static_tags.len(),
+                        entry,
+                    );
+                    if !static_tags.contains(&eff) {
+                        static_tags.push(eff);
+                        static_tags.sort();
+                    }
+                } else {
+                    acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
+                }
             }
             let new_var = self.fresh();
             // Layout mirrors the value we built: union of the inherited
@@ -563,6 +580,7 @@ impl<'a> Lowerer<'a> {
         // handler's body physically belongs to that imported module — inherit the
         // enclosing origin rather than clobbering it to `None`, so constructors in
         // the inline arm still canonicalize against the right module.
+        let source_module = self.handler_arm_definition_module(arm.id).or(source_module);
         if let Some(source_module) = source_module {
             self.current_handler_source_module = Some(source_module.to_string());
         }
@@ -570,7 +588,39 @@ impl<'a> Lowerer<'a> {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
 
+        // Recovered handler factories are lowered at the call site. Their
+        // captured handler parameters are lexical runtime values, not static
+        // named handler declarations. Register the capture names while
+        // lowering the arm body so `expr with backend` resolves to the tuple
+        // bound below instead of attempting a static handler lookup.
+        let mut saved_capture_handlers = Vec::new();
+        for (capture_name, capture_value) in captures {
+            let info = if let ExprKind::Var { name: value_name } = &capture_value.kind {
+                self.handle_dynamic_vars
+                    .get(value_name)
+                    .map(|(_, effects, has_return)| (effects.clone(), *has_return))
+                    .or_else(|| self.dynamic_handler_info_from_expr(capture_value))
+            } else {
+                self.dynamic_handler_info_from_expr(capture_value)
+            };
+            if let Some((effects, has_return)) = info {
+                let previous = self.handle_dynamic_vars.insert(
+                    capture_name.clone(),
+                    (core_var(capture_name), effects, has_return),
+                );
+                saved_capture_handlers.push((capture_name.clone(), previous));
+            }
+        }
+
         let mut body_ce = self.lower_handler_owned_expr(&arm.body);
+
+        for (capture_name, previous) in saved_capture_handlers.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.handle_dynamic_vars.insert(capture_name, previous);
+            } else {
+                self.handle_dynamic_vars.remove(&capture_name);
+            }
+        }
 
         self.current_handler_finally = saved_finally;
 
@@ -606,9 +656,22 @@ impl<'a> Lowerer<'a> {
         }
 
         for (name, value) in captures.iter().rev() {
+            // A handler factory argument may itself be a dynamic handler let
+            // binding. Such bindings are represented by a fresh tuple variable
+            // rather than the source-level Core variable name, so capture that
+            // tuple directly. Lowering the source `Var` would emit an unbound
+            // variable (e.g. `Base`) in the generated Core Erlang.
+            let capture_value = if let ExprKind::Var { name: value_name } = &value.kind {
+                self.handle_dynamic_vars
+                    .get(value_name)
+                    .map(|(tuple_var, _, _)| CExpr::Var(tuple_var.clone()))
+                    .unwrap_or_else(|| self.lower_expr_value(value))
+            } else {
+                self.lower_expr_value(value)
+            };
             body_ce = CExpr::Let(
                 crate::codegen::lower::core_var(name),
-                Box::new(self.lower_expr_value(value)),
+                Box::new(capture_value),
                 Box::new(body_ce),
             );
         }

@@ -346,11 +346,38 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     while let Type::Fun(_param, ret, row) = current {
         arity += 1;
         for entry in &row.effects {
-            effects.insert(entry.name.clone());
+            effects.insert(crate::typechecker::applied_effect_key(entry));
         }
         current = ret;
     }
     (arity, effects.into_iter().collect())
+}
+
+/// Extract fully-applied effect keys from `Handler E` / `Handler E1 E2`.
+pub fn handler_effects_from_type(ty: &Type) -> Vec<String> {
+    let Type::Con(name, handled) = ty else {
+        return Vec::new();
+    };
+    if crate::typechecker::canonicalize_type_name(name)
+        != crate::typechecker::canonicalize_type_name("Handler")
+    {
+        return Vec::new();
+    }
+    let mut effects = handled
+        .iter()
+        .filter_map(|ty| match ty {
+            Type::Con(family, args) => Some(crate::typechecker::applied_effect_key(
+                &crate::typechecker::EffectEntry {
+                    name: family.clone(),
+                    args: args.clone(),
+                },
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    effects.sort();
+    effects.dedup();
+    effects
 }
 
 /// Phase-3 variant of [`arity_and_effects_from_type`] that also reports

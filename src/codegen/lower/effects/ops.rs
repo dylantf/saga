@@ -453,10 +453,23 @@ impl<'a> Lowerer<'a> {
             .clone()
             .unwrap_or_else(|| panic!("no evidence in scope for op '{}.{}'", effect_name, op_name));
         let op_index = self.evidence_op_index(effect_name, op_name) as i64;
-        let layout_has_tag = ev_ctx.layout.tags().iter().any(|t| t == effect_name);
-        let entry_op_tuple: CExpr = if !ev_ctx.is_open && layout_has_tag {
+        let layout_tag = if ev_ctx.layout.tags().iter().any(|tag| tag == effect_name) {
+            Some(effect_name)
+        } else {
+            let family = crate::typechecker::applied_effect_family(effect_name);
+            let mut matches = ev_ctx
+                .layout
+                .tags()
+                .iter()
+                .filter(|tag| crate::typechecker::applied_effect_family(tag) == family);
+            match (matches.next(), matches.next()) {
+                (Some(tag), None) => Some(tag.as_str()),
+                _ => None,
+            }
+        };
+        let entry_op_tuple: CExpr = if let Some(layout_tag) = layout_tag {
             let eff_idx =
-                crate::codegen::lower::evidence::evidence_index_of(&ev_ctx.layout, effect_name)
+                crate::codegen::lower::evidence::evidence_index_of(&ev_ctx.layout, layout_tag)
                     as i64;
             cerl_call(
                 "erlang",
@@ -490,9 +503,10 @@ impl<'a> Lowerer<'a> {
     /// alphabetically by op name (matches `effect_handler_ops` ordering for a
     /// single effect and the canonical shape produced by handler emission).
     pub(crate) fn evidence_op_index(&self, effect_name: &str, op_name: &str) -> usize {
+        let effect_family = crate::typechecker::applied_effect_family(effect_name);
         let info = self
             .effect_defs
-            .get(effect_name)
+            .get(effect_family)
             .unwrap_or_else(|| panic!("unknown effect '{}'", effect_name));
         let mut ops: Vec<&String> = info.ops.keys().collect();
         ops.sort();

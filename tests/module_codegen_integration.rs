@@ -4889,9 +4889,14 @@ pub handler outer for Work needs {Base, Runner} {
 }
 "#;
 
+    let facade = r#"module Nested.Facade
+
+import Nested.Query (pub ..)
+"#;
+
     let main = r#"module Main
 
-import Nested.Query (Work, outer)
+import Nested.Facade (Work, outer)
 import Nested.Runtime (Base, Runner, RunError, RunFailed, Aborted)
 
 handler base_h for Base {
@@ -4936,6 +4941,7 @@ run () = {
         &[
             ("src/Nested/Runtime.saga", runtime),
             ("src/Nested/Query.saga", query),
+            ("src/Nested/Facade.saga", facade),
         ],
         main,
         |checker, program| {
@@ -4959,6 +4965,144 @@ run () = {
                 ],
                 "io:format(\"~p~n\", [main:run(unit)]), init:stop().",
                 &["4202"],
+            );
+        },
+    );
+}
+
+#[test]
+fn qualified_imported_static_handler_passed_as_value_runs_on_beam() {
+    let source = r#"module HandlerValue.Source
+
+pub effect Source {
+  fun value : Int -> Int
+}
+
+pub handler empty for Source {
+  value input = resume input
+}
+"#;
+
+    let main = r#"module Main
+
+import HandlerValue.Source
+
+effect Target {
+  fun value : Int -> Int
+}
+
+fun adapt : Handler Source.Source -> Handler Target
+adapt backend = handler for Target {
+  value input = resume (Source.Source.value! input with backend)
+}
+
+pub fun run : Unit -> Int
+run () = {
+  let adapted = adapt Source.empty
+  Target.value! 42 with adapted
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/HandlerValue/Source.saga", source)],
+        main,
+        |checker, program| {
+            let result = checker.to_result();
+            let source_program = result
+                .programs()
+                .get("HandlerValue.Source")
+                .expect("HandlerValue.Source module not found");
+            let source_core = emit_from_program(source_program, "handler_value_source", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert!(
+                !main_core.contains("call 'handler_value_source':'empty'"),
+                "named handlers passed as values must lower to operation tuples:\n{main_core}"
+            );
+            assert_project_modules_run(
+                &[("handler_value_source", &source_core), ("main", &main_core)],
+                "io:format(\"~p~n\", [main:run(unit)]), init:stop().",
+                &["42"],
+            );
+        },
+    );
+}
+
+#[test]
+fn destructured_function_value_shadows_transitively_imported_function() {
+    let dependency = r#"module Pattern.Shadow.Dependency
+
+pub fun run : Int -> Int
+run value = value + 1000
+"#;
+    let core = r#"module Pattern.Shadow.Core
+
+import Pattern.Shadow.Dependency as Dependency
+
+pub type Marker = Marker
+
+pub fun touch : Marker -> Int
+touch _ = Dependency.run 0
+"#;
+    let query = r#"module Pattern.Shadow.Query
+
+import Pattern.Shadow.Core
+
+type Step = Step (Int -> Int)
+
+pub fun reproduce : Int -> Int
+reproduce input = {
+  let step = Step (fun value -> value + 1)
+  let Step run = step
+  run input
+}
+"#;
+    let main = r#"module Main
+
+import Pattern.Shadow.Query
+
+pub fun run : Unit -> Int
+run () = Query.reproduce 41
+"#;
+
+    with_temp_project_files(
+        &[
+            ("lib/Pattern/Shadow/Dependency.saga", dependency),
+            ("lib/Pattern/Shadow/Core.saga", core),
+            ("lib/Pattern/Shadow/Query.saga", query),
+        ],
+        main,
+        |checker, program| {
+            let result = checker.to_result();
+            let dependency_program = result
+                .programs()
+                .get("Pattern.Shadow.Dependency")
+                .expect("Pattern.Shadow.Dependency module not found");
+            let core_program = result
+                .programs()
+                .get("Pattern.Shadow.Core")
+                .expect("Pattern.Shadow.Core module not found");
+            let query_program = result
+                .programs()
+                .get("Pattern.Shadow.Query")
+                .expect("Pattern.Shadow.Query module not found");
+            let dependency_core =
+                emit_from_program(dependency_program, "pattern_shadow_dependency", checker);
+            let core_core = emit_from_program(core_program, "pattern_shadow_core", checker);
+            let query_core = emit_from_program(query_program, "pattern_shadow_query", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert!(
+                !query_core.contains("call 'pattern_shadow_dependency':'run'"),
+                "the destructured local closure must shadow imported functions:\n{query_core}"
+            );
+            assert_project_modules_run(
+                &[
+                    ("pattern_shadow_dependency", &dependency_core),
+                    ("pattern_shadow_core", &core_core),
+                    ("pattern_shadow_query", &query_core),
+                    ("main", &main_core),
+                ],
+                "io:format(\"~p~n\", [main:run(unit)]), init:stop().",
+                &["42"],
             );
         },
     );

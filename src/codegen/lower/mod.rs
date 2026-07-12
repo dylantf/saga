@@ -151,6 +151,9 @@ struct EffectOpInfo {
     runtime_param_positions: Vec<usize>,
     /// For callback parameters, the effects absorbed by that parameter.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// Callback parameters with an open effect row. Kept separately because
+    /// an open-only row has no named effects in `param_absorbed_effects`.
+    param_open_rows: std::collections::HashSet<usize>,
     /// Dictionary parameter names for the operation's own `where` constraints
     /// (e.g. `set : a -> Unit where {a: PgType}` yields `["__dict_PgType_a"]`).
     /// These are threaded as trailing op arguments at each call site and bound
@@ -312,6 +315,11 @@ pub struct Lowerer<'a> {
     /// Set by typed value-boundary lowering when a function value is placed
     /// into an effectful or open-row slot.
     lambda_effect_context: Option<CpsShape>,
+    /// For open-row callbacks passed directly to an effect operation, preserve
+    /// the evidence present at the perform site. Handler op closures do not
+    /// receive ambient evidence as a separate ABI argument, so the callback
+    /// must close over it while retaining the normal CPS callback arity.
+    lambda_captured_evidence: Option<EvidenceCtx>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -432,6 +440,7 @@ impl<'a> Lowerer<'a> {
             direct_hof_callback_params: HashMap::new(),
             direct_hof_value_bindings: HashMap::new(),
             lambda_effect_context: None,
+            lambda_captured_evidence: None,
             constructor_atoms,
             resolved: resolution.symbols,
             carried_record_types: resolution.carried_record_types,
@@ -515,10 +524,13 @@ impl<'a> Lowerer<'a> {
 
     /// Resolve a bare effect name to its canonical form.
     fn canonicalize_effect(&self, bare: &str) -> String {
-        self.effect_canonical
-            .get(bare)
+        let family = crate::typechecker::applied_effect_family(bare);
+        let canonical = self
+            .effect_canonical
+            .get(family)
             .cloned()
-            .unwrap_or_else(|| bare.to_string())
+            .unwrap_or_else(|| family.to_string());
+        format!("{}{}", canonical, &bare[family.len()..])
     }
 
     /// Canonicalize a list of effect names from the type system (which uses bare names).
@@ -543,7 +555,8 @@ impl<'a> Lowerer<'a> {
     pub(super) fn effect_handler_ops(&self, effects: &[String]) -> Vec<(String, String)> {
         let mut ops = Vec::new();
         for eff_name in effects {
-            if let Some(info) = self.effect_defs.get(eff_name) {
+            let family = crate::typechecker::applied_effect_family(eff_name);
+            if let Some(info) = self.effect_defs.get(family) {
                 // Sort op names for deterministic ordering
                 let mut op_names: Vec<&String> = info.ops.keys().collect();
                 op_names.sort();
@@ -559,7 +572,11 @@ impl<'a> Lowerer<'a> {
     /// e.g. ("Std.Process.Process", "spawn") -> "_Handle_Std_Process_Process_spawn"
     /// Dots are replaced with underscores for valid Core Erlang variable names.
     pub(super) fn handler_param_name(effect: &str, op: &str) -> String {
-        format!("_Handle_{}_{}", effect.replace('.', "_"), op)
+        let effect = effect
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        format!("_Handle_{}_{}", effect, op)
     }
 
     /// Generate a fresh scoped handler binding name for a specific effect op.

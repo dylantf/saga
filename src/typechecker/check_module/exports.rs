@@ -257,6 +257,19 @@ impl ModuleExports {
                         effect_origins.insert(name.clone(), canonical);
                     }
                 }
+                Decl::NewEffect {
+                    public: true, name, ..
+                } => {
+                    let canonical = checker
+                        .current_module
+                        .as_ref()
+                        .map(|m| format!("{}.{}", m, name))
+                        .unwrap_or_else(|| name.clone());
+                    if let Some(info) = checker.effects.get(&canonical) {
+                        effects.insert(name.clone(), info.clone());
+                        effect_origins.insert(name.clone(), canonical);
+                    }
+                }
                 Decl::HandlerDef {
                     public: true, name, ..
                 } => {
@@ -395,6 +408,12 @@ impl ModuleExports {
                     ..
                 } => (name, doc),
                 Decl::EffectDef {
+                    public: true,
+                    name,
+                    doc,
+                    ..
+                } => (name, doc),
+                Decl::NewEffect {
                     public: true,
                     name,
                     doc,

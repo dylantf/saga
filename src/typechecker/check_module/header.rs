@@ -454,6 +454,16 @@ impl ModuleHeader {
                         },
                     );
                 }
+                Decl::NewEffect { public, name, .. } => {
+                    header.effects.insert(
+                        name.clone(),
+                        HeaderEffectDecl {
+                            public: *public,
+                            type_params: Vec::new(),
+                            operations: Vec::new(),
+                        },
+                    );
+                }
                 Decl::HandlerDef {
                     public, name, body, ..
                 } => {

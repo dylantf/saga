@@ -1,0 +1,63 @@
+# Spike: can one parameterized effect `Repo db` give us two distinct, aliased
+# repos (UserRepo / DataRepo) that install side by side and dispatch to
+# the right handler?
+#
+# The tag `db` is PHANTOM — it appears in no operation signature. Each repo's
+# handler closes over its own "pool" (here just a label string) via a factory.
+# We test:
+#   1. single repo in scope  -> bare `execute!` hits the right pool
+#   2. both repos in scope    -> qualified `UserRepo.execute` / `DataRepo.execute`
+#      each hit their OWN pool (no shadowing, correct dispatch)
+
+# Empty tag types — nominal markers only.
+type UserDb = UserDb
+type DataDb = DataDb
+
+# One generic effect, parameterized by a phantom db tag.
+effect Repo db {
+  fun execute : String -> String
+}
+
+# Fresh nominal effect identities derived from the generic Repo interface.
+neweffect UserRepo = Repo UserDb
+neweffect DataRepo = Repo DataDb
+
+# Factories are explicitly typed because the nominal effect identity determines
+# which evidence slot the produced handler installs.
+fun user_repo : String -> Handler UserRepo
+user_repo pool = handler for UserRepo {
+    execute query = resume pool <> " <- " <> query
+  }
+
+fun data_repo : String -> Handler DataRepo
+data_repo pool = handler for DataRepo {
+    execute query = resume pool <> " <- " <> query
+  }
+
+# --- 1. Single repo in scope: bare op call ---
+
+fun one_repo : Unit -> String needs {UserRepo}
+one_repo () = UserRepo.execute! "SELECT 1"
+
+# --- 2. Both repos in scope: qualified op calls must dispatch per-tag ---
+
+fun both_repos : Unit -> String needs {UserRepo, DataRepo}
+both_repos () = {
+  let u = UserRepo.execute! "SELECT * FROM users"
+  let s = DataRepo.execute! "SELECT * FROM seshes"
+  u <> " | " <> s
+}
+
+main () = {
+  let users = user_repo "users_pool"
+  let data = data_repo "seshes_pool"
+
+  # Single-repo, run under the user pool.
+  let r1 = one_repo () with users
+  println ("one_repo (user):  " <> r1)
+
+  # Both repos installed side by side. Distinct effects, so
+  # the inner install does NOT shadow the outer — both handlers stay live.
+  let r3 = both_repos () with {users, data}
+  println ("both_repos:       " <> r3)
+} with console

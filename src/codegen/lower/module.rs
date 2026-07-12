@@ -323,6 +323,11 @@ impl<'a> Lowerer<'a> {
                 self.impl_effects_by_dict
                     .entry(d.dict_name.clone())
                     .or_insert_with(|| d.impl_effects.clone());
+                for (idx, effects) in d.method_effects.iter().enumerate() {
+                    self.impl_method_effects_by_dict
+                        .entry((d.dict_name.clone(), idx))
+                        .or_insert_with(|| effects.clone());
+                }
             }
         }
     }

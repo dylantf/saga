@@ -663,6 +663,12 @@ fn collect_header_lsp_info(program: &[Decl]) -> HeaderLspInfo {
                 doc,
                 ..
             }
+            | Decl::NewEffect {
+                public: true,
+                name,
+                doc,
+                ..
+            }
             | Decl::HandlerDef {
                 public: true,
                 name,

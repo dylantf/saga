@@ -1,7 +1,8 @@
 //! Compile-time helpers for emitting evidence-vector operations in Core Erlang.
 //!
-//! The evidence vector is a Core Erlang tuple of per-effect entries, sorted
-//! canonically (alphabetically) by effect tag:
+//! The evidence vector is a Core Erlang tuple of per-effect entries. Initial
+//! layouts are canonical; call boundaries may reshape them into a positional
+//! callee prefix followed by an unselected tagged tail:
 //!
 //! ```text
 //!   { {'Std.Fail.Fail',  {FailHandler}},
@@ -20,9 +21,10 @@
 //!   [`evidence_index_of`] to compute a 1-based tuple index, then emit
 //!   `erlang:element/2` calls inline. No bridge call needed.
 //! - **Open rows** (row-polymorphic evidence flowing through): use
-//!   [`find_evidence`], [`insert_canonical`], or [`project_evidence`], which
-//!   emit calls into `std_evidence_bridge`. Bodies are O(n) linear over the
-//!   tuple; n is typically ≤5.
+//!   [`reframe_evidence`] to select the callee prefix and retain the tail;
+//!   [`find_evidence`], [`insert_canonical`], and [`project_evidence`] emit the
+//!   other runtime bridge operations. Bodies are O(n) linear over the tuple;
+//!   n is typically ≤5.
 
 use super::util::cerl_call;
 use crate::codegen::cerl::{CExpr, CLit};
@@ -92,6 +94,20 @@ pub(super) fn insert_canonical(evidence: CExpr, new_entry: CExpr) -> CExpr {
     )
 }
 
+/// Install an entry into the canonical static prefix of an open evidence
+/// frame without reordering its unknown tagged tail.
+pub(super) fn insert_static(evidence: CExpr, static_count: usize, new_entry: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "insert_static",
+        vec![
+            evidence,
+            CExpr::Lit(CLit::Int(static_count as i64)),
+            new_entry,
+        ],
+    )
+}
+
 /// Emit a runtime tag lookup. Returns the `OpTuple` for the entry whose tag
 /// equals `tag`. Used on open-row paths; closed-row sites compute the static
 /// index via [`evidence_index_of`] and emit `element/2` directly.
@@ -121,6 +137,31 @@ pub(super) fn project_evidence(evidence: CExpr, tags: &[&str]) -> CExpr {
         EVIDENCE_BRIDGE_MODULE,
         "project_evidence",
         vec![evidence, tag_list],
+    )
+}
+
+/// Reshape evidence for an open-row callee. Integer selectors address the
+/// caller's positional static prefix; tag selectors select a concrete applied
+/// effect from its forwarded tail.
+pub(super) fn reframe_evidence(
+    evidence: CExpr,
+    static_count: usize,
+    selectors: Vec<CExpr>,
+) -> CExpr {
+    let selectors = selectors
+        .into_iter()
+        .rev()
+        .fold(CExpr::Nil, |tail, selector| {
+            CExpr::Cons(Box::new(selector), Box::new(tail))
+        });
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "reframe_evidence",
+        vec![
+            evidence,
+            CExpr::Lit(CLit::Int(static_count as i64)),
+            selectors,
+        ],
     )
 }
 
@@ -213,6 +254,19 @@ mod tests {
     }
 
     #[test]
+    fn insert_static_is_bridge_call_with_prefix_size() {
+        let entry = build_evidence_entry("Router.Skip", vec![dummy_closure("Skip")]);
+        let call = insert_static(CExpr::Var("_Evidence".to_string()), 1, entry);
+        let CExpr::Call(module, function, args) = call else {
+            panic!("expected bridge call")
+        };
+        assert_eq!(module, "std_evidence_bridge");
+        assert_eq!(function, "insert_static");
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[1], CExpr::Lit(CLit::Int(1))));
+    }
+
+    #[test]
     fn find_evidence_is_bridge_call_with_tag_atom() {
         let ev = CExpr::Var("_Evidence".to_string());
         let call = find_evidence(ev, "Std.State.State");
@@ -268,6 +322,37 @@ mod tests {
             panic!("expected bridge call")
         };
         assert!(matches!(&args[1], CExpr::Nil));
+    }
+
+    #[test]
+    fn reframe_evidence_preserves_selector_order() {
+        let call = reframe_evidence(
+            CExpr::Var("_Evidence".to_string()),
+            2,
+            vec![
+                CExpr::Lit(CLit::Int(2)),
+                CExpr::Lit(CLit::Atom("Repo<UsersDb>".to_string())),
+            ],
+        );
+        let CExpr::Call(module, function, args) = call else {
+            panic!("expected bridge call")
+        };
+        assert_eq!(module, "std_evidence_bridge");
+        assert_eq!(function, "reframe_evidence");
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[1], CExpr::Lit(CLit::Int(2))));
+        let CExpr::Cons(first, rest) = &args[2] else {
+            panic!("expected selector list")
+        };
+        assert!(matches!(first.as_ref(), CExpr::Lit(CLit::Int(2))));
+        let CExpr::Cons(second, tail) = rest.as_ref() else {
+            panic!("expected second selector")
+        };
+        assert!(matches!(
+            second.as_ref(),
+            CExpr::Lit(CLit::Atom(tag)) if tag == "Repo<UsersDb>"
+        ));
+        assert!(matches!(tail.as_ref(), CExpr::Nil));
     }
 
     #[test]

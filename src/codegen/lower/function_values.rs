@@ -300,17 +300,39 @@ impl<'a> Lowerer<'a> {
         params.push("_Evidence".to_string());
         params.push("_ReturnK".to_string());
 
-        let tags: Vec<&str> = actual_shape
+        let (_, expected_effects) = util::arity_and_effects_from_type(expected_ty);
+        let expected_layout =
+            evidence::EvidenceLayout::new(self.canonicalize_effects(expected_effects));
+        let selectors = actual_shape
             .static_effects
             .iter()
-            .map(|s| s.as_str())
+            .map(|effect| {
+                let family = crate::typechecker::applied_effect_family(effect);
+                let matches = expected_layout
+                    .tags()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, candidate)| {
+                        crate::typechecker::applied_effect_family(candidate) == family
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect::<Vec<_>>();
+                if matches.len() == 1 {
+                    CExpr::Lit(CLit::Int((matches[0] + 1) as i64))
+                } else {
+                    CExpr::Lit(CLit::Atom(effect.clone()))
+                }
+            })
             .collect();
         apply_args.push(CExpr::Var(ev_var.clone()));
         apply_args.push(CExpr::Var("_ReturnK".to_string()));
 
         let actual_fun = self.lower_expr_value(expr);
-        let narrowed_evidence =
-            evidence::project_evidence(CExpr::Var("_Evidence".to_string()), &tags);
+        let narrowed_evidence = evidence::reframe_evidence(
+            CExpr::Var("_Evidence".to_string()),
+            expected_layout.tags().len(),
+            selectors,
+        );
         let call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
         let adapter = CExpr::Fun(
             params,
@@ -330,8 +352,19 @@ impl<'a> Lowerer<'a> {
         expected_shape: CpsShape,
     ) -> CExpr {
         if matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr) {
+            // An open callback parameter only describes what its caller can
+            // forward; it must not erase the concrete static prefix inferred
+            // for a lambda at this call site.  Keeping that prefix lets the
+            // lambda address generic handlers positionally (for example a
+            // `Gen Int` callback passed through `..e` to generic `from_gen`),
+            // without requiring the generic handler to mint a concrete tag at
+            // runtime.
+            let lambda_shape = self
+                .expr_cps_function_shape(expr)
+                .filter(|shape| !shape.static_effects.is_empty())
+                .unwrap_or(expected_shape);
             let saved_ctx = self.lambda_effect_context.take();
-            self.lambda_effect_context = Some(expected_shape);
+            self.lambda_effect_context = Some(lambda_shape);
             let ce = self
                 .lower_eta_reduced_effect_expr(expr)
                 .unwrap_or_else(|| self.lower_expr_value(expr));
@@ -646,6 +679,13 @@ impl<'a> Lowerer<'a> {
     ) -> Option<CExpr> {
         let effect_name = self.resolved_effect_call_name(node_id, op_name, qualifier)?;
         let _ = self.effect_defs.get(&effect_name)?.ops.get(op_name)?;
+        let applied_effect = self
+            .check_result
+            .effect_at_node
+            .get(&node_id)
+            .map(crate::typechecker::applied_effect_key)
+            .unwrap_or_else(|| effect_name.clone());
+        let applied_effect = self.canonicalize_effect(&applied_effect);
         let op_info = self
             .effect_defs
             .get(&effect_name)?
@@ -689,7 +729,7 @@ impl<'a> Lowerer<'a> {
                 layout: evidence::EvidenceLayout::new(shape.static_effects.iter().cloned()),
                 is_open: shape.is_open_row,
             });
-            let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
+            let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
             self.current_evidence = saved_evidence;
             Some(CExpr::Fun(
                 params,
@@ -700,7 +740,7 @@ impl<'a> Lowerer<'a> {
             // passed to a pure-shaped callback slot. Capture the in-scope
             // op closure (read out of current evidence) and provide an
             // identity return continuation.
-            let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
+            let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
             let return_value = self.fresh();
             runtime_args.push(CExpr::Fun(
                 vec![return_value.clone()],

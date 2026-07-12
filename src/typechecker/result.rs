@@ -188,6 +188,8 @@ pub struct CheckResult {
     /// Finalized through the current substitution at the `CheckResult`
     /// boundary; display helpers still prettify remaining free variables.
     pub type_at_node: HashMap<crate::ast::NodeId, super::Type>,
+    /// Exact applied effect performed by each effect-call expression.
+    pub effect_at_node: HashMap<crate::ast::NodeId, super::EffectEntry>,
     /// Per-span type information for Pat bindings (LSP hover).
     /// Finalized through the current substitution at the `CheckResult`
     /// boundary; display helpers still prettify remaining free variables.
@@ -620,6 +622,7 @@ impl CheckResult {
             let_binding_handlers: self.let_binding_handlers.clone(),
             fun_effects: self.fun_effects.clone(),
             type_at_node: self.type_at_node.clone(),
+            effect_at_node: self.effect_at_node.clone(),
             type_at_span: self.type_at_span.clone(),
             handler_arm_targets: self.handler_arm_targets.clone(),
             effect_call_targets: self.effect_call_targets.clone(),
@@ -731,6 +734,20 @@ impl Checker {
                 fun_effects
             },
             type_at_node,
+            effect_at_node: self
+                .lsp
+                .effect_at_node
+                .iter()
+                .map(|(id, entry)| {
+                    (
+                        *id,
+                        super::EffectEntry {
+                            name: entry.name.clone(),
+                            args: entry.args.iter().map(|arg| self.sub.apply(arg)).collect(),
+                        },
+                    )
+                })
+                .collect(),
             type_at_span,
             handler_arm_targets: self.lsp.handler_arm_targets.clone(),
             effect_call_targets: self.lsp.effect_call_targets.clone(),
