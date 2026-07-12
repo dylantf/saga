@@ -299,6 +299,24 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(&self.current_source_module)
     }
 
+    /// Resolve a source node's inferred type against the module whose code is
+    /// currently being lowered. Imported handler arms retain their defining
+    /// module's NodeIds, so consulting only the consumer's CheckResult loses
+    /// types for private nested handler factories.
+    pub(super) fn semantic_type_at_node(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&crate::typechecker::Type> {
+        let module_name = self.current_semantic_module_name();
+        if module_name == self.current_source_module {
+            self.check_result.type_at_node.get(&node_id)
+        } else {
+            self.ctx
+                .module_semantics(module_name)
+                .and_then(|semantics| semantics.type_at_node.get(&node_id))
+        }
+    }
+
     /// When lowering code from an imported handler, returns the handler's
     /// source module so constructor atoms and patterns resolve against the
     /// correct module. Returns `None` when lowering the current module's

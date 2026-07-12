@@ -167,6 +167,7 @@ impl Checker {
 
         self.match_effects_against_declared(body_effs, &declared, span)?;
         declared = self.sub.apply_effect_row(&declared);
+        let body_effs = self.sub.apply_effect_row(body_effs);
 
         // Open row: extras flow through the tail variable(s)
         if declared.is_open() {

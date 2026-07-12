@@ -292,6 +292,7 @@ pub fn cmd_emit(file: &str) {
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
             effect_at_node: result.effect_at_node.clone(),
+            type_at_node: result.type_at_node.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
             call_effects_ready: false,
             optimization: codegen::optimize::OptimizationFacts::default(),

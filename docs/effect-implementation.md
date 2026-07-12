@@ -75,9 +75,27 @@ The directional check runs after unification succeeds, comparing the resolved ar
 
 ### Absorption
 
-When a HOF parameter declares effects (e.g. `f: Unit -> a needs {Fail}`), calling the HOF with an effectful lambda doesn't propagate those effects to the caller. The parameter's declared effects are **absorbed** -- subtracted from the merged effect row.
+When a HOF handles a callback's declared effects internally, those effects do
+not escape to its caller. The callback's effects live on its arrow and are
+realized when the HOF invokes it; an enclosing `with` can discharge them before
+the HOF boundary.
 
-The absorption logic uses `resolve_var` (not full `apply`) on the parameter type to read only the statically declared effects, not effects captured by a row variable (`..e`). This ensures row-captured effects propagate to the caller while explicitly declared effects are absorbed.
+Call-site checking does not subtract callback effects from the HOF's declared
+result row. A named result effect is unconditional, even when the supplied
+callback is pure:
+
+```saga
+fun use_repo : (Unit -> a needs {Repo}) -> a needs {Repo}
+```
+
+If the result effects depend on the actual callback, that relationship must be
+expressed with a shared open row:
+
+```saga
+fun run : (Unit -> a needs {..e}) -> a needs {..e}
+```
+
+This prevents a pure callback from erasing an effect the HOF performs itself.
 
 ### Row Polymorphism
 

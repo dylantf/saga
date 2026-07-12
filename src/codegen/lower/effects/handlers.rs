@@ -195,6 +195,19 @@ impl<'a> Lowerer<'a> {
                 else_info: Box::new(else_info),
             };
         }
+        // A local let-bound alias/factory is registered while lowering the
+        // enclosing block. Named-handler refs do not always receive a front-end
+        // value-resolution entry (notably when the factory arrived through a
+        // re-export), so consult that scoped lowering fact before requiring a
+        // NodeId-based resolution.
+        if let Some(canonical) = self.handler_canonical.get(name).cloned()
+            && let Some(info) = self.handler_defs.get(&canonical).cloned()
+        {
+            return NamedHandlerItem::Static {
+                canonical,
+                info: Box::new(info),
+            };
+        }
         let canonical = self
             .resolved_handler_binding_name(reference.id)
             .unwrap_or_else(|| {

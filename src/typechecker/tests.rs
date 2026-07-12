@@ -4188,6 +4188,29 @@ both () = fail_string () + fail_int ()",
 }
 
 #[test]
+fn free_effect_parameter_covers_fresh_recursive_instantiation() {
+    // The recursive reference instantiates the annotated free Actor parameter
+    // with a fresh variable. Boundary matching unifies that fresh variable
+    // with `a`; the final exact-row check must compare both rows after applying
+    // that substitution.
+    let result = check(
+        "effect E t {
+  fun touch : Unit -> Unit
+}
+fun acceptor_loop : Unit -> Unit -> Unit needs {E a}
+acceptor_loop _ value = {
+  touch! ()
+  acceptor_loop () value
+}",
+    );
+    assert!(
+        result.is_ok(),
+        "a free applied-effect parameter should cover its fresh recursive instantiation, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn parameterized_effect_potentially_equal_instantiations_are_ambiguous() {
     let result = check(
         "effect Fail e {
@@ -5978,21 +6001,37 @@ pure_fn () = {
 }
 
 #[test]
-fn lambda_handling_own_effect_makes_hof_call_pure() {
-    // The callback discharges its own effect at an internal `with`, so a HOF
-    // that runs it inline performs nothing — even though the HOF's signature
-    // names the effect on both its callback parameter and its result. The
-    // caller is pure. (Absorbed = declared-callback minus actual-lambda effects,
-    // applied to the HOF's result row.)
+fn lambda_handling_own_effect_closes_polymorphic_hof_row() {
+    // Callback-dependent effects are represented by the shared open row. The
+    // callback discharges Tick internally, so `..e` closes to empty and the
+    // call is pure. A concrete named effect in the HOF result row would instead
+    // be unconditional.
     check(
         "effect Tick { fun tick : Unit -> Int }
 handler th for Tick { tick () = resume 1 }
-fun run_forward : (Unit -> Int needs {Tick, ..e}) -> Int needs {Tick, ..e}
+fun run_forward : (Unit -> Int needs {..e}) -> Int needs {..e}
 run_forward f = f ()
 fun caller : Unit -> Int
 caller () = run_forward (fun () -> tick! () with th)",
     )
     .unwrap();
+}
+
+#[test]
+fn pure_callback_does_not_erase_hof_own_effect() {
+    let result = check(
+        "effect Repo { fun read : Unit -> Int }
+fun with_repo : (Unit -> Int needs {Repo}) -> Int needs {Repo}
+with_repo k = read! () + k ()
+fun caller : Unit -> Int
+caller () = with_repo (fun () -> 1)",
+    );
+    assert!(
+        result
+            .err()
+            .is_some_and(|error| error.message.contains("Repo") && error.message.contains("needs")),
+        "a pure callback must not erase an effect performed by the HOF itself"
+    );
 }
 
 #[test]

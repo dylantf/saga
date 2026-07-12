@@ -85,6 +85,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: Default::default(),
                 effect_at_node: Default::default(),
+                type_at_node: Default::default(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
                 call_effects_ready: false,
                 optimization: codegen::optimize::OptimizationFacts::default(),

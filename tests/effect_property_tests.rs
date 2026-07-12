@@ -2021,6 +2021,53 @@ result () = {
 }
 
 #[test]
+fn reexported_handler_factory_can_use_private_nested_factory() {
+    let base = r#"module RepoBase
+
+pub effect Repo {
+  fun read : Unit -> Int
+  fun scope : (Unit -> Int needs {Repo}) -> Int
+}
+
+fun private_repo : Int -> Handler Repo
+private_repo n = handler for Repo {
+  read () = resume n
+  scope _body = resume 0
+}
+
+pub fun make_repo : Int -> Handler Repo
+make_repo n = handler for Repo {
+  read () = resume n
+  scope body = {
+    let nested = private_repo n
+    let value = body () with nested
+    resume value
+  }
+}
+"#;
+    let facade = r#"module RepoFacade
+
+import RepoBase (pub ..)
+"#;
+    let main_src = r#"module Main
+
+import RepoFacade (Repo, make_repo)
+
+pub fun result : Unit -> String
+result () = {
+  let repo = make_repo 40
+  show (Repo.scope! (fun () -> Repo.read! () + 2) with repo)
+}
+"#;
+    check_cross_module(
+        "reexported_handler_factory_private_nested_factory",
+        &[("lib/RepoBase.saga", base), ("lib/RepoFacade.saga", facade)],
+        main_src,
+        "42",
+    );
+}
+
+#[test]
 fn cross_module_partial_app() {
     let lib = r#"module GreetLib
 

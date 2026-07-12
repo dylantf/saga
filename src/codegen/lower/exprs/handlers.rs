@@ -25,7 +25,7 @@ impl<'a> Lowerer<'a> {
     ) {
         match pat {
             Pat::Var { id, name, .. } => {
-                if let Some(ty) = self.check_result.type_at_node.get(id)
+                if let Some(ty) = self.semantic_type_at_node(*id)
                     && let Some(effects) = self.dynamic_handler_info_from_type(ty)
                 {
                     let previous = self
@@ -251,9 +251,7 @@ impl<'a> Lowerer<'a> {
             let synthetic = format!("__handler_expr_{}", value.id.0);
             let semantic_module_name = self.current_semantic_module_name().to_string();
             let canonical_effects = self
-                .check_result
-                .type_at_node
-                .get(&value.id)
+                .semantic_type_at_node(value.id)
                 .and_then(|ty| self.dynamic_handler_info_from_type(ty))
                 .unwrap_or_else(|| {
                     self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects)
@@ -324,9 +322,7 @@ impl<'a> Lowerer<'a> {
                 (effects, has_return)
             })
             .or_else(|| {
-                self.check_result
-                    .type_at_node
-                    .get(&value.id)
+                self.semantic_type_at_node(value.id)
                     .and_then(|ty| self.dynamic_handler_info_from_type(ty))
                     .map(|effects| (effects, false))
             });
@@ -369,9 +365,7 @@ impl<'a> Lowerer<'a> {
             .as_deref()
             .unwrap_or_else(|| self.current_semantic_module_name());
         let canonical_effects = self
-            .check_result
-            .type_at_node
-            .get(&value.id)
+            .semantic_type_at_node(value.id)
             .and_then(|ty| self.dynamic_handler_info_from_type(ty))
             .unwrap_or_else(|| {
                 self.resolved_effect_refs_for_module(source_module, &factory.body.effects)
@@ -427,7 +421,7 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
     ) -> Option<(Vec<String>, bool)> {
         let cr = &self.check_result;
-        if let Some(ty) = cr.type_at_node.get(&expr.id)
+        if let Some(ty) = self.semantic_type_at_node(expr.id)
             && let Some(effects) = self.dynamic_handler_info_from_type(ty)
         {
             return Some((effects, false));

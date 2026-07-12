@@ -179,13 +179,10 @@ impl Checker {
         // *caller* of run_state, not run_state itself. We subtract effects declared
         // on any callback parameter types.
         //
-        // There is a second absorption site in infer.rs App (call-site half) that
-        // handles the inverse case: passing a lambda to a HOF like `try_it (fun () -> ...)`.
-        // Both are needed because they fire at different points in inference:
-        // - Call-site: lambda effects propagate immediately during lambda inference,
-        //   before the boundary runs. Only the App knows the HOF's parameter type.
-        // - Boundary: direct callback calls emit effects from the callee's type.
-        //   Only the boundary knows which params are callback parameters.
+        // Call sites separately validate that an actual callback's effects fit
+        // the parameter type. They do not subtract named effects from the HOF's
+        // result row: a named result effect is unconditional, while effects that
+        // depend on the callback must be represented by a shared open row.
         let mut absorbed = std::collections::HashSet::new();
         for pt in &param_types {
             let resolved = self.sub.apply(pt);
