@@ -221,7 +221,20 @@ impl<'a> Lowerer<'a> {
                     if let Some((var, _effects, _has_return)) =
                         self.handle_dynamic_vars.get(name.as_str()).cloned()
                     {
-                        let rhs_ce = self.lower_expr(value);
+                        // Handler factories may themselves be effectful. Their
+                        // result must be bound by the call continuation just
+                        // like any other CPS let; lowering with an identity K
+                        // leaves later first-class uses of the handler outside
+                        // the result's scope and loses abort semantics.
+                        if self.expr_is_effectful_call(value) {
+                            let rest_k = self.lower_rest_block_k_with_return_k(
+                                Some(pattern),
+                                rest,
+                                return_k,
+                            );
+                            return self.lower_expr_with_call_return_k(value, Some(rest_k));
+                        }
+                        let rhs_ce = self.lower_expr_value(value);
                         let rest_ce = self.lower_block_with_return_k(rest, return_k);
                         return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
                     }
@@ -673,7 +686,11 @@ impl<'a> Lowerer<'a> {
                     if let Some((var, _effects, _has_return)) =
                         self.handle_dynamic_vars.get(name.as_str()).cloned()
                     {
-                        let rhs_ce = self.lower_expr(value);
+                        if self.expr_is_effectful_call(value) {
+                            let rest_k = self.lower_rest_block_with_k_k(Some(pattern), rest, k_var);
+                            return self.lower_expr_with_call_return_k(value, Some(rest_k));
+                        }
+                        let rhs_ce = self.lower_expr_value(value);
                         let rest_ce = self.lower_block_with_k(rest, k_var);
                         return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
                     }

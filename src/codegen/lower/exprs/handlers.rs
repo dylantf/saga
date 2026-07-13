@@ -328,7 +328,13 @@ impl<'a> Lowerer<'a> {
             });
         let dynamic_info = dynamic_info.or_else(|| self.dynamic_handler_info_from_expr(value));
         if let Some((effects, has_return)) = dynamic_info {
-            let var = self.fresh();
+            // A dynamic handler is still an ordinary first-class value. Bind
+            // it under the pattern variable's Core name so uses outside a
+            // `with` boundary (for example returning two handlers in a tuple)
+            // reference the value actually produced by the factory call.
+            // `handle_dynamic_vars` then points `with name` at that same
+            // binding instead of a lowering-only temporary.
+            let var = core_var(name);
             self.handle_dynamic_vars
                 .insert(name.to_string(), (var, effects, has_return));
         }

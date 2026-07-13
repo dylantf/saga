@@ -2971,6 +2971,153 @@ result () = {
     );
 }
 
+#[test]
+fn imported_handler_factory_captures_nested_open_row_callback_evidence() {
+    let factory = r#"module HandlerFactory
+
+pub effect Repo {
+  fun run : String -> String
+}
+
+type Logger e = Logger (String -> Unit needs {..e})
+pub opaque type Config e = Config (Logger e)
+
+pub fun config : (String -> Unit needs {..e}) -> Config e needs {..e}
+config sink = Config (Logger sink)
+
+pub fun build : Config e -> Handler Repo needs {..e}
+build (Config (Logger sink)) = handler for Repo {
+  run value = {
+    sink value
+    resume value
+  }
+}
+
+pub fun program : Unit -> String needs {Repo}
+program () = run! "hello"
+"#;
+    let main_src = r#"module Main
+
+import HandlerFactory (config, build, program)
+
+effect Log {
+  fun write : String -> Unit
+}
+
+handler log_sink for Log {
+  write _message = resume ()
+}
+
+pub fun result : Unit -> String
+result () = {
+  let repo = build (config (fun message -> write! message))
+  program () with repo
+} with log_sink
+"#;
+    check_cross_module(
+        "imported_handler_factory_nested_open_callback_evidence",
+        &[("lib/HandlerFactory.saga", factory)],
+        main_src,
+        "hello",
+    );
+}
+
+#[test]
+fn effectful_handler_factory_results_escape_together_as_first_class_values() {
+    let src = r#"module Main
+
+effect Repo {
+  fun run : String -> String
+}
+
+effect Log {
+  fun write : String -> Unit
+}
+
+type Logger e = Logger (String -> Unit needs {..e})
+opaque type Config e = Config (Logger e)
+
+fun config : (String -> Unit needs {..e}) -> Config e needs {..e}
+config sink = Config (Logger sink)
+
+fun build : Config e -> Handler Repo needs {..e}
+build (Config (Logger sink)) = handler for Repo {
+  run value = {
+    sink value
+    resume value
+  }
+}
+
+fun make_handlers : Config e -> (Handler Repo, Handler Repo) needs {..e}
+make_handlers cfg = {
+  let plain = build cfg
+  let logged = build cfg
+  (plain, logged)
+}
+
+handler log_sink for Log {
+  write _message = resume ()
+}
+
+fun program : Unit -> String needs {Repo}
+program () = run! "hello"
+
+pub fun result : Unit -> String
+result () = {
+  let cfg = config (fun message -> write! message)
+  let (plain, logged) = make_handlers cfg
+  let one = program () with plain
+  let two = program () with logged
+  one <> "/" <> two
+} with log_sink
+"#;
+    check_result_string(
+        "effectful_handler_factory_results_escape_together",
+        src,
+        "hello/hello",
+    );
+}
+
+#[test]
+fn pure_dynamic_handler_results_escape_let_bindings() {
+    let src = r#"module Main
+
+effect Repo {
+  fun run : String -> String
+}
+
+fun identity_handler : Handler Repo -> Handler Repo
+identity_handler backend = backend
+
+fun make_handlers : Handler Repo -> (Handler Repo, Handler Repo)
+make_handlers backend = {
+  let plain = identity_handler backend
+  let logged = identity_handler backend
+  (plain, logged)
+}
+
+handler repo for Repo {
+  run value = resume value
+}
+
+fun program : Unit -> String needs {Repo}
+program () = run! "hello"
+
+pub fun result : Unit -> String
+result () = {
+  let (plain, logged) = make_handlers repo
+  let one = program () with plain
+  let two = program () with logged
+  one <> "/" <> two
+}
+"#;
+    check_result_string(
+        "pure_dynamic_handler_results_escape_let_bindings",
+        src,
+        "hello/hello",
+    );
+}
+
 // --- Row widening across multi-element forms (end-to-end) ---
 //
 // The driving use case: a list of heterogeneous-effect functions passed

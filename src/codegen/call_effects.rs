@@ -476,6 +476,15 @@ impl<'a> Populator<'a> {
             } => {
                 let (frame, open_row) = self.fun_param_effectful_vars(name, params);
                 self.push_scope_with(frame, open_row);
+                // `fun_param_effectful_vars` seeds callback shape from the
+                // function signature, but only a pattern variable can be
+                // paired directly with a parameter type. Bindings nested in
+                // constructor/tuple/record patterns have their own resolved
+                // types in `type_at_span`; record those too so calls through a
+                // destructured effectful callback retain the CPS ABI.
+                for param in params {
+                    self.record_pattern_effectful_vars(param);
+                }
                 self.walk_expr(body);
                 self.pop_scope();
             }
