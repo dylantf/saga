@@ -356,6 +356,14 @@ closed set at that occurrence. Treating the closure as the canonical union of
 that set would move `Skip` away from the slot used by the compiled `route`
 body.
 
+A lambda placed into a callback slot likewise uses the **expected callback
+row** as its positional ABI, even when the lambda body performs only a subset
+of those effects. Its inferred row contributes additional effects absorbed by
+an expected open tail, but it cannot remove an unused expected slot. Otherwise
+the caller and lambda can assign different meanings to the same index (for
+example, a `{Repo, Rollback e}` callback that performs only `Rollback` must
+still read it from slot 2).
+
 #### Effect-Operation Callbacks With Open Tails
 
 An effect operation may accept a callback whose row mixes handler-provided

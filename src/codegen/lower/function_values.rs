@@ -362,10 +362,20 @@ impl<'a> Lowerer<'a> {
             // `Gen Int` callback passed through `..e` to generic `from_gen`),
             // without requiring the generic handler to mint a concrete tag at
             // runtime.
-            let mut lambda_shape = self
+            let inferred_shape = self
                 .expr_cps_function_shape(expr)
                 .filter(|shape| !shape.static_effects.is_empty())
                 .unwrap_or_else(|| expected_shape.clone());
+            // The closure is invoked using the callback slot's ABI, so its
+            // positional evidence layout must contain every static effect in
+            // that expected row, including effects the lambda body does not
+            // itself perform. The inferred lambda shape remains relevant for
+            // effects absorbed by an expected open tail. Merge both views;
+            // choosing only the inferred/used effects makes slot 1 mean
+            // different things to caller and callee when an earlier expected
+            // effect is unused (for example {Repo, Rollback e} where the
+            // lambda performs only Rollback).
+            let lambda_shape = CpsShape::for_lambda_boundary(&expected_shape, &inferred_shape);
             // The lambda's inferred type gives us the most precise static
             // prefix, but the expected callback ABI determines whether the
             // value may be invoked with an additional forwarded tail.  A
@@ -374,7 +384,6 @@ impl<'a> Lowerer<'a> {
             // treat the runtime tail as part of a closed canonical vector;
             // a nested handler can then insert into a non-canonical frame and
             // make every following compile-time slot index wrong.
-            lambda_shape.is_open_row |= expected_shape.is_open_row;
             let saved_ctx = self.lambda_effect_context.take();
             self.lambda_effect_context = Some(lambda_shape);
             let ce = self

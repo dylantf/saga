@@ -2018,6 +2018,73 @@ result () = {
 }
 
 #[test]
+fn callback_layout_keeps_unused_effect_before_nonresuming_effect_slot() {
+    let src = r#"module Main
+
+effect Rollback e {
+  fun rollback : e -> a
+}
+
+type Outcome a e = Completed a | Returned e | Aborted e
+
+effect Repo {
+  fun transaction :
+    (Unit -> Result a e needs {Rollback e, ..r})
+    -> Result a e
+    needs {..r}
+}
+
+fun run_logical :
+     Handler Repo
+  -> (Unit -> Result a e needs {Repo, Rollback e, ..r})
+  -> Result a e
+  needs {..r}
+run_logical body_repo body = {
+  let run_body = fun () -> body () with body_repo
+  let outcome = (fun () -> case run_body () {
+    Ok value -> Completed value
+    Err err -> Returned err
+  }) () with {
+    rollback err = Aborted err
+  }
+  case outcome {
+    Completed value -> Ok value
+    Returned err -> Err err
+    Aborted err -> Err err
+  }
+}
+
+handler body_repo for Repo {
+  transaction _body = panic "wrong rollback slot"
+}
+
+handler empty_repo for Repo {
+  transaction body = resume (run_logical body_repo body)
+}
+
+fun transaction :
+     (Unit -> Result a e needs {Repo, Rollback e, ..r})
+  -> Result a e
+  needs {Repo, ..r}
+transaction body = transaction! body
+
+pub fun result : Unit -> String
+result () = case (transaction (fun () -> {
+  let _ = rollback! "stop"
+  panic "continued after rollback"
+}) with empty_repo) {
+  Err "stop" -> "stopped"
+  _ -> "wrong"
+}
+"#;
+    check_result_string(
+        "callback_layout_keeps_unused_effect_before_nonresuming_slot",
+        src,
+        "stopped",
+    );
+}
+
+#[test]
 fn closed_lambda_in_open_hof_keeps_tail_shape_for_nested_handler_insertion() {
     let parser = r#"module Parser
 

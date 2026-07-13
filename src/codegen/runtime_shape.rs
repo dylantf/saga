@@ -13,6 +13,51 @@ pub struct CpsShape {
     pub is_open_row: bool,
 }
 
+impl CpsShape {
+    /// Derive the runtime shape of a lambda placed into an expected callback
+    /// slot. The expected type defines the positional ABI; the inferred type
+    /// contributes effects absorbed by an open tail.
+    pub fn for_lambda_boundary(expected: &Self, inferred: &Self) -> Self {
+        let mut static_effects = expected.static_effects.clone();
+        for inferred_effect in &inferred.static_effects {
+            if static_effects
+                .iter()
+                .any(|effect| effect == inferred_effect)
+            {
+                continue;
+            }
+            let family = crate::typechecker::applied_effect_family(inferred_effect);
+            let same_family = static_effects
+                .iter()
+                .enumerate()
+                .filter(|(_, effect)| crate::typechecker::applied_effect_family(effect) == family)
+                .map(|(idx, _)| idx)
+                .collect::<Vec<_>>();
+            if same_family.len() == 1
+                && (static_effects[same_family[0]].contains('$') || inferred_effect.contains('$'))
+            {
+                // A generic and concrete spelling of the same applied effect
+                // describe one positional slot. Prefer the concrete spelling
+                // when available, but never mint a second slot for the type
+                // variable spelling.
+                if !inferred_effect.contains('$') {
+                    static_effects[same_family[0]] = inferred_effect.clone();
+                }
+            } else {
+                // Distinct concrete applications of one effect family are
+                // independent slots and must coexist.
+                static_effects.push(inferred_effect.clone());
+            }
+        }
+        static_effects.sort();
+        static_effects.dedup();
+        Self {
+            static_effects,
+            is_open_row: expected.is_open_row || inferred.is_open_row,
+        }
+    }
+}
+
 /// Runtime calling shape for a function value or resolved callable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeFunctionShape {
@@ -88,5 +133,64 @@ impl RuntimeFunctionShape {
             RuntimeFunctionShape::Cps(_) => base_arity + 2,
             RuntimeFunctionShape::Pure | RuntimeFunctionShape::Intrinsic => base_arity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CpsShape;
+
+    #[test]
+    fn lambda_boundary_keeps_unused_expected_slots() {
+        let expected = CpsShape {
+            static_effects: vec![
+                "Main.Repo".into(),
+                "Main.Rollback<Std.String.String>".into(),
+            ],
+            is_open_row: true,
+        };
+        let inferred = CpsShape {
+            static_effects: vec!["Main.Rollback<Std.String.String>".into()],
+            is_open_row: false,
+        };
+
+        assert_eq!(
+            CpsShape::for_lambda_boundary(&expected, &inferred),
+            expected
+        );
+    }
+
+    #[test]
+    fn lambda_boundary_keeps_distinct_concrete_family_slots() {
+        let expected = CpsShape {
+            static_effects: vec!["Main.Fail<Std.Int.Int>".into()],
+            is_open_row: true,
+        };
+        let inferred = CpsShape {
+            static_effects: vec!["Main.Fail<Std.String.String>".into()],
+            is_open_row: false,
+        };
+
+        assert_eq!(
+            CpsShape::for_lambda_boundary(&expected, &inferred).static_effects,
+            vec!["Main.Fail<Std.Int.Int>", "Main.Fail<Std.String.String>"]
+        );
+    }
+
+    #[test]
+    fn lambda_boundary_collapses_generic_and_concrete_family_slot() {
+        let expected = CpsShape {
+            static_effects: vec!["Main.Rollback<$1>".into()],
+            is_open_row: false,
+        };
+        let inferred = CpsShape {
+            static_effects: vec!["Main.Rollback<Std.String.String>".into()],
+            is_open_row: false,
+        };
+
+        assert_eq!(
+            CpsShape::for_lambda_boundary(&expected, &inferred).static_effects,
+            vec!["Main.Rollback<Std.String.String>"]
+        );
     }
 }
