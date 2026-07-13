@@ -2018,6 +2018,56 @@ result () = {
 }
 
 #[test]
+fn closed_lambda_in_open_hof_keeps_tail_shape_for_nested_handler_insertion() {
+    let parser = r#"module Parser
+
+pub effect Fail {
+  fun fail : String -> String
+}
+
+pub effect File {
+  fun read : String -> String
+}
+
+handler files for File {
+  read path = resume ("file:" <> path)
+}
+
+pub fun parse : String -> List String needs {Fail}
+parse path = [read! path] with files
+"#;
+    let main_src = r#"module Main
+
+import Std.List
+import Parser (Fail, parse)
+
+effect Repo {
+  fun run : String -> String
+}
+
+handler failures for Fail {
+  fail message = resume ("fail:" <> message)
+}
+
+handler repository for Repo {
+  run query = resume ("repo:" <> query)
+}
+
+pub fun result : Unit -> String
+result () = case ((List.flat_map (fun _year -> parse "csv") [2012]) with repository) with failures {
+  value :: _ -> value
+  [] -> "empty"
+}
+"#;
+    check_cross_module(
+        "closed_lambda_open_hof_nested_handler_insertion",
+        &[("lib/Parser.saga", parser)],
+        main_src,
+        "file:csv",
+    );
+}
+
+#[test]
 fn cross_module_stdlib_fail_handler() {
     let lib = r#"module FailLib
 
