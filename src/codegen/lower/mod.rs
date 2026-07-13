@@ -316,9 +316,9 @@ pub struct Lowerer<'a> {
     /// into an effectful or open-row slot.
     lambda_effect_context: Option<CpsShape>,
     /// For open-row callbacks passed directly to an effect operation, preserve
-    /// the evidence present at the perform site. Handler op closures do not
-    /// receive ambient evidence as a separate ABI argument, so the callback
-    /// must close over it while retaining the normal CPS callback arity.
+    /// the open evidence tail present at the perform site. Named callback
+    /// effects still come from the handler's call-time evidence; the callback
+    /// combines that static frame with this captured tail.
     lambda_captured_evidence: Option<EvidenceCtx>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.

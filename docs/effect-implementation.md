@@ -328,12 +328,42 @@ CallEvidence = call 'std_evidence_bridge':'reframe_evidence'(
 apply Callee(Args, CallEvidence, ReturnK)
 ```
 
-Selectors are either one-based positions in the caller's static prefix or
-concrete applied-effect atoms found in its tagged remainder. Selected entries
-are ordered as the callee expects; every unselected entry is appended as its
-open tail. A generic callee therefore uses ordinary positional lookup and does
-not receive a runtime type witness. Reframing costs one tuple allocation at a
-cross-row call boundary.
+Selectors are one-based positions in the caller's static prefix, concrete
+applied-effect atoms found in its tagged remainder, or `{Position, Tag}` pairs
+when a known static family slot must be relabeled. Selected entries are ordered
+as the callee expects; every unselected entry is appended as its open tail. An
+atom selector relabels a unique polymorphic-family entry to the concrete
+applied identity requested by the callee; a position/tag pair does the same
+without searching a forwarded tail that may contain a sibling application.
+Closed-row
+`project_evidence` performs the same exact-first, unique-family relabeling.
+Thus a handler installed inside generic code may initially carry a tag such as
+`Abort<$e>`, while the evidence frame delivered to a concrete callback carries
+`Abort<String>`. Ambiguous same-family frames still error. A generic callee
+uses ordinary positional lookup and does not receive a separate runtime type
+witness. Reframing costs one tuple allocation at a cross-row call boundary.
+
+#### Effect-Operation Callbacks With Open Tails
+
+An effect operation may accept a callback whose row mixes handler-provided
+effects with an open tail:
+
+```saga
+fun transaction :
+  (Unit -> Result a e needs {Repo, Rollback e, ..r})
+  -> Result a e
+  needs {..r}
+```
+
+The handler invoking that callback supplies the named static frame (`Repo` and
+`Rollback e`). The original perform site supplies `..r`. The callback closure
+therefore retains the perform-site evidence, but does not use it directly:
+`append_tail/3` relabels the handler's call-time static prefix to the callback's
+concrete applied tags, overlays that frame, and appends only captured entries
+not replaced there. This lets a transaction-scoped `Repo` shadow the outer
+repository while unrelated effects in `..r` continue to the callback.
+Capturing the whole perform-site frame as the callback's active frame would
+incorrectly discard both nested handlers.
 
 #### What Saga Doesn't Use From Koka
 
@@ -486,13 +516,13 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/call_effects.rs` -- `CallEffectInfo`, `CallEffectMap`, populator. The pre-pass that determines per-call evidence shape ahead of lowering.
 - `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
 - `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
-- `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `insert_static`, `find_evidence`, `project_evidence`, `reframe_evidence`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
+- `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `insert_static`, `find_evidence`, `project_evidence`, `reframe_evidence`, `append_tail`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
 - `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, call-site emission. Single helper for effectful calls regardless of head shape (Var, QualifiedName, DictMethodAccess, lambda).
 - `codegen/lower/effects.rs` -- `lower_effect_call` (op call lookup against evidence), `lower_with` (extends evidence via `insert_canonical`), `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_def_to_tuple`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- populates `FunInfo` (with `EvidenceLayout`) from type schemes via `arity_and_effects_from_type`.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `project_evidence/2`, and `reframe_evidence/3` for the operations that don't inline cleanly.
+- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `project_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.
 
 ### Optimization Opportunities
 

@@ -1336,24 +1336,35 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|effect| {
                         let exact = ctx.layout.tags().iter().position(|tag| tag == effect);
-                        let position = exact.or_else(|| {
-                            let family = crate::typechecker::applied_effect_family(effect);
-                            let matches = ctx
-                                .layout
-                                .tags()
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, tag)| {
-                                    crate::typechecker::applied_effect_family(tag) == family
-                                })
-                                .map(|(idx, _)| idx)
-                                .collect::<Vec<_>>();
-                            (matches.len() == 1).then_some(matches[0])
-                        });
-                        position.map_or_else(
-                            || CExpr::Lit(CLit::Atom(effect.clone())),
-                            |idx| CExpr::Lit(CLit::Int((idx + 1) as i64)),
-                        )
+                        if let Some(idx) = exact {
+                            return CExpr::Lit(CLit::Int((idx + 1) as i64));
+                        }
+                        let family = crate::typechecker::applied_effect_family(effect);
+                        let family_matches = ctx
+                            .layout
+                            .tags()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, tag)| {
+                                crate::typechecker::applied_effect_family(tag) == family
+                            })
+                            .map(|(idx, _)| idx)
+                            .collect::<Vec<_>>();
+                        if family_matches.len() == 1 {
+                            // The static prefix identifies the intended family
+                            // slot even if the runtime tail contains a sibling
+                            // application. Carry both its position and the
+                            // callee's requested tag so the bridge can relabel
+                            // without an ambiguous whole-frame family search.
+                            CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Int((family_matches[0] + 1) as i64)),
+                                CExpr::Lit(CLit::Atom(effect.clone())),
+                            ])
+                        } else {
+                            // Tag selectors perform runtime exact/unique-family
+                            // lookup for entries known only in the open tail.
+                            CExpr::Lit(CLit::Atom(effect.clone()))
+                        }
                     })
                     .collect();
                 evidence::reframe_evidence(
@@ -1368,13 +1379,7 @@ impl<'a> Lowerer<'a> {
                 // the case where no narrowing is required (returns the input
                 // tuple unchanged when tags match), but we skip the call when
                 // we can prove statically that no narrowing is needed.
-                let caller_tags: std::collections::HashSet<&str> =
-                    ctx.layout.tags().iter().map(|s| s.as_str()).collect();
-                let callee_subset = callee_effects
-                    .iter()
-                    .all(|t| caller_tags.contains(t.as_str()));
-                let narrowing = callee_subset && callee_effects.len() < ctx.layout.tags().len();
-                if narrowing {
+                if ctx.layout.tags() != callee_effects {
                     let tags: Vec<&str> = callee_effects.iter().map(|s| s.as_str()).collect();
                     evidence::project_evidence(CExpr::Var(ctx.var.clone()), &tags)
                 } else {

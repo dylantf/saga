@@ -1920,6 +1920,104 @@ result () =
 }
 
 #[test]
+fn imported_nested_handler_specializes_callback_effect_and_preserves_open_tail() {
+    let transactions = r#"module Transactions
+
+pub effect Abort e {
+  fun abort : e -> a
+}
+
+effect InnerTransaction {
+  fun transact :
+    (Unit -> Result a e needs {Abort e})
+    -> Result a e
+}
+
+pub effect Repo {
+  fun ping : Unit -> Unit
+  fun transaction :
+    (Unit -> Result a e needs {Repo, Abort e, ..r})
+    -> Result a e
+    needs {..r}
+}
+
+fun inner_transaction : Unit -> Handler InnerTransaction
+inner_transaction () = handler for InnerTransaction {
+  transact body = {
+    let result = body () with {
+      abort err = Err err
+    }
+    resume result
+  }
+}
+
+fun transaction_repo : Unit -> Handler Repo
+transaction_repo () = handler for Repo {
+  ping _ = resume ()
+  transaction _body = resume (Err "nested transaction")
+}
+
+pub fun repo : Unit -> Handler Repo
+repo () = handler for Repo {
+  ping _ = resume ()
+  transaction body = {
+    let inner = inner_transaction ()
+    let scoped_repo = transaction_repo ()
+    let result = transact! (fun () -> body () with scoped_repo) with inner
+    resume result
+  }
+}
+"#;
+    let main_src = r#"module Main
+
+import Transactions (Abort, Repo, repo)
+
+effect Trace {
+  fun trace : String -> Unit
+}
+
+handler tracing for Trace {
+  trace _message = resume ()
+}
+
+handler outer_abort for Abort String {
+  abort _message = panic "outer abort handler was selected"
+}
+
+fun stop : Unit -> Unit needs {Abort String}
+stop () = abort! "stop"
+
+fun operation : Unit -> Unit needs {Repo, Abort String, Trace}
+operation () = {
+  trace! "inside"
+  ping! ()
+  stop ()
+}
+
+fun run : Unit -> Result Int String needs {Repo, Trace, Abort String}
+run () = transaction! (fun () -> {
+  operation ()
+  Ok 42
+})
+
+pub fun result : Unit -> String
+result () = {
+  let installed_repo = repo ()
+  case (run () with installed_repo) {
+    Err "stop" -> "stopped"
+    _ -> "wrong"
+  }
+} with {tracing, outer_abort}
+"#;
+    check_cross_module(
+        "imported_nested_handler_generic_effect_specialization",
+        &[("lib/Transactions.saga", transactions)],
+        main_src,
+        "stopped",
+    );
+}
+
+#[test]
 fn cross_module_stdlib_fail_handler() {
     let lib = r#"module FailLib
 

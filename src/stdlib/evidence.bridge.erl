@@ -1,6 +1,6 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
-         project_evidence/2, reframe_evidence/3]).
+         project_evidence/2, reframe_evidence/3, append_tail/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -78,11 +78,32 @@ project_evidence(Evidence, Tags) ->
 reframe_evidence(Evidence, _StaticCount, Selectors) ->
     SelectedPositions = unique_positions(
         [selector_position(Evidence, S) || S <- Selectors]),
-    Selected = [element(I, Evidence) || I <- SelectedPositions],
+    Selected = [selected_entry(Evidence, Selector,
+                               selector_position(Evidence, Selector))
+                || Selector <- Selectors],
     Remaining = [element(I, Evidence)
                  || I <- lists:seq(1, tuple_size(Evidence)),
                     not lists:member(I, SelectedPositions)],
     list_to_tuple(Selected ++ Remaining).
+
+%% An effect-operation callback with an open row receives its named effects
+%% from the handler that invokes it, while the unknown row tail comes from the
+%% original perform site. Keep the call-time frame as the static prefix and
+%% append captured entries it does not already replace. Exact duplicates are
+%% removed with call-time evidence winning; distinct applications of one family
+%% remain independent. The callback's concrete named effects therefore come
+%% from the nested handler while its `..r` effects survive from the perform site.
+append_tail(CallEvidence, CapturedEvidence, StaticTags) ->
+    CallEntries = tuple_to_list(CallEvidence),
+    {StaticPrefix, CallTail} = lists:split(length(StaticTags), CallEntries),
+    SpecializedPrefix = [{Tag, Ops}
+                         || {Tag, {_OldTag, Ops}}
+                                <- lists:zip(StaticTags, StaticPrefix)],
+    SpecializedCall = SpecializedPrefix ++ CallTail,
+    CallTags = [Tag || {Tag, _} <- SpecializedCall],
+    ExtraTail = [Entry || {Tag, _} = Entry <- tuple_to_list(CapturedEvidence),
+                          not lists:member(Tag, CallTags)],
+    list_to_tuple(SpecializedCall ++ ExtraTail).
 
 unique_positions(Positions) -> unique_positions(Positions, []).
 
@@ -95,11 +116,24 @@ unique_positions([Position | Rest], Acc) ->
 
 selector_position(Evidence, I) when is_integer(I), I >= 1,
                                       I =< tuple_size(Evidence) -> I;
+selector_position(Evidence, {I, _Tag}) when is_integer(I), I >= 1,
+                                               I =< tuple_size(Evidence) -> I;
 selector_position(Evidence, Tag) when is_atom(Tag) ->
     case entry_position(Evidence, Tag, 1, tuple_size(Evidence)) of
         {ok, Position} -> Position;
         not_found -> unique_family_position(Evidence, Tag)
     end.
+
+%% Atom selectors carry the callee's requested identity, so selecting a
+%% unique polymorphic family also specializes the entry's runtime tag.
+selected_entry(Evidence, {_Position, Tag}, Position) when is_atom(Tag) ->
+    {_OldTag, Ops} = element(Position, Evidence),
+    {Tag, Ops};
+selected_entry(Evidence, Selector, Position) when is_atom(Selector) ->
+    {_OldTag, Ops} = element(Position, Evidence),
+    {Selector, Ops};
+selected_entry(Evidence, _Selector, Position) ->
+    element(Position, Evidence).
 
 entry_position(_Evidence, _Tag, I, N) when I > N -> not_found;
 entry_position(Evidence, Tag, I, N) ->
@@ -124,12 +158,17 @@ effect_family(Tag) ->
     Family.
 
 entry_for(Evidence, Tag) ->
-    entry_at(Evidence, Tag, 1, tuple_size(Evidence)).
+    case entry_at(Evidence, Tag, 1, tuple_size(Evidence)) of
+        {ok, Ops} -> {Tag, Ops};
+        not_found ->
+            Position = unique_family_position(Evidence, Tag),
+            {_OldTag, Ops} = element(Position, Evidence),
+            {Tag, Ops}
+    end.
 
-entry_at(_Evidence, Tag, I, N) when I > N ->
-    erlang:error({evidence_tag_not_found, Tag});
+entry_at(_Evidence, _Tag, I, N) when I > N -> not_found;
 entry_at(Evidence, Tag, I, N) ->
     case element(I, Evidence) of
-        {Tag, _} = Entry -> Entry;
+        {Tag, Ops} -> {ok, Ops};
         _ -> entry_at(Evidence, Tag, I + 1, N)
     end.

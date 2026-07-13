@@ -107,6 +107,11 @@ impl<'a> Lowerer<'a> {
                 .and_then(|pae| pae.get(&source_idx));
             let has_open_row = op_param_open_rows.contains(&source_idx);
             if absorbed_effects.is_some() || has_open_row {
+                let actual_callback_effects = self
+                    .semantic_type_at_node(arg.id)
+                    .and_then(|ty| self.cps_function_shape_from_type(ty))
+                    .map(|shape| shape.static_effects)
+                    .unwrap_or_default();
                 let mut uncapturable: Vec<String> = Vec::new();
                 let mut uses_native_callback_context = false;
                 for eff in absorbed_effects.into_iter().flatten() {
@@ -129,8 +134,26 @@ impl<'a> Lowerer<'a> {
                         }
                         continue;
                     }
-                    uncapturable.push(eff.clone());
+                    let concrete = if actual_callback_effects.contains(eff) {
+                        eff.clone()
+                    } else {
+                        let family = crate::typechecker::applied_effect_family(eff);
+                        let matches = actual_callback_effects
+                            .iter()
+                            .filter(|actual| {
+                                crate::typechecker::applied_effect_family(actual) == family
+                            })
+                            .collect::<Vec<_>>();
+                        if matches.len() == 1 {
+                            matches[0].to_string()
+                        } else {
+                            eff.clone()
+                        }
+                    };
+                    uncapturable.push(concrete);
                 }
+                uncapturable.sort();
+                uncapturable.dedup();
                 let cps_open_row = has_open_row && !uses_native_callback_context;
                 if !uncapturable.is_empty() || cps_open_row {
                     self.lambda_effect_context = Some(CpsShape {
@@ -138,6 +161,11 @@ impl<'a> Lowerer<'a> {
                         is_open_row: cps_open_row,
                     });
                     if cps_open_row {
+                        // Named callback effects are supplied by the handler
+                        // at invocation time. Capture the perform-site frame
+                        // only as a source for the callback's `..r` entries;
+                        // lambda lowering overlays the call-time static frame
+                        // and removes exact duplicates.
                         self.lambda_captured_evidence = self.current_evidence.clone();
                     }
                 }

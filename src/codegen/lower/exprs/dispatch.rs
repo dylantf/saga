@@ -183,9 +183,14 @@ impl<'a> Lowerer<'a> {
                 let shape = self.lambda_effect_context.take();
                 let captured_evidence = self.lambda_captured_evidence.take();
                 let saved_evidence = self.current_evidence.clone();
+                let mut callback_tail_binding = None;
                 if let Some(shape) = shape {
                     // Effectful lambdas take `_Evidence` and `_ReturnK`; the
                     // body reads per-op handlers out of the evidence vector.
+                    // A callback that captures perform-site evidence needs a
+                    // distinct parameter name so the closure can still refer
+                    // to the outer evidence variable when it overlays the
+                    // handler-supplied call-time frame.
                     let evidence_param = if captured_evidence.is_some() {
                         self.fresh()
                     } else {
@@ -193,14 +198,26 @@ impl<'a> Lowerer<'a> {
                     };
                     param_vars.push(evidence_param.clone());
                     param_vars.push("_ReturnK".to_string());
-                    self.current_evidence = captured_evidence.or_else(|| {
-                        Some(EvidenceCtx {
-                            var: evidence_param,
-                            layout: evidence::EvidenceLayout::new(
-                                shape.static_effects.iter().cloned(),
-                            ),
-                            is_open: shape.is_open_row,
-                        })
+                    let callback_static_effects = shape.static_effects.clone();
+                    let evidence_var = captured_evidence.as_ref().map_or_else(
+                        || evidence_param.clone(),
+                        |captured| {
+                            let merged = self.fresh();
+                            callback_tail_binding = Some((
+                                merged.clone(),
+                                evidence::append_tail(
+                                    CExpr::Var(evidence_param.clone()),
+                                    CExpr::Var(captured.var.clone()),
+                                    &callback_static_effects,
+                                ),
+                            ));
+                            merged
+                        },
+                    );
+                    self.current_evidence = Some(EvidenceCtx {
+                        var: evidence_var,
+                        layout: evidence::EvidenceLayout::new(shape.static_effects.iter().cloned()),
+                        is_open: shape.is_open_row,
                     });
                     is_effectful_lambda = true;
                 }
@@ -219,6 +236,10 @@ impl<'a> Lowerer<'a> {
                     )
                 } else {
                     self.lower_expr_with_installed_return_k(flattened_body, effect_return_k.clone())
+                };
+                let body_ce = match callback_tail_binding {
+                    Some((var, value)) => CExpr::Let(var, Box::new(value), Box::new(body_ce)),
+                    None => body_ce,
                 };
                 self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 self.current_evidence = saved_evidence;

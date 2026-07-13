@@ -165,6 +165,29 @@ pub(super) fn reframe_evidence(
     )
 }
 
+/// Combine handler-supplied callback evidence with the unknown tail captured
+/// at the original effect-operation call site. The call-time frame remains the
+/// positional static prefix and is relabeled to `static_tags`; exact entries
+/// replaced at call time are omitted from the captured frame while independent
+/// tail entries are appended.
+pub(super) fn append_tail(
+    call_evidence: CExpr,
+    captured_evidence: CExpr,
+    static_tags: &[String],
+) -> CExpr {
+    let tag_list = static_tags.iter().rev().fold(CExpr::Nil, |tail, tag| {
+        CExpr::Cons(
+            Box::new(CExpr::Lit(CLit::Atom(tag.clone()))),
+            Box::new(tail),
+        )
+    });
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "append_tail",
+        vec![call_evidence, captured_evidence, tag_list],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +376,21 @@ mod tests {
             CExpr::Lit(CLit::Atom(tag)) if tag == "Repo<UsersDb>"
         ));
         assert!(matches!(tail.as_ref(), CExpr::Nil));
+    }
+
+    #[test]
+    fn append_tail_is_bridge_call() {
+        let call = append_tail(
+            CExpr::Var("CallEvidence".to_string()),
+            CExpr::Var("CapturedEvidence".to_string()),
+            &["Abort<String>".to_string(), "Repo".to_string()],
+        );
+        let CExpr::Call(module, function, args) = call else {
+            panic!("expected bridge call")
+        };
+        assert_eq!(module, "std_evidence_bridge");
+        assert_eq!(function, "append_tail");
+        assert_eq!(args.len(), 3);
     }
 
     #[test]

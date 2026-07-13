@@ -871,6 +871,14 @@ impl Checker {
                 &deferred_lambda.param_ty,
                 deferred_lambda.arg_expr.span,
             )?;
+            // Deferred lambdas are inferred only after the whole application
+            // spine has constrained the HOF's row variables. Preserve their
+            // resolved call-site type for codegen just like the eager
+            // `infer_arg_against` path does. Effect-operation lowering needs
+            // this to specialize a generic callback requirement such as
+            // `Abort e` to the concrete `Abort String` supplied here.
+            let resolved_arg_ty = self.sub.apply(&arg_ty);
+            self.record_type(deferred_lambda.arg_expr.id, &resolved_arg_ty);
         }
 
         // Now that deferred lambdas have bound any open effect rows, emit the
