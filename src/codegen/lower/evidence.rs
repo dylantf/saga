@@ -140,6 +140,24 @@ pub(super) fn project_evidence(evidence: CExpr, tags: &[&str]) -> CExpr {
     )
 }
 
+/// Select a closed callee frame using the same position/tag selector language
+/// as [`reframe_evidence`], but drop every unselected caller entry. This is
+/// required when a closed CPS function value is passed through an open-row
+/// callback ABI: the HOF's open tail must not leak into the closed function.
+pub(super) fn select_evidence(evidence: CExpr, selectors: Vec<CExpr>) -> CExpr {
+    let selectors = selectors
+        .into_iter()
+        .rev()
+        .fold(CExpr::Nil, |tail, selector| {
+            CExpr::Cons(Box::new(selector), Box::new(tail))
+        });
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "select_evidence",
+        vec![evidence, selectors],
+    )
+}
+
 /// Reshape evidence for an open-row callee. Integer selectors address the
 /// caller's positional static prefix; tag selectors select a concrete applied
 /// effect from its forwarded tail.
@@ -365,6 +383,35 @@ mod tests {
         assert_eq!(args.len(), 3);
         assert!(matches!(&args[1], CExpr::Lit(CLit::Int(2))));
         let CExpr::Cons(first, rest) = &args[2] else {
+            panic!("expected selector list")
+        };
+        assert!(matches!(first.as_ref(), CExpr::Lit(CLit::Int(2))));
+        let CExpr::Cons(second, tail) = rest.as_ref() else {
+            panic!("expected second selector")
+        };
+        assert!(matches!(
+            second.as_ref(),
+            CExpr::Lit(CLit::Atom(tag)) if tag == "Repo<UsersDb>"
+        ));
+        assert!(matches!(tail.as_ref(), CExpr::Nil));
+    }
+
+    #[test]
+    fn select_evidence_preserves_selector_order() {
+        let call = select_evidence(
+            CExpr::Var("_Evidence".to_string()),
+            vec![
+                CExpr::Lit(CLit::Int(2)),
+                CExpr::Lit(CLit::Atom("Repo<UsersDb>".to_string())),
+            ],
+        );
+        let CExpr::Call(module, function, args) = call else {
+            panic!("expected bridge call")
+        };
+        assert_eq!(module, "std_evidence_bridge");
+        assert_eq!(function, "select_evidence");
+        assert_eq!(args.len(), 2);
+        let CExpr::Cons(first, rest) = &args[1] else {
             panic!("expected selector list")
         };
         assert!(matches!(first.as_ref(), CExpr::Lit(CLit::Int(2))));

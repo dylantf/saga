@@ -2068,6 +2068,56 @@ result () = case ((List.flat_map (fun _year -> parse "csv") [2012]) with reposit
 }
 
 #[test]
+fn closed_imported_function_in_open_hof_drops_tail_before_nested_handler() {
+    let parser = r#"module Parser
+
+pub effect Fail {
+  fun fail : String -> String
+}
+
+pub effect File {
+  fun read : String -> String
+}
+
+handler files for File {
+  read path = resume ("file:" <> path)
+}
+
+pub fun parse : String -> List String needs {Fail}
+parse path = [read! path] with files
+"#;
+    let main_src = r#"module Main
+
+import Std.List
+import Parser (Fail, parse)
+
+effect Repo {
+  fun run : String -> String
+}
+
+handler failures for Fail {
+  fail message = resume ("fail:" <> message)
+}
+
+handler repository for Repo {
+  run query = resume ("repo:" <> query)
+}
+
+pub fun result : Unit -> String
+result () = case ((List.flat_map parse ["csv"]) with repository) with failures {
+  value :: _ -> value
+  [] -> "empty"
+}
+"#;
+    check_cross_module(
+        "closed_imported_function_open_hof_nested_handler",
+        &[("lib/Parser.saga", parser)],
+        main_src,
+        "file:csv",
+    );
+}
+
+#[test]
 fn cross_module_stdlib_fail_handler() {
     let lib = r#"module FailLib
 
@@ -3079,6 +3129,57 @@ result () = {
         "narrowed_cps_partial_app_passed_to_open_row_param",
         src,
         "pure",
+    );
+}
+
+#[test]
+fn imported_open_partial_app_keeps_declared_static_effect_prefix() {
+    let routing = r#"module Routing
+
+pub effect Skip {
+  fun skip : Unit -> a
+}
+
+pub fun route : Bool -> (Unit -> String needs {..e}) -> Unit -> String
+  needs {Skip, ..e}
+route matches app () =
+  if matches then app ()
+  else skip! ()
+
+pub fun choose : List (Unit -> String needs {Skip, ..e}) -> Unit -> String
+  needs {..e}
+choose routes () = case routes {
+  [] -> "no match"
+  route :: rest -> route () with {
+    skip () = choose rest ()
+  }
+}
+"#;
+    let main_src = r#"module Main
+
+import Routing (route, choose)
+
+effect Foo {
+  fun foo : Unit -> String
+}
+
+fun pure : Unit -> String
+pure () = "wrong route"
+
+fun use_foo : Unit -> String needs {Foo}
+use_foo () = foo! ()
+
+pub fun result : Unit -> String
+result () =
+  choose [route False pure, route True use_foo] () with {
+    foo () = resume "matched"
+  }
+"#;
+    check_cross_module(
+        "imported_open_partial_app_static_prefix",
+        &[("lib/Routing.saga", routing)],
+        main_src,
+        "matched",
     );
 }
 

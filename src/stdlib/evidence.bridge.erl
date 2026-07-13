@@ -1,6 +1,7 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
-         project_evidence/2, reframe_evidence/3, append_tail/3]).
+         project_evidence/2, select_evidence/2, reframe_evidence/3,
+         append_tail/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -70,6 +71,16 @@ insert_static(Evidence, StaticCount, {NewTag, _} = NewEntry) ->
 %% supplied (the caller is expected to pass them in canonical order).
 project_evidence(Evidence, Tags) ->
     list_to_tuple([entry_for(Evidence, T) || T <- Tags]).
+
+%% Build a closed callee frame from positional/tag selectors. Unlike
+%% reframe_evidence/3, this deliberately drops every unselected entry. It is
+%% used when a closed CPS function value is adapted to an open callback slot:
+%% the surrounding HOF's tail belongs to the adapter ABI, not to the closed
+%% function it invokes.
+select_evidence(Evidence, Selectors) ->
+    list_to_tuple([selected_entry(Evidence, Selector,
+                                 selector_position(Evidence, Selector))
+                   || Selector <- Selectors]).
 
 %% Build a callee-shaped open-row vector. Selectors identify the callee's
 %% positional static prefix: integers address the caller's own static prefix,

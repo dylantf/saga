@@ -328,11 +328,14 @@ impl<'a> Lowerer<'a> {
         apply_args.push(CExpr::Var("_ReturnK".to_string()));
 
         let actual_fun = self.lower_expr_value(expr);
-        let narrowed_evidence = evidence::reframe_evidence(
-            CExpr::Var("_Evidence".to_string()),
-            expected_layout.tags().len(),
-            selectors,
-        );
+        // `actual_shape` is closed (the open case returned above), even when
+        // the expected callback slot is open. Select only the actual
+        // function's entries here. `reframe_evidence` would retain the HOF's
+        // unselected tail and pass a non-closed frame into a function whose
+        // local handler insertion and static slot lookups assume a canonical
+        // closed vector.
+        let narrowed_evidence =
+            evidence::select_evidence(CExpr::Var("_Evidence".to_string()), selectors);
         let call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
         let adapter = CExpr::Fun(
             params,
@@ -381,14 +384,20 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
-        // Determine the actual runtime shape, prefering the resolved type
-        // but falling back to a partial-application analysis when the type
-        // system has narrowed the row variable (e.g. `wrap pure_fn` whose
-        // type is `Unit -> Unit` but whose runtime closure is CPS-shaped
-        // because `wrap` was compiled with `..e`).
+        // Determine the actual runtime shape. Partial applications must use
+        // the compiled head's ABI even when their resolved occurrence type has
+        // narrowed or closed its row; other values use the resolved type, with
+        // a trait-dictionary fallback for synthesized method-access nodes.
         let actual_shape = self
-            .expr_cps_function_shape(expr)
-            .or_else(|| self.cps_shape_from_partial_app(expr))
+            // A partial application's runtime ABI is fixed by the compiled
+            // head function, not by the occurrence type after its row has
+            // been instantiated. In particular, partially applying
+            // `route : ... needs {Skip, ..e}` must leave a closure whose
+            // static prefix is `Skip` plus an open tail; the resolved result
+            // type may misleadingly look like a closed union of every effect
+            // supplied at this call site.
+            .cps_shape_from_partial_app(expr)
+            .or_else(|| self.expr_cps_function_shape(expr))
             .or_else(|| self.cps_shape_from_dict_method_access(expr));
 
         if let Some(actual_shape) = actual_shape {
