@@ -55,6 +55,54 @@ impl EvidenceLayout {
     pub(super) fn tags(&self) -> &[String] {
         &self.tags
     }
+
+    /// Record a handler installed into an open frame.
+    ///
+    /// Function-entry layouts can retain the effect declaration's bare or
+    /// generalized spelling even though the caller has already specialized
+    /// that positional slot to a concrete applied tag. Installing a handler
+    /// for that concrete application therefore specializes the existing slot;
+    /// it does not add a second slot. Distinct concrete applications remain
+    /// independent and are both retained.
+    pub(super) fn install_open_effect(&mut self, installed: String) {
+        if self.tags.iter().any(|tag| tag == &installed) {
+            return;
+        }
+
+        let family = crate::typechecker::applied_effect_family(&installed);
+        let same_family = self
+            .tags
+            .iter()
+            .enumerate()
+            .filter(|(_, tag)| crate::typechecker::applied_effect_family(tag) == family)
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+
+        if same_family.len() == 1
+            && is_effect_placeholder(&self.tags[same_family[0]])
+            && !is_effect_placeholder(&installed)
+        {
+            self.tags[same_family[0]] = installed;
+        } else {
+            self.tags.push(installed);
+        }
+        self.tags.sort();
+        self.tags.dedup();
+    }
+
+    /// Record a handler installed into a closed frame. Every tag in a closed
+    /// layout denotes an actual runtime entry, so only exact identities
+    /// replace; a bare family and an applied family member remain distinct.
+    pub(super) fn install_closed_effect(&mut self, installed: String) {
+        if !self.tags.contains(&installed) {
+            self.tags.push(installed);
+            self.tags.sort();
+        }
+    }
+}
+
+fn is_effect_placeholder(tag: &str) -> bool {
+    !tag.contains('<') || tag.contains('$')
 }
 
 /// Compile-time tuple index for `tag` in `layout`. Returns a 1-based index
@@ -222,6 +270,43 @@ mod tests {
             "Std.IO.Stdio".to_string(),
         ]);
         assert_eq!(layout.tags(), &["Std.Fail.Fail", "Std.IO.Stdio"]);
+    }
+
+    #[test]
+    fn installing_applied_effect_specializes_bare_family_slot() {
+        let mut layout = EvidenceLayout::new(["Std.Fail.Fail"]);
+        layout.install_open_effect("Std.Fail.Fail<SagaJson.Error>".to_string());
+        assert_eq!(layout.tags(), &["Std.Fail.Fail<SagaJson.Error>"]);
+    }
+
+    #[test]
+    fn installing_concrete_effect_specializes_generic_family_slot() {
+        let mut layout = EvidenceLayout::new(["Main.Abort<$799>"]);
+        layout.install_open_effect("Main.Abort<Std.String.String>".to_string());
+        assert_eq!(layout.tags(), &["Main.Abort<Std.String.String>"]);
+    }
+
+    #[test]
+    fn installing_distinct_concrete_applications_keeps_both_slots() {
+        let mut layout = EvidenceLayout::new(["Std.Fail.Fail<Std.Int.Int>"]);
+        layout.install_open_effect("Std.Fail.Fail<Std.String.String>".to_string());
+        assert_eq!(
+            layout.tags(),
+            &[
+                "Std.Fail.Fail<Std.Int.Int>",
+                "Std.Fail.Fail<Std.String.String>"
+            ]
+        );
+    }
+
+    #[test]
+    fn closed_layout_keeps_bare_and_applied_runtime_entries() {
+        let mut layout = EvidenceLayout::new(["Std.Fail.Fail"]);
+        layout.install_closed_effect("Std.Fail.Fail<Std.String.String>".to_string());
+        assert_eq!(
+            layout.tags(),
+            &["Std.Fail.Fail", "Std.Fail.Fail<Std.String.String>"]
+        );
     }
 
     #[test]

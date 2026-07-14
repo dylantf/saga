@@ -598,6 +598,44 @@ result () = maybe_fail False with to_result_str
 }
 
 #[test]
+fn inline_handler_specializes_open_row_parameterized_effect_slot() {
+    // A row-polymorphic function entry may describe its known slot by the
+    // effect family's bare declaration name, while its caller has already
+    // specialized the runtime entry to `Fail String`. Installing middleware
+    // for that application must replace/specialize the one slot rather than
+    // make lowering believe a second Fail slot exists.
+    let lib = r#"module Middleware.Relay
+
+import Std.Fail (Fail)
+
+pub fun relay : (Unit -> String needs {Fail String, ..e}) -> String
+  needs {Fail String, ..e}
+relay decoder = decoder () with {
+  fail e = fail! ("wrapped:" <> e)
+}
+"#;
+    let main_src = r#"module Main
+
+import Std.Fail (Fail)
+import Middleware.Relay (relay)
+
+handler capture for Fail String {
+  fail e = "err:" <> e
+  return v = "ok:" <> v
+}
+
+pub fun result : Unit -> String
+result () = relay (fun () -> fail! "boom") with capture
+"#;
+    check_cross_module(
+        "inline_handler_specializes_open_row_parameterized_effect_slot",
+        &[("lib/Middleware/Relay.saga", lib)],
+        main_src,
+        "err:wrapped:boom",
+    );
+}
+
+#[test]
 fn dict_method_effectful_call_threads_evidence() {
     // Trait method calls elaborate to `App(DictMethodAccess, ...)`. When the
     // selected impl declares `needs`, the call must thread evidence/return_k

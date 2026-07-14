@@ -182,9 +182,9 @@ impl<'a> Lowerer<'a> {
                 None => CExpr::Tuple(Vec::new()),
             };
             let open_frame = saved_evidence.as_ref().is_some_and(|ctx| ctx.is_open);
-            let mut static_tags = saved_evidence
+            let mut new_layout = saved_evidence
                 .as_ref()
-                .map(|ctx| ctx.layout.tags().to_vec())
+                .map(|ctx| ctx.layout.clone())
                 .unwrap_or_default();
             for (eff, mut ops) in effect_to_ops {
                 ops.sort();
@@ -203,15 +203,16 @@ impl<'a> Lowerer<'a> {
                 if open_frame {
                     acc = crate::codegen::lower::evidence::insert_static(
                         acc,
-                        static_tags.len(),
+                        new_layout.tags().len(),
                         entry,
                     );
-                    if !static_tags.contains(&eff) {
-                        static_tags.push(eff);
-                        static_tags.sort();
-                    }
                 } else {
                     acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
+                }
+                if open_frame {
+                    new_layout.install_open_effect(eff);
+                } else {
+                    new_layout.install_closed_effect(eff);
                 }
             }
             let new_var = self.fresh();
@@ -220,22 +221,10 @@ impl<'a> Lowerer<'a> {
             // here. The is_open flag also propagates from the inherited
             // context — a row-polymorphic outer caller's evidence may carry
             // additional unknown effects beyond the static layout.
-            let mut tags: Vec<String> = Vec::new();
-            let mut is_open = false;
-            if let Some(ctx) = &saved_evidence {
-                tags.extend(ctx.layout.tags().iter().cloned());
-                is_open = ctx.is_open;
-            }
-            for (eff, _, _, _) in &op_vars {
-                if !tags.contains(eff) {
-                    tags.push(eff.clone());
-                }
-            }
-            let new_layout = crate::codegen::lower::evidence::EvidenceLayout::new(tags);
             self.current_evidence = Some(crate::codegen::lower::EvidenceCtx {
                 var: new_var.clone(),
                 layout: new_layout,
-                is_open,
+                is_open: open_frame,
             });
             ((new_var.clone(), acc), new_var)
         };
