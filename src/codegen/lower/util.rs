@@ -388,7 +388,7 @@ pub fn handler_effects_from_type(ty: &Type) -> Vec<String> {
 /// parameter count seen by source code: it does not include the
 /// `_Evidence` or `_ReturnK` parameters appended at lowering. The
 /// `has_open_row` flag chooses between `StaticOps` (closed-row, project at
-/// call sites against a known `EvidenceLayout`) and `RowForwarded`
+/// call sites against a known `EvidenceAbi`) and `RowForwarded`
 /// (open-row, forward full ambient evidence).
 pub fn arity_and_evidence_from_type(ty: &Type) -> (usize, Vec<String>, bool) {
     let (user_arity, effects) = arity_and_effects_from_type(ty);

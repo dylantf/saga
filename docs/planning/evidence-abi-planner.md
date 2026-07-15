@@ -1,9 +1,32 @@
 # Authoritative Evidence ABI Planning
 
-Status: proposed. A narrow lambda-boundary fix exists, but the compiler still
-reconstructs evidence shape in several places. This plan turns that invariant
-into explicit shared metadata without changing Saga semantics or the runtime
-evidence representation.
+Status: implemented (2026-07-15). The compiler now uses shared ABI metadata
+without changing Saga semantics or the flat runtime evidence representation.
+
+Implementation inventory: [Evidence ABI Entrypoint Inventory](evidence-abi-entrypoints.md).
+The inventory is the review checkpoint and migration checklist for the phases
+below.
+
+## Implementation Outcome
+
+- `EvidenceAbi` owns normalized static slots, open-tail state, handler
+  installation, slot resolution, and source-to-target compatibility.
+- `CallableAbi` is retained in function, symbol, trait/dictionary, export, and
+  cache metadata; `EvidenceFrame` couples each active Core variable to its ABI.
+- `EffectAbiPlan` records declarations, instantiated calls, and the inferred,
+  implementation, and boundary views of function values by `NodeId`.
+- `EvidenceReframePlan` is the only selector planner used by calls and CPS
+  adapters. `EvidenceInstallPlan` couples each runtime insertion strategy to
+  its resulting compile-time frame.
+- Imported and re-exported symbols consume origin `CallableAbi` metadata while
+  occurrence types provide concrete applied-effect instantiations.
+- The legacy `RuntimeFunctionShape`, `CpsShape`, `EvidenceLayout`,
+  `EvidenceCtx`, and mutable `lambda_effect_context` paths were removed.
+- Open reframing explicitly records which source-static positions instantiate
+  the target row variable. Closed-source extras can therefore become a target
+  tail, while omitted declaration slots from an already-open source are
+  excluded. This fixed the nested HOF failure without dropping same-family
+  sibling effects supplied by a closed caller.
 
 ## Goal
 
@@ -275,8 +298,20 @@ independent of local handler installation can be precomputed.
 
 ## Planning phase
 
-Extend the existing call-effects pre-pass rather than adding another unrelated
-AST walk. Its output becomes a broader effect-ABI plan:
+Planning has two coordinated pre-lowering passes that write one
+`EffectAbiPlan`:
+
+1. the call-effects walk records declaration ABIs, inferred callable views,
+   and direct/closed/open call classification;
+2. the contextual callable walk propagates declaration-shaped expected types
+   through calls and value containers, then records implementation and exposed
+   boundary ABIs separately.
+
+The second pass runs after substitutions and declaration metadata are final,
+but before any Core expression is emitted. It lives on the lowering context so
+it can reuse the same record, constructor, intrinsic, effect-operation, and
+cross-module semantic metadata as emission without reconstructing those rules
+inside the generic call classifier. Their shared output is:
 
 ```rust
 struct PlannedEffectAbi {
@@ -316,6 +351,20 @@ Expected types flow from existing metadata:
 - effect-operation parameter types;
 - contextual result types for branches.
 
+"Declaration-shaped" preserves the declaration's actual row form. A callback
+declared with `{Foo, Skip}` has a closed boundary with those two slots. A
+callback declared with `{Skip, ..e}` has a pinned `Skip` prefix and an open
+tail, even when its expression occurrence has inferred the concrete closed set
+`{Foo, Skip}`. The occurrence view describes the implementation; the consuming
+declaration determines the exposed boundary.
+
+Registered imported handler arms are not declarations in the consumer's AST,
+so the contextual pass also walks their stored bodies under the defining
+module's semantic context. Compiler intrinsics remain explicit exceptions:
+their registered native callback convention wins over a generic source
+declaration (for example, `catch_panic` invokes an already-handled thunk as a
+plain BEAM callable).
+
 Each expression occurrence has a unique `NodeId`, so a lambda used in two
 different contexts already appears as two AST occurrences. Adapters created by
 lowering state source and target ABIs explicitly rather than overwriting the
@@ -330,9 +379,9 @@ typecheck + finalized substitutions
                 |
                 v
 effect ABI planner
-  - declaration/call target ABIs
-  - function-value ABIs
-  - direct/CPS/row-forwarded classification
+  pass 1: declarations, inferred values, and call targets
+  pass 2: contextual implementation/boundary ABIs
+  output: direct/CPS/row-forwarded classification plus complete value ABIs
                 |
                 v
 lowering
@@ -584,12 +633,13 @@ back to ambient inference.
 - `src/codegen/runtime_shape.rs`
   - `EvidenceAbi`, `CallableAbi`, ABI compatibility and residual-shape logic.
 - `src/codegen/call_effects.rs`
-  - per-`NodeId` call classification and function-value ABI planning.
+  - per-`NodeId` declaration, inferred-value, and call classification planning.
 - `src/codegen/lower/evidence.rs`
   - `EvidenceFrame`, `EvidenceReframePlan`, selector planning, Core bridge
     emission helpers.
 - `src/codegen/lower/function_values.rs`
-  - consume planned function-value ABIs and emit explicit adapters.
+  - run contextual function-value planning before Core emission, then consume
+    the completed plan and emit explicit adapters.
 - `src/codegen/lower/calls.rs`
   - consume planned target ABIs and reframe plans.
 - `src/codegen/lower/effects/with.rs`

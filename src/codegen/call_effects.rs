@@ -31,24 +31,14 @@ use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::CodegenContext;
 use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
-use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
+use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 use crate::typechecker::{CheckResult, TraitMethodEffectSig};
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEffectInfo {
     kind: CallEffectKind,
-    /// Logical user-argument count (excludes evidence and return_k).
-    ///
-    /// **Invariant**: when `kind == CallEffectKind::Pure`, `user_arity` is
-    /// always `0`. The lowerer never reads `user_arity` on `Pure` entries,
-    /// and pinning the value to a single canonical zero prevents drift if a
-    /// future producer is added. Construct via [`CallEffectInfo::pure()`]
-    /// or [`CallEffectInfo::cps()`] so debug builds verify the invariant at
-    /// the classifier boundary.
-    user_arity: usize,
-    /// Whether this call accepts a return continuation (i.e. it is effectful).
-    needs_return_k: bool,
+    callable_abi: Option<CallableAbi>,
 }
 
 impl CallEffectInfo {
@@ -56,18 +46,23 @@ impl CallEffectInfo {
     pub fn pure() -> Self {
         CallEffectInfo {
             kind: CallEffectKind::Pure,
-            user_arity: 0,
-            needs_return_k: false,
+            callable_abi: None,
         }
     }
 
     /// CPS/evidence call. The caller must supply evidence and a return
     /// continuation according to `kind`.
     fn cps(kind: CallEffectKind, user_arity: usize) -> Self {
+        let evidence = match &kind {
+            CallEffectKind::Pure => unreachable!("CPS call cannot have a pure kind"),
+            CallEffectKind::StaticOps { ops } => EvidenceAbi::closed(unique_effects(ops)),
+            CallEffectKind::RowForwarded { static_ops } => {
+                EvidenceAbi::new(unique_effects(static_ops), true)
+            }
+        };
         let info = CallEffectInfo {
             kind,
-            user_arity,
-            needs_return_k: true,
+            callable_abi: Some(CallableAbi::cps(user_arity, evidence)),
         };
         info.debug_check();
         info
@@ -81,15 +76,10 @@ impl CallEffectInfo {
     pub fn cps_call_plan(&self) -> Option<CpsCallPlan> {
         match &self.kind {
             CallEffectKind::Pure => None,
-            CallEffectKind::StaticOps { ops } if !ops.is_empty() => Some(CpsCallPlan {
-                effects: unique_effects(ops),
-                row_forwarded: false,
-            }),
-            CallEffectKind::StaticOps { .. } => None,
-            CallEffectKind::RowForwarded { static_ops } => Some(CpsCallPlan {
-                effects: unique_effects(static_ops),
-                row_forwarded: true,
-            }),
+            CallEffectKind::StaticOps { ops } if ops.is_empty() => None,
+            CallEffectKind::StaticOps { .. } | CallEffectKind::RowForwarded { .. } => {
+                self.callable_abi.clone().map(|abi| CpsCallPlan { abi })
+            }
         }
     }
 
@@ -107,14 +97,18 @@ impl CallEffectInfo {
             CallEffectKind::Pure => "direct".to_string(),
             CallEffectKind::StaticOps { ops } => format!(
                 "cps-static({}->{}, effects={:?})",
-                self.user_arity,
-                self.user_arity + 2,
+                self.callable_abi.as_ref().map_or(0, |abi| abi.user_arity),
+                self.callable_abi
+                    .as_ref()
+                    .map_or(0, CallableAbi::expanded_arity),
                 unique_effects(ops)
             ),
             CallEffectKind::RowForwarded { static_ops } => format!(
                 "cps-row-forwarded({}->{}, pinned_effects={:?})",
-                self.user_arity,
-                self.user_arity + 2,
+                self.callable_abi.as_ref().map_or(0, |abi| abi.user_arity),
+                self.callable_abi
+                    .as_ref()
+                    .map_or(0, CallableAbi::expanded_arity),
                 unique_effects(static_ops)
             ),
         }
@@ -139,13 +133,9 @@ impl CallEffectInfo {
         if cfg!(debug_assertions) {
             match &self.kind {
                 CallEffectKind::Pure => {
-                    debug_assert_eq!(
-                        self.user_arity, 0,
-                        "CallEffectInfo: Pure kind requires user_arity == 0"
-                    );
                     debug_assert!(
-                        !self.needs_return_k,
-                        "CallEffectInfo: Pure kind requires needs_return_k == false"
+                        self.callable_abi.is_none(),
+                        "CallEffectInfo: Pure kind cannot carry a callable ABI"
                     );
                 }
                 CallEffectKind::StaticOps { ops } => {
@@ -154,14 +144,14 @@ impl CallEffectInfo {
                         "CallEffectInfo: StaticOps requires at least one op; use Pure otherwise"
                     );
                     debug_assert!(
-                        self.needs_return_k,
-                        "CallEffectInfo: CPS calls require needs_return_k == true"
+                        self.callable_abi.is_some(),
+                        "CallEffectInfo: CPS calls require a callable ABI"
                     );
                 }
                 CallEffectKind::RowForwarded { .. } => {
                     debug_assert!(
-                        self.needs_return_k,
-                        "CallEffectInfo: CPS calls require needs_return_k == true"
+                        self.callable_abi.is_some(),
+                        "CallEffectInfo: CPS calls require a callable ABI"
                     );
                 }
             }
@@ -171,12 +161,7 @@ impl CallEffectInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpsCallPlan {
-    /// Canonical effect names whose evidence entries should be projected or
-    /// pinned at this call site.
-    pub effects: Vec<String>,
-    /// True for open-row calls; the caller forwards ambient evidence instead
-    /// of projecting to exactly `effects`.
-    pub row_forwarded: bool,
+    pub abi: CallableAbi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +186,103 @@ pub struct OpKey {
 
 pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
 
+/// The three callable views that can coexist for one function-value
+/// expression. They must not be collapsed: a row-polymorphic partial
+/// application can infer a pure occurrence type while still constructing a
+/// CPS closure, and a surrounding callback slot can expose yet another ABI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FunctionValueAbiPlan {
+    pub inferred: Option<CallableAbi>,
+    pub implementation: Option<CallableAbi>,
+    pub boundary: Option<CallableAbi>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EffectAbiPlan {
+    pub declarations: HashMap<NodeId, CallableAbi>,
+    pub calls: CallEffectMap,
+    pub function_values: HashMap<NodeId, FunctionValueAbiPlan>,
+}
+
+impl EffectAbiPlan {
+    pub fn record_declaration(&mut self, node_id: NodeId, abi: CallableAbi) {
+        if let Some(previous) = self.declarations.insert(node_id, abi.clone()) {
+            assert_eq!(
+                previous, abi,
+                "internal ABI planning error: conflicting declaration ABI for {node_id:?}"
+            );
+        }
+    }
+
+    pub fn declaration(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        self.declarations.get(&node_id)
+    }
+
+    pub fn record_inferred_function_value(&mut self, node_id: NodeId, abi: CallableAbi) {
+        let value = self.function_values.entry(node_id).or_default();
+        if let Some(previous) = value.inferred.replace(abi.clone()) {
+            assert_eq!(
+                previous, abi,
+                "internal ABI planning error: conflicting inferred ABI for {node_id:?}"
+            );
+        }
+    }
+
+    pub fn record_function_value_boundary(
+        &mut self,
+        node_id: NodeId,
+        implementation: CallableAbi,
+        boundary: CallableAbi,
+    ) {
+        let value = self.function_values.entry(node_id).or_default();
+        if let Some(previous) = value.implementation.replace(implementation.clone()) {
+            assert_eq!(
+                previous, implementation,
+                "internal ABI planning error: conflicting implementation ABI for {node_id:?}"
+            );
+        }
+        if let Some(previous) = value.boundary.replace(boundary.clone()) {
+            assert_eq!(
+                previous, boundary,
+                "internal ABI planning error: conflicting boundary ABI for {node_id:?}"
+            );
+        }
+    }
+
+    pub fn function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        let value = self.function_values.get(&node_id)?;
+        value.boundary.as_ref().or(value.implementation.as_ref())
+    }
+
+    pub fn function_value_implementation(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        self.function_values.get(&node_id)?.implementation.as_ref()
+    }
+
+    pub fn merge_inferred_function_value(&mut self, node_id: NodeId, absorbed: CallableAbi) {
+        let value = self.function_values.entry(node_id).or_default();
+        let Some(previous) = value.inferred.take() else {
+            value.inferred = Some(absorbed);
+            return;
+        };
+        assert_eq!(
+            previous.user_arity, absorbed.user_arity,
+            "internal ABI planning error: inferred arity changed for {node_id:?}"
+        );
+        let evidence = match (previous.evidence, absorbed.evidence) {
+            (None, None) => None,
+            (Some(evidence), None) | (None, Some(evidence)) => Some(evidence),
+            (Some(previous), Some(absorbed)) => {
+                Some(EvidenceAbi::for_lambda_boundary(&previous, &absorbed))
+            }
+        };
+        value.inferred = Some(CallableAbi {
+            user_arity: previous.user_arity,
+            evidence,
+            is_intrinsic: previous.is_intrinsic || absorbed.is_intrinsic,
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEffectTraceEntry {
     pub app_id: NodeId,
@@ -212,7 +294,7 @@ pub struct CallEffectTraceEntry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PopulatedCallEffects {
-    pub map: CallEffectMap,
+    pub plan: EffectAbiPlan,
     pub trace: Vec<CallEffectTraceEntry>,
 }
 
@@ -298,15 +380,10 @@ fn unique_effects(ops: &[OpKey]) -> Vec<String> {
 /// Lowerer from its own `FunInfo` table once `init_module` has finished.
 #[derive(Debug, Clone, Default)]
 pub struct FunSig {
-    /// Expanded arity (base user args + per-op handler params + return_k).
-    pub arity: usize,
-    /// Sorted, canonical effect names from the `needs` clause.
-    pub effects: Vec<String>,
+    /// Authoritative runtime convention for this callable.
+    pub abi: CallableAbi,
     /// param-index -> absorbed effects (for HOF effect absorption).
     pub param_absorbed_effects: HashMap<usize, Vec<String>>,
-    /// True if the callee's effect row has an open tail (`needs {Foo, ..e}`).
-    /// Open-row callees produce `RowForwarded` rather than `StaticOps`.
-    pub is_open_row: bool,
     /// Source-level parameter types. Used to detect callback parameters
     /// whose type has an open effect row but no named effects — these need
     /// CPS threading at call sites even though `param_absorbed_effects`
@@ -350,7 +427,7 @@ pub struct PopulatorInputs<'a> {
 /// `populate(program)`.
 pub struct Populator<'a> {
     inputs: PopulatorInputs<'a>,
-    map: CallEffectMap,
+    plan: EffectAbiPlan,
     trace: Vec<CallEffectTraceEntry>,
     /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
     /// effects that calls of that name should thread.
@@ -367,6 +444,14 @@ pub struct Populator<'a> {
     local_fun_sigs: Vec<HashMap<String, FunSig>>,
     /// Resolved call head NodeId -> whether the callee's effect row is open.
     head_open_row: HashMap<NodeId, bool>,
+    /// Effects performed by calls in the currently walked lambda body. This
+    /// recovers open callback forwarding when the type-at-node view omits the
+    /// absorbed row variable.
+    lambda_body_evidence: Vec<EvidenceAbi>,
+    /// Completed body-call evidence used only when the lambda itself is an
+    /// immediate call head. It must not replace the callable's inferred ABI:
+    /// enclosing `with` expressions may discharge some body-call evidence.
+    lambda_head_evidence: HashMap<NodeId, EvidenceAbi>,
 }
 
 impl<'a> Populator<'a> {
@@ -374,12 +459,14 @@ impl<'a> Populator<'a> {
         let head_open_row = Self::collect_head_open_rows(&inputs);
         Populator {
             inputs,
-            map: HashMap::new(),
+            plan: EffectAbiPlan::default(),
             trace: Vec::new(),
             scopes: Vec::new(),
             open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
             head_open_row,
+            lambda_body_evidence: Vec::new(),
+            lambda_head_evidence: HashMap::new(),
         }
     }
 
@@ -438,7 +525,7 @@ impl<'a> Populator<'a> {
     }
 
     pub fn populate(self, program: &Program) -> CallEffectMap {
-        self.populate_with_trace(program).map
+        self.populate_with_trace(program).plan.calls
     }
 
     pub fn populate_with_trace(mut self, program: &Program) -> PopulatedCallEffects {
@@ -446,7 +533,7 @@ impl<'a> Populator<'a> {
             self.walk_decl(decl);
         }
         PopulatedCallEffects {
-            map: self.map,
+            plan: self.plan,
             trace: self.trace,
         }
     }
@@ -472,8 +559,15 @@ impl<'a> Populator<'a> {
     fn walk_decl(&mut self, decl: &Decl) {
         match decl {
             Decl::FunBinding {
-                name, params, body, ..
+                id,
+                name,
+                params,
+                body,
+                ..
             } => {
+                if let Some(sig) = self.inputs.fun_sigs.get(name) {
+                    self.plan.record_declaration(*id, sig.abi.clone());
+                }
                 let (frame, open_row) = self.fun_param_effectful_vars(name, params);
                 self.push_scope_with(frame, open_row);
                 // `fun_param_effectful_vars` seeds callback shape from the
@@ -679,15 +773,47 @@ impl<'a> Populator<'a> {
     }
 
     fn walk_expr(&mut self, expr: &Expr) {
-        // Tag App nodes (must be done before recursing so head/args don't
-        // mutate scope before classification).
+        if let Some(ty) = self.inputs.check_result.resolved_type_for_node(expr.id)
+            && matches!(ty, crate::typechecker::Type::Fun(..))
+        {
+            let inferred =
+                CallableAbi::from_type(&ty, |effects| self.canonicalize_effects(effects));
+            self.plan.record_inferred_function_value(expr.id, inferred);
+        }
+        // Classify after children. Immediately-invoked lambda heads need the
+        // completed body plan so an absorbed open callback row contributes to
+        // the lambda's runtime ABI even when its type-at-node view is pure.
+        self.walk_children(expr);
         if matches!(expr.kind, ExprKind::App { .. }) {
             let info = self.classify_app(expr);
             info.debug_check();
             self.trace.push(self.trace_entry(expr, &info));
-            self.map.insert(expr.id, info);
+            if let Some(evidence) = info.cps_call_plan().and_then(|plan| plan.abi.evidence)
+                && let Some(lambda_evidence) = self.lambda_body_evidence.last_mut()
+            {
+                *lambda_evidence = EvidenceAbi::for_lambda_boundary(lambda_evidence, &evidence);
+            }
+            self.plan.calls.insert(expr.id, info);
+            self.plan_app_function_value_boundaries(expr);
         }
-        self.walk_children(expr);
+    }
+
+    fn plan_app_function_value_boundaries(&mut self, expr: &Expr) {
+        let (head, _) = peel_app(expr);
+        if !matches!(head.kind, ExprKind::Lambda { .. }) {
+            return;
+        }
+
+        if let Some(call_abi) = self
+            .plan
+            .calls
+            .get(&expr.id)
+            .and_then(CallEffectInfo::cps_call_plan)
+            .map(|plan| plan.abi)
+        {
+            self.plan
+                .record_function_value_boundary(head.id, call_abi.clone(), call_abi);
+        }
     }
 
     fn trace_entry(&self, expr: &Expr, info: &CallEffectInfo) -> CallEffectTraceEntry {
@@ -749,9 +875,20 @@ impl<'a> Populator<'a> {
                 self.local_fun_sigs.pop();
                 self.pop_scope();
             }
-            ExprKind::Lambda { body, .. } => {
+            ExprKind::Lambda { params, body, .. } => {
                 self.push_scope();
+                for param in params {
+                    self.record_pattern_effectful_vars(param);
+                }
+                self.lambda_body_evidence.push(EvidenceAbi::default());
                 self.walk_expr(body);
+                let body_evidence = self
+                    .lambda_body_evidence
+                    .pop()
+                    .expect("lambda evidence stack underflow");
+                if !body_evidence.static_slots().is_empty() || body_evidence.is_open() {
+                    self.lambda_head_evidence.insert(expr.id, body_evidence);
+                }
                 self.pop_scope();
             }
             ExprKind::FieldAccess { expr, .. } => self.walk_expr(expr),
@@ -946,10 +1083,11 @@ impl<'a> Populator<'a> {
                 // Mirror the lowerer: register the LetFun's signature into the
                 // top local fun frame BEFORE walking its body so recursive
                 // calls classify correctly.
-                if let Some(sig) = self.let_fun_sig(*id, name)
-                    && let Some(frame) = self.local_fun_sigs.last_mut()
-                {
-                    frame.insert(name.clone(), sig);
+                if let Some(sig) = self.let_fun_sig(*id, name) {
+                    self.plan.record_declaration(*id, sig.abi.clone());
+                    if let Some(frame) = self.local_fun_sigs.last_mut() {
+                        frame.insert(name.clone(), sig);
+                    }
                 }
                 if let Some(g) = guard {
                     self.push_scope();
@@ -967,7 +1105,15 @@ impl<'a> Populator<'a> {
     /// If `value` is itself an effectful call, return its effect list. Used to
     /// promote `let g = factory()` so subsequent `g x` calls thread evidence.
     fn value_effect_signature(&self, value: &Expr) -> Option<Vec<String>> {
-        let effects = self.map.get(&value.id)?.cps_call_plan()?.effects;
+        let effects = self
+            .plan
+            .calls
+            .get(&value.id)?
+            .cps_call_plan()?
+            .abi
+            .evidence?
+            .static_slots()
+            .to_vec();
         if effects.is_empty() {
             None
         } else {
@@ -1116,25 +1262,26 @@ impl<'a> Populator<'a> {
         let resolved = self.inputs.resolved.get(&head_id);
         let resolved_shape =
             resolved.map(|resolved| self.runtime_shape_from_resolved_head(head_id, resolved));
-        if matches!(resolved_shape, Some(RuntimeFunctionShape::Intrinsic)) {
+        if resolved_shape.as_ref().is_some_and(|abi| abi.is_intrinsic) {
             return pure();
         }
         let resolved_env_shape =
             resolved.and_then(|resolved| self.runtime_shape_from_resolved_env(resolved, name));
         let resolved_cps_shape = resolved_shape
             .as_ref()
-            .and_then(|shape| shape.cps_shape())
+            .and_then(|abi| abi.cps_evidence())
             .or_else(|| {
                 resolved_env_shape
                     .as_ref()
-                    .and_then(|shape| shape.cps_shape())
+                    .and_then(|abi| abi.cps_evidence())
             });
         let canonical_name = resolved.map(|resolved| resolved.canonical_name.clone());
         let mut effects: Vec<String> = match resolved {
             Some(resolved) if !resolved.effects().is_empty() => resolved.effects().to_vec(),
             Some(_) => self
                 .lookup_fun_sig(name, canonical_name.as_deref())
-                .map(|s| s.effects.clone())
+                .and_then(|sig| sig.abi.evidence.as_ref())
+                .map(|evidence| evidence.static_slots().to_vec())
                 .unwrap_or_default(),
             None => {
                 // Not a resolved fun. Treat as effectful if it's an in-scope
@@ -1146,8 +1293,7 @@ impl<'a> Populator<'a> {
                     if ops.is_empty() && !is_open_row {
                         // Either the var carried no effects, or the effects
                         // didn't canonicalize against `effect_ops`. Either
-                        // way the call is Pure — and Pure must have
-                        // needs_return_k == false (see CallEffectInfo doc).
+                        // way the call is Pure and carries no callable ABI.
                         return pure();
                     }
                     let kind = if is_open_row {
@@ -1171,9 +1317,9 @@ impl<'a> Populator<'a> {
             }
         };
         if let Some(shape) = &resolved_cps_shape
-            && !shape.static_effects.is_empty()
+            && !shape.static_slots().is_empty()
         {
-            effects = shape.static_effects.clone();
+            effects = shape.static_slots().to_vec();
         }
 
         // Need expanded arity from fun_sigs to compute user_arity.
@@ -1181,11 +1327,11 @@ impl<'a> Populator<'a> {
             let ops = self.collect_op_keys(&effects);
             let is_open_row = resolved_cps_shape
                 .as_ref()
-                .map(|shape| shape.is_open_row)
+                .map(EvidenceAbi::is_open)
                 .unwrap_or_else(|| self.head_open_row.get(&head_id).copied().unwrap_or(false));
             // No FunSig snapshot. Effectful only if the effects canonicalized
             // to known ops or the callee has an open row; supplied is the
-            // best-effort user-arity. Pure must not carry needs_return_k.
+            // best-effort user arity. Pure calls carry no callable ABI.
             if ops.is_empty() && !is_open_row {
                 return pure();
             }
@@ -1207,14 +1353,14 @@ impl<'a> Populator<'a> {
             .get(&head_id)
             .copied()
             .unwrap_or_else(|| {
-                sig.is_open_row || resolved_cps_shape.is_some_and(|shape| shape.is_open_row)
+                sig.abi.evidence.as_ref().is_some_and(EvidenceAbi::is_open)
+                    || resolved_cps_shape.is_some_and(|shape| shape.is_open())
             });
         if effects.is_empty() && !is_open_row {
             return pure();
         }
         // Effectful/open-row arity = user + Evidence + ReturnK.
-        let extras = if has_ops || is_open_row { 2 } else { 0 };
-        let user_arity = sig.arity.saturating_sub(extras);
+        let user_arity = sig.abi.user_arity;
 
         // Saturation gate from `call_performs_effect`.
         if user_arity == 0 || supplied < user_arity {
@@ -1249,27 +1395,33 @@ impl<'a> Populator<'a> {
         None
     }
 
-    fn lambda_head_shape(&self, lambda_id: NodeId) -> Option<CpsShape> {
+    fn lambda_head_shape(&self, lambda_id: NodeId) -> Option<EvidenceAbi> {
+        if let Some(evidence) = self.lambda_head_evidence.get(&lambda_id) {
+            return Some(evidence.clone());
+        }
+        if let Some(evidence) = self
+            .plan
+            .function_values
+            .get(&lambda_id)
+            .and_then(|value| value.inferred.as_ref())
+            .and_then(|abi| abi.evidence.clone())
+        {
+            return Some(evidence);
+        }
         let ty = self.inputs.check_result.resolved_type_for_node(lambda_id)?;
-        self.runtime_shape_from_type(&ty).cps_shape()
+        self.callable_abi_from_type(&ty).cps_evidence()
     }
 
     fn let_fun_sig(&self, id: NodeId, name: &str) -> Option<FunSig> {
         if let Some(ty) = self.inputs.check_result.resolved_type_for_node(id) {
-            let (base_arity, effects) = util::arity_and_effects_from_type(&ty);
-            let effects = self.canonicalize_effects(effects);
-            let shape = self.runtime_shape_from_type(&ty);
-            let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
-            let expanded_arity = shape.expanded_arity(base_arity);
+            let abi = self.callable_abi_from_type(&ty);
             let param_absorbed_effects = util::param_absorbed_effects_from_type(&ty)
                 .into_iter()
                 .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                 .collect();
             return Some(FunSig {
-                arity: expanded_arity,
-                effects,
+                abi,
                 param_absorbed_effects,
-                is_open_row,
                 param_types: util::param_types_from_type(&ty),
                 dict_param_count: 0,
             });
@@ -1299,17 +1451,17 @@ impl<'a> Populator<'a> {
         out
     }
 
-    fn runtime_shape_from_type(&self, ty: &crate::typechecker::Type) -> RuntimeFunctionShape {
-        RuntimeFunctionShape::from_type(ty, |effects| self.canonicalize_effects(effects))
+    fn callable_abi_from_type(&self, ty: &crate::typechecker::Type) -> CallableAbi {
+        CallableAbi::from_type(ty, |effects| self.canonicalize_effects(effects))
     }
 
     fn runtime_shape_from_resolved_head(
         &self,
         head_id: NodeId,
         resolved: &crate::codegen::resolve::ResolvedSymbol,
-    ) -> RuntimeFunctionShape {
+    ) -> CallableAbi {
         let fallback_ty = self.inputs.check_result.resolved_type_for_node(head_id);
-        RuntimeFunctionShape::from_resolved_symbol(resolved, fallback_ty.as_ref(), |effects| {
+        CallableAbi::from_resolved_symbol(resolved, fallback_ty.as_ref(), |effects| {
             self.canonicalize_effects(effects)
         })
     }
@@ -1318,7 +1470,7 @@ impl<'a> Populator<'a> {
         &self,
         resolved: &crate::codegen::resolve::ResolvedSymbol,
         fallback_name: &str,
-    ) -> Option<RuntimeFunctionShape> {
+    ) -> Option<CallableAbi> {
         let candidates = [
             resolved.canonical_name.as_str(),
             resolved.name.as_str(),
@@ -1345,14 +1497,14 @@ impl<'a> Populator<'a> {
                 .and_then(|check| lookup_type(check, &candidates))
         })?;
 
-        Some(self.runtime_shape_from_type(&ty))
+        Some(self.callable_abi_from_type(&ty))
     }
 
-    fn call_kind_from_cps_shape(&self, shape: &CpsShape) -> Option<CallEffectKind> {
-        let ops = self.collect_op_keys(&shape.static_effects);
-        if ops.is_empty() && !shape.is_open_row {
+    fn call_kind_from_cps_shape(&self, shape: &EvidenceAbi) -> Option<CallEffectKind> {
+        let ops = self.collect_op_keys(shape.static_slots());
+        if ops.is_empty() && !shape.is_open() {
             None
-        } else if shape.is_open_row {
+        } else if shape.is_open() {
             Some(CallEffectKind::RowForwarded { static_ops: ops })
         } else {
             Some(CallEffectKind::StaticOps { ops })
@@ -1452,6 +1604,34 @@ mod tests {
             effect: effect.to_string(),
             op: op.to_string(),
         }
+    }
+
+    #[test]
+    fn function_value_plan_keeps_inferred_implementation_and_boundary_distinct() {
+        let node = NodeId(42);
+        let inferred = CallableAbi::pure(1);
+        let implementation = CallableAbi::cps(
+            1,
+            EvidenceAbi::new(["Main.Repo", "Main.Rollback<Std.String.String>"], true),
+        );
+        let boundary = CallableAbi::cps(
+            1,
+            EvidenceAbi::new(["Main.Rollback<Std.String.String>"], false),
+        );
+
+        let mut plan = EffectAbiPlan::default();
+        plan.record_inferred_function_value(node, inferred.clone());
+        plan.record_function_value_boundary(node, implementation.clone(), boundary.clone());
+
+        assert_eq!(
+            plan.function_values.get(&node),
+            Some(&FunctionValueAbiPlan {
+                inferred: Some(inferred),
+                implementation: Some(implementation),
+                boundary: Some(boundary.clone()),
+            })
+        );
+        assert_eq!(plan.function_value_boundary(node), Some(&boundary));
     }
 
     #[test]

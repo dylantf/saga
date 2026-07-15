@@ -85,15 +85,20 @@ select_evidence(Evidence, Selectors) ->
 %% Build a callee-shaped open-row vector. Selectors identify the callee's
 %% positional static prefix: integers address the caller's own static prefix,
 %% while atoms select a concrete applied tag from the forwarded remainder.
-%% Every unselected caller entry follows as the callee's tagged open tail.
-reframe_evidence(Evidence, _StaticCount, Selectors) ->
+%% FramePlan names the source prefix length and the source-static positions
+%% that instantiate the target row variable. The already-tagged source tail is
+%% always forwarded; omitted declaration-prefix slots are not implicitly
+%% leaked into it.
+reframe_evidence(Evidence, {StaticCount, ForwardStaticPositions}, Selectors) ->
     SelectedPositions = unique_positions(
         [selector_position(Evidence, S) || S <- Selectors]),
     Selected = [selected_entry(Evidence, Selector,
                                selector_position(Evidence, Selector))
                 || Selector <- Selectors],
+    ForwardPositions = unique_positions(
+        ForwardStaticPositions ++ lists:seq(StaticCount + 1, tuple_size(Evidence))),
     Remaining = [element(I, Evidence)
-                 || I <- lists:seq(1, tuple_size(Evidence)),
+                 || I <- ForwardPositions,
                     not lists:member(I, SelectedPositions)],
     list_to_tuple(Selected ++ Remaining).
 

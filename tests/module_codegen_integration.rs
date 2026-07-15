@@ -4031,9 +4031,9 @@ run_miss () = choose [r1, r2] \"/nope\"
 /// params, but the let-binding lowering path called `lower_expr_value(value)`
 /// without an expected type, so the lambda lowering recipe at mod.rs never
 /// saw the effect row and emitted a `/1` closure. The fix passes the
-/// pattern's resolved type as the expected type, routing the lambda through
-/// `lower_expr_value_with_expected_type` which sets `lambda_effect_context`
-/// for the duration of lowering.
+/// pattern's resolved type into the contextual ABI planner; lambda lowering
+/// then reads the resulting `CallableAbi` instead of relying on mutable
+/// lowering context.
 #[test]
 fn let_bound_effectful_lambda_compiles_as_cps_value() {
     let main_src = "

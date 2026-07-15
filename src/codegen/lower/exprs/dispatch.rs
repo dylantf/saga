@@ -180,8 +180,9 @@ impl<'a> Lowerer<'a> {
                 });
                 let mut param_vars = lower_params(&flattened_params);
                 let mut is_effectful_lambda = false;
-                let shape = self.lambda_effect_context.take();
-                let captured_evidence = self.lambda_captured_evidence.take();
+                let shape = self.planned_function_value_evidence(expr.id);
+                let captured_evidence =
+                    self.function_value_captured_evidence.get(&expr.id).cloned();
                 let saved_evidence = self.current_evidence.clone();
                 let mut callback_tail_binding = None;
                 if let Some(shape) = shape {
@@ -198,7 +199,6 @@ impl<'a> Lowerer<'a> {
                     };
                     param_vars.push(evidence_param.clone());
                     param_vars.push("_ReturnK".to_string());
-                    let callback_static_effects = shape.static_effects.clone();
                     let evidence_var = captured_evidence.as_ref().map_or_else(
                         || evidence_param.clone(),
                         |captured| {
@@ -208,17 +208,13 @@ impl<'a> Lowerer<'a> {
                                 evidence::append_tail(
                                     CExpr::Var(evidence_param.clone()),
                                     CExpr::Var(captured.var.clone()),
-                                    &callback_static_effects,
+                                    &shape,
                                 ),
                             ));
                             merged
                         },
                     );
-                    self.current_evidence = Some(EvidenceCtx {
-                        var: evidence_var,
-                        layout: evidence::EvidenceLayout::new(shape.static_effects.iter().cloned()),
-                        is_open: shape.is_open_row,
-                    });
+                    self.current_evidence = Some(EvidenceFrame::new(evidence_var, shape.clone()));
                     is_effectful_lambda = true;
                 }
                 let effect_return_k =

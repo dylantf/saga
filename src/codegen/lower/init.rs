@@ -2,7 +2,7 @@
 /// function metadata, imports, and type constructors from the program's
 /// declarations and imported module codegen info.
 use crate::ast::{self, Decl};
-use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
+use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::util;
@@ -531,23 +531,24 @@ impl<'a> Lowerer<'a> {
                                 util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
                             })
                             .unwrap_or(false);
-                        let expanded_arity =
-                            self.expanded_arity_for_row(real_arity, &sorted_effects, is_open_row);
+                        let evidence = EvidenceAbi::new(sorted_effects, is_open_row);
+                        let abi = if evidence.static_slots().is_empty() && !evidence.is_open() {
+                            CallableAbi::pure(real_arity)
+                        } else {
+                            CallableAbi::cps(real_arity, evidence)
+                        };
                         self.fun_info.insert(
                             name.clone(),
-                            FunInfo {
-                                arity: expanded_arity,
-                                effects: sorted_effects,
-                                is_open_row,
-                                param_absorbed_effects: HashMap::new(),
-                                param_types: Vec::new(),
-                                dict_param_count: self
-                                    .check_result
+                            FunInfo::from_abi(
+                                abi,
+                                HashMap::new(),
+                                Vec::new(),
+                                self.check_result
                                     .env
                                     .get(name)
                                     .map(|scheme| util::dict_param_count(&scheme.constraints))
                                     .unwrap_or(0),
-                            },
+                            ),
                         );
                     } else {
                         let mut sorted_effects: Vec<String> = effects
@@ -607,9 +608,8 @@ impl<'a> Lowerer<'a> {
             let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for d in &info.trait_impl_dicts {
-                self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
-                    arity: d.arity,
-                    ..Default::default()
+                self.fun_info.entry(d.dict_name.clone()).or_insert_with(|| {
+                    FunInfo::from_abi(CallableAbi::pure(d.arity), HashMap::new(), Vec::new(), 0)
                 });
             }
             if mod_name.starts_with("Std.") {
@@ -639,27 +639,32 @@ impl<'a> Lowerer<'a> {
                 }
 
                 for (name, scheme) in &info.exports {
-                    let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-                    let effects = self.canonicalize_effects(effects);
-                    let shape = RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
-                        self.canonicalize_effects(effects)
-                    });
-                    let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
-                    let expanded_arity = shape.expanded_arity(base_arity) + dict_param_count;
+                    let callable_abi = info
+                        .fun_abis
+                        .iter()
+                        .find(|(fun_name, _)| fun_name == name)
+                        .map(|(_, abi)| abi.clone())
+                        .unwrap_or_else(|| {
+                            assert!(
+                                !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
+                                "missing exported CallableAbi for '{}.{}'",
+                                mod_name,
+                                name
+                            );
+                            CallableAbi::pure(dict_param_count)
+                        });
                     let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
                         .into_iter()
                         .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                         .collect();
-                    let fi = FunInfo {
-                        arity: expanded_arity,
-                        effects,
-                        is_open_row,
-                        param_absorbed_effects: param_absorbed,
-                        param_types: util::param_types_from_type(&scheme.ty),
+                    let fi = FunInfo::from_abi(
+                        callable_abi,
+                        param_absorbed,
+                        util::param_types_from_type(&scheme.ty),
                         dict_param_count,
-                    };
+                    );
                     let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
                     self.fun_info.entry(alias_qualified).or_insert(fi.clone());
                     let canonical = format!("{}.{}", mod_name, name);
@@ -743,25 +748,21 @@ impl<'a> Lowerer<'a> {
                 .module_semantics(origin_mod)
                 .map(|module| module.codegen_info)
                 .unwrap_or(info);
-            let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-            let mut effects = self.canonicalize_effects(effects);
-            if let Some((_, ann_effs)) = origin_info
-                .fun_effects
+            let dict_param_count = util::dict_param_count(&scheme.constraints);
+            let callable_abi = origin_info
+                .fun_abis
                 .iter()
                 .find(|(fun_name, _)| fun_name == origin_name)
-            {
-                for eff in ann_effs {
-                    if !effects.contains(eff) {
-                        effects.push(eff.clone());
-                    }
-                }
-            }
-            let shape = RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
-                self.canonicalize_effects(effects)
-            });
-            let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
-            let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity = shape.expanded_arity(base_arity) + dict_param_count;
+                .map(|(_, abi)| abi.clone())
+                .unwrap_or_else(|| {
+                    assert!(
+                        !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
+                        "missing exported CallableAbi for '{}.{}'",
+                        origin_mod,
+                        origin_name
+                    );
+                    CallableAbi::pure(dict_param_count)
+                });
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             let param_effs: HashMap<usize, Vec<String>> = param_effs
                 .into_iter()
@@ -769,14 +770,12 @@ impl<'a> Lowerer<'a> {
                 .collect();
 
             let alias_qualified = format!("{}.{}", prefix, name);
-            let fi = FunInfo {
-                arity: expanded_arity,
-                effects: effects.clone(),
-                is_open_row,
-                param_absorbed_effects: param_effs.clone(),
-                param_types: util::param_types_from_type(&scheme.ty),
+            let fi = FunInfo::from_abi(
+                callable_abi.clone(),
+                param_effs.clone(),
+                util::param_types_from_type(&scheme.ty),
                 dict_param_count,
-            };
+            );
             self.fun_info.insert(alias_qualified, fi.clone());
             let canonical = format!("{}.{}", origin_mod, origin_name);
             self.fun_info.entry(canonical).or_insert(fi);
@@ -784,14 +783,12 @@ impl<'a> Lowerer<'a> {
             if let Some(surface) = exposed_surface(name)
                 && exported_names.iter().any(|exported| *exported == name)
             {
-                self.fun_info.entry(surface).or_insert(FunInfo {
-                    arity: expanded_arity,
-                    effects,
-                    is_open_row,
-                    param_absorbed_effects: param_effs,
-                    param_types: util::param_types_from_type(&scheme.ty),
+                self.fun_info.entry(surface).or_insert(FunInfo::from_abi(
+                    callable_abi,
+                    param_effs,
+                    util::param_types_from_type(&scheme.ty),
                     dict_param_count,
-                });
+                ));
             }
         }
     }
@@ -823,9 +820,8 @@ impl<'a> Lowerer<'a> {
         }
 
         for d in &info.trait_impl_dicts {
-            self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
-                arity: d.arity,
-                ..Default::default()
+            self.fun_info.entry(d.dict_name.clone()).or_insert_with(|| {
+                FunInfo::from_abi(CallableAbi::pure(d.arity), HashMap::new(), Vec::new(), 0)
             });
         }
 
@@ -972,38 +968,38 @@ impl<'a> Lowerer<'a> {
                         base_arity = declared;
                     }
                 }
-                let shape = origin_scheme
+                let dict_param_count = origin_scheme
+                    .map(|scheme| util::dict_param_count(&scheme.constraints))
+                    .unwrap_or(0);
+                let mut callable_abi = origin_scheme
                     .map(|scheme| {
-                        RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
+                        let mut abi = CallableAbi::from_type(&scheme.ty, |effects| {
                             self.canonicalize_effects(effects)
-                        })
+                        });
+                        abi.user_arity += dict_param_count;
+                        abi
                     })
                     .unwrap_or_else(|| {
                         if effects.is_empty() {
-                            RuntimeFunctionShape::Pure
+                            CallableAbi::pure(base_arity)
                         } else {
-                            RuntimeFunctionShape::Cps(CpsShape {
-                                static_effects: effects.clone(),
-                                is_open_row: false,
-                            })
+                            CallableAbi::cps(base_arity, EvidenceAbi::closed(effects.clone()))
                         }
                     });
-                let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
-                let arity = shape.expanded_arity(base_arity);
+                callable_abi.user_arity = callable_abi.user_arity.max(base_arity);
+                if callable_abi.evidence.is_none() && !effects.is_empty() {
+                    callable_abi.evidence = Some(EvidenceAbi::closed(effects.clone()));
+                }
                 let param_types = origin_scheme
                     .map(|scheme| util::param_types_from_type(&scheme.ty))
                     .unwrap_or_default();
                 let canonical = format!("{}.{}", source_module_name, name);
-                self.fun_info.entry(canonical).or_insert(FunInfo {
-                    arity,
-                    effects,
-                    is_open_row,
+                self.fun_info.entry(canonical).or_insert(FunInfo::from_abi(
+                    callable_abi,
                     param_absorbed_effects,
                     param_types,
-                    dict_param_count: origin_scheme
-                        .map(|scheme| util::dict_param_count(&scheme.constraints))
-                        .unwrap_or(0),
-                });
+                    dict_param_count,
+                ));
             }
         }
     }

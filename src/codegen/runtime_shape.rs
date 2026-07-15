@@ -2,18 +2,135 @@ use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 use crate::typechecker::Type;
 
-/// Runtime CPS convention for a Saga function value.
+/// Authoritative evidence convention for a Saga CPS callable or in-scope
+/// evidence frame.
 ///
 /// `static_effects` is the canonical, statically-known prefix of the effect
 /// row. `is_open_row` means callers must forward their ambient evidence tail
 /// in addition to that prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CpsShape {
-    pub static_effects: Vec<String>,
-    pub is_open_row: bool,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvidenceAbi {
+    static_effects: Vec<String>,
+    is_open_row: bool,
 }
 
-impl CpsShape {
+impl EvidenceAbi {
+    pub fn new<I, S>(effects: I, is_open_row: bool) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut static_effects: Vec<String> = effects.into_iter().map(Into::into).collect();
+        static_effects.sort();
+        static_effects.dedup();
+        Self {
+            static_effects,
+            is_open_row,
+        }
+    }
+
+    pub fn closed<I, S>(effects: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new(effects, false)
+    }
+
+    pub fn static_slots(&self) -> &[String] {
+        &self.static_effects
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.is_open_row
+    }
+
+    /// Record a handler installed into this frame's ABI.
+    ///
+    /// An open frame may carry one bare/generalized family placeholder for a
+    /// caller-specialized applied effect. Installing the concrete application
+    /// specializes that unique placeholder. Closed frames describe actual
+    /// runtime entries, so only exact identities replace.
+    fn install(&mut self, installed: String) {
+        if self.static_effects.contains(&installed) {
+            return;
+        }
+
+        if self.is_open_row {
+            let family = crate::typechecker::applied_effect_family(&installed);
+            let same_family = self
+                .static_effects
+                .iter()
+                .enumerate()
+                .filter(|(_, effect)| crate::typechecker::applied_effect_family(effect) == family)
+                .map(|(idx, _)| idx)
+                .collect::<Vec<_>>();
+
+            if same_family.len() == 1
+                && is_effect_placeholder(&self.static_effects[same_family[0]])
+                && !is_effect_placeholder(&installed)
+            {
+                self.static_effects[same_family[0]] = installed;
+            } else {
+                self.static_effects.push(installed);
+            }
+        } else {
+            self.static_effects.push(installed);
+        }
+
+        self.static_effects.sort();
+        self.static_effects.dedup();
+    }
+
+    /// Plan one handler installation and the ABI of the resulting frame.
+    ///
+    /// The runtime insertion operation and the compile-time target shape must
+    /// be derived together: an open frame inserts into its known prefix while
+    /// a closed frame may be rebuilt in canonical order.
+    pub fn plan_install(&self, installed: impl Into<String>) -> EvidenceInstallPlan {
+        let installed = installed.into();
+        let kind = if self.is_open_row {
+            EvidenceInstallKind::StaticPrefix {
+                source_static_count: self.static_slots().len(),
+            }
+        } else {
+            EvidenceInstallKind::Canonical
+        };
+        let mut target = self.clone();
+        target.install(installed.clone());
+        EvidenceInstallPlan {
+            source: self.clone(),
+            target,
+            installed,
+            kind,
+        }
+    }
+
+    /// Resolve an operation's effect identity against this frame's static
+    /// prefix. Exact identities are positional. A unique generic family slot
+    /// is also positional, but a distinct concrete sibling must be found by
+    /// its runtime tag (normally in an open tail).
+    pub fn resolve_slot(&self, effect: &str) -> EvidenceSlotResolution {
+        if let Some(index) = self.static_slots().iter().position(|tag| tag == effect) {
+            return EvidenceSlotResolution::Static(index + 1);
+        }
+
+        let family = crate::typechecker::applied_effect_family(effect);
+        let family_matches = self
+            .static_slots()
+            .iter()
+            .enumerate()
+            .filter(|(_, tag)| crate::typechecker::applied_effect_family(tag) == family)
+            .collect::<Vec<_>>();
+        if let [(index, tag)] = family_matches.as_slice()
+            && (is_effect_placeholder(tag) || is_effect_placeholder(effect))
+        {
+            EvidenceSlotResolution::Static(*index + 1)
+        } else {
+            EvidenceSlotResolution::DynamicTag
+        }
+    }
+
     /// Derive the runtime shape of a lambda placed into an expected callback
     /// slot. The expected type defines the positional ABI; the inferred type
     /// contributes effects absorbed by an open tail.
@@ -58,33 +175,262 @@ impl CpsShape {
     }
 }
 
-/// Runtime calling shape for a function value or resolved callable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeFunctionShape {
-    Pure,
-    Cps(CpsShape),
-    Intrinsic,
+pub enum EvidenceInstallKind {
+    Canonical,
+    StaticPrefix { source_static_count: usize },
 }
 
-impl RuntimeFunctionShape {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceInstallPlan {
+    pub source: EvidenceAbi,
+    pub target: EvidenceAbi,
+    pub installed: String,
+    pub kind: EvidenceInstallKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceSlotResolution {
+    Static(usize),
+    DynamicTag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceSelector {
+    Position(usize),
+    Relabel { position: usize, target: String },
+    DynamicTag(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceReframeKind {
+    Identity,
+    SelectClosed {
+        selectors: Vec<EvidenceSelector>,
+    },
+    ReframeOpen {
+        source_static_count: usize,
+        forward_static_positions: Vec<usize>,
+        selectors: Vec<EvidenceSelector>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceReframePlan {
+    pub source: EvidenceAbi,
+    pub target: EvidenceAbi,
+    pub kind: EvidenceReframeKind,
+}
+
+impl EvidenceReframePlan {
+    pub fn between(source: &EvidenceAbi, target: &EvidenceAbi) -> Self {
+        let kind = if source == target {
+            EvidenceReframeKind::Identity
+        } else {
+            let selectors = target
+                .static_slots()
+                .iter()
+                .map(|effect| Self::selector_for(source, target, effect))
+                .collect();
+            if target.is_open_row {
+                EvidenceReframeKind::ReframeOpen {
+                    source_static_count: source.static_slots().len(),
+                    // A closed caller has no pre-existing tail: its unselected
+                    // static entries are precisely the target row variable's
+                    // concrete contents. In an open caller, the target row
+                    // variable denotes the already-tagged source tail; source
+                    // declaration slots (for example Router.Skip) are not part
+                    // of it and must not leak across the boundary.
+                    forward_static_positions: if source.is_open() {
+                        Vec::new()
+                    } else {
+                        (1..=source.static_slots().len()).collect()
+                    },
+                    selectors,
+                }
+            } else {
+                EvidenceReframeKind::SelectClosed { selectors }
+            }
+        };
+        let plan = Self {
+            source: source.clone(),
+            target: target.clone(),
+            kind,
+        };
+        plan.assert_valid();
+        plan
+    }
+
+    fn assert_valid(&self) {
+        let (selectors, _forward_static_positions): (&[EvidenceSelector], &[usize]) = match &self
+            .kind
+        {
+            EvidenceReframeKind::Identity => {
+                assert_eq!(
+                    self.source, self.target,
+                    "internal ABI planning error: identity reframe requires equal ABIs"
+                );
+                return;
+            }
+            EvidenceReframeKind::SelectClosed { selectors } => (selectors, &[]),
+            EvidenceReframeKind::ReframeOpen {
+                source_static_count,
+                forward_static_positions,
+                selectors,
+            } => {
+                assert_eq!(
+                    *source_static_count,
+                    self.source.static_slots().len(),
+                    "internal ABI planning error: reframe source prefix length disagrees with source ABI"
+                );
+                assert!(
+                    self.target.is_open(),
+                    "internal ABI planning error: open reframe requires an open target ABI"
+                );
+                assert!(
+                    forward_static_positions
+                        .windows(2)
+                        .all(|positions| positions[0] < positions[1]),
+                    "internal ABI planning error: forwarded static positions must be unique and ordered"
+                );
+                for position in forward_static_positions {
+                    assert!(
+                        (1..=*source_static_count).contains(position),
+                        "internal ABI planning error: forwarded static position {position} is outside source prefix of {source_static_count}"
+                    );
+                }
+                (selectors, forward_static_positions)
+            }
+        };
+
+        assert_eq!(
+            selectors.len(),
+            self.target.static_slots().len(),
+            "internal ABI planning error: selector count must equal target static-slot count"
+        );
+
+        let mut selected_static_positions = std::collections::BTreeSet::new();
+        for selector in selectors {
+            let position = match selector {
+                EvidenceSelector::Position(position)
+                | EvidenceSelector::Relabel { position, .. } => Some(*position),
+                EvidenceSelector::DynamicTag(_) => None,
+            };
+            if let Some(position) = position {
+                assert!(
+                    (1..=self.source.static_slots().len()).contains(&position),
+                    "internal ABI planning error: selector position {position} is outside source prefix"
+                );
+                assert!(
+                    selected_static_positions.insert(position),
+                    "internal ABI planning error: source static slot {position} selected for multiple target slots"
+                );
+            }
+        }
+    }
+
+    fn selector_for(
+        source: &EvidenceAbi,
+        target_abi: &EvidenceAbi,
+        target: &str,
+    ) -> EvidenceSelector {
+        if let Some(index) = source.static_slots().iter().position(|tag| tag == target) {
+            return EvidenceSelector::Position(index + 1);
+        }
+        let family = crate::typechecker::applied_effect_family(target);
+        let family_matches = source
+            .static_slots()
+            .iter()
+            .enumerate()
+            .filter(|(_, tag)| crate::typechecker::applied_effect_family(tag) == family)
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>();
+        if (!source.is_open_row || target_abi.is_open_row)
+            && let [position] = family_matches.as_slice()
+            && (is_effect_placeholder(&source.static_slots()[*position - 1])
+                || is_effect_placeholder(target))
+        {
+            EvidenceSelector::Relabel {
+                position: *position,
+                target: target.to_string(),
+            }
+        } else {
+            EvidenceSelector::DynamicTag(target.to_string())
+        }
+    }
+}
+
+fn is_effect_placeholder(tag: &str) -> bool {
+    !tag.contains('<') || tag.contains('$')
+}
+
+/// Calling convention for one Saga callable.
+///
+/// `user_arity` never includes the evidence frame or success continuation.
+/// Effectful callables have one `EvidenceAbi` and therefore exactly two
+/// additional Core parameters. Intrinsics remain explicit because they bypass
+/// the normal Saga callable path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallableAbi {
+    pub user_arity: usize,
+    pub evidence: Option<EvidenceAbi>,
+    pub is_intrinsic: bool,
+}
+
+impl Default for CallableAbi {
+    fn default() -> Self {
+        Self::pure(0)
+    }
+}
+
+impl CallableAbi {
+    pub fn pure(user_arity: usize) -> Self {
+        Self {
+            user_arity,
+            evidence: None,
+            is_intrinsic: false,
+        }
+    }
+
+    pub fn cps(user_arity: usize, evidence: EvidenceAbi) -> Self {
+        Self {
+            user_arity,
+            evidence: Some(evidence),
+            is_intrinsic: false,
+        }
+    }
+
+    pub fn intrinsic(user_arity: usize) -> Self {
+        Self {
+            user_arity,
+            evidence: None,
+            is_intrinsic: true,
+        }
+    }
+
     pub fn from_type(
         ty: &Type,
         mut canonicalize_effects: impl FnMut(Vec<String>) -> Vec<String>,
     ) -> Self {
         if !matches!(ty, Type::Fun(..)) {
-            return RuntimeFunctionShape::Pure;
+            return Self::pure(0);
         }
-        let (_, effects) = util::arity_and_effects_from_type(ty);
-        let static_effects = canonicalize_effects(effects);
-        let is_open_row = util::has_open_effect_row(ty);
-        if static_effects.is_empty() && !is_open_row {
-            RuntimeFunctionShape::Pure
+        let (user_arity, effects) = util::arity_and_effects_from_type(ty);
+        let evidence =
+            EvidenceAbi::new(canonicalize_effects(effects), util::has_open_effect_row(ty));
+        if evidence.static_effects.is_empty() && !evidence.is_open_row {
+            Self::pure(user_arity)
         } else {
-            RuntimeFunctionShape::Cps(CpsShape {
-                static_effects,
-                is_open_row,
-            })
+            Self::cps(user_arity, evidence)
         }
+    }
+
+    pub fn expanded_arity(&self) -> usize {
+        self.user_arity + usize::from(self.evidence.is_some()) * 2
+    }
+
+    pub fn cps_evidence(&self) -> Option<EvidenceAbi> {
+        self.evidence.clone()
     }
 
     pub fn from_resolved_symbol(
@@ -93,103 +439,257 @@ impl RuntimeFunctionShape {
         mut canonicalize_effects: impl FnMut(Vec<String>) -> Vec<String>,
     ) -> Self {
         match &resolved.kind {
-            ResolvedCodegenKind::Intrinsic { .. } => RuntimeFunctionShape::Intrinsic,
-            ResolvedCodegenKind::BeamFunction { effects, .. }
-            | ResolvedCodegenKind::ExternalFunction { effects, .. } => {
-                let fallback = fallback_ty
-                    .map(|ty| RuntimeFunctionShape::from_type(ty, &mut canonicalize_effects));
-                let fallback_shape = fallback.and_then(|shape| shape.cps_shape());
+            ResolvedCodegenKind::Intrinsic { arity, .. } => CallableAbi::intrinsic(*arity),
+            ResolvedCodegenKind::BeamFunction { abi, .. }
+            | ResolvedCodegenKind::ExternalFunction { abi, .. } => {
+                let fallback =
+                    fallback_ty.map(|ty| CallableAbi::from_type(ty, &mut canonicalize_effects));
+                let fallback_evidence = fallback.and_then(|abi| abi.evidence);
                 // The occurrence type carries the caller's instantiation of
                 // parameterized effects; exported symbol metadata only carries
                 // the generic declaration. Prefer the occurrence whenever it
                 // is available so caller-side evidence projection selects the
                 // concrete applied slots.
-                let static_effects = fallback_shape
-                    .as_ref()
-                    .map(|shape| shape.static_effects.clone())
-                    .unwrap_or_else(|| canonicalize_effects(effects.clone()));
-                let is_open_row = fallback_shape.is_some_and(|shape| shape.is_open_row);
-                if static_effects.is_empty() && !is_open_row {
-                    RuntimeFunctionShape::Pure
-                } else {
-                    RuntimeFunctionShape::Cps(CpsShape {
-                        static_effects,
-                        is_open_row,
-                    })
+                let mut instantiated = abi.clone();
+                if fallback_evidence.is_some() {
+                    instantiated.evidence = fallback_evidence;
                 }
+                instantiated
             }
-        }
-    }
-
-    pub fn cps_shape(&self) -> Option<CpsShape> {
-        match self {
-            RuntimeFunctionShape::Cps(shape) => Some(shape.clone()),
-            RuntimeFunctionShape::Pure | RuntimeFunctionShape::Intrinsic => None,
-        }
-    }
-
-    pub fn expanded_arity(&self, base_arity: usize) -> usize {
-        match self {
-            RuntimeFunctionShape::Cps(_) => base_arity + 2,
-            RuntimeFunctionShape::Pure | RuntimeFunctionShape::Intrinsic => base_arity,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CpsShape;
+    use super::{
+        CallableAbi, EvidenceAbi, EvidenceInstallKind, EvidenceReframeKind, EvidenceReframePlan,
+        EvidenceSelector, EvidenceSlotResolution,
+    };
+
+    #[test]
+    fn callable_abi_expands_only_cps_callables() {
+        let pure = CallableAbi::pure(2);
+        assert_eq!(pure.expanded_arity(), 2);
+        assert_eq!(pure.cps_evidence(), None);
+
+        let cps = CallableAbi::cps(2, EvidenceAbi::new(["Main.Repo"], true));
+        assert_eq!(cps.expanded_arity(), 4);
+        assert_eq!(
+            cps.cps_evidence(),
+            Some(EvidenceAbi::new(["Main.Repo"], true))
+        );
+    }
+
+    #[test]
+    fn reframe_plan_reuses_identical_abi() {
+        let abi = EvidenceAbi::new(["Main.Fail<Std.Int.Int>"], true);
+        assert_eq!(
+            EvidenceReframePlan::between(&abi, &abi).kind,
+            EvidenceReframeKind::Identity
+        );
+    }
+
+    #[test]
+    fn reframe_plan_distinguishes_closed_extras_from_an_open_source_prefix() {
+        let target = EvidenceAbi::new(["Main.A"], true);
+        let closed = EvidenceAbi::closed(["Main.A", "Main.B"]);
+        let open = EvidenceAbi::new(["Main.A", "Main.B"], true);
+
+        assert_eq!(
+            EvidenceReframePlan::between(&closed, &target).kind,
+            EvidenceReframeKind::ReframeOpen {
+                source_static_count: 2,
+                forward_static_positions: vec![1, 2],
+                selectors: vec![EvidenceSelector::Position(1)],
+            }
+        );
+        assert_eq!(
+            EvidenceReframePlan::between(&open, &target).kind,
+            EvidenceReframeKind::ReframeOpen {
+                source_static_count: 2,
+                forward_static_positions: vec![],
+                selectors: vec![EvidenceSelector::Position(1)],
+            }
+        );
+    }
+
+    #[test]
+    fn reframe_plan_relabels_a_unique_generic_family_slot() {
+        let source = EvidenceAbi::new(["Main.Rollback<$1>"], true);
+        let target = EvidenceAbi::new(["Main.Rollback<Std.String.String>"], true);
+        assert_eq!(
+            EvidenceReframePlan::between(&source, &target).kind,
+            EvidenceReframeKind::ReframeOpen {
+                source_static_count: 1,
+                forward_static_positions: vec![],
+                selectors: vec![EvidenceSelector::Relabel {
+                    position: 1,
+                    target: "Main.Rollback<Std.String.String>".into(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn reframe_plan_uses_dynamic_tag_for_missing_or_ambiguous_static_family() {
+        let missing = EvidenceAbi::new(["Main.Repo"], true);
+        let concrete_sibling = EvidenceAbi::new(["Main.Fail<Std.String.String>"], true);
+        let ambiguous = EvidenceAbi::new(
+            ["Main.Fail<Std.Int.Int>", "Main.Fail<Std.String.String>"],
+            true,
+        );
+        let target = EvidenceAbi::new(["Main.Fail<Std.Bool.Bool>"], true);
+        for source in [&missing, &concrete_sibling, &ambiguous] {
+            assert_eq!(
+                EvidenceReframePlan::between(source, &target).kind,
+                EvidenceReframeKind::ReframeOpen {
+                    source_static_count: source.static_slots().len(),
+                    forward_static_positions: vec![],
+                    selectors: vec![EvidenceSelector::DynamicTag(
+                        "Main.Fail<Std.Bool.Bool>".into()
+                    )],
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn reframe_plan_closes_an_open_source_with_positional_selection() {
+        let source = EvidenceAbi::new(["Main.Fail", "Main.Repo"], true);
+        let target = EvidenceAbi::closed(["Main.Repo"]);
+        assert_eq!(
+            EvidenceReframePlan::between(&source, &target).kind,
+            EvidenceReframeKind::SelectClosed {
+                selectors: vec![EvidenceSelector::Position(2)]
+            }
+        );
+    }
+
+    #[test]
+    fn reframe_plan_projects_first_middle_and_last_closed_slots() {
+        let source = EvidenceAbi::closed(["Main.A", "Main.B", "Main.C"]);
+        for (target, expected_position) in [
+            (EvidenceAbi::closed(["Main.A"]), 1),
+            (EvidenceAbi::closed(["Main.B"]), 2),
+            (EvidenceAbi::closed(["Main.C"]), 3),
+        ] {
+            assert_eq!(
+                EvidenceReframePlan::between(&source, &target).kind,
+                EvidenceReframeKind::SelectClosed {
+                    selectors: vec![EvidenceSelector::Position(expected_position)]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn reframe_plan_searches_open_tail_before_relabeling_a_placeholder() {
+        let source = EvidenceAbi::new(["Main.Fail"], true);
+        let target = EvidenceAbi::closed(["Main.Fail<Std.Int.Int>"]);
+        assert_eq!(
+            EvidenceReframePlan::between(&source, &target).kind,
+            EvidenceReframeKind::SelectClosed {
+                selectors: vec![EvidenceSelector::DynamicTag(
+                    "Main.Fail<Std.Int.Int>".into()
+                )]
+            }
+        );
+    }
+
+    #[test]
+    fn installation_plan_couples_runtime_strategy_and_target_abi() {
+        let open = EvidenceAbi::new(["Main.Fail"], true);
+        let open_plan = open.plan_install("Main.Fail<Std.String.String>");
+        assert_eq!(
+            open_plan.kind,
+            EvidenceInstallKind::StaticPrefix {
+                source_static_count: 1
+            }
+        );
+        assert_eq!(
+            open_plan.target,
+            EvidenceAbi::new(["Main.Fail<Std.String.String>"], true)
+        );
+
+        let closed = EvidenceAbi::closed(["Main.Repo"]);
+        let closed_plan = closed.plan_install("Main.Fail<Std.String.String>");
+        assert_eq!(closed_plan.kind, EvidenceInstallKind::Canonical);
+        assert_eq!(
+            closed_plan.target,
+            EvidenceAbi::closed(["Main.Fail<Std.String.String>", "Main.Repo"])
+        );
+    }
+
+    #[test]
+    fn slot_resolution_does_not_steal_a_concrete_sibling() {
+        let abi = EvidenceAbi::new(["Main.Fail<Std.String.String>"], true);
+        assert_eq!(
+            abi.resolve_slot("Main.Fail<Std.String.String>"),
+            EvidenceSlotResolution::Static(1)
+        );
+        assert_eq!(
+            abi.resolve_slot("Main.Fail<Std.Int.Int>"),
+            EvidenceSlotResolution::DynamicTag
+        );
+
+        let generic = EvidenceAbi::new(["Main.Fail<$1>"], true);
+        assert_eq!(
+            generic.resolve_slot("Main.Fail<Std.Int.Int>"),
+            EvidenceSlotResolution::Static(1)
+        );
+    }
 
     #[test]
     fn lambda_boundary_keeps_unused_expected_slots() {
-        let expected = CpsShape {
+        let expected = EvidenceAbi {
             static_effects: vec![
                 "Main.Repo".into(),
                 "Main.Rollback<Std.String.String>".into(),
             ],
             is_open_row: true,
         };
-        let inferred = CpsShape {
+        let inferred = EvidenceAbi {
             static_effects: vec!["Main.Rollback<Std.String.String>".into()],
             is_open_row: false,
         };
 
         assert_eq!(
-            CpsShape::for_lambda_boundary(&expected, &inferred),
+            EvidenceAbi::for_lambda_boundary(&expected, &inferred),
             expected
         );
     }
 
     #[test]
     fn lambda_boundary_keeps_distinct_concrete_family_slots() {
-        let expected = CpsShape {
+        let expected = EvidenceAbi {
             static_effects: vec!["Main.Fail<Std.Int.Int>".into()],
             is_open_row: true,
         };
-        let inferred = CpsShape {
+        let inferred = EvidenceAbi {
             static_effects: vec!["Main.Fail<Std.String.String>".into()],
             is_open_row: false,
         };
 
         assert_eq!(
-            CpsShape::for_lambda_boundary(&expected, &inferred).static_effects,
+            EvidenceAbi::for_lambda_boundary(&expected, &inferred).static_effects,
             vec!["Main.Fail<Std.Int.Int>", "Main.Fail<Std.String.String>"]
         );
     }
 
     #[test]
     fn lambda_boundary_collapses_generic_and_concrete_family_slot() {
-        let expected = CpsShape {
+        let expected = EvidenceAbi {
             static_effects: vec!["Main.Rollback<$1>".into()],
             is_open_row: false,
         };
-        let inferred = CpsShape {
+        let inferred = EvidenceAbi {
             static_effects: vec!["Main.Rollback<Std.String.String>".into()],
             is_open_row: false,
         };
 
         assert_eq!(
-            CpsShape::for_lambda_boundary(&expected, &inferred).static_effects,
+            EvidenceAbi::for_lambda_boundary(&expected, &inferred).static_effects,
             vec!["Main.Rollback<Std.String.String>"]
         );
     }

@@ -90,6 +90,10 @@ pub struct ModuleCodegenInfo {
     pub handler_origins: Vec<(String, String)>,
     /// Public function effect annotations: name -> sorted effect names.
     pub fun_effects: Vec<(String, Vec<String>)>,
+    /// Authoritative declaration ABI for each public Saga callable. The name
+    /// is the module's exported surface name; re-exports resolve through
+    /// `export_origins` before consuming the origin module's ABI.
+    pub fun_abis: Vec<(String, crate::codegen::runtime_shape::CallableAbi)>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts exported by this module.
@@ -521,6 +525,27 @@ pub(super) fn collect_codegen_info(
         }
     }
 
+    let fun_abis = exports
+        .bindings
+        .iter()
+        .filter(|(_, scheme)| matches!(scheme.ty, Type::Fun(..)))
+        .map(|(name, scheme)| {
+            let mut abi =
+                crate::codegen::runtime_shape::CallableAbi::from_type(&scheme.ty, |effects| {
+                    effects
+                        .into_iter()
+                        .map(|effect| {
+                            let family = super::super::applied_effect_family(&effect);
+                            let canonical = scope_map.resolve_effect(family).unwrap_or(family);
+                            format!("{}{}", canonical, &effect[family.len()..])
+                        })
+                        .collect()
+                });
+            abi.user_arity += crate::codegen::lower::util::dict_param_count(&scheme.constraints);
+            (name.clone(), abi)
+        })
+        .collect();
+
     ModuleCodegenInfo {
         exports: exports.bindings.clone(),
         export_origins: exports
@@ -542,6 +567,7 @@ pub(super) fn collect_codegen_info(
             .map(|(surface, origin)| (surface.clone(), origin.clone()))
             .collect(),
         fun_effects,
+        fun_abis,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
         external_funs,

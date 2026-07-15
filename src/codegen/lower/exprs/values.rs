@@ -53,7 +53,7 @@ impl<'a> Lowerer<'a> {
             _ => {
                 // ADT constructor: tagged tuple {name, arg1, arg2, ...}
                 // Look up field types from the constructor's scheme so that
-                // lambda args inherit a `lambda_effect_context` and get the
+                // lambda args receive a contextual function-value ABI and get the
                 // proper CPS expansion (evidence + _ReturnK).
                 let field_tys: Vec<Option<crate::typechecker::Type>> = {
                     let scheme = self.constructor_scheme_for(name);

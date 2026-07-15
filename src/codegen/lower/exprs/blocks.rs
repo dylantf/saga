@@ -3,7 +3,6 @@ use crate::ast::{Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
-use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
@@ -52,67 +51,47 @@ impl<'a> Lowerer<'a> {
 
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
-                let (arity, effects, is_open_row, param_absorbed_effects, param_types) = self
+                let callable_abi = self
+                    .effect_abi_plan
+                    .declaration(fun_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "internal ABI planning error: missing local declaration ABI for {fun_id:?}"
+                        )
+                    });
+                debug_assert_eq!(callable_abi.user_arity, source_arity);
+                let (param_absorbed_effects, param_types) = self
                     .check_result
                     .resolved_type_for_node(fun_id)
                     .map(|ty| {
-                        let (base_arity, effects) = arity_and_effects_from_type(&ty);
-                        let effects = self.canonicalize_effects(effects);
-                        let shape = RuntimeFunctionShape::from_type(&ty, |effects| {
-                            self.canonicalize_effects(effects)
-                        });
-                        let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
-                        let expanded_arity = shape.expanded_arity(base_arity);
                         let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                             .collect::<HashMap<usize, Vec<String>>>();
                         let param_types = param_types_from_type(&ty);
-                        (
-                            expanded_arity,
-                            effects,
-                            is_open_row,
-                            param_absorbed_effects,
-                            param_types,
-                        )
+                        (param_absorbed_effects, param_types)
                     })
-                    .unwrap_or_else(|| {
-                        (source_arity, Vec::new(), false, HashMap::new(), Vec::new())
-                    });
+                    .unwrap_or_else(|| (HashMap::new(), Vec::new()));
+                let arity = callable_abi.expanded_arity();
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
 
                 // Register in fun_info BEFORE lowering body so recursive
                 // calls are recognized as saturated apply
-                self.fun_info.insert(
-                    fun_name.clone(),
-                    FunInfo {
-                        arity,
-                        effects: effects.clone(),
-                        is_open_row,
-                        param_absorbed_effects: param_absorbed_effects.clone(),
-                        param_types: param_types.clone(),
-                        dict_param_count: 0,
-                    },
-                );
+                let fun_info =
+                    FunInfo::from_abi(callable_abi.clone(), param_absorbed_effects, param_types, 0);
+                self.fun_info.insert(fun_name.clone(), fun_info);
 
-                let handler_ops = self.effect_handler_ops(&effects);
-
-                let has_effects = !handler_ops.is_empty() || is_open_row;
-                let base_arity = arity - if has_effects { 2 } else { 0 };
+                let has_effects = callable_abi.evidence.is_some();
+                let base_arity = callable_abi.user_arity;
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 
                 // Install the evidence context for the body of effectful
                 // local functions. Op-call emission inside the body reads
                 // handler closures out of `current_evidence`.
                 let saved_evidence = self.current_evidence.clone();
-                if has_effects {
-                    self.current_evidence = Some(EvidenceCtx {
-                        var: "_Evidence".to_string(),
-                        layout: crate::codegen::lower::evidence::EvidenceLayout::new(
-                            effects.iter().cloned(),
-                        ),
-                        is_open: is_open_row,
-                    });
+                if let Some(evidence_abi) = callable_abi.evidence.clone() {
+                    self.current_evidence = Some(EvidenceFrame::new("_Evidence", evidence_abi));
                 }
 
                 let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {

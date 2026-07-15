@@ -4,6 +4,7 @@ use crate::codegen::call_effects;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use crate::codegen::runtime_shape::EvidenceSlotResolution;
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn push_effect_op_trace(
@@ -27,10 +28,13 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn evidence_lookup_trace_shape(&self, effect_name: &str) -> String {
         match &self.current_evidence {
-            Some(ctx) if !ctx.is_open && ctx.layout.tags().iter().any(|tag| tag == effect_name) => {
+            Some(ctx)
+                if !ctx.abi.is_open()
+                    && ctx.abi.static_slots().iter().any(|tag| tag == effect_name) =>
+            {
                 "evidence-lookup(static-index)".to_string()
             }
-            Some(ctx) if ctx.is_open => "evidence-lookup(open-row-bridge)".to_string(),
+            Some(ctx) if ctx.abi.is_open() => "evidence-lookup(open-row-bridge)".to_string(),
             Some(_) => "evidence-lookup(runtime-bridge)".to_string(),
             None => "evidence-lookup(missing-evidence)".to_string(),
         }
@@ -453,45 +457,29 @@ impl<'a> Lowerer<'a> {
             .clone()
             .unwrap_or_else(|| panic!("no evidence in scope for op '{}.{}'", effect_name, op_name));
         let op_index = self.evidence_op_index(effect_name, op_name) as i64;
-        let layout_tag = if ev_ctx.layout.tags().iter().any(|tag| tag == effect_name) {
-            Some(effect_name)
-        } else {
-            let family = crate::typechecker::applied_effect_family(effect_name);
-            let mut matches = ev_ctx
-                .layout
-                .tags()
-                .iter()
-                .filter(|tag| crate::typechecker::applied_effect_family(tag) == family);
-            match (matches.next(), matches.next()) {
-                (Some(tag), None) => Some(tag.as_str()),
-                _ => None,
-            }
-        };
-        let entry_op_tuple: CExpr = if let Some(layout_tag) = layout_tag {
-            let eff_idx =
-                crate::codegen::lower::evidence::evidence_index_of(&ev_ctx.layout, layout_tag)
-                    as i64;
-            cerl_call(
-                "erlang",
-                "element",
-                vec![
-                    CExpr::Lit(CLit::Int(2)),
-                    cerl_call(
-                        "erlang",
-                        "element",
-                        vec![
-                            CExpr::Lit(CLit::Int(eff_idx)),
-                            CExpr::Var(ev_ctx.var.clone()),
-                        ],
-                    ),
-                ],
-            )
-        } else {
-            crate::codegen::lower::evidence::find_evidence(
-                CExpr::Var(ev_ctx.var.clone()),
-                effect_name,
-            )
-        };
+        let entry_op_tuple: CExpr =
+            if let EvidenceSlotResolution::Static(eff_idx) = ev_ctx.abi.resolve_slot(effect_name) {
+                cerl_call(
+                    "erlang",
+                    "element",
+                    vec![
+                        CExpr::Lit(CLit::Int(2)),
+                        cerl_call(
+                            "erlang",
+                            "element",
+                            vec![
+                                CExpr::Lit(CLit::Int(eff_idx as i64)),
+                                CExpr::Var(ev_ctx.var.clone()),
+                            ],
+                        ),
+                    ],
+                )
+            } else {
+                crate::codegen::lower::evidence::find_evidence(
+                    CExpr::Var(ev_ctx.var.clone()),
+                    effect_name,
+                )
+            };
         cerl_call(
             "erlang",
             "element",
