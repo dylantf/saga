@@ -265,6 +265,40 @@ Transforms to Core Erlang where the function takes an evidence vector and a retu
 
 `_Evidence` carries every effect handler in scope; `_ReturnK` runs on successful completion at the enclosing handler boundary. Both are explicit parameters — no thread-local state, no implicit context.
 
+### Authoritative Evidence ABI
+
+The compiler keeps inferred body effects separate from the runtime convention
+of a callable:
+
+- `EvidenceAbi` describes the canonical static prefix and whether a tagged
+  open tail follows it.
+- `CallableAbi` describes user arity and whether the callable receives
+  `_Evidence` and `_ReturnK`.
+- `EvidenceFrame` identifies the Core variable currently carrying a particular
+  `EvidenceAbi`.
+- `EffectAbiPlan` records declaration ABIs, instantiated call ABIs, and
+  contextual function-value ABIs by `NodeId`.
+- `EvidenceReframePlan` is the single source-to-target slot mapping used by
+  calls and CPS adapters.
+
+A callable body indexes evidence using its `CallableAbi`, never the narrower
+set of effects that happened to be performed in that body. Handler insertion
+updates the runtime tuple and the compile-time `EvidenceFrame` together.
+Exported `CallableAbi` metadata is preserved through imports and re-exports;
+the caller's occurrence type supplies concrete applied-effect instantiations.
+
+The plan is completed in two pre-lowering stages. Call classification records
+declarations, inferred callable views, and instantiated call targets. A
+contextual pass then propagates the consuming declaration's expected type
+through calls and containers and records each function value's implementation
+ABI separately from its exposed boundary ABI. Closed callback declarations
+stay closed; an open declaration such as `{Skip, ..e}` keeps its pinned static
+prefix and open tail even when the stored expression has inferred a concrete
+closed set such as `{Foo, Skip}`. Core lowering only reads and asserts this
+completed metadata. Imported named-handler bodies are included under their
+defining module's semantic context; compiler intrinsics retain their explicitly
+registered native callback convention.
+
 ### Evidence Vector Representation
 
 The evidence vector is a BEAM tuple of per-effect entries. Effect arguments
@@ -331,12 +365,16 @@ apply Callee(Args, CallEvidence, ReturnK)
 Selectors are one-based positions in the caller's static prefix, concrete
 applied-effect atoms found in its tagged remainder, or `{Position, Tag}` pairs
 when a known static family slot must be relabeled. Selected entries are ordered
-as the callee expects; every unselected entry is appended as its open tail. An
+as the callee expects. The reframe plan also names which unselected source
+static positions instantiate the target row variable: a closed caller's extra
+slots can become that tail, while an already-open caller forwards its tagged
+tail without leaking handled or omitted declaration-prefix slots into it. An
 atom selector relabels a unique polymorphic-family entry to the concrete
 applied identity requested by the callee; a position/tag pair does the same
 without searching a forwarded tail that may contain a sibling application.
 Closed-row
-`project_evidence` performs the same exact-first, unique-family relabeling.
+Closed projection and relabeling use the same selector language as open-row
+reframing.
 When a closed CPS function value is passed through an open callback slot,
 `select_evidence` uses the position/tag selector language above but drops every
 unselected entry. The open tail belongs to the adapter ABI and must not enter
@@ -488,13 +526,14 @@ their own surrounding handled expression completes.
 
 ### Lowering Structure
 
-Per-call effect metadata is computed once by a pre-pass and stored in
-`CallEffectMap` (keyed by AST `NodeId`). The lowerer is a read-only consumer:
-at every effectful call site, it reads `CallEffectInfo` from the map to
-determine projection, evidence layout, and op-call indices. There is no inline
-call-shape recognition at lowering time -- adding a new call shape (e.g.
-`DictMethodAccess`, lambda-headed call) means teaching the populator one new
-branch, not auditing every dispatcher.
+Effect ABI metadata is computed once by a pre-pass and stored in
+`EffectAbiPlan` (keyed by AST `NodeId`). It contains declaration ABIs,
+`CallEffectInfo` entries, and the inferred/implementation/boundary ABIs of
+function values. The lowerer consumes those facts and maps its current
+`EvidenceFrame` to each planned target through `EvidenceReframePlan`. There is
+no inline call-shape recognition at lowering time -- adding a new call shape
+(e.g. `DictMethodAccess`, lambda-headed call) means teaching the planner one
+new branch, not auditing every dispatcher.
 
 `CallEffectInfo` has three runtime shapes:
 
@@ -534,16 +573,18 @@ nested `with` semantics; the native interop happens inside the handler body.
 
 ### Key Files
 
-- `codegen/call_effects.rs` -- `CallEffectInfo`, `CallEffectMap`, populator. The pre-pass that determines per-call evidence shape ahead of lowering.
+- `codegen/runtime_shape.rs` -- `EvidenceAbi`, `CallableAbi`, handler-installation and reframe plans, selector compatibility, and slot resolution.
+- `codegen/call_effects.rs` -- `EffectAbiPlan`, `CallEffectInfo`, and the planner for declaration, call, and function-value ABIs.
 - `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
 - `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
-- `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `insert_static`, `find_evidence`, `project_evidence`, `select_evidence`, `reframe_evidence`, `append_tail`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
-- `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, call-site emission. Single helper for effectful calls regardless of head shape (Var, QualifiedName, DictMethodAccess, lambda).
-- `codegen/lower/effects.rs` -- `lower_effect_call` (op call lookup against evidence), `lower_with` (extends evidence via `insert_canonical`), `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_def_to_tuple`.
+- `codegen/lower/evidence.rs` -- `EvidenceFrame` and thin Core emitters for the six runtime bridge operations.
+- `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values and executes `EvidenceReframePlan` for every effectful head shape.
+- `codegen/lower/effects/ops.rs` -- resolves static or dynamic operation slots through `EvidenceAbi`.
+- `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
-- `codegen/lower/init.rs` -- populates `FunInfo` (with `EvidenceLayout`) from type schemes via `arity_and_effects_from_type`.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `project_evidence/2`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.
+- `codegen/lower/init.rs` -- registers local/imported `FunInfo` entries carrying `CallableAbi` plus non-ABI HOF parameter metadata.
+- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.
 
 ### Optimization Opportunities
 

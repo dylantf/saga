@@ -1,6 +1,6 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
-         project_evidence/2, select_evidence/2, reframe_evidence/3,
+         select_evidence/2, reframe_evidence/3,
          append_tail/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
@@ -67,11 +67,6 @@ insert_static(Evidence, StaticCount, {NewTag, _} = NewEntry) ->
     NewPrefix = tuple_to_list(insert_at(CleanPrefix, NewTag, NewEntry, [])),
     list_to_tuple(NewPrefix ++ CleanTail).
 
-%% Build a new evidence tuple containing only the named tags, in the order
-%% supplied (the caller is expected to pass them in canonical order).
-project_evidence(Evidence, Tags) ->
-    list_to_tuple([entry_for(Evidence, T) || T <- Tags]).
-
 %% Build a closed callee frame from positional/tag selectors. Unlike
 %% reframe_evidence/3, this deliberately drops every unselected entry. It is
 %% used when a closed CPS function value is adapted to an open callback slot:
@@ -85,15 +80,20 @@ select_evidence(Evidence, Selectors) ->
 %% Build a callee-shaped open-row vector. Selectors identify the callee's
 %% positional static prefix: integers address the caller's own static prefix,
 %% while atoms select a concrete applied tag from the forwarded remainder.
-%% Every unselected caller entry follows as the callee's tagged open tail.
-reframe_evidence(Evidence, _StaticCount, Selectors) ->
+%% FramePlan names the source prefix length and the source-static positions
+%% that instantiate the target row variable. The already-tagged source tail is
+%% always forwarded; omitted declaration-prefix slots are not implicitly
+%% leaked into it.
+reframe_evidence(Evidence, {StaticCount, ForwardStaticPositions}, Selectors) ->
     SelectedPositions = unique_positions(
         [selector_position(Evidence, S) || S <- Selectors]),
     Selected = [selected_entry(Evidence, Selector,
                                selector_position(Evidence, Selector))
                 || Selector <- Selectors],
+    ForwardPositions = unique_positions(
+        ForwardStaticPositions ++ lists:seq(StaticCount + 1, tuple_size(Evidence))),
     Remaining = [element(I, Evidence)
-                 || I <- lists:seq(1, tuple_size(Evidence)),
+                 || I <- ForwardPositions,
                     not lists:member(I, SelectedPositions)],
     list_to_tuple(Selected ++ Remaining).
 
@@ -167,19 +167,3 @@ unique_family_position(Evidence, Tag) ->
 effect_family(Tag) ->
     [Family | _] = binary:split(atom_to_binary(Tag, utf8), <<"<">>),
     Family.
-
-entry_for(Evidence, Tag) ->
-    case entry_at(Evidence, Tag, 1, tuple_size(Evidence)) of
-        {ok, Ops} -> {Tag, Ops};
-        not_found ->
-            Position = unique_family_position(Evidence, Tag),
-            {_OldTag, Ops} = element(Position, Evidence),
-            {Tag, Ops}
-    end.
-
-entry_at(_Evidence, _Tag, I, N) when I > N -> not_found;
-entry_at(Evidence, Tag, I, N) ->
-    case element(I, Evidence) of
-        {Tag, Ops} -> {ok, Ops};
-        _ -> entry_at(Evidence, Tag, I + 1, N)
-    end.

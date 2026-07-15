@@ -16,12 +16,14 @@ mod trait_spec_stats;
 pub mod util;
 
 use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
+use crate::codegen::call_effects::CallEffectInfo;
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::CpsShape;
+use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 use crate::typechecker::TraitInfo;
 use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
+pub(super) use evidence::EvidenceFrame;
 use util::{cerl_call, collect_effect_call, core_var, lower_string_to_binary};
 
 pub(super) type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -168,18 +170,10 @@ struct EffectOpInfo {
 /// transformation.
 #[derive(Debug, Clone, Default)]
 struct FunInfo {
-    /// Exported arity: `user_arity + 2` (`_Evidence` + `_ReturnK`) when
-    /// effectful, `user_arity` when pure. 0 if not yet known.
-    arity: usize,
-    /// Effect names from `needs` clause (sorted). Used to derive the evidence
-    /// layout the callee expects.
-    effects: Vec<String>,
-    /// True when the callee's declared effect row has an open tail
-    /// (`needs {Foo, ..e}`). Call-site lowering uses this to choose
-    /// `RowForwarded` (forward full evidence) vs `StaticOps` (project the
-    /// caller's evidence). Mirrors `util::has_open_effect_row` on the
-    /// declared/inferred type.
-    is_open_row: bool,
+    /// The single runtime calling convention for this function. Compatibility
+    /// registration still receives expanded arity/effect parts, but they are
+    /// normalized into this value immediately.
+    abi: crate::codegen::runtime_shape::CallableAbi,
     /// For EffArrow params: param_index -> absorbed effects. Used to inject
     /// evidence threading into lambdas passed to effectful higher-order
     /// functions.
@@ -195,6 +189,38 @@ struct FunInfo {
 }
 
 impl FunInfo {
+    fn from_abi(
+        abi: crate::codegen::runtime_shape::CallableAbi,
+        param_absorbed_effects: HashMap<usize, Vec<String>>,
+        param_types: Vec<crate::typechecker::Type>,
+        dict_param_count: usize,
+    ) -> Self {
+        Self {
+            abi,
+            param_absorbed_effects,
+            param_types,
+            dict_param_count,
+        }
+    }
+
+    fn arity(&self) -> usize {
+        self.abi.expanded_arity()
+    }
+
+    fn effects(&self) -> &[String] {
+        self.abi
+            .evidence
+            .as_ref()
+            .map_or(&[], |evidence| evidence.static_slots())
+    }
+
+    fn is_open_row(&self) -> bool {
+        self.abi
+            .evidence
+            .as_ref()
+            .is_some_and(crate::codegen::runtime_shape::EvidenceAbi::is_open)
+    }
+
     fn expected_arg_types(&self, arg_count: usize) -> Vec<crate::typechecker::Type> {
         let mut out = Vec::with_capacity(arg_count);
         for idx in 0..arg_count {
@@ -206,25 +232,6 @@ impl FunInfo {
         }
         out
     }
-}
-
-/// Tracks the evidence vector currently in scope during lowering.
-///
-/// An `_Evidence` parameter is threaded into every effectful function
-/// definition and at every effectful call site, paired with a trailing
-/// `_ReturnK` for the success continuation. Op-call emission reads handler
-/// closures out of this context via `evidence_op_lookup`.
-#[derive(Debug, Clone)]
-#[allow(dead_code, private_interfaces)]
-pub(super) struct EvidenceCtx {
-    /// Core Erlang variable name holding the evidence tuple in scope.
-    pub(super) var: String,
-    /// Statically-known canonical effect tags in the evidence vector. Sorted.
-    pub(super) layout: evidence::EvidenceLayout,
-    /// True when the evidence has an open tail (additional effects may be
-    /// present at runtime beyond `layout`). Closed-row narrowing only
-    /// projects when `is_open` is false.
-    pub(super) is_open: bool,
 }
 
 /// Explicit lowering context for value-producing vs terminal positions.
@@ -291,7 +298,7 @@ pub struct Lowerer<'a> {
     /// name bound to the inserted-canonical extension). Op-call emission
     /// reads handler closures out of this evidence vector via
     /// `evidence_op_lookup`.
-    current_evidence: Option<EvidenceCtx>,
+    current_evidence: Option<EvidenceFrame>,
     /// Set of "effect.op" keys whose current handler arm never calls resume.
     /// Used to pass a cheap atom instead of a real continuation closure at the call site,
     /// avoiding the Erlang "a term is constructed but never used" warning.
@@ -311,15 +318,17 @@ pub struct Lowerer<'a> {
     static_helper_variant_capture_bindings: Vec<(String, String)>,
     direct_hof_callback_params: HashMap<String, usize>,
     direct_hof_value_bindings: HashMap<String, DirectHofValueBinding>,
-    /// Runtime function shape that the next lambda/effect-op ref should use.
-    /// Set by typed value-boundary lowering when a function value is placed
-    /// into an effectful or open-row slot.
-    lambda_effect_context: Option<CpsShape>,
-    /// For open-row callbacks passed directly to an effect operation, preserve
-    /// the open evidence tail present at the perform site. Named callback
-    /// effects still come from the handler's call-time evidence; the callback
-    /// combines that static frame with this captured tail.
-    lambda_captured_evidence: Option<EvidenceCtx>,
+    /// Contextual function-value ABIs keyed by the value expression's stable
+    /// identity. Unlike the former mutable "next lambda" slot, unrelated
+    /// recursive lowering cannot consume or overwrite another value's ABI.
+    effect_abi_plan: super::call_effects::EffectAbiPlan,
+    /// Compatibility cache for callers that invoke contextual emission
+    /// without the normal project-wide precompute checkpoint. Plans remain
+    /// module-separated and are consulted only by semantic module.
+    fallback_effect_abi_plans: HashMap<String, super::call_effects::EffectAbiPlan>,
+    /// Perform-site evidence captured by an open-row callback value, keyed by
+    /// that callback expression's identity.
+    function_value_captured_evidence: HashMap<NodeId, EvidenceFrame>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -383,10 +392,6 @@ pub struct Lowerer<'a> {
     /// wired through the build pipeline's `emit_module*` API.
     #[allow(dead_code)]
     entry_export: Option<String>,
-    /// Per-call effect metadata for every `App` node in the module being
-    /// lowered. Populated by the call-effects pre-pass after `init_module`,
-    /// then consumed at every effectful call site to drive evidence threading.
-    call_effects: super::call_effects::CallEffectMap,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
     /// `needs` clause. Populated during `lower_module` from active and
     /// imported modules, and used as a fallback for imported metadata that
@@ -439,8 +444,9 @@ impl<'a> Lowerer<'a> {
             static_helper_variant_capture_bindings: Vec::new(),
             direct_hof_callback_params: HashMap::new(),
             direct_hof_value_bindings: HashMap::new(),
-            lambda_effect_context: None,
-            lambda_captured_evidence: None,
+            effect_abi_plan: super::call_effects::EffectAbiPlan::default(),
+            fallback_effect_abi_plans: HashMap::new(),
+            function_value_captured_evidence: HashMap::new(),
             constructor_atoms,
             resolved: resolution.symbols,
             carried_record_types: resolution.carried_record_types,
@@ -457,7 +463,6 @@ impl<'a> Lowerer<'a> {
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
             entry_export,
-            call_effects: super::call_effects::CallEffectMap::new(),
             impl_effects_by_dict: HashMap::new(),
             impl_method_effects_by_dict: HashMap::new(),
             effect_op_trace: Vec::new(),
@@ -468,6 +473,89 @@ impl<'a> Lowerer<'a> {
         let n = self.counter;
         self.counter += 1;
         format!("_Cor{}", n)
+    }
+
+    pub(super) fn planned_function_value_evidence(&self, node_id: NodeId) -> Option<EvidenceAbi> {
+        self.planned_function_value_implementation(node_id)
+            .and_then(|abi| abi.evidence.clone())
+    }
+
+    fn semantic_effect_abi_plan(&self) -> Option<&super::call_effects::EffectAbiPlan> {
+        let semantic_module = self.current_semantic_module_name();
+        if let Some(plan) = self.fallback_effect_abi_plans.get(semantic_module) {
+            return Some(plan);
+        }
+        (semantic_module != self.current_source_module)
+            .then(|| self.ctx.modules.get(semantic_module))
+            .flatten()
+            .filter(|compiled| compiled.effect_abi_plan_ready)
+            .map(|compiled| &compiled.effect_abi_plan)
+    }
+
+    pub(super) fn planned_call(&self, node_id: NodeId) -> Option<&CallEffectInfo> {
+        self.effect_abi_plan.call(node_id).or_else(|| {
+            self.semantic_effect_abi_plan()
+                .and_then(|plan| plan.call(node_id))
+        })
+    }
+
+    pub(super) fn planned_declaration(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        self.effect_abi_plan.declaration(node_id).or_else(|| {
+            self.semantic_effect_abi_plan()
+                .and_then(|plan| plan.declaration(node_id))
+        })
+    }
+
+    pub(super) fn planned_function_value(
+        &self,
+        node_id: NodeId,
+    ) -> Option<&super::call_effects::FunctionValueAbiPlan> {
+        self.effect_abi_plan.function_value(node_id).or_else(|| {
+            self.semantic_effect_abi_plan()
+                .and_then(|plan| plan.function_value(node_id))
+        })
+    }
+
+    pub(super) fn planned_function_value_implementation(
+        &self,
+        node_id: NodeId,
+    ) -> Option<&CallableAbi> {
+        self.effect_abi_plan
+            .function_value_implementation(node_id)
+            .or_else(|| {
+                self.semantic_effect_abi_plan()
+                    .and_then(|plan| plan.function_value_implementation(node_id))
+            })
+    }
+
+    pub(super) fn planned_function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        self.effect_abi_plan
+            .function_value_boundary(node_id)
+            .or_else(|| {
+                self.semantic_effect_abi_plan()
+                    .and_then(|plan| plan.function_value_boundary(node_id))
+            })
+    }
+
+    pub(super) fn capture_function_value_evidence(
+        &mut self,
+        node_id: NodeId,
+        frame: EvidenceFrame,
+    ) -> Option<EvidenceFrame> {
+        self.function_value_captured_evidence.insert(node_id, frame)
+    }
+
+    pub(super) fn restore_function_value_captured_evidence(
+        &mut self,
+        node_id: NodeId,
+        previous: Option<EvidenceFrame>,
+    ) {
+        if let Some(previous) = previous {
+            self.function_value_captured_evidence
+                .insert(node_id, previous);
+        } else {
+            self.function_value_captured_evidence.remove(&node_id);
+        }
     }
 
     /// Build a structured error term and wrap it in `erlang:error(Term)`.
@@ -586,25 +674,6 @@ impl<'a> Lowerer<'a> {
         let suffix = self.counter;
         self.counter += 1;
         format!("{}__{}", Self::handler_param_name(effect, op), suffix)
-    }
-
-    /// Compute the expanded arity for a function with the given base arity
-    /// and effect requirements. Effectful functions get `_Evidence` and
-    /// `_ReturnK` appended (handler params no longer threaded under the
-    /// evidence-passing convention).
-    pub(super) fn expanded_arity(&self, base_arity: usize, effects: &[String]) -> usize {
-        let op_count = self.effect_handler_ops(effects).len();
-        base_arity + if op_count > 0 { 2 } else { 0 }
-    }
-
-    pub(super) fn expanded_arity_for_row(
-        &self,
-        base_arity: usize,
-        effects: &[String],
-        is_open_row: bool,
-    ) -> usize {
-        let op_count = self.effect_handler_ops(effects).len();
-        base_arity + if op_count > 0 || is_open_row { 2 } else { 0 }
     }
 
     /// Check if an expression contains effectful calls nested inside if/case/block
@@ -808,8 +877,7 @@ impl<'a> Lowerer<'a> {
         {
             return false;
         }
-        self.call_effects
-            .get(&expr.id)
+        self.planned_call(expr.id)
             .is_some_and(|info| info.is_cps_call())
     }
 
@@ -825,8 +893,7 @@ impl<'a> Lowerer<'a> {
 
     pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
         let shape = self
-            .call_effects
-            .get(&expr.id)
+            .planned_call(expr.id)
             .map(|info| info.debug_label())
             .unwrap_or_else(|| "missing-call-effect-info".to_string());
         let head = head.unwrap_or(expr);
@@ -860,10 +927,8 @@ impl<'a> Lowerer<'a> {
                 (
                     name.clone(),
                     FunSig {
-                        arity: info.arity,
-                        effects: info.effects.clone(),
+                        abi: info.abi.clone(),
                         param_absorbed_effects: info.param_absorbed_effects.clone(),
-                        is_open_row: info.is_open_row,
                         param_types: info.param_types.clone(),
                         dict_param_count: info.dict_param_count,
                     },
@@ -911,7 +976,7 @@ impl<'a> Lowerer<'a> {
 
     /// Get a function's arity.
     fn fun_arity(&self, name: &str) -> Option<usize> {
-        self.fun_info.get(name).map(|f| f.arity)
+        self.fun_info.get(name).map(FunInfo::arity)
     }
 
     /// Whether the trait method at `(trait_name, method_index)` takes no
@@ -940,14 +1005,6 @@ impl<'a> Lowerer<'a> {
         let info = matches.next()?;
         matches.next().is_none().then_some(info)
     }
-
-    /// Get a function's effects.
-    fn fun_effects(&self, name: &str) -> Option<&Vec<String>> {
-        self.fun_info
-            .get(name)
-            .map(|f| &f.effects)
-            .filter(|e| !e.is_empty())
-    }
 }
 
 pub(crate) fn precompute_call_effects(
@@ -956,7 +1013,7 @@ pub(crate) fn precompute_call_effects(
     program: &ast::Program,
     resolution: super::resolve::ResolutionMap,
     check_result: &crate::typechecker::CheckResult,
-) -> super::call_effects::CallEffectMap {
+) -> super::call_effects::EffectAbiPlan {
     Lowerer::new(
         ctx,
         super::resolve::ConstructorAtoms::new(),
@@ -1007,7 +1064,7 @@ mod tests {
                 )),
             },
         );
-        lowerer.call_effects.insert(
+        lowerer.effect_abi_plan.record_call(
             app.id,
             super::super::call_effects::CallEffectInfo::test_cps_static("Main.Log", "log", 1),
         );

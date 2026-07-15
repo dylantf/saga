@@ -207,10 +207,10 @@ impl<'a> Lowerer<'a> {
         info: &super::FunInfo,
         specialization: &HofDirectSpecialization,
     ) -> bool {
-        if info.is_open_row {
+        if info.is_open_row() {
             return false;
         }
-        if info.effects.is_empty() {
+        if info.effects().is_empty() {
             return true;
         }
         let covered: HashSet<&str> = specialization
@@ -219,7 +219,7 @@ impl<'a> Lowerer<'a> {
             .filter_map(|callback| info.param_absorbed_effects.get(&callback.index))
             .flat_map(|effects| effects.iter().map(String::as_str))
             .collect();
-        info.effects
+        info.effects()
             .iter()
             .all(|effect| covered.contains(effect.as_str()))
     }
@@ -249,14 +249,18 @@ impl<'a> Lowerer<'a> {
         match &arg.kind {
             ExprKind::Var { name, .. } => {
                 self.resolved_fun_info(arg.id, name).is_some_and(|info| {
-                    info.arity == expected_arity && info.effects.is_empty() && !info.is_open_row
+                    info.arity() == expected_arity
+                        && info.effects().is_empty()
+                        && !info.is_open_row()
                 })
             }
             ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 self.resolved_fun_info(arg.id, &qualified)
                     .is_some_and(|info| {
-                        info.arity == expected_arity && info.effects.is_empty() && !info.is_open_row
+                        info.arity() == expected_arity
+                            && info.effects().is_empty()
+                            && !info.is_open_row()
                     })
             }
             _ => false,
@@ -305,6 +309,10 @@ impl<'a> Lowerer<'a> {
         let Some(info) = self.fun_info.get(name) else {
             return;
         };
+        debug_assert_eq!(
+            info.abi.user_arity, arity,
+            "direct-HOF variant must preserve the source CallableAbi user arity"
+        );
         if !Self::hof_direct_effects_covered(info, &specialization) {
             return;
         }

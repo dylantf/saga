@@ -24,7 +24,7 @@ pub use scan::{
     scan_project_modules, scan_source_dir,
 };
 
-use codegen_info::{collect_codegen_info, ctor_arity};
+use codegen_info::{CodegenInfoInputs, collect_codegen_info, ctor_arity};
 use header_scope::resolve_header_import;
 use import_scope::{resolve_import, synthesize_all_exposed};
 
@@ -394,16 +394,18 @@ impl Checker {
 
         self.modules.loading.remove(&module_name);
 
-        // Build codegen info from the module's public declarations.
-        // Pass the effects map so fun_effects can use canonical effect names.
+        // Build codegen info from the checked module environment and exports.
         let codegen_info = collect_codegen_info(
             &module_name,
             &program,
             exports.as_ref(),
-            &mod_checker.effects,
-            &mod_checker.scope_map,
-            &mod_checker.trait_state.impls,
-            &mod_checker.trait_state.traits,
+            CodegenInfoInputs {
+                env: &mod_checker.env,
+                effects: &mod_checker.effects,
+                scope: &mod_checker.scope_map,
+                trait_impls: &mod_checker.trait_state.impls,
+                traits: &mod_checker.trait_state.traits,
+            },
         );
         self.modules
             .codegen_info
@@ -638,10 +640,13 @@ impl Checker {
                 &module_name,
                 &program,
                 exports.as_ref(),
-                &mod_checker.effects,
-                &mod_checker.scope_map,
-                &mod_checker.trait_state.impls,
-                &mod_checker.trait_state.traits,
+                CodegenInfoInputs {
+                    env: &mod_checker.env,
+                    effects: &mod_checker.effects,
+                    scope: &mod_checker.scope_map,
+                    trait_impls: &mod_checker.trait_state.impls,
+                    traits: &mod_checker.trait_state.traits,
+                },
             );
             self.modules
                 .codegen_info

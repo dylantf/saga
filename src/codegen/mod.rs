@@ -54,15 +54,16 @@ pub struct CompiledModule {
     pub effect_at_node: HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     /// Resolved expression types used when lowering imported handler bodies.
     pub type_at_node: HashMap<ast::NodeId, crate::typechecker::Type>,
-    /// Per-call effect metadata produced by the call-effects pre-pass. Empty
-    /// until the module has been lowered (the Lowerer populates this map and
-    /// writes it back via `set_compiled_call_effects`). Read by the lowerer at
-    /// every effectful call site to drive evidence threading and projection.
-    pub call_effects: call_effects::CallEffectMap,
-    /// True when `call_effects` has been deliberately populated. An empty map
-    /// is a valid result for modules without `App` nodes, so emptiness alone
-    /// cannot distinguish "computed empty" from "not computed yet".
-    pub call_effects_ready: bool,
+    /// Resolved binding/pattern types used by contextual ABI planning inside
+    /// imported handler bodies.
+    pub type_at_span: HashMap<crate::token::Span, crate::typechecker::Type>,
+    /// NodeId-keyed callable ABI metadata produced by the effect-ABI pre-pass.
+    /// Keeping calls and function values together is required for imported
+    /// handler bodies and other cross-module lowering paths.
+    pub effect_abi_plan: call_effects::EffectAbiPlan,
+    /// True when `effect_abi_plan` has deliberately been populated. An empty
+    /// plan is valid for modules without calls or function values.
+    pub effect_abi_plan_ready: bool,
     /// Post-classifier optimizer facts for this module. Empty facts mean
     /// lowering should take the normal direct-first/evidence path.
     pub optimization: optimize::OptimizationFacts,
@@ -75,6 +76,7 @@ pub struct ModuleSemantics<'a> {
     pub front_resolution: &'a crate::typechecker::ResolutionResult,
     pub effect_at_node: &'a HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     pub type_at_node: &'a HashMap<ast::NodeId, crate::typechecker::Type>,
+    pub type_at_span: &'a HashMap<crate::token::Span, crate::typechecker::Type>,
     pub optimization: &'a optimize::OptimizationFacts,
 }
 
@@ -140,6 +142,7 @@ impl CodegenContext {
             front_resolution: &m.front_resolution,
             effect_at_node: &m.effect_at_node,
             type_at_node: &m.type_at_node,
+            type_at_span: &m.type_at_span,
             optimization: &m.optimization,
         })
     }
@@ -155,6 +158,7 @@ impl CodegenContext {
                     front_resolution: &m.front_resolution,
                     effect_at_node: &m.effect_at_node,
                     type_at_node: &m.type_at_node,
+                    type_at_span: &m.type_at_span,
                     optimization: &m.optimization,
                 },
             )
@@ -197,8 +201,9 @@ pub fn compile_module_from_result(
         front_resolution: mod_result.resolution.clone(),
         effect_at_node: mod_result.effect_at_node.clone(),
         type_at_node: mod_result.type_at_node.clone(),
-        call_effects: call_effects::CallEffectMap::new(),
-        call_effects_ready: false,
+        type_at_span: mod_result.type_at_span.clone(),
+        effect_abi_plan: call_effects::EffectAbiPlan::default(),
+        effect_abi_plan_ready: false,
         optimization,
     })
 }
@@ -208,47 +213,39 @@ pub fn precompute_context_call_effects(
     result: &crate::typechecker::CheckResult,
 ) {
     let module_names: Vec<String> = ctx.modules.keys().cloned().collect();
-    let computed: Vec<(String, call_effects::CallEffectMap)> = module_names
+    let computed: Vec<(String, call_effects::EffectAbiPlan)> = module_names
         .into_iter()
         .filter_map(|module_name| {
             let compiled = ctx.modules.get(&module_name)?;
-            if compiled.call_effects_ready {
+            if compiled.effect_abi_plan_ready {
                 return None;
             }
             if module_name == "Main" {
-                return Some((module_name, call_effects::CallEffectMap::new()));
+                return Some((module_name, call_effects::EffectAbiPlan::default()));
             }
             let check_result = result
                 .module_check_results()
                 .get(&module_name)
                 .map(|module_result| module_result.as_ref())
                 .unwrap_or(result);
-            let mut resolution = compiled.resolution.clone();
-            for other in ctx.modules.values() {
-                resolution.extend(
-                    other
-                        .resolution
-                        .iter()
-                        .map(|(id, symbol)| (*id, symbol.clone())),
-                );
-            }
-            let call_effects = timed_codegen_phase(&module_name, "precompute_call_effects", || {
-                lower::precompute_call_effects(
-                    ctx,
-                    &module_name,
-                    &compiled.elaborated,
-                    resolution,
-                    check_result,
-                )
-            });
-            Some((module_name, call_effects))
+            let effect_abi_plan =
+                timed_codegen_phase(&module_name, "precompute_call_effects", || {
+                    lower::precompute_call_effects(
+                        ctx,
+                        &module_name,
+                        &compiled.elaborated,
+                        compiled.resolution.clone(),
+                        check_result,
+                    )
+                });
+            Some((module_name, effect_abi_plan))
         })
         .collect();
 
-    for (module_name, call_effects) in computed {
+    for (module_name, effect_abi_plan) in computed {
         if let Some(compiled) = ctx.modules.get_mut(&module_name) {
-            compiled.call_effects = call_effects;
-            compiled.call_effects_ready = true;
+            compiled.effect_abi_plan = effect_abi_plan;
+            compiled.effect_abi_plan_ready = true;
         }
     }
 }

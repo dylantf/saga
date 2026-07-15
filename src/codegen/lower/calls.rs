@@ -1,6 +1,5 @@
 use crate::ast::{Expr, ExprKind, NodeId, Pat};
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::CpsShape;
 
 use super::errors::ErrorKind;
 use super::evidence;
@@ -35,7 +34,7 @@ impl CpsCallee {
 }
 
 struct RuntimeCpsApplySite<'a> {
-    plan: super::super::call_effects::CpsCallPlan,
+    abi: crate::codegen::runtime_shape::CallableAbi,
     callee: CpsCallee,
     args: &'a [&'a Expr],
     return_k: Option<CExpr>,
@@ -60,27 +59,16 @@ impl<'a> Lowerer<'a> {
         // and which effects the callee declares; both used to be recomputed here
         // from `resolved_effects` + `effect_handler_ops`.
         let cps_plan = self
-            .call_effects
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan());
-        // `row_forwarded` says "callee is row-polymorphic, forward caller's
-        // ambient evidence unchanged (don't project)". Without distinguishing
-        // it from closed calls, a call to e.g. `wrap : ... -> ... needs
-        // {Stdio, ..e}` would project the caller's evidence down to just
-        // `{Stdio}` and drop the entries that the open-row tail is supposed
-        // to carry through into `wrap`'s body.
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned());
         let is_effectful = cps_plan.is_some();
-        let callee_effects_vec = cps_plan
+        let target_evidence = cps_plan
             .as_ref()
-            .map(|plan| plan.effects.clone())
-            .unwrap_or_default();
-        let is_row_forward = cps_plan
-            .as_ref()
-            .map(|plan| plan.row_forwarded)
-            .unwrap_or(false);
+            .and_then(|abi| abi.evidence.as_ref())
+            .cloned();
         let total_arity = self
             .resolved_fun_info(head.id, lookup_name)
-            .map(|f| f.arity);
+            .map(|info| info.arity());
         let has_static_call_target = total_arity.is_some()
             || fallback_erlang_module.is_some()
             || self.imported_handler_function_source(lookup_name).is_some()
@@ -169,8 +157,11 @@ impl<'a> Lowerer<'a> {
                 let mut call_args: Vec<CExpr> =
                     arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                 // Effectful callee: thread evidence + _ReturnK.
-                let (ev_var, ev_ce) =
-                    self.build_call_evidence_with(&callee_effects_vec, is_row_forward);
+                let (ev_var, ev_ce) = self.build_call_evidence_with(
+                    target_evidence
+                        .as_ref()
+                        .expect("effectful call missing target evidence ABI"),
+                );
                 call_args.push(CExpr::Var(ev_var.clone()));
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
                 call_args.push(CExpr::Var(rk_var.clone()));
@@ -201,8 +192,11 @@ impl<'a> Lowerer<'a> {
                 self.lower_call_args_with_expected_types(args, param_types.as_deref());
             if is_effectful {
                 // Effectful callee: thread evidence + _ReturnK.
-                let (ev_var, ev_ce) =
-                    self.build_call_evidence_with(&callee_effects_vec, is_row_forward);
+                let (ev_var, ev_ce) = self.build_call_evidence_with(
+                    target_evidence
+                        .as_ref()
+                        .expect("effectful call missing target evidence ABI"),
+                );
                 bindings.push((ev_var.clone(), ev_ce));
                 arg_vars.push(ev_var);
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
@@ -275,21 +269,19 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a call to an already-materialized runtime CPS callable value.
     ///
-    /// The call shape still comes from `CallEffectInfo::cps_call_plan()`;
+    /// The call shape still comes from `CallEffectInfo::cps_call_abi()`;
     /// callers supply only the callee expression and the narrow argument
     /// lowering mode needed to preserve existing value-boundary behavior.
     fn lower_runtime_cps_apply(&mut self, site: RuntimeCpsApplySite<'_>) -> CExpr {
         let RuntimeCpsApplySite {
-            plan,
+            abi,
             callee,
             args,
             return_k,
             nested_pure_arg_lowering,
             flat_arg_lowering,
         } = site;
-        let absorbed = plan.effects;
-        let is_row_forward = plan.row_forwarded;
-
+        let evidence_abi = abi.evidence.expect("CPS call plan missing evidence ABI");
         let effectful_arg_idxs: Vec<usize> = args
             .iter()
             .enumerate()
@@ -311,7 +303,7 @@ impl<'a> Lowerer<'a> {
 
             let mut call_args: Vec<CExpr> =
                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-            let (ev_var, ev_ce) = self.build_call_evidence_with(&absorbed, is_row_forward);
+            let (ev_var, ev_ce) = self.build_call_evidence_with(&evidence_abi);
             call_args.push(CExpr::Var(ev_var.clone()));
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
@@ -337,7 +329,7 @@ impl<'a> Lowerer<'a> {
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }
-        let (ev_var, ev_ce) = self.build_call_evidence_with(&absorbed, is_row_forward);
+        let (ev_var, ev_ce) = self.build_call_evidence_with(&evidence_abi);
         bindings.push((ev_var.clone(), ev_ce));
         arg_vars.push(ev_var);
         let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
@@ -375,9 +367,8 @@ impl<'a> Lowerer<'a> {
         //     without narrowing — including when `static_ops` is empty, which
         //     is the open-row-only case (`f: Unit -> Unit needs {..e}`).
         let plan = self
-            .call_effects
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
         let callee = if let Some(source_module) = self.imported_handler_function_source(var_name) {
             CpsCallee::Remote {
                 erlang_mod: Self::module_name_to_erlang(source_module),
@@ -387,7 +378,7 @@ impl<'a> Lowerer<'a> {
             CpsCallee::Value(CExpr::Var(core_var(var_name)))
         };
         Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee,
             args,
             return_k,
@@ -602,9 +593,8 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
         let plan = self
-            .call_effects
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
 
         // Statically-known impl with a hoisted method — call it directly,
         // skipping the dict tuple build and `element/2`: a local `FunRef`
@@ -619,7 +609,7 @@ impl<'a> Lowerer<'a> {
             true,
         ) {
             return Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-                plan,
+                abi: plan,
                 callee,
                 args,
                 return_k,
@@ -642,7 +632,7 @@ impl<'a> Lowerer<'a> {
         );
 
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee: CpsCallee::Value(CExpr::Var(method_var.clone())),
             args,
             return_k,
@@ -658,10 +648,9 @@ impl<'a> Lowerer<'a> {
     /// classifies the call as pure; the caller then falls through to the
     /// regular path where the lambda lowers as a pure closure.
     ///
-    /// When effectful, the lambda is recompiled as effectful (taking
-    /// `_Evidence`/`_ReturnK` params, body lowered with evidence installed)
-    /// by setting `lambda_effect_context` for the duration of `lower_expr`
-    /// on the head. The call site threads evidence + return_k like any
+    /// When effectful, the lambda is compiled with the contextual
+    /// `CallableAbi` recorded by the ABI planner before lowering.
+    /// The call site threads evidence + return_k like any
     /// other effectful call. This preserves §8: the body sees the *call-time*
     /// evidence (passed as a param), not creation-time evidence.
     pub(super) fn lower_lambda_head_call(
@@ -672,21 +661,26 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
         let plan = self
-            .call_effects
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
 
-        let saved_ctx = self.lambda_effect_context.take();
-        self.lambda_effect_context = Some(CpsShape {
-            static_effects: plan.effects.clone(),
-            is_open_row: plan.row_forwarded,
-        });
+        let implementation = self
+            .planned_function_value_implementation(lambda.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "internal ABI planning error: missing immediate-lambda ABI for {:?}",
+                    lambda.id
+                )
+            });
+        assert_eq!(
+            implementation, &plan,
+            "internal ABI planning error: immediate-lambda ABI disagrees with its call ABI"
+        );
         let func_ce = self.lower_expr(lambda);
-        self.lambda_effect_context = saved_ctx;
 
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
             args,
             return_k,
@@ -714,13 +708,12 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
         let plan = self
-            .call_effects
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
         let func_ce = self.lower_expr_value(head);
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
             args,
             return_k,
@@ -749,16 +742,16 @@ impl<'a> Lowerer<'a> {
         }
 
         let callee_arity = match &callee.kind {
-            ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => {
-                self.resolved_fun_info(callee.id, name).map(|f| f.arity)
-            }
+            ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => self
+                .resolved_fun_info(callee.id, name)
+                .map(|info| info.arity()),
             ExprKind::Lambda { .. } => direct_lambda_arity(callee),
             _ => None,
         };
 
         if let Some(arity) = callee_arity {
             if arity < args.len() {
-                let (arg_vars, mut bindings) = self.lower_call_args(args, None);
+                let (arg_vars, mut bindings) = self.lower_call_args(args);
                 let sat_args: Vec<CExpr> = arg_vars[..arity]
                     .iter()
                     .map(|v| CExpr::Var(v.clone()))
@@ -781,7 +774,7 @@ impl<'a> Lowerer<'a> {
             if arity > args.len() {
                 let func_var = self.fresh();
                 let func_ce = self.lower_expr(callee);
-                let (arg_vars, mut bindings) = self.lower_call_args(args, None);
+                let (arg_vars, mut bindings) = self.lower_call_args(args);
                 let mut params = Vec::with_capacity(arity - args.len());
                 for _ in args.len()..arity {
                     params.push(self.fresh());
@@ -799,7 +792,7 @@ impl<'a> Lowerer<'a> {
 
         let func_var = self.fresh();
         let func_ce = self.lower_expr(callee);
-        let (arg_vars, mut bindings) = self.lower_call_args(args, None);
+        let (arg_vars, mut bindings) = self.lower_call_args(args);
         bindings.insert(0, (func_var.clone(), func_ce));
         let call = CExpr::Apply(
             Box::new(CExpr::Var(func_var)),
@@ -1037,10 +1030,10 @@ impl<'a> Lowerer<'a> {
     fn lower_local_fun_ref(
         &mut self,
         name: &str,
-        arity: usize,
-        effects: Option<Vec<String>>,
+        abi: crate::codegen::runtime_shape::CallableAbi,
         source_module: Option<&str>,
     ) -> CExpr {
+        let arity = abi.expanded_arity();
         if let Some(source_module) =
             source_module.filter(|source| *source != self.current_source_module)
         {
@@ -1049,21 +1042,6 @@ impl<'a> Lowerer<'a> {
                 .unwrap_or_else(|| (Self::module_name_to_erlang(source_module), name.to_string()));
             if arity == 0 {
                 return CExpr::Call(erlang_mod, target_name, vec![]);
-            }
-            if let Some(effects) = effects.as_ref()
-                && !effects.is_empty()
-            {
-                // Effectful function value: raw-CPS calling convention.
-                let expanded_arity = self.expanded_arity(arity, effects);
-                return CExpr::Call(
-                    "erlang".to_string(),
-                    "make_fun".to_string(),
-                    vec![
-                        CExpr::Lit(CLit::Atom(erlang_mod)),
-                        CExpr::Lit(CLit::Atom(target_name)),
-                        CExpr::Lit(CLit::Int(expanded_arity as i64)),
-                    ],
-                );
             }
             return CExpr::Call(
                 "erlang".to_string(),
@@ -1078,16 +1056,6 @@ impl<'a> Lowerer<'a> {
 
         if arity == 0 {
             CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), 0)), vec![])
-        } else if effects.as_ref().is_some_and(|e| !e.is_empty()) {
-            // Effectful function used as a value: emit a raw FunRef of the
-            // CPS-expanded arity. The calling convention for effectful function
-            // values is raw-CPS — call sites supply (user_args..., handlers...,
-            // _ReturnK). An eta-wrapper that captures handlers and supplies an
-            // identity continuation would be incompatible with HOFs whose body
-            // calls the callback in raw-CPS shape (e.g. `decoder n` lowering to
-            // `decoder(n, H, K)` in `Lib.at`).
-            let lowered_arity = self.fun_arity(name).unwrap_or(arity);
-            CExpr::FunRef(name.to_string(), lowered_arity)
         } else {
             let lowered_arity = self.fun_arity(name).unwrap_or(arity);
             CExpr::FunRef(name.to_string(), lowered_arity)
@@ -1211,17 +1179,13 @@ impl<'a> Lowerer<'a> {
                 name,
                 target_erlang_mod,
                 target_name,
-                arity,
+                abi,
                 ..
             } => {
                 if resolved.source_module.as_deref() == Some(&self.current_source_module) {
-                    return self.lower_local_fun_ref(
-                        &name,
-                        arity,
-                        None,
-                        resolved.source_module.as_deref(),
-                    );
+                    return self.lower_local_fun_ref(&name, abi, resolved.source_module.as_deref());
                 }
+                let arity = abi.expanded_arity();
                 let (erlang_mod, name) = if self.current_handler_source_module.as_deref()
                     == resolved.source_module.as_deref()
                 {
@@ -1246,9 +1210,10 @@ impl<'a> Lowerer<'a> {
             super::super::resolve::ResolvedCodegenKind::BeamFunction {
                 erlang_mod: Some(erlang_mod),
                 name,
-                arity,
+                abi,
                 ..
             } => {
+                let arity = abi.expanded_arity();
                 if arity == 0 {
                     CExpr::Call(erlang_mod, name, vec![])
                 } else {
@@ -1263,21 +1228,15 @@ impl<'a> Lowerer<'a> {
                     )
                 }
             }
-            super::super::resolve::ResolvedCodegenKind::BeamFunction {
-                name,
-                arity,
-                effects,
-                ..
-            } => {
-                let eff = if !effects.is_empty() {
-                    Some(effects)
+            super::super::resolve::ResolvedCodegenKind::BeamFunction { name, abi, .. } => {
+                let abi = if abi.evidence.is_some() {
+                    abi
                 } else {
                     self.resolved_fun_info(node_id, &name)
-                        .map(|f| &f.effects)
-                        .cloned()
-                        .filter(|e| !e.is_empty())
+                        .map(|f| f.abi.clone())
+                        .unwrap_or(abi)
                 };
-                self.lower_local_fun_ref(&name, arity, eff, resolved.source_module.as_deref())
+                self.lower_local_fun_ref(&name, abi, resolved.source_module.as_deref())
             }
         }
     }
@@ -1306,89 +1265,35 @@ impl<'a> Lowerer<'a> {
         let Pat::Var { span, .. } = pat else {
             return None;
         };
-        self.check_result.type_at_span.get(span).cloned()
+        let module_name = self.current_semantic_module_name();
+        if module_name == self.current_source_module {
+            self.check_result.type_at_span.get(span).cloned()
+        } else {
+            self.ctx
+                .module_semantics(module_name)
+                .and_then(|semantics| semantics.type_at_span.get(span).cloned())
+        }
     }
 
-    /// Build the evidence value to pass to a callee that declares the given
-    /// effects. Returns a fresh let-binding that produces the evidence
+    /// Build the evidence value for a planned callee ABI. Returns a fresh
+    /// let-binding that produces the evidence
     /// (`(var_name, value_expr)`).
     ///
-    /// - Closed-row caller (`current_evidence` is `Some` with `is_open == false`)
-    ///   and callee effects are a strict subset: emit a runtime
-    ///   `project_evidence` narrowing call.
-    /// - Otherwise: forward the caller's evidence directly. When the caller
-    ///   has no evidence in scope (pure caller installing first effect via a
-    ///   `with` further out, or handler-bound value paths), emit an empty
-    ///   tuple as a placeholder so arity matches.
+    /// The authoritative `EvidenceReframePlan` selects/relabels the callee's
+    /// prefix and forwards only the row tail described by the target ABI.
+    /// When no evidence is in scope, emit an empty tuple placeholder so the
+    /// CPS arity remains valid for handler-bound paths.
     ///
-    /// When `is_row_forward` is true, the callee is row-polymorphic and must
-    /// receive the caller's full evidence, including entries not known in the
-    /// callee's static effect list.
     pub(super) fn build_call_evidence_with(
         &mut self,
-        callee_effects: &[String],
-        is_row_forward: bool,
+        target: &crate::codegen::runtime_shape::EvidenceAbi,
     ) -> (String, CExpr) {
         let var = self.fresh();
         let value = match &self.current_evidence {
-            Some(ctx) if is_row_forward => {
-                let selectors = callee_effects
-                    .iter()
-                    .map(|effect| {
-                        let exact = ctx.layout.tags().iter().position(|tag| tag == effect);
-                        if let Some(idx) = exact {
-                            return CExpr::Lit(CLit::Int((idx + 1) as i64));
-                        }
-                        let family = crate::typechecker::applied_effect_family(effect);
-                        let family_matches = ctx
-                            .layout
-                            .tags()
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, tag)| {
-                                crate::typechecker::applied_effect_family(tag) == family
-                            })
-                            .map(|(idx, _)| idx)
-                            .collect::<Vec<_>>();
-                        if family_matches.len() == 1 {
-                            // The static prefix identifies the intended family
-                            // slot even if the runtime tail contains a sibling
-                            // application. Carry both its position and the
-                            // callee's requested tag so the bridge can relabel
-                            // without an ambiguous whole-frame family search.
-                            CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Int((family_matches[0] + 1) as i64)),
-                                CExpr::Lit(CLit::Atom(effect.clone())),
-                            ])
-                        } else {
-                            // Tag selectors perform runtime exact/unique-family
-                            // lookup for entries known only in the open tail.
-                            CExpr::Lit(CLit::Atom(effect.clone()))
-                        }
-                    })
-                    .collect();
-                evidence::reframe_evidence(
-                    CExpr::Var(ctx.var.clone()),
-                    ctx.layout.tags().len(),
-                    selectors,
-                )
-            }
-            Some(ctx) if !ctx.is_open => {
-                // Project when the callee asks for fewer effects than the
-                // caller's static layout carries. The runtime helper handles
-                // the case where no narrowing is required (returns the input
-                // tuple unchanged when tags match), but we skip the call when
-                // we can prove statically that no narrowing is needed.
-                if ctx.layout.tags() != callee_effects {
-                    let tags: Vec<&str> = callee_effects.iter().map(|s| s.as_str()).collect();
-                    evidence::project_evidence(CExpr::Var(ctx.var.clone()), &tags)
-                } else {
-                    CExpr::Var(ctx.var.clone())
-                }
-            }
             Some(ctx) => {
-                let tags: Vec<&str> = callee_effects.iter().map(|s| s.as_str()).collect();
-                evidence::project_evidence(CExpr::Var(ctx.var.clone()), &tags)
+                let plan =
+                    crate::codegen::runtime_shape::EvidenceReframePlan::between(&ctx.abi, target);
+                evidence::apply_reframe(CExpr::Var(ctx.var.clone()), &plan)
             }
             None => CExpr::Tuple(Vec::new()),
         };

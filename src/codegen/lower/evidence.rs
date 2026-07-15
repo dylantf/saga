@@ -18,103 +18,82 @@
 //! ## Static vs runtime helpers
 //!
 //! - **Closed rows** (the layout is statically known at lowering time): use
-//!   [`evidence_index_of`] to compute a 1-based tuple index, then emit
+//!   `EvidenceAbi::resolve_slot` to obtain a 1-based tuple index, then emit
 //!   `erlang:element/2` calls inline. No bridge call needed.
 //! - **Open rows** (row-polymorphic evidence flowing through): use
 //!   [`reframe_evidence`] to select the callee prefix and retain the tail;
-//!   [`find_evidence`], [`insert_canonical`], and [`project_evidence`] emit the
-//!   other runtime bridge operations. Bodies are O(n) linear over the tuple;
+//!   [`find_evidence`] and [`insert_canonical`] emit the other runtime bridge
+//!   operations. Bodies are O(n) linear over the tuple;
 //!   n is typically ≤5.
 
 use super::util::cerl_call;
 use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::runtime_shape::{
+    EvidenceAbi, EvidenceInstallKind, EvidenceInstallPlan, EvidenceReframeKind,
+    EvidenceReframePlan, EvidenceSelector,
+};
 
 const EVIDENCE_BRIDGE_MODULE: &str = "std_evidence_bridge";
 
-/// Records the canonical-ordered effect tags for a known-shape evidence
-/// vector at a specific lowering point. Used by closed-row callers to look
-/// up static positions for `element/2` emission.
-#[derive(Debug, Clone, Default)]
-pub(super) struct EvidenceLayout {
-    /// Effect tags in canonical (alphabetical, deduplicated) order.
-    tags: Vec<String>,
+/// A Core Erlang variable carrying evidence with one authoritative ABI.
+#[derive(Debug, Clone)]
+pub(crate) struct EvidenceFrame {
+    pub(super) var: String,
+    pub(super) abi: EvidenceAbi,
 }
 
-impl EvidenceLayout {
-    pub(super) fn new<I, S>(tags: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut tags: Vec<String> = tags.into_iter().map(Into::into).collect();
-        tags.sort();
-        tags.dedup();
-        Self { tags }
-    }
-
-    pub(super) fn tags(&self) -> &[String] {
-        &self.tags
-    }
-
-    /// Record a handler installed into an open frame.
-    ///
-    /// Function-entry layouts can retain the effect declaration's bare or
-    /// generalized spelling even though the caller has already specialized
-    /// that positional slot to a concrete applied tag. Installing a handler
-    /// for that concrete application therefore specializes the existing slot;
-    /// it does not add a second slot. Distinct concrete applications remain
-    /// independent and are both retained.
-    pub(super) fn install_open_effect(&mut self, installed: String) {
-        if self.tags.iter().any(|tag| tag == &installed) {
-            return;
-        }
-
-        let family = crate::typechecker::applied_effect_family(&installed);
-        let same_family = self
-            .tags
-            .iter()
-            .enumerate()
-            .filter(|(_, tag)| crate::typechecker::applied_effect_family(tag) == family)
-            .map(|(idx, _)| idx)
-            .collect::<Vec<_>>();
-
-        if same_family.len() == 1
-            && is_effect_placeholder(&self.tags[same_family[0]])
-            && !is_effect_placeholder(&installed)
-        {
-            self.tags[same_family[0]] = installed;
-        } else {
-            self.tags.push(installed);
-        }
-        self.tags.sort();
-        self.tags.dedup();
-    }
-
-    /// Record a handler installed into a closed frame. Every tag in a closed
-    /// layout denotes an actual runtime entry, so only exact identities
-    /// replace; a bare family and an applied family member remain distinct.
-    pub(super) fn install_closed_effect(&mut self, installed: String) {
-        if !self.tags.contains(&installed) {
-            self.tags.push(installed);
-            self.tags.sort();
+impl EvidenceFrame {
+    pub(super) fn new(var: impl Into<String>, abi: EvidenceAbi) -> Self {
+        Self {
+            var: var.into(),
+            abi,
         }
     }
 }
 
-fn is_effect_placeholder(tag: &str) -> bool {
-    !tag.contains('<') || tag.contains('$')
+fn lower_selector(selector: &EvidenceSelector) -> CExpr {
+    match selector {
+        EvidenceSelector::Position(position) => CExpr::Lit(CLit::Int(*position as i64)),
+        EvidenceSelector::Relabel { position, target } => CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Int(*position as i64)),
+            CExpr::Lit(CLit::Atom(target.clone())),
+        ]),
+        EvidenceSelector::DynamicTag(tag) => CExpr::Lit(CLit::Atom(tag.clone())),
+    }
 }
 
-/// Compile-time tuple index for `tag` in `layout`. Returns a 1-based index
-/// suitable for direct use with `erlang:element/2`. Panics if the tag is
-/// not present — callers must only ask for tags they know are in scope.
-pub(super) fn evidence_index_of(layout: &EvidenceLayout, tag: &str) -> usize {
-    match layout.tags.iter().position(|t| t == tag) {
-        Some(i) => i + 1,
-        None => panic!(
-            "evidence layout {:?} does not contain tag '{}'",
-            layout.tags, tag
+pub(super) fn apply_reframe(evidence: CExpr, plan: &EvidenceReframePlan) -> CExpr {
+    match &plan.kind {
+        EvidenceReframeKind::Identity => evidence,
+        EvidenceReframeKind::SelectClosed { selectors } => {
+            select_evidence(evidence, selectors.iter().map(lower_selector).collect())
+        }
+        EvidenceReframeKind::ReframeOpen {
+            source_static_count,
+            forward_static_positions,
+            selectors,
+        } => reframe_evidence(
+            evidence,
+            *source_static_count,
+            forward_static_positions.clone(),
+            selectors.iter().map(lower_selector).collect(),
         ),
+    }
+}
+
+/// Execute a handler-installation plan. The plan also carries the resulting
+/// `EvidenceAbi`, so callers cannot update runtime and compile-time frame
+/// shapes through separate decisions.
+pub(super) fn apply_install(
+    evidence: CExpr,
+    new_entry: CExpr,
+    plan: &EvidenceInstallPlan,
+) -> CExpr {
+    match plan.kind {
+        EvidenceInstallKind::Canonical => insert_canonical(evidence, new_entry),
+        EvidenceInstallKind::StaticPrefix {
+            source_static_count,
+        } => insert_static(evidence, source_static_count, new_entry),
     }
 }
 
@@ -132,8 +111,8 @@ pub(super) fn build_evidence_entry(tag: &str, op_closures: Vec<CExpr>) -> CExpr 
 /// builds a new tuple with `new_entry` at its canonical position, and
 /// replaces an existing entry whose tag matches (innermost-wins).
 ///
-/// For closed-row sites where the layout is known statically, callers
-/// should build the new tuple inline instead of going through this helper.
+/// This is selected by an `EvidenceInstallPlan`; callers do not independently
+/// choose between canonical and static-prefix insertion.
 pub(super) fn insert_canonical(evidence: CExpr, new_entry: CExpr) -> CExpr {
     cerl_call(
         EVIDENCE_BRIDGE_MODULE,
@@ -167,27 +146,6 @@ pub(super) fn find_evidence(evidence: CExpr, tag: &str) -> CExpr {
     )
 }
 
-/// Emit a runtime projection: build a new tuple containing only the
-/// `{Tag, OpTuple}` entries for the named tags, in canonical order. Used
-/// for closed-row narrowing at call boundaries when the source evidence
-/// shape is not known statically.
-pub(super) fn project_evidence(evidence: CExpr, tags: &[&str]) -> CExpr {
-    let mut sorted: Vec<&str> = tags.to_vec();
-    sorted.sort();
-    sorted.dedup();
-    let tag_list = sorted.into_iter().rev().fold(CExpr::Nil, |tail, tag| {
-        CExpr::Cons(
-            Box::new(CExpr::Lit(CLit::Atom(tag.to_string()))),
-            Box::new(tail),
-        )
-    });
-    cerl_call(
-        EVIDENCE_BRIDGE_MODULE,
-        "project_evidence",
-        vec![evidence, tag_list],
-    )
-}
-
 /// Select a closed callee frame using the same position/tag selector language
 /// as [`reframe_evidence`], but drop every unselected caller entry. This is
 /// required when a closed CPS function value is passed through an open-row
@@ -212,8 +170,19 @@ pub(super) fn select_evidence(evidence: CExpr, selectors: Vec<CExpr>) -> CExpr {
 pub(super) fn reframe_evidence(
     evidence: CExpr,
     static_count: usize,
+    forward_static_positions: Vec<usize>,
     selectors: Vec<CExpr>,
 ) -> CExpr {
+    let forward_static_positions =
+        forward_static_positions
+            .into_iter()
+            .rev()
+            .fold(CExpr::Nil, |tail, position| {
+                CExpr::Cons(
+                    Box::new(CExpr::Lit(CLit::Int(position as i64))),
+                    Box::new(tail),
+                )
+            });
     let selectors = selectors
         .into_iter()
         .rev()
@@ -225,7 +194,10 @@ pub(super) fn reframe_evidence(
         "reframe_evidence",
         vec![
             evidence,
-            CExpr::Lit(CLit::Int(static_count as i64)),
+            CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Int(static_count as i64)),
+                forward_static_positions,
+            ]),
             selectors,
         ],
     )
@@ -233,20 +205,25 @@ pub(super) fn reframe_evidence(
 
 /// Combine handler-supplied callback evidence with the unknown tail captured
 /// at the original effect-operation call site. The call-time frame remains the
-/// positional static prefix and is relabeled to `static_tags`; exact entries
+/// positional static prefix and is relabeled to the target ABI's static tags;
+/// exact entries
 /// replaced at call time are omitted from the captured frame while independent
 /// tail entries are appended.
 pub(super) fn append_tail(
     call_evidence: CExpr,
     captured_evidence: CExpr,
-    static_tags: &[String],
+    target_abi: &EvidenceAbi,
 ) -> CExpr {
-    let tag_list = static_tags.iter().rev().fold(CExpr::Nil, |tail, tag| {
-        CExpr::Cons(
-            Box::new(CExpr::Lit(CLit::Atom(tag.clone()))),
-            Box::new(tail),
-        )
-    });
+    let tag_list = target_abi
+        .static_slots()
+        .iter()
+        .rev()
+        .fold(CExpr::Nil, |tail, tag| {
+            CExpr::Cons(
+                Box::new(CExpr::Lit(CLit::Atom(tag.clone()))),
+                Box::new(tail),
+            )
+        });
     cerl_call(
         EVIDENCE_BRIDGE_MODULE,
         "append_tail",
@@ -263,35 +240,38 @@ mod tests {
     }
 
     #[test]
-    fn layout_sorts_and_dedups() {
-        let layout = EvidenceLayout::new([
+    fn abi_sorts_and_dedups() {
+        let abi = EvidenceAbi::closed([
             "Std.IO.Stdio".to_string(),
             "Std.Fail.Fail".to_string(),
             "Std.IO.Stdio".to_string(),
         ]);
-        assert_eq!(layout.tags(), &["Std.Fail.Fail", "Std.IO.Stdio"]);
+        assert_eq!(abi.static_slots(), &["Std.Fail.Fail", "Std.IO.Stdio"]);
     }
 
     #[test]
     fn installing_applied_effect_specializes_bare_family_slot() {
-        let mut layout = EvidenceLayout::new(["Std.Fail.Fail"]);
-        layout.install_open_effect("Std.Fail.Fail<SagaJson.Error>".to_string());
-        assert_eq!(layout.tags(), &["Std.Fail.Fail<SagaJson.Error>"]);
+        let abi = EvidenceAbi::new(["Std.Fail.Fail"], true)
+            .plan_install("Std.Fail.Fail<SagaJson.Error>")
+            .target;
+        assert_eq!(abi.static_slots(), &["Std.Fail.Fail<SagaJson.Error>"]);
     }
 
     #[test]
     fn installing_concrete_effect_specializes_generic_family_slot() {
-        let mut layout = EvidenceLayout::new(["Main.Abort<$799>"]);
-        layout.install_open_effect("Main.Abort<Std.String.String>".to_string());
-        assert_eq!(layout.tags(), &["Main.Abort<Std.String.String>"]);
+        let abi = EvidenceAbi::new(["Main.Abort<$799>"], true)
+            .plan_install("Main.Abort<Std.String.String>")
+            .target;
+        assert_eq!(abi.static_slots(), &["Main.Abort<Std.String.String>"]);
     }
 
     #[test]
     fn installing_distinct_concrete_applications_keeps_both_slots() {
-        let mut layout = EvidenceLayout::new(["Std.Fail.Fail<Std.Int.Int>"]);
-        layout.install_open_effect("Std.Fail.Fail<Std.String.String>".to_string());
+        let abi = EvidenceAbi::new(["Std.Fail.Fail<Std.Int.Int>"], true)
+            .plan_install("Std.Fail.Fail<Std.String.String>")
+            .target;
         assert_eq!(
-            layout.tags(),
+            abi.static_slots(),
             &[
                 "Std.Fail.Fail<Std.Int.Int>",
                 "Std.Fail.Fail<Std.String.String>"
@@ -300,32 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn closed_layout_keeps_bare_and_applied_runtime_entries() {
-        let mut layout = EvidenceLayout::new(["Std.Fail.Fail"]);
-        layout.install_closed_effect("Std.Fail.Fail<Std.String.String>".to_string());
+    fn closed_abi_keeps_bare_and_applied_runtime_entries() {
+        let abi = EvidenceAbi::closed(["Std.Fail.Fail"])
+            .plan_install("Std.Fail.Fail<Std.String.String>")
+            .target;
         assert_eq!(
-            layout.tags(),
+            abi.static_slots(),
             &["Std.Fail.Fail", "Std.Fail.Fail<Std.String.String>"]
         );
-    }
-
-    #[test]
-    fn index_of_is_one_based() {
-        let layout = EvidenceLayout::new([
-            "Std.IO.Stdio".to_string(),
-            "Std.Fail.Fail".to_string(),
-            "Std.State.State".to_string(),
-        ]);
-        assert_eq!(evidence_index_of(&layout, "Std.Fail.Fail"), 1);
-        assert_eq!(evidence_index_of(&layout, "Std.IO.Stdio"), 2);
-        assert_eq!(evidence_index_of(&layout, "Std.State.State"), 3);
-    }
-
-    #[test]
-    #[should_panic(expected = "does not contain tag")]
-    fn index_of_panics_on_missing_tag() {
-        let layout = EvidenceLayout::new(["Std.Fail.Fail".to_string()]);
-        let _ = evidence_index_of(&layout, "Std.IO.Stdio");
     }
 
     #[test]
@@ -393,6 +355,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_install_executes_the_abi_planned_strategy() {
+        let source = EvidenceAbi::new(["Main.Fail"], true);
+        let plan = source.plan_install("Main.Fail<Std.String.String>");
+        let entry =
+            build_evidence_entry("Main.Fail<Std.String.String>", vec![dummy_closure("Fail")]);
+        let CExpr::Call(module, function, args) =
+            apply_install(CExpr::Var("_Evidence".to_string()), entry, &plan)
+        else {
+            panic!("expected bridge call")
+        };
+        assert_eq!(module, "std_evidence_bridge");
+        assert_eq!(function, "insert_static");
+        assert!(matches!(&args[1], CExpr::Lit(CLit::Int(1))));
+    }
+
+    #[test]
     fn find_evidence_is_bridge_call_with_tag_atom() {
         let ev = CExpr::Var("_Evidence".to_string());
         let call = find_evidence(ev, "Std.State.State");
@@ -412,49 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn project_evidence_emits_sorted_tag_list() {
-        let ev = CExpr::Var("_Evidence".to_string());
-        let call = project_evidence(ev, &["Std.IO.Stdio", "Std.Fail.Fail", "Std.IO.Stdio"]);
-        let CExpr::Call(m, f, args) = call else {
-            panic!("expected bridge call")
-        };
-        assert_eq!(m, "std_evidence_bridge");
-        assert_eq!(f, "project_evidence");
-        assert_eq!(args.len(), 2);
-        // Walk the cons list and collect tag atoms in order.
-        let mut node = &args[1];
-        let mut tags: Vec<String> = Vec::new();
-        loop {
-            match node {
-                CExpr::Cons(h, t) => {
-                    match h.as_ref() {
-                        CExpr::Lit(CLit::Atom(a)) => tags.push(a.clone()),
-                        other => panic!("expected atom in cons, got {:?}", other),
-                    }
-                    node = t.as_ref();
-                }
-                CExpr::Nil => break,
-                other => panic!("expected cons or nil, got {:?}", other),
-            }
-        }
-        assert_eq!(tags, vec!["Std.Fail.Fail", "Std.IO.Stdio"]);
-    }
-
-    #[test]
-    fn project_evidence_with_empty_tags_yields_nil_list() {
-        let ev = CExpr::Var("_Evidence".to_string());
-        let call = project_evidence(ev, &[]);
-        let CExpr::Call(_, _, args) = call else {
-            panic!("expected bridge call")
-        };
-        assert!(matches!(&args[1], CExpr::Nil));
-    }
-
-    #[test]
     fn reframe_evidence_preserves_selector_order() {
         let call = reframe_evidence(
             CExpr::Var("_Evidence".to_string()),
             2,
+            vec![1],
             vec![
                 CExpr::Lit(CLit::Int(2)),
                 CExpr::Lit(CLit::Atom("Repo<UsersDb>".to_string())),
@@ -466,7 +406,15 @@ mod tests {
         assert_eq!(module, "std_evidence_bridge");
         assert_eq!(function, "reframe_evidence");
         assert_eq!(args.len(), 3);
-        assert!(matches!(&args[1], CExpr::Lit(CLit::Int(2))));
+        let CExpr::Tuple(frame_plan) = &args[1] else {
+            panic!("expected frame plan tuple")
+        };
+        assert!(matches!(&frame_plan[0], CExpr::Lit(CLit::Int(2))));
+        let CExpr::Cons(forwarded, forwarded_tail) = &frame_plan[1] else {
+            panic!("expected forwarded static position list")
+        };
+        assert!(matches!(forwarded.as_ref(), CExpr::Lit(CLit::Int(1))));
+        assert!(matches!(forwarded_tail.as_ref(), CExpr::Nil));
         let CExpr::Cons(first, rest) = &args[2] else {
             panic!("expected selector list")
         };
@@ -512,10 +460,11 @@ mod tests {
 
     #[test]
     fn append_tail_is_bridge_call() {
+        let target = EvidenceAbi::new(["Abort<String>", "Repo"], true);
         let call = append_tail(
             CExpr::Var("CallEvidence".to_string()),
             CExpr::Var("CapturedEvidence".to_string()),
-            &["Abort<String>".to_string(), "Repo".to_string()],
+            &target,
         );
         let CExpr::Call(module, function, args) = call else {
             panic!("expected bridge call")

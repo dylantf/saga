@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::ModuleExports;
 use crate::typechecker::{
-    EffectDefInfo, EffectOpSig, Scheme, ScopeMap, Type, arity_keyed_target_name,
+    EffectDefInfo, EffectOpSig, Scheme, ScopeMap, Type, TypeEnv, arity_keyed_target_name,
     canonicalize_type_name, make_dict_name,
 };
 
@@ -88,8 +88,10 @@ pub struct ModuleCodegenInfo {
     pub handler_defs: Vec<String>,
     /// Public handler surface name -> canonical origin handler name.
     pub handler_origins: Vec<(String, String)>,
-    /// Public function effect annotations: name -> sorted effect names.
-    pub fun_effects: Vec<(String, Vec<String>)>,
+    /// Authoritative declaration ABI for each Saga callable defined by this
+    /// module plus its exported/re-exported callable surface. Private entries
+    /// support local name resolution but are never exposed by import lookup.
+    pub fun_abis: HashMap<String, crate::codegen::runtime_shape::CallableAbi>,
     /// Public type constructors: type name -> [constructor names].
     pub type_constructors: Vec<(String, Vec<String>)>,
     /// Trait impl dicts exported by this module.
@@ -99,6 +101,12 @@ pub struct ModuleCodegenInfo {
     pub external_funs: Vec<(String, String, String, usize)>,
     /// Compiler intrinsic exports: source name -> intrinsic id.
     pub intrinsic_exports: Vec<(String, crate::intrinsics::IntrinsicId)>,
+}
+
+impl ModuleCodegenInfo {
+    pub fn fun_abi(&self, name: &str) -> Option<&crate::codegen::runtime_shape::CallableAbi> {
+        self.fun_abis.get(name)
+    }
 }
 
 fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
@@ -143,16 +151,29 @@ pub(super) fn ctor_arity(ty: &Type) -> usize {
 }
 
 /// Collect codegen-relevant info from a module's public declarations.
+pub(super) struct CodegenInfoInputs<'a> {
+    pub env: &'a TypeEnv,
+    pub effects: &'a std::collections::HashMap<String, EffectDefInfo>,
+    pub scope: &'a ScopeMap,
+    pub trait_impls:
+        &'a std::collections::HashMap<(String, Vec<String>, String), super::super::ImplInfo>,
+    pub traits: &'a std::collections::HashMap<String, super::super::TraitInfo>,
+}
+
 pub(super) fn collect_codegen_info(
     module_name: &str,
     program: &[crate::ast::Decl],
     exports: &ModuleExports,
-    effects_map: &std::collections::HashMap<String, EffectDefInfo>,
-    scope_map: &ScopeMap,
-    trait_impls: &std::collections::HashMap<(String, Vec<String>, String), super::super::ImplInfo>,
-    traits: &std::collections::HashMap<String, super::super::TraitInfo>,
+    inputs: CodegenInfoInputs<'_>,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
+    let CodegenInfoInputs {
+        env,
+        effects: effects_map,
+        scope: scope_map,
+        trait_impls,
+        traits,
+    } = inputs;
     fn is_runtime_unit_param(ty: &crate::ast::TypeExpr) -> bool {
         match ty {
             crate::ast::TypeExpr::Named { name, .. } => {
@@ -185,7 +206,6 @@ pub(super) fn collect_codegen_info(
     let mut effect_defs = Vec::new();
     let mut record_fields = Vec::new();
     let mut handler_defs = Vec::new();
-    let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
     let mut external_funs = Vec::new();
     let mut intrinsic_exports = Vec::new();
@@ -306,41 +326,6 @@ pub(super) fn collect_codegen_info(
                 public: true, name, ..
             } => {
                 handler_defs.push(format!("{}.{}", module_name, name));
-            }
-            Decl::FunSignature {
-                public: true,
-                name,
-                effects,
-                ..
-            } if !effects.is_empty() => {
-                // Strip beam-native effects (same as elaboration), canonicalize names
-                let mut sorted: Vec<String> = effects
-                    .iter()
-                    .filter(|e| {
-                        !matches!(
-                            e.name.as_str(),
-                            "Actor" | "Process" | "Monitor" | "Link" | "Timer"
-                        )
-                    })
-                    .map(|e| {
-                        // Resolve effect name to canonical via scope_map
-                        scope_map
-                            .resolve_effect(&e.name)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                // Fallback: try effects_map directly, or qualify with module
-                                if effects_map.contains_key(&e.name) {
-                                    e.name.clone()
-                                } else {
-                                    format!("{}.{}", module_name, e.name)
-                                }
-                            })
-                    })
-                    .collect();
-                sorted.sort();
-                if !sorted.is_empty() {
-                    fun_effects.push((name.clone(), sorted));
-                }
             }
             Decl::FunSignature {
                 name,
@@ -521,6 +506,45 @@ pub(super) fn collect_codegen_info(
         }
     }
 
+    let canonicalize_effects = |effects: Vec<String>| {
+        effects
+            .into_iter()
+            .map(|effect| {
+                let family = super::super::applied_effect_family(&effect);
+                let canonical = scope_map.resolve_effect(family).unwrap_or(family);
+                format!("{}{}", canonical, &effect[family.len()..])
+            })
+            .collect()
+    };
+    let mut fun_abis: HashMap<_, _> = exports
+        .bindings
+        .iter()
+        .filter(|(_, scheme)| matches!(scheme.ty, Type::Fun(..)))
+        .map(|(name, scheme)| {
+            let abi = crate::codegen::runtime_shape::CallableAbi::from_scheme(
+                scheme,
+                &canonicalize_effects,
+            );
+            (name.clone(), abi)
+        })
+        .collect();
+    for decl in program {
+        let name = match decl {
+            Decl::FunBinding { name, .. } | Decl::FunSignature { name, .. } => name,
+            _ => continue,
+        };
+        if let Some(scheme) = env.get(name)
+            && matches!(scheme.ty, Type::Fun(..))
+        {
+            fun_abis.entry(name.clone()).or_insert_with(|| {
+                crate::codegen::runtime_shape::CallableAbi::from_scheme(
+                    scheme,
+                    &canonicalize_effects,
+                )
+            });
+        }
+    }
+
     ModuleCodegenInfo {
         exports: exports.bindings.clone(),
         export_origins: exports
@@ -541,7 +565,7 @@ pub(super) fn collect_codegen_info(
             .iter()
             .map(|(surface, origin)| (surface.clone(), origin.clone()))
             .collect(),
-        fun_effects,
+        fun_abis,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
         external_funs,

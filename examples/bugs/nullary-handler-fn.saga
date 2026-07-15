@@ -1,0 +1,42 @@
+# Missing typecheck: `with` accepts a nullary function that *returns* a Handler.
+#
+# `with` takes handler items -- a `handler` decl, or a variable bound to a
+# handler value. It does not evaluate expressions, so a zero-argument function
+# that constructs a handler can never be installed: there is no call to make.
+# That should be a type error, but `saga check` passes and the lowerer panics:
+#
+#   saga check  -> OK
+#   saga run    -> internal lowering error: unknown handler item 'collect_log'
+#                  (src/codegen/lower/effects/handlers.rs:224)
+#
+# Aliasing it through a `let` binds the *function*, not a handler, and panics at
+# a different site:
+#
+#   let logh = collect_log ; ... with logh
+#   -> internal lowering error: missing handler resolution for 'logh'
+#      (src/codegen/lower/effects/handlers.rs:214)
+#
+# Accepted forms, for contrast -- all give the `with` an actual handler value:
+#   handler collect_log for Log { ... }          ; ... with collect_log
+#   handler decl + let logh = collect_log        ; ... with logh
+#   fun make_log : Int -> Handler Log            ; let logh = make_log 0 ; with logh
+#
+# Only the zero-argument function is broken; arity >= 1 forces the call site to
+# apply it, which yields a value.
+
+effect Log {
+  fun log : Int -> Unit
+}
+
+fun collect_log : Handler Log
+collect_log = handler for Log {
+  log _ = resume ()
+}
+
+fun go : Unit -> Int
+go () = {
+  log! 1
+  5
+} with collect_log
+
+main () = dbg (go ())

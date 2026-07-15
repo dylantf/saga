@@ -181,10 +181,9 @@ impl<'a> Lowerer<'a> {
                 Some(ctx) => CExpr::Var(ctx.var.clone()),
                 None => CExpr::Tuple(Vec::new()),
             };
-            let open_frame = saved_evidence.as_ref().is_some_and(|ctx| ctx.is_open);
-            let mut new_layout = saved_evidence
+            let mut new_abi = saved_evidence
                 .as_ref()
-                .map(|ctx| ctx.layout.clone())
+                .map(|frame| frame.abi.clone())
                 .unwrap_or_default();
             for (eff, mut ops) in effect_to_ops {
                 ops.sort();
@@ -200,20 +199,9 @@ impl<'a> Lowerer<'a> {
                     .collect();
                 let entry =
                     crate::codegen::lower::evidence::build_evidence_entry(&eff, op_closures);
-                if open_frame {
-                    acc = crate::codegen::lower::evidence::insert_static(
-                        acc,
-                        new_layout.tags().len(),
-                        entry,
-                    );
-                } else {
-                    acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
-                }
-                if open_frame {
-                    new_layout.install_open_effect(eff);
-                } else {
-                    new_layout.install_closed_effect(eff);
-                }
+                let install = new_abi.plan_install(eff);
+                acc = crate::codegen::lower::evidence::apply_install(acc, entry, &install);
+                new_abi = install.target;
             }
             let new_var = self.fresh();
             // Layout mirrors the value we built: union of the inherited
@@ -221,11 +209,10 @@ impl<'a> Lowerer<'a> {
             // here. The is_open flag also propagates from the inherited
             // context — a row-polymorphic outer caller's evidence may carry
             // additional unknown effects beyond the static layout.
-            self.current_evidence = Some(crate::codegen::lower::EvidenceCtx {
-                var: new_var.clone(),
-                layout: new_layout,
-                is_open: open_frame,
-            });
+            self.current_evidence = Some(crate::codegen::lower::EvidenceFrame::new(
+                new_var.clone(),
+                new_abi,
+            ));
             ((new_var.clone(), acc), new_var)
         };
 

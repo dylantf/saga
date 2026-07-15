@@ -149,8 +149,7 @@ pub enum ResolvedCodegenKind {
     BeamFunction {
         erlang_mod: Option<String>,
         name: String,
-        arity: usize,
-        effects: Vec<String>,
+        abi: crate::codegen::runtime_shape::CallableAbi,
     },
     /// A Saga declaration implemented by an Erlang function. Normal calls go
     /// through the Saga wrapper, because effectful Saga calls may have
@@ -162,8 +161,7 @@ pub enum ResolvedCodegenKind {
         name: String,
         target_erlang_mod: String,
         target_name: String,
-        arity: usize,
-        effects: Vec<String>,
+        abi: crate::codegen::runtime_shape::CallableAbi,
     },
     /// A compiler intrinsic selected by declaration identity, never spelling.
     /// Intrinsics lower via `lower_intrinsic` and never flow through the
@@ -177,16 +175,19 @@ pub enum ResolvedCodegenKind {
 impl ResolvedCodegenKind {
     pub fn arity(&self) -> usize {
         match self {
-            ResolvedCodegenKind::BeamFunction { arity, .. }
-            | ResolvedCodegenKind::ExternalFunction { arity, .. }
-            | ResolvedCodegenKind::Intrinsic { arity, .. } => *arity,
+            ResolvedCodegenKind::BeamFunction { abi, .. }
+            | ResolvedCodegenKind::ExternalFunction { abi, .. } => abi.expanded_arity(),
+            ResolvedCodegenKind::Intrinsic { arity, .. } => *arity,
         }
     }
 
     pub fn effects(&self) -> &[String] {
         match self {
-            ResolvedCodegenKind::BeamFunction { effects, .. }
-            | ResolvedCodegenKind::ExternalFunction { effects, .. } => effects,
+            ResolvedCodegenKind::BeamFunction { abi, .. }
+            | ResolvedCodegenKind::ExternalFunction { abi, .. } => abi
+                .evidence
+                .as_ref()
+                .map_or(&[], |evidence| evidence.static_slots()),
             ResolvedCodegenKind::Intrinsic { .. } => &[],
         }
     }
@@ -468,22 +469,15 @@ pub fn resolve_names(
             .get(&source_module_name)
             .map(|info| info.as_ref()),
     );
-    let effect_op_counts = build_effect_op_counts(codegen_info);
     // Canonical-form qualified entries are driven by what's been *loaded*
     // (every module in `codegen_info`), independent of explicit imports.
     // Imports below add the bare/alias surface on top.
-    register_canonical_qualified_scope(
-        codegen_info,
-        &source_module_name,
-        &effect_op_counts,
-        &mut qualified_scope,
-    );
+    register_canonical_qualified_scope(codegen_info, &source_module_name, &mut qualified_scope);
     register_import_aliases(
         program,
         prelude_imports,
         codegen_info,
         &local_funs,
-        &effect_op_counts,
         &mut scope,
         &mut qualified_scope,
     );
@@ -692,8 +686,7 @@ fn resolve_expr(
                                 kind: ResolvedCodegenKind::BeamFunction {
                                     erlang_mod: None,
                                     name: name.clone(),
-                                    arity,
-                                    effects: Vec::new(),
+                                    abi: crate::codegen::runtime_shape::CallableAbi::pure(arity),
                                 },
                             },
                         );
@@ -983,17 +976,17 @@ fn classify_codegen_kind(
     info: Option<&ModuleCodegenInfo>,
     name: &str,
     declared_arity: usize,
-    arity: usize,
+    abi: crate::codegen::runtime_shape::CallableAbi,
     erlang_mod_for_beam: Option<String>,
     erlang_mod_for_external: &str,
-    effects: Vec<String>,
 ) -> ResolvedCodegenKind {
+    let expanded_arity = abi.expanded_arity();
     if let Some((_, intrinsic)) =
         info.and_then(|info| info.intrinsic_exports.iter().find(|(n, _)| n == name))
     {
         return ResolvedCodegenKind::Intrinsic {
             id: *intrinsic,
-            arity,
+            arity: expanded_arity,
         };
     }
     if let Some((_, target_mod, target_fun, _)) = info.and_then(|info| {
@@ -1006,15 +999,13 @@ fn classify_codegen_kind(
             name: name.to_string(),
             target_erlang_mod: target_mod.clone(),
             target_name: target_fun.clone(),
-            arity,
-            effects,
+            abi,
         };
     }
     ResolvedCodegenKind::BeamFunction {
         erlang_mod: erlang_mod_for_beam,
         name: name.to_string(),
-        arity,
-        effects,
+        abi,
     }
 }
 
@@ -1031,15 +1022,11 @@ fn register_local_scope_funs(
             .collect::<Vec<_>>(),
     );
     for (name, arity) in local_funs {
-        let kind = classify_codegen_kind(
-            info,
-            name,
-            *arity,
-            *arity,
-            None,
-            &source_erlang_mod,
-            Vec::new(),
-        );
+        let abi = info
+            .and_then(|info| info.fun_abi(name))
+            .cloned()
+            .unwrap_or_else(|| crate::codegen::runtime_shape::CallableAbi::pure(*arity));
+        let kind = classify_codegen_kind(info, name, *arity, abi, None, &source_erlang_mod);
         scope.insert(
             name.clone(),
             ScopedName::Symbol {
@@ -1052,20 +1039,6 @@ fn register_local_scope_funs(
     }
 }
 
-fn build_effect_op_counts(
-    codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
-) -> HashMap<String, usize> {
-    let mut effect_op_counts: HashMap<String, usize> = HashMap::new();
-    for info in codegen_info.values() {
-        for eff_def in &info.effect_defs {
-            effect_op_counts
-                .entry(eff_def.name.clone())
-                .or_insert(eff_def.ops.len());
-        }
-    }
-    effect_op_counts
-}
-
 /// Build the `ScopedName::ImportedFun` for a single module export, applying
 /// the standard arity/effect/evidence-param expansion. Shared by canonical
 /// and alias registration so both compute the same scoped value.
@@ -1075,48 +1048,26 @@ fn build_imported_fun_scoped(
     name: &str,
     scheme: &crate::typechecker::Scheme,
     info: &ModuleCodegenInfo,
-    fun_effects_map: &HashMap<&str, &Vec<String>>,
-    effect_op_counts: &HashMap<String, usize>,
 ) -> ScopedName {
-    let (arity, mut effects) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
-    let dict_params = crate::codegen::lower::util::dict_param_count(&scheme.constraints);
-    let is_open_row = crate::codegen::lower::util::has_open_effect_row(&scheme.ty);
-    // Merge with fun_effects (which strips beam-native effects in
-    // check_module.rs but is otherwise the authoritative annotation list).
-    // Effects from the type include beam-native ones; the lowered function
-    // threads evidence covering *all* of them, so the resolver's arity
-    // calculation must match. This mirrors the supplementation in `lower/init.rs`.
-    if let Some(ann_effs) = fun_effects_map.get(name) {
-        for eff in ann_effs.iter() {
-            if !effects.contains(eff) {
-                effects.push(eff.clone());
-            }
-        }
-    }
-    effects.sort();
-    let handler_param_count: usize = effects
-        .iter()
-        .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
-        .sum();
-    // Effectful/open-row callees take `_Evidence` and `_ReturnK`. Open-row
-    // functions may have no statically named effects, but they still use the
-    // CPS ABI so callers can forward ambient evidence through the row tail.
-    let extras = if handler_param_count > 0 || is_open_row {
-        2
-    } else {
-        0
-    };
-    let expanded_arity = arity + dict_params + extras;
+    let (arity, _) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
+    let abi = info.fun_abi(name).cloned().unwrap_or_else(|| {
+        assert!(
+            !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
+            "missing exported CallableAbi for '{}.{}'",
+            mod_name,
+            name
+        );
+        crate::codegen::runtime_shape::CallableAbi::pure(arity)
+    });
     let canonical_name = format!("{}.{}", mod_name, name);
 
     let kind = classify_codegen_kind(
         Some(info),
         name,
         arity,
-        expanded_arity,
+        abi,
         Some(erlang_mod.to_string()),
         erlang_mod,
-        effects,
     );
 
     ScopedName::Symbol {
@@ -1154,7 +1105,6 @@ fn export_origin<'a>(
 fn register_canonical_qualified_scope(
     codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     source_module_name: &str,
-    effect_op_counts: &HashMap<String, usize>,
     qualified_scope: &mut HashMap<String, ScopedName>,
 ) {
     for (mod_name, info) in codegen_info {
@@ -1168,19 +1118,12 @@ fn register_canonical_qualified_scope(
             let origin_info = codegen_info.get(origin_mod).unwrap_or(info);
             let origin_path: Vec<String> = origin_mod.split('.').map(String::from).collect();
             let origin_erlang_mod = module_name_to_erlang(&origin_path);
-            let origin_fun_effects_map: HashMap<&str, &Vec<String>> = origin_info
-                .fun_effects
-                .iter()
-                .map(|(n, effs)| (n.as_str(), effs))
-                .collect();
             let scoped = build_imported_fun_scoped(
                 origin_mod,
                 &origin_erlang_mod,
                 origin_name,
                 scheme,
                 origin_info,
-                &origin_fun_effects_map,
-                effect_op_counts,
             );
             let canonical = format!("{}.{}", mod_name, name);
             qualified_scope.entry(canonical).or_insert(scoped);
@@ -1198,7 +1141,6 @@ fn register_import_aliases(
     prelude_imports: &[Decl],
     codegen_info: &HashMap<String, std::sync::Arc<ModuleCodegenInfo>>,
     local_funs: &HashMap<String, usize>,
-    effect_op_counts: &HashMap<String, usize>,
     scope: &mut HashMap<String, ScopedName>,
     qualified_scope: &mut HashMap<String, ScopedName>,
 ) {
@@ -1242,19 +1184,12 @@ fn register_import_aliases(
                 let origin_info = codegen_info.get(origin_mod).unwrap_or(info);
                 let origin_path: Vec<String> = origin_mod.split('.').map(String::from).collect();
                 let origin_erlang_mod = module_name_to_erlang(&origin_path);
-                let origin_fun_effects_map: HashMap<&str, &Vec<String>> = origin_info
-                    .fun_effects
-                    .iter()
-                    .map(|(n, effs)| (n.as_str(), effs))
-                    .collect();
                 let scoped = build_imported_fun_scoped(
                     origin_mod,
                     &origin_erlang_mod,
                     origin_name,
                     scheme,
                     origin_info,
-                    &origin_fun_effects_map,
-                    effect_op_counts,
                 );
                 if alias_differs {
                     let aliased = format!("{}.{}", alias, name);
@@ -1289,8 +1224,7 @@ fn register_trait_impl_dicts(
                     kind: ResolvedCodegenKind::BeamFunction {
                         erlang_mod: Some(erlang_mod.clone()),
                         name: d.dict_name.clone(),
-                        arity: d.arity,
-                        effects: Vec::new(),
+                        abi: crate::codegen::runtime_shape::CallableAbi::pure(d.arity),
                     },
                 });
         }

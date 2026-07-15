@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::lower::*;
-use crate::codegen::runtime_shape::CpsShape;
+use crate::codegen::runtime_shape::EvidenceAbi;
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.
@@ -99,9 +99,8 @@ impl<'a> Lowerer<'a> {
             // to the wrong handler. BEAM-native effects (e.g. spawn's Actor)
             // are the exception below: their context comes from direct erlang
             // calls, not handler params.
-            let saved_ctx = self.lambda_effect_context.take();
-            let saved_captured_evidence = self.lambda_captured_evidence.take();
             let saved_direct_ops = self.direct_ops.clone();
+            let mut captured_evidence_scope = None;
             let absorbed_effects = op_param_absorbed
                 .as_ref()
                 .and_then(|pae| pae.get(&source_idx));
@@ -110,7 +109,7 @@ impl<'a> Lowerer<'a> {
                 let actual_callback_effects = self
                     .semantic_type_at_node(arg.id)
                     .and_then(|ty| self.cps_function_shape_from_type(ty))
-                    .map(|shape| shape.static_effects)
+                    .map(|shape| shape.static_slots().to_vec())
                     .unwrap_or_default();
                 let mut uncapturable: Vec<String> = Vec::new();
                 let mut uses_native_callback_context = false;
@@ -156,25 +155,39 @@ impl<'a> Lowerer<'a> {
                 uncapturable.dedup();
                 let cps_open_row = has_open_row && !uses_native_callback_context;
                 if !uncapturable.is_empty() || cps_open_row {
-                    self.lambda_effect_context = Some(CpsShape {
-                        static_effects: uncapturable,
-                        is_open_row: cps_open_row,
-                    });
+                    let planned = self
+                        .planned_function_value_implementation(arg.id)
+                        .and_then(|abi| abi.evidence.as_ref())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "internal ABI planning error: missing effect callback ABI for {:?}",
+                                arg.id
+                            )
+                        });
+                    assert_eq!(
+                        planned,
+                        &EvidenceAbi::new(uncapturable, cps_open_row),
+                        "internal ABI planning error: effect callback ABI disagrees with lowering"
+                    );
                     if cps_open_row {
                         // Named callback effects are supplied by the handler
                         // at invocation time. Capture the perform-site frame
                         // only as a source for the callback's `..r` entries;
                         // lambda lowering overlays the call-time static frame
                         // and removes exact duplicates.
-                        self.lambda_captured_evidence = self.current_evidence.clone();
+                        if let Some(frame) = self.current_evidence.clone() {
+                            captured_evidence_scope =
+                                Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
+                        }
                     }
                 }
             }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));
-            self.lambda_effect_context = saved_ctx;
-            self.lambda_captured_evidence = saved_captured_evidence;
+            if let Some((node_id, previous)) = captured_evidence_scope {
+                self.restore_function_value_captured_evidence(node_id, previous);
+            }
             self.direct_ops = saved_direct_ops;
             bindings.push((v.clone(), ce));
             param_vars.push(v);

@@ -2845,6 +2845,153 @@ result () = {
 }
 
 #[test]
+fn open_cps_function_value_reframes_a_different_static_prefix() {
+    // `invoke` exposes a callback frame shaped as {B, ..e}, while `actual`
+    // is compiled against {Z, ..r}. Both are open, so the adapter must still
+    // move Z into the implementation's first static slot.
+    let src = r#"module Main
+
+effect A { fun get_a : Unit -> String }
+effect B { fun get_b : Unit -> String }
+effect Z { fun get_z : Unit -> String }
+
+handler handle_a for A { get_a () = resume "a" }
+handler handle_b for B { get_b () = resume "b" }
+handler handle_z for Z { get_z () = resume "z" }
+
+fun actual : Unit -> String needs {Z, ..r}
+actual () = get_z! ()
+
+fun invoke : (Unit -> String needs {B, ..e}) -> String needs {A, B, ..e}
+invoke callback = {
+  let _ = get_a! ()
+  callback ()
+}
+
+pub fun result : Unit -> String
+result () = (((invoke actual) with handle_z) with handle_b) with handle_a
+
+main () = ()
+"#;
+    check_result_string(
+        "open_cps_function_value_reframes_a_different_static_prefix",
+        src,
+        "z",
+    );
+}
+
+#[test]
+fn cross_module_open_cps_function_value_reframes_a_different_static_prefix() {
+    let lib = r#"module OpenAdapter
+
+pub effect A { fun get_a : Unit -> String }
+pub effect B { fun get_b : Unit -> String }
+
+pub fun invoke : (Unit -> String needs {B, ..e}) -> String needs {A, B, ..e}
+invoke callback = {
+  let _ = get_a! ()
+  callback ()
+}
+"#;
+    let main_src = r#"module Main
+
+import OpenAdapter (A, B, invoke)
+
+effect Z { fun get_z : Unit -> String }
+
+handler handle_a for A { get_a () = resume "a" }
+handler handle_b for B { get_b () = resume "b" }
+handler handle_z for Z { get_z () = resume "z" }
+
+fun actual : Unit -> String needs {Z, ..r}
+actual () = get_z! ()
+
+pub fun result : Unit -> String
+result () = (((invoke actual) with handle_z) with handle_b) with handle_a
+"#;
+    check_cross_module(
+        "cross_module_open_cps_function_value_reframes_a_different_static_prefix",
+        &[("lib/OpenAdapter.saga", lib)],
+        main_src,
+        "z",
+    );
+}
+
+#[test]
+fn nested_cross_module_open_hofs_drop_handled_static_prefix() {
+    // `choose` installs Skip around `group`; `group` installs a second Skip
+    // around `route`.  The route callback must receive only its ambient Check
+    // tail.  Retaining either handled Skip prefix makes `check!` dispatch to a
+    // Skip operation closure with the wrong arity.
+    let lib = r#"module NestedRoutes
+
+pub effect Skip {
+  fun skip : Unit -> a
+  fun rejected : String -> a
+}
+
+pub fun route :
+  (Unit -> String needs {..e}) -> Unit -> String needs {Skip, ..e}
+route callback () = callback ()
+
+pub fun choose :
+  List (Unit -> String needs {Skip, ..e}) -> Unit -> String needs {..e}
+choose routes () = choose_loop routes ()
+
+fun choose_loop :
+  List (Unit -> String needs {Skip, ..e}) -> Unit -> String needs {..e}
+choose_loop routes () = case routes {
+  [] -> "missing"
+  current :: rest -> current () with {
+    skip () = choose_loop rest ()
+    rejected _ = choose_loop rest ()
+  }
+}
+
+pub fun group :
+  List (Unit -> String needs {Skip, ..e}) -> Unit -> String needs {Skip, ..e}
+group routes () = choose_or_skip routes ()
+
+fun choose_or_skip :
+  List (Unit -> String needs {Skip, ..e}) -> Unit -> String needs {Skip, ..e}
+choose_or_skip routes () = case routes {
+  [] -> skip! ()
+  current :: rest -> current () with {
+    skip () = choose_or_skip rest ()
+    rejected _ = choose_or_skip rest ()
+  }
+}
+"#;
+    let main_src = r#"module Main
+
+import NestedRoutes (choose, group, route)
+
+effect Check {
+  fun check : Unit -> Unit
+}
+
+handler checks for Check {
+  check () = resume ()
+}
+
+pub fun result : Unit -> String
+result () = {
+  let app = choose [group [route (fun () -> {
+    check! ()
+    "ok"
+  })]]
+  app ()
+} with checks
+"#;
+    check_cross_module(
+        "nested_cross_module_open_hofs_drop_handled_static_prefix",
+        &[("lib/NestedRoutes.saga", lib)],
+        main_src,
+        "ok",
+    );
+}
+
+#[test]
 fn beam_ref_with_fail_recover() {
     let src = r#"module Main
 

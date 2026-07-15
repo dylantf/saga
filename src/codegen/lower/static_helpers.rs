@@ -64,6 +64,14 @@ impl<'a> Lowerer<'a> {
         if params.len() != arg_vars.len() {
             return None;
         }
+        debug_assert!(
+            self.resolved_fun_info(head.id, &helper_key)
+                .or_else(|| self.resolved_fun_info(head.id, lookup_name))
+                .is_some_and(|info| {
+                    info.abi.evidence.is_some() && info.abi.user_arity == params.len()
+                }),
+            "static helper variant must be derived from the source CallableAbi"
+        );
 
         self.helper_inline_stack.push(helper_key);
         let body = self.lower_expr_with_installed_return_k(&helper.body, return_k);
@@ -147,6 +155,14 @@ impl<'a> Lowerer<'a> {
         if params.len() != arg_vars.len() {
             return None;
         }
+        debug_assert!(
+            self.resolved_fun_info(head.id, &helper_key)
+                .or_else(|| self.resolved_fun_info(head.id, lookup_name))
+                .is_some_and(|info| {
+                    info.abi.evidence.is_some() && info.abi.user_arity == params.len()
+                }),
+            "imported static helper variant must preserve the source CallableAbi"
+        );
         let capture_param_names: Vec<String> = captures
             .iter()
             .map(|capture| Self::generated_helper_capture_param_name(&capture.name))
