@@ -16,8 +16,9 @@ mod trait_spec_stats;
 pub mod util;
 
 use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
+use crate::codegen::call_effects::CallEffectInfo;
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::EvidenceAbi;
+use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 use crate::typechecker::TraitInfo;
 use std::collections::HashMap;
 
@@ -321,6 +322,10 @@ pub struct Lowerer<'a> {
     /// identity. Unlike the former mutable "next lambda" slot, unrelated
     /// recursive lowering cannot consume or overwrite another value's ABI.
     effect_abi_plan: super::call_effects::EffectAbiPlan,
+    /// Compatibility cache for callers that invoke contextual emission
+    /// without the normal project-wide precompute checkpoint. Plans remain
+    /// module-separated and are consulted only by semantic module.
+    fallback_effect_abi_plans: HashMap<String, super::call_effects::EffectAbiPlan>,
     /// Perform-site evidence captured by an open-row callback value, keyed by
     /// that callback expression's identity.
     function_value_captured_evidence: HashMap<NodeId, EvidenceFrame>,
@@ -440,6 +445,7 @@ impl<'a> Lowerer<'a> {
             direct_hof_callback_params: HashMap::new(),
             direct_hof_value_bindings: HashMap::new(),
             effect_abi_plan: super::call_effects::EffectAbiPlan::default(),
+            fallback_effect_abi_plans: HashMap::new(),
             function_value_captured_evidence: HashMap::new(),
             constructor_atoms,
             resolved: resolution.symbols,
@@ -470,9 +476,65 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn planned_function_value_evidence(&self, node_id: NodeId) -> Option<EvidenceAbi> {
+        self.planned_function_value_implementation(node_id)
+            .and_then(|abi| abi.evidence.clone())
+    }
+
+    fn semantic_effect_abi_plan(&self) -> Option<&super::call_effects::EffectAbiPlan> {
+        let semantic_module = self.current_semantic_module_name();
+        if let Some(plan) = self.fallback_effect_abi_plans.get(semantic_module) {
+            return Some(plan);
+        }
+        (semantic_module != self.current_source_module)
+            .then(|| self.ctx.modules.get(semantic_module))
+            .flatten()
+            .filter(|compiled| compiled.effect_abi_plan_ready)
+            .map(|compiled| &compiled.effect_abi_plan)
+    }
+
+    pub(super) fn planned_call(&self, node_id: NodeId) -> Option<&CallEffectInfo> {
+        self.effect_abi_plan.call(node_id).or_else(|| {
+            self.semantic_effect_abi_plan()
+                .and_then(|plan| plan.call(node_id))
+        })
+    }
+
+    pub(super) fn planned_declaration(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        self.effect_abi_plan.declaration(node_id).or_else(|| {
+            self.semantic_effect_abi_plan()
+                .and_then(|plan| plan.declaration(node_id))
+        })
+    }
+
+    pub(super) fn planned_function_value(
+        &self,
+        node_id: NodeId,
+    ) -> Option<&super::call_effects::FunctionValueAbiPlan> {
+        self.effect_abi_plan.function_value(node_id).or_else(|| {
+            self.semantic_effect_abi_plan()
+                .and_then(|plan| plan.function_value(node_id))
+        })
+    }
+
+    pub(super) fn planned_function_value_implementation(
+        &self,
+        node_id: NodeId,
+    ) -> Option<&CallableAbi> {
         self.effect_abi_plan
             .function_value_implementation(node_id)
-            .and_then(|abi| abi.evidence.clone())
+            .or_else(|| {
+                self.semantic_effect_abi_plan()
+                    .and_then(|plan| plan.function_value_implementation(node_id))
+            })
+    }
+
+    pub(super) fn planned_function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
+        self.effect_abi_plan
+            .function_value_boundary(node_id)
+            .or_else(|| {
+                self.semantic_effect_abi_plan()
+                    .and_then(|plan| plan.function_value_boundary(node_id))
+            })
     }
 
     pub(super) fn capture_function_value_evidence(
@@ -815,9 +877,7 @@ impl<'a> Lowerer<'a> {
         {
             return false;
         }
-        self.effect_abi_plan
-            .calls
-            .get(&expr.id)
+        self.planned_call(expr.id)
             .is_some_and(|info| info.is_cps_call())
     }
 
@@ -833,9 +893,7 @@ impl<'a> Lowerer<'a> {
 
     pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
         let shape = self
-            .effect_abi_plan
-            .calls
-            .get(&expr.id)
+            .planned_call(expr.id)
             .map(|info| info.debug_label())
             .unwrap_or_else(|| "missing-call-effect-info".to_string());
         let head = head.unwrap_or(expr);
@@ -1006,7 +1064,7 @@ mod tests {
                 )),
             },
         );
-        lowerer.effect_abi_plan.calls.insert(
+        lowerer.effect_abi_plan.record_call(
             app.id,
             super::super::call_effects::CallEffectInfo::test_cps_static("Main.Log", "log", 1),
         );

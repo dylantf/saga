@@ -640,20 +640,15 @@ impl<'a> Lowerer<'a> {
 
                 for (name, scheme) in &info.exports {
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
-                    let callable_abi = info
-                        .fun_abis
-                        .iter()
-                        .find(|(fun_name, _)| fun_name == name)
-                        .map(|(_, abi)| abi.clone())
-                        .unwrap_or_else(|| {
-                            assert!(
-                                !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
-                                "missing exported CallableAbi for '{}.{}'",
-                                mod_name,
-                                name
-                            );
-                            CallableAbi::pure(dict_param_count)
-                        });
+                    let callable_abi = info.fun_abi(name).cloned().unwrap_or_else(|| {
+                        assert!(
+                            !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
+                            "missing exported CallableAbi for '{}.{}'",
+                            mod_name,
+                            name
+                        );
+                        CallableAbi::pure(dict_param_count)
+                    });
                     let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
                         .into_iter()
@@ -750,10 +745,8 @@ impl<'a> Lowerer<'a> {
                 .unwrap_or(info);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
             let callable_abi = origin_info
-                .fun_abis
-                .iter()
-                .find(|(fun_name, _)| fun_name == origin_name)
-                .map(|(_, abi)| abi.clone())
+                .fun_abi(origin_name)
+                .cloned()
                 .unwrap_or_else(|| {
                     assert!(
                         !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
@@ -973,11 +966,9 @@ impl<'a> Lowerer<'a> {
                     .unwrap_or(0);
                 let mut callable_abi = origin_scheme
                     .map(|scheme| {
-                        let mut abi = CallableAbi::from_type(&scheme.ty, |effects| {
+                        CallableAbi::from_scheme(scheme, |effects| {
                             self.canonicalize_effects(effects)
-                        });
-                        abi.user_arity += dict_param_count;
-                        abi
+                        })
                     })
                     .unwrap_or_else(|| {
                         if effects.is_empty() {

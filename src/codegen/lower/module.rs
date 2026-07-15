@@ -135,6 +135,64 @@ fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
 }
 
 impl<'a> Lowerer<'a> {
+    fn fun_binding_runtime_info(
+        &self,
+        name: &str,
+        params: &[ast::Pat],
+        body: &Expr,
+        annotation: PendingAnnotation,
+    ) -> FunInfo {
+        let PendingAnnotation {
+            mut effects,
+            mut param_absorbed_effects,
+        } = annotation;
+        let scheme = self.check_result.env.get(name);
+        let resolved_ty = scheme.map(|scheme| self.check_result.sub.apply(&scheme.ty));
+        let param_types = resolved_ty
+            .as_ref()
+            .map(util::param_types_from_type)
+            .unwrap_or_default();
+        if effects.is_empty()
+            && let Some(ty) = resolved_ty.as_ref()
+        {
+            effects = self.canonicalize_effects(util::arity_and_effects_from_type(ty).1);
+            param_absorbed_effects = util::param_absorbed_effects_from_type(ty)
+                .into_iter()
+                .map(|(idx, effects)| (idx, self.canonicalize_effects(effects)))
+                .collect();
+        }
+
+        let source_arity = lower_params(params).len() + count_lambda_params(body);
+        let declared_arity = resolved_ty
+            .as_ref()
+            .map(|ty| util::arity_and_effects_from_type(ty).0)
+            .unwrap_or(0);
+        let base_arity = source_arity.max(declared_arity);
+        let mut abi = resolved_ty
+            .as_ref()
+            .map(|ty| CallableAbi::from_type(ty, |effects| self.canonicalize_effects(effects)))
+            .unwrap_or_else(|| {
+                if effects.is_empty() {
+                    CallableAbi::pure(base_arity)
+                } else {
+                    CallableAbi::cps(base_arity, EvidenceAbi::closed(effects.clone()))
+                }
+            });
+        abi.user_arity = abi.user_arity.max(base_arity);
+        if abi.evidence.is_none() && !effects.is_empty() {
+            abi.evidence = Some(EvidenceAbi::closed(effects));
+        }
+
+        FunInfo::from_abi(
+            abi,
+            param_absorbed_effects,
+            param_types,
+            scheme
+                .map(|scheme| util::dict_param_count(&scheme.constraints))
+                .unwrap_or(0),
+        )
+    }
+
     pub(super) fn precompute_call_effects(
         &mut self,
         module_name: &str,
@@ -173,6 +231,7 @@ impl<'a> Lowerer<'a> {
         timed_lower_phase(module_name, "plan_contextual_effect_abis", || {
             self.plan_contextual_function_value_abis(program)
         });
+        self.effect_abi_plan.freeze();
         std::mem::take(&mut self.effect_abi_plan)
     }
 
@@ -188,77 +247,15 @@ impl<'a> Lowerer<'a> {
                 Decl::FunBinding {
                     name, params, body, ..
                 } => {
-                    let PendingAnnotation {
-                        mut effects,
-                        mut param_absorbed_effects,
-                    } = pending_annotations
-                        .remove(name.as_str())
-                        .unwrap_or(PendingAnnotation {
-                            effects: Vec::new(),
-                            param_absorbed_effects: HashMap::new(),
-                        });
-                    let mut param_types = Vec::new();
-                    if effects.is_empty()
-                        && let Some(scheme) = self.check_result.env.get(name)
-                    {
-                        let resolved_ty = self.check_result.sub.apply(&scheme.ty);
-                        effects = self.canonicalize_effects(
-                            util::arity_and_effects_from_type(&resolved_ty).1,
-                        );
-                        param_absorbed_effects =
-                            util::param_absorbed_effects_from_type(&resolved_ty)
-                                .into_iter()
-                                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                                .collect();
-                        param_types = util::param_types_from_type(&resolved_ty);
-                    } else if let Some(scheme) = self.check_result.env.get(name) {
-                        param_types =
-                            util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty));
-                    }
-                    let mut base_arity = lower_params(params).len() + count_lambda_params(body);
-                    if let Some(scheme) = self.check_result.env.get(name) {
-                        let declared_arity = util::arity_and_effects_from_type(
-                            &self.check_result.sub.apply(&scheme.ty),
-                        )
-                        .0;
-                        if declared_arity > base_arity {
-                            base_arity = declared_arity;
-                        }
-                    }
-                    let mut callable_abi = self
-                        .check_result
-                        .env
-                        .get(name)
-                        .map(|scheme| {
-                            let ty = self.check_result.sub.apply(&scheme.ty);
-                            CallableAbi::from_type(&ty, |effects| {
-                                self.canonicalize_effects(effects)
-                            })
-                        })
-                        .unwrap_or_else(|| {
-                            if effects.is_empty() {
-                                CallableAbi::pure(base_arity)
-                            } else {
-                                CallableAbi::cps(base_arity, EvidenceAbi::closed(effects.clone()))
-                            }
-                        });
-                    callable_abi.user_arity = callable_abi.user_arity.max(base_arity);
-                    if callable_abi.evidence.is_none() && !effects.is_empty() {
-                        callable_abi.evidence = Some(EvidenceAbi::closed(effects.clone()));
-                    }
-                    let registered_abi = callable_abi.clone();
-                    self.fun_info.entry(name.clone()).or_insert_with(|| {
-                        FunInfo::from_abi(
-                            registered_abi,
-                            param_absorbed_effects,
-                            param_types,
-                            self.check_result
-                                .env
-                                .get(name)
-                                .map(|scheme| util::dict_param_count(&scheme.constraints))
-                                .unwrap_or(0),
-                        )
-                    });
+                    let annotation =
+                        pending_annotations
+                            .remove(name.as_str())
+                            .unwrap_or(PendingAnnotation {
+                                effects: Vec::new(),
+                                param_absorbed_effects: HashMap::new(),
+                            });
+                    let info = self.fun_binding_runtime_info(name, params, body, annotation);
+                    self.fun_info.entry(name.clone()).or_insert(info);
                 }
                 Decl::DictConstructor {
                     name,
@@ -329,6 +326,35 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn precompute_missing_context_plans(&mut self) {
+        let missing = self
+            .ctx
+            .modules
+            .iter()
+            .filter(|(name, compiled)| {
+                name.as_str() != self.current_source_module && !compiled.effect_abi_plan_ready
+            })
+            .map(|(name, compiled)| {
+                (
+                    name.clone(),
+                    compiled.elaborated.clone(),
+                    compiled.resolution.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (name, program, resolution) in missing {
+            let module_check = self
+                .check_result
+                .module_check_results()
+                .get(&name)
+                .map(|result| result.as_ref())
+                .unwrap_or(self.check_result);
+            let plan =
+                super::precompute_call_effects(self.ctx, &name, &program, resolution, module_check);
+            self.fallback_effect_abi_plans.insert(name, plan);
+        }
+    }
+
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
         self.current_module = module_name.to_string();
         self.current_source_module = program
@@ -365,92 +391,21 @@ impl<'a> Lowerer<'a> {
                         span,
                         ..
                     } => {
-                        let PendingAnnotation {
-                            mut effects,
-                            mut param_absorbed_effects,
-                        } = pending_annotations.remove(name.as_str()).unwrap_or(
+                        let annotation = pending_annotations.remove(name.as_str()).unwrap_or(
                             PendingAnnotation {
                                 effects: Vec::new(),
                                 param_absorbed_effects: HashMap::new(),
                             },
                         );
-                        let mut param_types = Vec::new();
-                        if effects.is_empty()
-                            && let Some(scheme) = self.check_result.env.get(name)
-                        {
-                            let resolved_ty = self.check_result.sub.apply(&scheme.ty);
-                            effects = self.canonicalize_effects(
-                                util::arity_and_effects_from_type(&resolved_ty).1,
-                            );
-                            param_absorbed_effects =
-                                util::param_absorbed_effects_from_type(&resolved_ty)
-                                    .into_iter()
-                                    .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                                    .collect();
-                            param_types = util::param_types_from_type(&resolved_ty);
-                        } else if let Some(scheme) = self.check_result.env.get(name) {
-                            param_types = util::param_types_from_type(
-                                &self.check_result.sub.apply(&scheme.ty),
-                            );
-                        }
-                        let mut base_arity = lower_params(params).len() + count_lambda_params(body);
-                        // For eta-reduced functions (e.g. `pg_text = coerce_value`),
-                        // the binding has 0 params but the type annotation declares a
-                        // higher arity. Use the annotation's arity so cross-module
-                        // callers (who derive arity from the type) find the right /N.
-                        if let Some(scheme) = self.check_result.env.get(name) {
-                            let declared_arity = util::arity_and_effects_from_type(
-                                &self.check_result.sub.apply(&scheme.ty),
-                            )
-                            .0;
-                            if declared_arity > base_arity {
-                                base_arity = declared_arity;
-                            }
-                        }
-                        let mut callable_abi = self
-                            .check_result
-                            .env
-                            .get(name)
-                            .map(|scheme| {
-                                let ty = self.check_result.sub.apply(&scheme.ty);
-                                CallableAbi::from_type(&ty, |effects| {
-                                    self.canonicalize_effects(effects)
-                                })
-                            })
-                            .unwrap_or_else(|| {
-                                if effects.is_empty() {
-                                    CallableAbi::pure(base_arity)
-                                } else {
-                                    CallableAbi::cps(
-                                        base_arity,
-                                        EvidenceAbi::closed(effects.clone()),
-                                    )
-                                }
-                            });
-                        callable_abi.user_arity = callable_abi.user_arity.max(base_arity);
-                        if callable_abi.evidence.is_none() && !effects.is_empty() {
-                            callable_abi.evidence = Some(EvidenceAbi::closed(effects.clone()));
-                        }
-                        let arity = callable_abi.expanded_arity();
+                        let info = self.fun_binding_runtime_info(name, params, body, annotation);
+                        let arity = info.arity();
                         if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name)
                         {
                             // Additional clause: just add to existing group
                             group.2.push((params, guard, body));
                         } else {
                             // First clause: register fun_info for arity/effects lookup.
-                            self.fun_info.insert(
-                                name.clone(),
-                                FunInfo::from_abi(
-                                    callable_abi,
-                                    param_absorbed_effects,
-                                    param_types,
-                                    self.check_result
-                                        .env
-                                        .get(name)
-                                        .map(|scheme| util::dict_param_count(&scheme.constraints))
-                                        .unwrap_or(0),
-                                ),
-                            );
+                            self.fun_info.insert(name.clone(), info);
                             clause_groups.push((
                                 name.clone(),
                                 arity,
@@ -532,61 +487,14 @@ impl<'a> Lowerer<'a> {
         timed_lower_phase(module_name, "plan_contextual_effect_abis", || {
             self.plan_contextual_function_value_abis(program)
         });
-        // Cross-module inlined handler bodies live in the elaborated programs
-        // of compiled modules and are lowered through the active Lowerer.
-        // Tag their `App` nodes too so the parallel-check can see them.
-        timed_lower_phase(module_name, "populate_call_effects_cross_modules", || {
-            for (name, compiled) in self.ctx.modules.iter() {
-                if compiled.effect_abi_plan_ready {
-                    for (id, abi) in &compiled.effect_abi_plan.declarations {
-                        self.effect_abi_plan
-                            .declarations
-                            .entry(*id)
-                            .or_insert_with(|| abi.clone());
-                    }
-                    for (id, info) in &compiled.effect_abi_plan.calls {
-                        self.effect_abi_plan
-                            .calls
-                            .entry(*id)
-                            .or_insert_with(|| info.clone());
-                    }
-                    for (id, info) in &compiled.effect_abi_plan.function_values {
-                        self.effect_abi_plan
-                            .function_values
-                            .entry(*id)
-                            .or_insert_with(|| info.clone());
-                    }
-                    continue;
-                }
-                // Use the source module's CheckResult so type_at_span lookups in
-                // the populator (e.g. for handler arm parameters) hit. The active
-                // module's check_result only carries spans from its own source.
-                let module_check = self
-                    .check_result
-                    .module_check_results()
-                    .get(name)
-                    .map(|result| result.as_ref())
-                    .unwrap_or(self.check_result);
-                let cross_call_effects =
-                    self.populate_call_effects_with_check(&compiled.elaborated, module_check);
-                for (id, abi) in cross_call_effects.plan.declarations {
-                    self.effect_abi_plan.declarations.entry(id).or_insert(abi);
-                }
-                for (id, info) in cross_call_effects.plan.calls {
-                    self.effect_abi_plan.calls.entry(id).or_insert(info);
-                }
-                for (id, info) in cross_call_effects.plan.function_values {
-                    self.effect_abi_plan
-                        .function_values
-                        .entry(id)
-                        .or_insert(info);
-                }
-            }
+        self.effect_abi_plan.freeze();
+        timed_lower_phase(module_name, "precompute_missing_context_abis", || {
+            self.precompute_missing_context_plans()
         });
-        timed_lower_phase(module_name, "plan_registered_handler_effect_abis", || {
-            self.plan_registered_handler_function_value_abis()
-        });
-
+        // Imported handler/helper bodies retain their defining NodeIds. ABI
+        // reads switch to that module's precomputed plan while the semantic
+        // source module is active, avoiding an all-modules plan merge for
+        // every emitted module.
         let mut exports = Vec::new();
         let mut fun_defs = Vec::new();
 

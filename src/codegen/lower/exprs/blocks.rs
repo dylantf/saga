@@ -52,8 +52,7 @@ impl<'a> Lowerer<'a> {
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
                 let callable_abi = self
-                    .effect_abi_plan
-                    .declaration(fun_id)
+                    .planned_declaration(fun_id)
                     .cloned()
                     .unwrap_or_else(|| {
                         panic!(

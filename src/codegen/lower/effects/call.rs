@@ -156,8 +156,7 @@ impl<'a> Lowerer<'a> {
                 let cps_open_row = has_open_row && !uses_native_callback_context;
                 if !uncapturable.is_empty() || cps_open_row {
                     let planned = self
-                        .effect_abi_plan
-                        .function_value_implementation(arg.id)
+                        .planned_function_value_implementation(arg.id)
                         .and_then(|abi| abi.evidence.as_ref())
                         .unwrap_or_else(|| {
                             panic!(

@@ -36,34 +36,30 @@ use crate::typechecker::{CheckResult, TraitMethodEffectSig};
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallEffectInfo {
-    kind: CallEffectKind,
-    callable_abi: Option<CallableAbi>,
+pub enum CallEffectInfo {
+    Direct,
+    Cps(CallableAbi),
 }
 
 impl CallEffectInfo {
     /// Pure call. No evidence threading, no return continuation.
     pub fn pure() -> Self {
-        CallEffectInfo {
-            kind: CallEffectKind::Pure,
-            callable_abi: None,
-        }
+        Self::Direct
     }
 
     /// CPS/evidence call. The caller must supply evidence and a return
     /// continuation according to `kind`.
     fn cps(kind: CallEffectKind, user_arity: usize) -> Self {
+        if matches!(&kind, CallEffectKind::StaticOps { ops } if ops.is_empty()) {
+            return Self::Direct;
+        }
         let evidence = match &kind {
-            CallEffectKind::Pure => unreachable!("CPS call cannot have a pure kind"),
             CallEffectKind::StaticOps { ops } => EvidenceAbi::closed(unique_effects(ops)),
             CallEffectKind::RowForwarded { static_ops } => {
                 EvidenceAbi::new(unique_effects(static_ops), true)
             }
         };
-        let info = CallEffectInfo {
-            kind,
-            callable_abi: Some(CallableAbi::cps(user_arity, evidence)),
-        };
+        let info = Self::Cps(CallableAbi::cps(user_arity, evidence));
         info.debug_check();
         info
     }
@@ -73,18 +69,15 @@ impl CallEffectInfo {
     /// Returns `None` for direct/externally-pure calls. Open-row calls return
     /// `Some` even when their static effect prefix is empty, because they still
     /// need caller evidence forwarded through the CPS ABI.
-    pub fn cps_call_plan(&self) -> Option<CpsCallPlan> {
-        match &self.kind {
-            CallEffectKind::Pure => None,
-            CallEffectKind::StaticOps { ops } if ops.is_empty() => None,
-            CallEffectKind::StaticOps { .. } | CallEffectKind::RowForwarded { .. } => {
-                self.callable_abi.clone().map(|abi| CpsCallPlan { abi })
-            }
+    pub fn cps_call_abi(&self) -> Option<&CallableAbi> {
+        match self {
+            Self::Direct => None,
+            Self::Cps(abi) => Some(abi),
         }
     }
 
     pub fn is_cps_call(&self) -> bool {
-        self.cps_call_plan().is_some()
+        matches!(self, Self::Cps(_))
     }
 
     /// Human-readable ABI shape for debug/audit traces.
@@ -93,24 +86,29 @@ impl CallEffectInfo {
     /// `call_shape_debug_label` style, but describes the current direct-first
     /// classifier contract rather than a separate planner.
     pub fn debug_label(&self) -> String {
-        match &self.kind {
-            CallEffectKind::Pure => "direct".to_string(),
-            CallEffectKind::StaticOps { ops } => format!(
-                "cps-static({}->{}, effects={:?})",
-                self.callable_abi.as_ref().map_or(0, |abi| abi.user_arity),
-                self.callable_abi
+        match self {
+            Self::Direct => "direct".to_string(),
+            Self::Cps(abi) => {
+                let evidence = abi
+                    .evidence
                     .as_ref()
-                    .map_or(0, CallableAbi::expanded_arity),
-                unique_effects(ops)
-            ),
-            CallEffectKind::RowForwarded { static_ops } => format!(
-                "cps-row-forwarded({}->{}, pinned_effects={:?})",
-                self.callable_abi.as_ref().map_or(0, |abi| abi.user_arity),
-                self.callable_abi
-                    .as_ref()
-                    .map_or(0, CallableAbi::expanded_arity),
-                unique_effects(static_ops)
-            ),
+                    .expect("CPS call ABI is missing evidence");
+                if evidence.is_open() {
+                    format!(
+                        "cps-row-forwarded({}->{}, pinned_effects={:?})",
+                        abi.user_arity,
+                        abi.expanded_arity(),
+                        evidence.static_slots()
+                    )
+                } else {
+                    format!(
+                        "cps-static({}->{}, effects={:?})",
+                        abi.user_arity,
+                        abi.expanded_arity(),
+                        evidence.static_slots()
+                    )
+                }
+            }
         }
     }
 
@@ -127,47 +125,20 @@ impl CallEffectInfo {
         )
     }
 
-    /// Debug-builds-only invariant check for classifier-created entries.
+    /// Invariant check for classifier-created entries.
     #[inline]
     fn debug_check(&self) {
-        if cfg!(debug_assertions) {
-            match &self.kind {
-                CallEffectKind::Pure => {
-                    debug_assert!(
-                        self.callable_abi.is_none(),
-                        "CallEffectInfo: Pure kind cannot carry a callable ABI"
-                    );
-                }
-                CallEffectKind::StaticOps { ops } => {
-                    debug_assert!(
-                        !ops.is_empty(),
-                        "CallEffectInfo: StaticOps requires at least one op; use Pure otherwise"
-                    );
-                    debug_assert!(
-                        self.callable_abi.is_some(),
-                        "CallEffectInfo: CPS calls require a callable ABI"
-                    );
-                }
-                CallEffectKind::RowForwarded { .. } => {
-                    debug_assert!(
-                        self.callable_abi.is_some(),
-                        "CallEffectInfo: CPS calls require a callable ABI"
-                    );
-                }
-            }
+        if let Self::Cps(abi) = self {
+            assert!(
+                abi.evidence.is_some(),
+                "CallEffectInfo: CPS calls require an evidence ABI"
+            );
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CpsCallPlan {
-    pub abi: CallableAbi,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum CallEffectKind {
-    /// Pure call. No effect threading.
-    Pure,
     /// Effects fully known statically at this call site. Caller threads exactly
     /// these ops, in canonical (effect, op) order.
     StaticOps { ops: Vec<OpKey> },
@@ -186,26 +157,66 @@ pub struct OpKey {
 
 pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
 
-/// The three callable views that can coexist for one function-value
-/// expression. They must not be collapsed: a row-polymorphic partial
-/// application can infer a pure occurrence type while still constructing a
-/// CPS closure, and a surrounding callback slot can expose yet another ABI.
+/// The implementation and contextual boundary of one function value.
+/// Keeping them in one value makes a one-sided adapter plan unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionValueBoundary {
+    implementation: CallableAbi,
+    boundary: CallableAbi,
+}
+
+impl FunctionValueBoundary {
+    pub fn implementation(&self) -> &CallableAbi {
+        &self.implementation
+    }
+
+    pub fn boundary(&self) -> &CallableAbi {
+        &self.boundary
+    }
+}
+
+/// The callable views that can coexist for one function-value expression.
+/// They must not be collapsed: a row-polymorphic partial application can
+/// infer a pure occurrence type while still constructing a CPS closure, and
+/// a surrounding callback slot can expose yet another ABI.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionValueAbiPlan {
-    pub inferred: Option<CallableAbi>,
-    pub implementation: Option<CallableAbi>,
-    pub boundary: Option<CallableAbi>,
+    inferred: Option<CallableAbi>,
+    contextual: Option<FunctionValueBoundary>,
+}
+
+impl FunctionValueAbiPlan {
+    pub fn inferred(&self) -> Option<&CallableAbi> {
+        self.inferred.as_ref()
+    }
+
+    pub fn contextual(&self) -> Option<&FunctionValueBoundary> {
+        self.contextual.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectAbiPlan {
-    pub declarations: HashMap<NodeId, CallableAbi>,
-    pub calls: CallEffectMap,
-    pub function_values: HashMap<NodeId, FunctionValueAbiPlan>,
+    declarations: HashMap<NodeId, CallableAbi>,
+    calls: CallEffectMap,
+    function_values: HashMap<NodeId, FunctionValueAbiPlan>,
+    frozen: bool,
 }
 
 impl EffectAbiPlan {
+    fn assert_mutable(&self) {
+        assert!(
+            !self.frozen,
+            "internal ABI planning error: attempted to mutate a frozen plan"
+        );
+    }
+
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
     pub fn record_declaration(&mut self, node_id: NodeId, abi: CallableAbi) {
+        self.assert_mutable();
         if let Some(previous) = self.declarations.insert(node_id, abi.clone()) {
             assert_eq!(
                 previous, abi,
@@ -218,7 +229,30 @@ impl EffectAbiPlan {
         self.declarations.get(&node_id)
     }
 
+    pub fn call(&self, node_id: NodeId) -> Option<&CallEffectInfo> {
+        self.calls.get(&node_id)
+    }
+
+    pub fn into_calls(self) -> CallEffectMap {
+        self.calls
+    }
+
+    pub fn record_call(&mut self, node_id: NodeId, info: CallEffectInfo) {
+        self.assert_mutable();
+        if let Some(previous) = self.calls.insert(node_id, info.clone()) {
+            assert_eq!(
+                previous, info,
+                "internal ABI planning error: conflicting call ABI for {node_id:?}"
+            );
+        }
+    }
+
+    pub fn function_value(&self, node_id: NodeId) -> Option<&FunctionValueAbiPlan> {
+        self.function_values.get(&node_id)
+    }
+
     pub fn record_inferred_function_value(&mut self, node_id: NodeId, abi: CallableAbi) {
+        self.assert_mutable();
         let value = self.function_values.entry(node_id).or_default();
         if let Some(previous) = value.inferred.replace(abi.clone()) {
             assert_eq!(
@@ -234,52 +268,62 @@ impl EffectAbiPlan {
         implementation: CallableAbi,
         boundary: CallableAbi,
     ) {
+        self.assert_mutable();
         let value = self.function_values.entry(node_id).or_default();
-        if let Some(previous) = value.implementation.replace(implementation.clone()) {
+        let contextual = FunctionValueBoundary {
+            implementation,
+            boundary,
+        };
+        if let Some(previous) = value.contextual.replace(contextual.clone()) {
             assert_eq!(
-                previous, implementation,
-                "internal ABI planning error: conflicting implementation ABI for {node_id:?}"
-            );
-        }
-        if let Some(previous) = value.boundary.replace(boundary.clone()) {
-            assert_eq!(
-                previous, boundary,
-                "internal ABI planning error: conflicting boundary ABI for {node_id:?}"
+                previous, contextual,
+                "internal ABI planning error: conflicting contextual ABI for {node_id:?}"
             );
         }
     }
 
     pub fn function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        let value = self.function_values.get(&node_id)?;
-        value.boundary.as_ref().or(value.implementation.as_ref())
+        Some(
+            self.function_values
+                .get(&node_id)?
+                .contextual
+                .as_ref()?
+                .boundary(),
+        )
     }
 
     pub fn function_value_implementation(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        self.function_values.get(&node_id)?.implementation.as_ref()
+        Some(
+            self.function_values
+                .get(&node_id)?
+                .contextual
+                .as_ref()?
+                .implementation(),
+        )
     }
 
-    pub fn merge_inferred_function_value(&mut self, node_id: NodeId, absorbed: CallableAbi) {
-        let value = self.function_values.entry(node_id).or_default();
-        let Some(previous) = value.inferred.take() else {
-            value.inferred = Some(absorbed);
-            return;
-        };
-        assert_eq!(
-            previous.user_arity, absorbed.user_arity,
-            "internal ABI planning error: inferred arity changed for {node_id:?}"
-        );
-        let evidence = match (previous.evidence, absorbed.evidence) {
-            (None, None) => None,
-            (Some(evidence), None) | (None, Some(evidence)) => Some(evidence),
-            (Some(previous), Some(absorbed)) => {
-                Some(EvidenceAbi::for_lambda_boundary(&previous, &absorbed))
+    /// Merge a separately planned module, rejecting conflicting facts rather
+    /// than silently retaining whichever plan happened to be visited first.
+    pub fn merge_checked(&mut self, other: &Self) {
+        self.assert_mutable();
+        for (node_id, abi) in &other.declarations {
+            self.record_declaration(*node_id, abi.clone());
+        }
+        for (node_id, info) in &other.calls {
+            self.record_call(*node_id, info.clone());
+        }
+        for (node_id, value) in &other.function_values {
+            if let Some(inferred) = value.inferred() {
+                self.record_inferred_function_value(*node_id, inferred.clone());
             }
-        };
-        value.inferred = Some(CallableAbi {
-            user_arity: previous.user_arity,
-            evidence,
-            is_intrinsic: previous.is_intrinsic || absorbed.is_intrinsic,
-        });
+            if let Some(contextual) = value.contextual() {
+                self.record_function_value_boundary(
+                    *node_id,
+                    contextual.implementation().clone(),
+                    contextual.boundary().clone(),
+                );
+            }
+        }
     }
 }
 
@@ -525,7 +569,7 @@ impl<'a> Populator<'a> {
     }
 
     pub fn populate(self, program: &Program) -> CallEffectMap {
-        self.populate_with_trace(program).plan.calls
+        self.populate_with_trace(program).plan.into_calls()
     }
 
     pub fn populate_with_trace(mut self, program: &Program) -> PopulatedCallEffects {
@@ -788,12 +832,12 @@ impl<'a> Populator<'a> {
             let info = self.classify_app(expr);
             info.debug_check();
             self.trace.push(self.trace_entry(expr, &info));
-            if let Some(evidence) = info.cps_call_plan().and_then(|plan| plan.abi.evidence)
+            if let Some(evidence) = info.cps_call_abi().and_then(|abi| abi.evidence.clone())
                 && let Some(lambda_evidence) = self.lambda_body_evidence.last_mut()
             {
                 *lambda_evidence = EvidenceAbi::for_lambda_boundary(lambda_evidence, &evidence);
             }
-            self.plan.calls.insert(expr.id, info);
+            self.plan.record_call(expr.id, info);
             self.plan_app_function_value_boundaries(expr);
         }
     }
@@ -806,10 +850,9 @@ impl<'a> Populator<'a> {
 
         if let Some(call_abi) = self
             .plan
-            .calls
-            .get(&expr.id)
-            .and_then(CallEffectInfo::cps_call_plan)
-            .map(|plan| plan.abi)
+            .call(expr.id)
+            .and_then(CallEffectInfo::cps_call_abi)
+            .cloned()
         {
             self.plan
                 .record_function_value_boundary(head.id, call_abi.clone(), call_abi);
@@ -1107,11 +1150,10 @@ impl<'a> Populator<'a> {
     fn value_effect_signature(&self, value: &Expr) -> Option<Vec<String>> {
         let effects = self
             .plan
-            .calls
-            .get(&value.id)?
-            .cps_call_plan()?
-            .abi
-            .evidence?
+            .call(value.id)?
+            .cps_call_abi()?
+            .evidence
+            .as_ref()?
             .static_slots()
             .to_vec();
         if effects.is_empty() {
@@ -1262,7 +1304,9 @@ impl<'a> Populator<'a> {
         let resolved = self.inputs.resolved.get(&head_id);
         let resolved_shape =
             resolved.map(|resolved| self.runtime_shape_from_resolved_head(head_id, resolved));
-        if resolved_shape.as_ref().is_some_and(|abi| abi.is_intrinsic) {
+        if resolved
+            .is_some_and(|resolved| matches!(resolved.kind, ResolvedCodegenKind::Intrinsic { .. }))
+        {
             return pure();
         }
         let resolved_env_shape =
@@ -1401,9 +1445,8 @@ impl<'a> Populator<'a> {
         }
         if let Some(evidence) = self
             .plan
-            .function_values
-            .get(&lambda_id)
-            .and_then(|value| value.inferred.as_ref())
+            .function_value(lambda_id)
+            .and_then(FunctionValueAbiPlan::inferred)
             .and_then(|abi| abi.evidence.clone())
         {
             return Some(evidence);
@@ -1623,15 +1666,34 @@ mod tests {
         plan.record_inferred_function_value(node, inferred.clone());
         plan.record_function_value_boundary(node, implementation.clone(), boundary.clone());
 
-        assert_eq!(
-            plan.function_values.get(&node),
-            Some(&FunctionValueAbiPlan {
-                inferred: Some(inferred),
-                implementation: Some(implementation),
-                boundary: Some(boundary.clone()),
-            })
-        );
+        let value = plan.function_value(node).expect("function-value plan");
+        assert_eq!(value.inferred(), Some(&inferred));
+        let contextual = value.contextual().expect("contextual boundary");
+        assert_eq!(contextual.implementation(), &implementation);
+        assert_eq!(contextual.boundary(), &boundary);
         assert_eq!(plan.function_value_boundary(node), Some(&boundary));
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicting call ABI")]
+    fn checked_plan_merge_rejects_conflicting_facts() {
+        let node = NodeId(7);
+        let mut left = EffectAbiPlan::default();
+        left.record_call(node, CallEffectInfo::pure());
+        let mut right = EffectAbiPlan::default();
+        right.record_call(
+            node,
+            CallEffectInfo::Cps(CallableAbi::cps(1, EvidenceAbi::closed(["Main.Log"]))),
+        );
+        left.merge_checked(&right);
+    }
+
+    #[test]
+    #[should_panic(expected = "mutate a frozen plan")]
+    fn frozen_plan_rejects_late_lowering_mutation() {
+        let mut plan = EffectAbiPlan::default();
+        plan.freeze();
+        plan.record_call(NodeId(9), CallEffectInfo::pure());
     }
 
     #[test]

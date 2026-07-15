@@ -1,6 +1,27 @@
 use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
-use crate::typechecker::Type;
+use crate::typechecker::{Scheme, Type};
+
+#[derive(Clone, Copy)]
+struct EffectSlotIdentity<'a> {
+    family: &'a str,
+    placeholder: bool,
+}
+
+impl<'a> EffectSlotIdentity<'a> {
+    fn new(tag: &'a str) -> Self {
+        Self {
+            family: crate::typechecker::applied_effect_family(tag),
+            // Bare family names and applications containing a compiler type
+            // variable are the two generalized runtime spellings.
+            placeholder: !tag.contains('<') || tag.contains('$'),
+        }
+    }
+
+    fn same_family(self, other: Self) -> bool {
+        self.family == other.family
+    }
+}
 
 /// Authoritative evidence convention for a Saga CPS callable or in-scope
 /// evidence frame.
@@ -45,6 +66,45 @@ impl EvidenceAbi {
         self.is_open_row
     }
 
+    /// Specialize the statically declared slots at one use site without
+    /// folding effects supplied by an open row variable into that prefix.
+    ///
+    /// A callee compiled as `{A, B, ..e}` always addresses A and B as its
+    /// first two slots. If an occurrence instantiates `..e` with Z, the call
+    /// frame must remain `{A, B | Z}`, even when the fully instantiated set
+    /// would sort as `{Z, A, B}` by canonical module name.
+    fn specialize_declared_slots(&self, occurrence: &Self) -> Self {
+        let static_effects = self
+            .static_effects
+            .iter()
+            .map(|declared| {
+                if occurrence.static_effects.contains(declared) {
+                    return declared.clone();
+                }
+                let declared_identity = EffectSlotIdentity::new(declared);
+                let family_matches = occurrence
+                    .static_effects
+                    .iter()
+                    .filter(|candidate| {
+                        declared_identity.same_family(EffectSlotIdentity::new(candidate))
+                    })
+                    .collect::<Vec<_>>();
+                if let [candidate] = family_matches.as_slice()
+                    && (declared_identity.placeholder
+                        || EffectSlotIdentity::new(candidate).placeholder)
+                {
+                    (*candidate).clone()
+                } else {
+                    declared.clone()
+                }
+            })
+            .collect();
+        Self {
+            static_effects,
+            is_open_row: self.is_open_row,
+        }
+    }
+
     /// Record a handler installed into this frame's ABI.
     ///
     /// An open frame may carry one bare/generalized family placeholder for a
@@ -57,18 +117,20 @@ impl EvidenceAbi {
         }
 
         if self.is_open_row {
-            let family = crate::typechecker::applied_effect_family(&installed);
+            let installed_identity = EffectSlotIdentity::new(&installed);
             let same_family = self
                 .static_effects
                 .iter()
                 .enumerate()
-                .filter(|(_, effect)| crate::typechecker::applied_effect_family(effect) == family)
+                .filter(|(_, effect)| {
+                    installed_identity.same_family(EffectSlotIdentity::new(effect))
+                })
                 .map(|(idx, _)| idx)
                 .collect::<Vec<_>>();
 
             if same_family.len() == 1
-                && is_effect_placeholder(&self.static_effects[same_family[0]])
-                && !is_effect_placeholder(&installed)
+                && EffectSlotIdentity::new(&self.static_effects[same_family[0]]).placeholder
+                && !installed_identity.placeholder
             {
                 self.static_effects[same_family[0]] = installed;
             } else {
@@ -97,13 +159,8 @@ impl EvidenceAbi {
             EvidenceInstallKind::Canonical
         };
         let mut target = self.clone();
-        target.install(installed.clone());
-        EvidenceInstallPlan {
-            source: self.clone(),
-            target,
-            installed,
-            kind,
-        }
+        target.install(installed);
+        EvidenceInstallPlan { target, kind }
     }
 
     /// Resolve an operation's effect identity against this frame's static
@@ -115,15 +172,15 @@ impl EvidenceAbi {
             return EvidenceSlotResolution::Static(index + 1);
         }
 
-        let family = crate::typechecker::applied_effect_family(effect);
+        let requested = EffectSlotIdentity::new(effect);
         let family_matches = self
             .static_slots()
             .iter()
             .enumerate()
-            .filter(|(_, tag)| crate::typechecker::applied_effect_family(tag) == family)
+            .filter(|(_, tag)| requested.same_family(EffectSlotIdentity::new(tag)))
             .collect::<Vec<_>>();
         if let [(index, tag)] = family_matches.as_slice()
-            && (is_effect_placeholder(tag) || is_effect_placeholder(effect))
+            && (EffectSlotIdentity::new(tag).placeholder || requested.placeholder)
         {
             EvidenceSlotResolution::Static(*index + 1)
         } else {
@@ -143,21 +200,24 @@ impl EvidenceAbi {
             {
                 continue;
             }
-            let family = crate::typechecker::applied_effect_family(inferred_effect);
+            let inferred_identity = EffectSlotIdentity::new(inferred_effect);
             let same_family = static_effects
                 .iter()
                 .enumerate()
-                .filter(|(_, effect)| crate::typechecker::applied_effect_family(effect) == family)
+                .filter(|(_, effect)| {
+                    inferred_identity.same_family(EffectSlotIdentity::new(effect))
+                })
                 .map(|(idx, _)| idx)
                 .collect::<Vec<_>>();
             if same_family.len() == 1
-                && (static_effects[same_family[0]].contains('$') || inferred_effect.contains('$'))
+                && (EffectSlotIdentity::new(&static_effects[same_family[0]]).placeholder
+                    || inferred_identity.placeholder)
             {
                 // A generic and concrete spelling of the same applied effect
                 // describe one positional slot. Prefer the concrete spelling
                 // when available, but never mint a second slot for the type
                 // variable spelling.
-                if !inferred_effect.contains('$') {
+                if !inferred_identity.placeholder {
                     static_effects[same_family[0]] = inferred_effect.clone();
                 }
             } else {
@@ -183,9 +243,7 @@ pub enum EvidenceInstallKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceInstallPlan {
-    pub source: EvidenceAbi,
     pub target: EvidenceAbi,
-    pub installed: String,
     pub kind: EvidenceInstallKind,
 }
 
@@ -337,44 +395,44 @@ impl EvidenceReframePlan {
         if let Some(index) = source.static_slots().iter().position(|tag| tag == target) {
             return EvidenceSelector::Position(index + 1);
         }
-        let family = crate::typechecker::applied_effect_family(target);
+        let target_identity = EffectSlotIdentity::new(target);
         let family_matches = source
             .static_slots()
             .iter()
             .enumerate()
-            .filter(|(_, tag)| crate::typechecker::applied_effect_family(tag) == family)
+            .filter(|(_, tag)| target_identity.same_family(EffectSlotIdentity::new(tag)))
             .map(|(index, _)| index + 1)
             .collect::<Vec<_>>();
         if (!source.is_open_row || target_abi.is_open_row)
             && let [position] = family_matches.as_slice()
-            && (is_effect_placeholder(&source.static_slots()[*position - 1])
-                || is_effect_placeholder(target))
+            && (EffectSlotIdentity::new(&source.static_slots()[*position - 1]).placeholder
+                || target_identity.placeholder)
         {
             EvidenceSelector::Relabel {
                 position: *position,
                 target: target.to_string(),
             }
         } else {
+            assert!(
+                source.is_open_row,
+                "internal ABI planning error: closed evidence source {:?} cannot satisfy target slot {target}",
+                source.static_slots()
+            );
             EvidenceSelector::DynamicTag(target.to_string())
         }
     }
-}
-
-fn is_effect_placeholder(tag: &str) -> bool {
-    !tag.contains('<') || tag.contains('$')
 }
 
 /// Calling convention for one Saga callable.
 ///
 /// `user_arity` never includes the evidence frame or success continuation.
 /// Effectful callables have one `EvidenceAbi` and therefore exactly two
-/// additional Core parameters. Intrinsics remain explicit because they bypass
-/// the normal Saga callable path.
+/// additional Core parameters. Intrinsics bypass this representation and are
+/// classified directly by `ResolvedCodegenKind`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallableAbi {
     pub user_arity: usize,
     pub evidence: Option<EvidenceAbi>,
-    pub is_intrinsic: bool,
 }
 
 impl Default for CallableAbi {
@@ -388,7 +446,6 @@ impl CallableAbi {
         Self {
             user_arity,
             evidence: None,
-            is_intrinsic: false,
         }
     }
 
@@ -396,15 +453,13 @@ impl CallableAbi {
         Self {
             user_arity,
             evidence: Some(evidence),
-            is_intrinsic: false,
         }
     }
 
-    pub fn intrinsic(user_arity: usize) -> Self {
-        Self {
-            user_arity,
-            evidence: None,
-            is_intrinsic: true,
+    pub fn from_parts(user_arity: usize, evidence: Option<EvidenceAbi>) -> Self {
+        match evidence {
+            Some(evidence) => Self::cps(user_arity, evidence),
+            None => Self::pure(user_arity),
         }
     }
 
@@ -425,6 +480,18 @@ impl CallableAbi {
         }
     }
 
+    /// Build a declaration ABI from its full scheme, including elaborated
+    /// trait-dictionary parameters that are absent from the source function
+    /// arrow count.
+    pub fn from_scheme(
+        scheme: &Scheme,
+        canonicalize_effects: impl FnMut(Vec<String>) -> Vec<String>,
+    ) -> Self {
+        let mut abi = Self::from_type(&scheme.ty, canonicalize_effects);
+        abi.user_arity += util::dict_param_count(&scheme.constraints);
+        abi
+    }
+
     pub fn expanded_arity(&self) -> usize {
         self.user_arity + usize::from(self.evidence.is_some()) * 2
     }
@@ -439,20 +506,21 @@ impl CallableAbi {
         mut canonicalize_effects: impl FnMut(Vec<String>) -> Vec<String>,
     ) -> Self {
         match &resolved.kind {
-            ResolvedCodegenKind::Intrinsic { arity, .. } => CallableAbi::intrinsic(*arity),
+            ResolvedCodegenKind::Intrinsic { arity, .. } => CallableAbi::pure(*arity),
             ResolvedCodegenKind::BeamFunction { abi, .. }
             | ResolvedCodegenKind::ExternalFunction { abi, .. } => {
                 let fallback =
                     fallback_ty.map(|ty| CallableAbi::from_type(ty, &mut canonicalize_effects));
-                let fallback_evidence = fallback.and_then(|abi| abi.evidence);
-                // The occurrence type carries the caller's instantiation of
-                // parameterized effects; exported symbol metadata only carries
-                // the generic declaration. Prefer the occurrence whenever it
-                // is available so caller-side evidence projection selects the
-                // concrete applied slots.
+                let occurrence_evidence = fallback.and_then(|abi| abi.evidence);
+                // The occurrence type carries call-site specialization, while
+                // the exported ABI defines the callee's positional prefix.
+                // Specialize declaration slots in place; effects absorbed by
+                // an open row remain in the forwarded tail.
                 let mut instantiated = abi.clone();
-                if fallback_evidence.is_some() {
-                    instantiated.evidence = fallback_evidence;
+                if let (Some(declared), Some(occurrence)) =
+                    (abi.evidence.as_ref(), occurrence_evidence.as_ref())
+                {
+                    instantiated.evidence = Some(declared.specialize_declared_slots(occurrence));
                 }
                 instantiated
             }
@@ -478,6 +546,16 @@ mod tests {
         assert_eq!(
             cps.cps_evidence(),
             Some(EvidenceAbi::new(["Main.Repo"], true))
+        );
+    }
+
+    #[test]
+    fn open_declaration_specialization_keeps_row_effects_out_of_static_prefix() {
+        let declared = EvidenceAbi::new(["OpenAdapter.A", "OpenAdapter.B"], true);
+        let occurrence = EvidenceAbi::new(["Main.Z", "OpenAdapter.A", "OpenAdapter.B"], true);
+        assert_eq!(
+            declared.specialize_declared_slots(&occurrence),
+            EvidenceAbi::new(["OpenAdapter.A", "OpenAdapter.B"], true)
         );
     }
 
@@ -552,6 +630,14 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "closed evidence source")]
+    fn reframe_plan_rejects_a_missing_slot_from_a_closed_source() {
+        let source = EvidenceAbi::closed(["Main.A"]);
+        let target = EvidenceAbi::closed(["Main.B"]);
+        let _ = EvidenceReframePlan::between(&source, &target);
     }
 
     #[test]

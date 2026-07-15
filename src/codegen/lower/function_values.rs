@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 use crate::ast::{self, Decl, Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
@@ -8,66 +9,60 @@ use super::evidence;
 use super::util::{self, collect_ctor_call_with_head, collect_effect_call_expr};
 use super::{EvidenceFrame, Lowerer};
 
-impl<'a> Lowerer<'a> {
-    fn direct_lambda_arity(expr: &Expr) -> Option<usize> {
-        let ExprKind::Lambda { params, body } = &expr.kind else {
-            return None;
-        };
-        let mut arity = params.len();
-        let mut current = body.as_ref();
-        while let ExprKind::Lambda {
-            params,
-            body: nested_body,
-        } = &current.kind
-        {
-            arity += params.len();
-            current = nested_body.as_ref();
-        }
-        Some(arity)
+fn direct_lambda_arity(expr: &Expr) -> Option<usize> {
+    let ExprKind::Lambda { params, body } = &expr.kind else {
+        return None;
+    };
+    let mut arity = params.len();
+    let mut current = body.as_ref();
+    while let ExprKind::Lambda {
+        params,
+        body: nested_body,
+    } = &current.kind
+    {
+        arity += params.len();
+        current = nested_body.as_ref();
     }
+    Some(arity)
+}
 
+/// Owns the contextual function-value planning pass. It borrows lowering's
+/// semantic metadata, but all mutations performed by this type are ABI-plan
+/// mutations; Core emission remains on `Lowerer` below.
+struct EffectAbiPlanner<'lowerer, 'ctx> {
+    lowerer: &'lowerer mut Lowerer<'ctx>,
+}
+
+impl<'lowerer, 'ctx> Deref for EffectAbiPlanner<'lowerer, 'ctx> {
+    type Target = Lowerer<'ctx>;
+
+    fn deref(&self) -> &Self::Target {
+        self.lowerer
+    }
+}
+
+impl DerefMut for EffectAbiPlanner<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.lowerer
+    }
+}
+
+impl<'a> Lowerer<'a> {
+    pub(super) fn plan_contextual_function_value_abis(&mut self, program: &[Decl]) {
+        EffectAbiPlanner { lowerer: self }.plan_program(program);
+    }
+}
+
+impl EffectAbiPlanner<'_, '_> {
     /// Complete the function-value portion of the effect ABI plan before Core
     /// lowering begins. The call classifier owns declaration and call ABIs;
     /// this second pass owns contextual value boundaries, whose expected type
     /// comes from the declaration that consumes the value rather than from the
     /// expression's already-instantiated occurrence type.
-    pub(super) fn plan_contextual_function_value_abis(&mut self, program: &[Decl]) {
+    fn plan_program(&mut self, program: &[Decl]) {
         for decl in program {
             self.plan_contextual_decl(decl);
         }
-    }
-
-    /// Imported named-handler arms are registered as lowering metadata rather
-    /// than declarations in the consumer's program. Plan those bodies at the
-    /// same pre-lowering checkpoint, under their defining module's semantic
-    /// context, so private nested handlers and callback values receive entries
-    /// keyed by their original NodeIds too.
-    pub(super) fn plan_registered_handler_function_value_abis(&mut self) {
-        let handlers: Vec<_> = self
-            .handler_defs
-            .values()
-            .map(|handler| {
-                (
-                    handler.source_module.clone(),
-                    handler.arms.clone(),
-                    handler.return_clause.clone(),
-                )
-            })
-            .collect();
-        let saved_source = self.current_handler_source_module.clone();
-        for (source_module, arms, return_clause) in handlers {
-            self.current_handler_source_module = source_module;
-            for arm in arms {
-                self.plan_contextual_expr(&arm.body, None);
-                if let Some(finally) = &arm.finally_block {
-                    self.plan_contextual_expr(finally, None);
-                }
-            }
-            if let Some(return_clause) = return_clause {
-                self.plan_contextual_expr(&return_clause.body, None);
-            }
-        }
-        self.current_handler_source_module = saved_source;
     }
 
     fn plan_contextual_decl(&mut self, decl: &Decl) {
@@ -124,7 +119,7 @@ impl<'a> Lowerer<'a> {
                             .semantic_type_at_node(method.id)
                             .filter(|ty| matches!(ty, crate::typechecker::Type::Fun(..)))
                             .map(|ty| util::arity_and_effects_from_type(ty).0)
-                            .or_else(|| Self::direct_lambda_arity(method))
+                            .or_else(|| direct_lambda_arity(method))
                             .expect("dictionary method is missing its callable arity");
                         let abi = CallableAbi::cps(
                             user_arity,
@@ -218,12 +213,10 @@ impl<'a> Lowerer<'a> {
         let expected =
             CallableAbi::from_type(expected_ty, |effects| self.canonicalize_effects(effects));
         let inferred = self
-            .effect_abi_plan
-            .function_values
-            .get(&expr.id)
-            .and_then(|value| value.inferred.clone());
-        let literal =
-            matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr);
+            .planned_function_value(expr.id)
+            .and_then(|value| value.inferred().cloned());
+        let literal = matches!(expr.kind, ExprKind::Lambda { .. })
+            || Lowerer::is_eta_reduced_effect_expr(expr);
         let implementation = if literal {
             let evidence = match (
                 expected.evidence.as_ref(),
@@ -235,13 +228,10 @@ impl<'a> Lowerer<'a> {
                     Some(EvidenceAbi::for_lambda_boundary(expected, inferred))
                 }
             };
-            CallableAbi {
-                user_arity: expected.user_arity,
-                evidence,
-                is_intrinsic: false,
-            }
+            CallableAbi::from_parts(expected.user_arity, evidence)
         } else {
             self.callable_abi_from_partial_app(expr)
+                .or_else(|| self.callable_abi_from_named_function_value(expr))
                 .or(inferred)
                 .or_else(|| {
                     self.expr_cps_function_shape(expr)
@@ -325,7 +315,7 @@ impl<'a> Lowerer<'a> {
                 .semantic_type_at_node(arg.id)
                 .filter(|ty| matches!(ty, crate::typechecker::Type::Fun(..)))
                 .map(|ty| util::arity_and_effects_from_type(ty).0)
-                .or_else(|| Self::direct_lambda_arity(arg))
+                .or_else(|| direct_lambda_arity(arg))
                 .expect("effect callback is missing its callable arity");
             let abi = CallableAbi::cps(user_arity, EvidenceAbi::new(static_effects, is_open));
             self.effect_abi_plan
@@ -608,7 +598,9 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
+}
 
+impl<'a> Lowerer<'a> {
     fn lower_curried_lambda_for_expected_arity(
         &mut self,
         expr: &Expr,
@@ -618,7 +610,7 @@ impl<'a> Lowerer<'a> {
         if expected_arity == 0 || !effects.is_empty() {
             return None;
         }
-        let actual_arity = Self::direct_lambda_arity(expr)?;
+        let actual_arity = direct_lambda_arity(expr)?;
         if expected_arity >= actual_arity {
             return None;
         }
@@ -694,10 +686,8 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn expr_cps_function_shape(&self, expr: &Expr) -> Option<EvidenceAbi> {
-        self.effect_abi_plan
-            .function_values
-            .get(&expr.id)
-            .and_then(|plan| plan.inferred.as_ref())
+        self.planned_function_value(expr.id)
+            .and_then(|plan| plan.inferred())
             .and_then(|abi| abi.evidence.clone())
             .or_else(|| {
                 self.check_result
@@ -762,6 +752,25 @@ impl<'a> Lowerer<'a> {
         ))
     }
 
+    /// Return the declaration ABI for a named function used as a value.
+    ///
+    /// Its occurrence type may contain effects absorbed while unifying it
+    /// with an open callback slot. Those effects describe the call-site
+    /// boundary, not the function's compiled implementation layout.
+    fn callable_abi_from_named_function_value(&self, expr: &Expr) -> Option<CallableAbi> {
+        match &expr.kind {
+            ExprKind::Var { name } => self
+                .resolved_fun_info(expr.id, name)
+                .map(|info| info.abi.clone()),
+            ExprKind::QualifiedName { module, name, .. } => {
+                let qualified = format!("{module}.{name}");
+                self.resolved_fun_info(expr.id, &qualified)
+                    .map(|info| info.abi.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// If `expr` is a `DictMethodAccess` for a trait method that carries
     /// effects, return its runtime CPS shape. Synthesized `DictMethodAccess`
     /// nodes have fresh `NodeId`s with no recorded type, so the type-based
@@ -798,8 +807,7 @@ impl<'a> Lowerer<'a> {
         _expected_ty: &crate::typechecker::Type,
     ) -> CExpr {
         let user_arity = self
-            .effect_abi_plan
-            .function_value_boundary(expr.id)
+            .planned_function_value_boundary(expr.id)
             .map(|abi| abi.user_arity)
             .unwrap_or_else(|| {
                 panic!(
@@ -856,8 +864,7 @@ impl<'a> Lowerer<'a> {
         _expected_ty: &crate::typechecker::Type,
     ) -> CExpr {
         let user_arity = self
-            .effect_abi_plan
-            .function_value_boundary(expr.id)
+            .planned_function_value_boundary(expr.id)
             .map(|abi| abi.user_arity)
             .unwrap_or_else(|| {
                 panic!(
@@ -893,13 +900,8 @@ impl<'a> Lowerer<'a> {
         _expected_ty: &crate::typechecker::Type,
         actual_shape: EvidenceAbi,
     ) -> CExpr {
-        if actual_shape.is_open() {
-            return self.lower_expr_value(expr);
-        }
-
         let boundary_abi = self
-            .effect_abi_plan
-            .function_value_boundary(expr.id)
+            .planned_function_value_boundary(expr.id)
             .cloned()
             .unwrap_or_else(|| {
                 panic!(
@@ -931,12 +933,10 @@ impl<'a> Lowerer<'a> {
         apply_args.push(CExpr::Var("_ReturnK".to_string()));
 
         let actual_fun = self.lower_expr_value(expr);
-        // `actual_shape` is closed (the open case returned above), even when
-        // the expected callback slot is open. Select only the actual
-        // function's entries here. `reframe_evidence` would retain the HOF's
-        // unselected tail and pass a non-closed frame into a function whose
-        // local handler insertion and static slot lookups assume a canonical
-        // closed vector.
+        // Reframe from the callback slot's ABI into the implementation ABI.
+        // This is required for open implementations too: two open rows may
+        // have different static prefixes, and forwarding the boundary frame
+        // unchanged would make the implementation read the wrong slot.
         let narrowed_evidence =
             evidence::apply_reframe(CExpr::Var("_Evidence".to_string()), &reframe_plan);
         let call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
@@ -959,8 +959,7 @@ impl<'a> Lowerer<'a> {
     ) -> CExpr {
         if matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr) {
             let implementation = self
-                .effect_abi_plan
-                .function_value_implementation(expr.id)
+                .planned_function_value_implementation(expr.id)
                 .unwrap_or_else(|| {
                     panic!(
                         "internal ABI planning error: missing contextual callable ABI for {:?}",
@@ -978,8 +977,7 @@ impl<'a> Lowerer<'a> {
                 "internal ABI planning error: CPS callback has a pure implementation ABI"
             );
             assert_eq!(
-                self.effect_abi_plan
-                    .function_value_boundary(expr.id)
+                self.planned_function_value_boundary(expr.id)
                     .and_then(|abi| abi.evidence.as_ref()),
                 Some(&expected_shape),
                 "internal ABI planning error: CPS callback boundary disagrees with lowering"
@@ -1005,11 +1003,10 @@ impl<'a> Lowerer<'a> {
             // type may misleadingly look like a closed union of every effect
             // supplied at this call site.
             .callable_abi_from_partial_app(expr)
+            .or_else(|| self.callable_abi_from_named_function_value(expr))
             .or_else(|| {
-                self.effect_abi_plan
-                    .function_values
-                    .get(&expr.id)
-                    .and_then(|plan| plan.inferred.clone())
+                self.planned_function_value(expr.id)
+                    .and_then(|plan| plan.inferred().cloned())
             })
             .or_else(|| {
                 self.expr_cps_function_shape(expr)
@@ -1017,24 +1014,17 @@ impl<'a> Lowerer<'a> {
             })
             .or_else(|| self.callable_abi_from_dict_method_access(expr))
             .unwrap_or_else(|| CallableAbi::pure(expected_abi.user_arity));
-        let planned = self
-            .effect_abi_plan
-            .function_values
-            .get(&expr.id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "internal ABI planning error: missing function-value boundary for {:?}",
-                    expr.id
-                )
-            });
-        let actual_abi = planned
-            .implementation
-            .clone()
-            .expect("contextual function-value plan is missing its implementation ABI");
-        let boundary_abi = planned
-            .boundary
-            .as_ref()
-            .expect("contextual function-value plan is missing its boundary ABI");
+        let planned = self.planned_function_value(expr.id).unwrap_or_else(|| {
+            panic!(
+                "internal ABI planning error: missing function-value boundary for {:?}",
+                expr.id
+            )
+        });
+        let contextual = planned
+            .contextual()
+            .expect("contextual function-value plan is missing its boundary pair");
+        let actual_abi = contextual.implementation().clone();
+        let boundary_abi = contextual.boundary();
         assert_eq!(
             &expected_abi, boundary_abi,
             "internal ABI planning error: lowering expected ABI disagrees with planned boundary"
@@ -1205,18 +1195,15 @@ impl<'a> Lowerer<'a> {
                 let boundary = CallableAbi::from_type(expected_ty, |effects| {
                     self.canonicalize_effects(effects)
                 });
-                let planned = self
-                    .effect_abi_plan
-                    .function_values
-                    .get(&expr.id)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "internal ABI planning error: missing pure-boundary adapter ABI for {:?}",
-                            expr.id
-                        )
-                    });
-                assert_eq!(planned.implementation.as_ref(), Some(&actual_abi));
-                assert_eq!(planned.boundary.as_ref(), Some(&boundary));
+                let planned = self.planned_function_value(expr.id).unwrap_or_else(|| {
+                    panic!(
+                        "internal ABI planning error: missing pure-boundary adapter ABI for {:?}",
+                        expr.id
+                    )
+                });
+                let contextual = planned.contextual().expect("contextual adapter ABI");
+                assert_eq!(contextual.implementation(), &actual_abi);
+                assert_eq!(contextual.boundary(), &boundary);
                 return self.wrap_cps_function_value_as_pure_adapter(expr, expected_ty);
             }
 

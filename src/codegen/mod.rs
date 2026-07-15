@@ -228,22 +228,13 @@ pub fn precompute_context_call_effects(
                 .get(&module_name)
                 .map(|module_result| module_result.as_ref())
                 .unwrap_or(result);
-            let mut resolution = compiled.resolution.clone();
-            for other in ctx.modules.values() {
-                resolution.extend(
-                    other
-                        .resolution
-                        .iter()
-                        .map(|(id, symbol)| (*id, symbol.clone())),
-                );
-            }
             let effect_abi_plan =
                 timed_codegen_phase(&module_name, "precompute_call_effects", || {
                     lower::precompute_call_effects(
                         ctx,
                         &module_name,
                         &compiled.elaborated,
-                        resolution,
+                        compiled.resolution.clone(),
                         check_result,
                     )
                 });

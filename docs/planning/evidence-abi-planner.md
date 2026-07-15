@@ -79,8 +79,8 @@ The following remain unchanged:
 - one `_Evidence` tuple followed by `_ReturnK` in the CPS function ABI;
 - the flat frame shape
   `{callee static prefix..., forwarded tagged tail...}`;
-- `insert_canonical`, `insert_static`, `project_evidence`,
-  `select_evidence`, `reframe_evidence`, and `append_tail`;
+- `insert_canonical`, `insert_static`, `select_evidence`,
+  `reframe_evidence`, and `append_tail`;
 - static `element/2` lookup for known prefix slots;
 - exact-tag and unique-family lookup in an unknown open tail;
 - source syntax, type inference rules, handler semantics, and module privacy;
@@ -99,10 +99,10 @@ shape:
 CheckResult resolved types
 ModuleCodegenInfo function effects
 FunInfo effects / is_open_row / param_types
-CallEffectInfo and CpsCallPlan
-RuntimeFunctionShape and CpsShape
-lambda_effect_context
-EvidenceCtx and EvidenceLayout
+CallEffectInfo and the former CpsCallPlan
+the former RuntimeFunctionShape and CpsShape
+the former lambda_effect_context
+the former EvidenceCtx and EvidenceLayout
 ```
 
 They answer different questions, but the distinction is implicit:
@@ -287,8 +287,8 @@ fn plan_reframe(
 ) -> Result<EvidenceReframePlan, EvidenceAbiError>;
 ```
 
-Lowering translates this plan into `project_evidence`, `select_evidence`, or
-`reframe_evidence`. It should not repeat exact/family/position selection logic.
+Lowering translates this plan into `select_evidence` or `reframe_evidence`.
+It should not repeat exact/family/position selection logic.
 
 The first implementation may calculate the plan during lowering because a
 local `with` changes the source `EvidenceFrame`. The important boundary is that

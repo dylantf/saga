@@ -56,17 +56,17 @@ Migration phases are:
 | `RuntimeFunctionShape::from_resolved_symbol` | Resolved symbol ABI plus instantiated occurrence type | Chooses the instantiated target shape over the retained declaration ABI | `EffectAbiPlan` declaration and instantiated target ABI | P4 | Qualified imported and re-exported calls | Migrated |
 | `RuntimeFunctionShape::{cps_shape, expanded_arity}` | Runtime function shape | Converts semantic shape to Core arity | `CallableAbi` | P1 | Export and first-class function arity tests | Migrated |
 | Former `CpsShape::for_lambda_boundary` (now `EvidenceAbi::for_lambda_boundary`) | Effect row at a lambda boundary | Normalizes static evidence slots and open-tail status | `EvidenceAbi` | P1 | `closed_lambda_in_open_hof_keeps_tail_shape_for_nested_handler_insertion` | Migrated |
-| `CallEffectInfo`, `CallEffectKind`, `CpsCallPlan` (`codegen/call_effects.rs`) | Call node, resolved target, inferred/declared type | Classifies pure, closed CPS, and open CPS calls and records expected callback shapes | `EffectAbiPlan` plus a planned-call view of `CallableAbi` | P2/P4 | Applied-effect, HOF, and imported-call regressions | Migrated |
+| `CallEffectInfo` plus private `CallEffectKind` classification (`codegen/call_effects.rs`) | Call node, resolved target, inferred/declared type | Produces `Direct` or `Cps(CallableAbi)` and records expected callback shapes | `EffectAbiPlan` plus `CallableAbi` | P2/P4 | Applied-effect, HOF, and imported-call regressions | Migrated |
 | Call-effect classification/population helpers (`populate_*`, `classify_*`) | Typed AST and resolution metadata | Populate call and function-value ABI facts keyed by `NodeId` | `EffectAbiPlan` | P2 | Planner tests for inferred/implementation/boundary separation and all call kinds | Migrated |
-| `plan_contextual_function_value_abis` (`lower/function_values.rs`) | Declaration parameter/result types plus finalized expression types | Propagates closed versus open expected rows through calls, constructors/lists, tuples, records, branches, lets, and effect callbacks before Core emission | `EffectAbiPlan.function_values[NodeId]` | P2 | Heterogeneous callback lists, record/ADT storage, open HOFs, applied effect callbacks | Migrated |
-| `plan_registered_handler_function_value_abis` | Imported named-handler metadata plus defining-module semantics | Plans callback values in handler arms stored outside the consumer AST | `EffectAbiPlan.function_values[NodeId]` | P2/P4 | Imported public handler using private nested handler; re-exported handler factory | Migrated |
+| `EffectAbiPlanner::plan_program` (`lower/function_values.rs`) | Declaration parameter/result types plus finalized expression types | Propagates closed versus open expected rows through calls, constructors/lists, tuples, records, branches, lets, handlers, and effect callbacks before Core emission, then the plan is frozen | `EffectAbiPlan.function_values[NodeId]` | P2 | Heterogeneous callback lists, record/ADT storage, open HOFs, applied effect callbacks | Migrated |
+| Defining-module plan lookup for imported handlers/helpers | Imported body NodeId plus active semantic module | Reads callback/call facts from the producer's frozen plan without merging module maps | `EffectAbiPlan` per compiled module | P2/P4 | Imported public handler using private nested handler; nested public static helper | Migrated |
 | Shape helpers (`lambda_head_shape`, `let_fun_sig`, `runtime_shape_from_*`) | Lambda/local binding context | Construct declaration and occurrence ABIs at planner producer boundaries | Shared `CallableAbi` construction | P2 | Local HOF and pattern-bound callback regressions | Migrated |
 | `FunInfo` registration (`codegen/lower/mod.rs`, `lower/init.rs`) | Local/top-level declaration | Stores user arity, effects, and Core name | `CallableAbi` stored with symbol metadata | P1 | Same-file recursion and partial application | Migrated |
-| `register_std_module_semantics`, `register_imported_exports`, `register_imported_module_local_funs` | `ModuleCodegenInfo` and imports | Consume exported ABIs; private imported helper fallback remains an explicit compatibility path for P5 | Imported declaration `CallableAbi` | P4 | Cold dependency and qualified import tests | Migrated |
+| `register_std_module_semantics`, `register_imported_exports`, `register_imported_module_local_funs` | `ModuleCodegenInfo` and imports | Consume authoritative exported and private-local declaration ABIs | Imported declaration `CallableAbi` | P4 | Cold dependency and qualified import tests | Migrated |
 | `method_cps_shape` and dictionary method registration | Trait method scheme and impl method | Defines dictionary slot/hoist callable convention | `CallableAbi` in trait/dictionary metadata | P2/P4 | Dictionary callback and imported trait method tests | Migrated |
-| `collect_codegen_info`, `ModuleCodegenInfo` (`typechecker/check_module/codegen_info.rs`) | Checked module exports | Publishes declaration `CallableAbi` for downstream lowering | Exported declaration `CallableAbi` plus compiled-module `EffectAbiPlan` | P4 | Re-export and dependency regressions | Migrated |
+| `collect_codegen_info`, `ModuleCodegenInfo` (`typechecker/check_module/codegen_info.rs`) | Checked module environment and exports | Publishes declaration `CallableAbi` for local/private resolution and downstream lowering | Declaration `CallableAbi` map plus compiled-module `EffectAbiPlan` | P4 | Re-export and dependency regressions | Migrated |
 | `build_imported_fun_scoped` (`codegen/resolve.rs`) | Import/re-export graph | Constructs canonical imported symbol identity retaining the origin `CallableAbi` | Symbol plus declaration `CallableAbi` | P4 | `qualified_open_row_call_prefers_canonical_fun_sig_over_local_bare_name` | Migrated |
-| `hash_scheme` and interface fingerprinting (`cli/cache.rs`) | Exported schemes and effect rows | Invalidates dependents when public callable shape changes | Fingerprinted exported `CallableAbi` | P4 | Callable slot/open-tail fingerprint test and dependent rebuild-plan tests | Migrated |
+| `hash_scheme` and interface fingerprinting (`cli/cache.rs`) | Exported schemes, constraints, and effect rows | Invalidates dependents when a public callable shape changes without redundantly hashing derived ABI metadata | Exported scheme fingerprint | P4 | Effect-row and dependent rebuild-plan tests | Migrated |
 
 ## Callable Constructors
 
@@ -84,7 +84,7 @@ Migration phases are:
 | Eta-reduced effect operations (`lower/function_values.rs`) | Effect operation used as a value | Builds CPS callable that captures/accepts the operation frame | Operation `CallableAbi` | P2 | Stored/returned effect-operation regressions | Migrated |
 | Pure → CPS adapter | Source and expected callback ABIs | Adds an evidence argument without changing user arguments | Explicit adapter `CallableAbi` | P2/P3 | Closed callback passed to open HOF | Migrated |
 | CPS → pure adapter | Source and expected callback ABIs | Discharges a known frame and removes evidence from the exposed value | Explicit adapter `CallableAbi` | P2/P3 | Narrowed partial application tests | Migrated |
-| CPS → CPS adapter | Source and expected evidence ABIs | Reframes evidence across compatible callable boundaries | `CallableAbi` plus `EvidenceReframePlan` | P2/P3 | `closed_imported_function_in_open_hof_drops_tail_before_nested_handler` | Migrated |
+| CPS → CPS adapter | Source and expected evidence ABIs | Reframes evidence across compatible callable boundaries, including open→open boundaries with different static prefixes | `CallableAbi` plus `EvidenceReframePlan` | P2/P3 | `closed_imported_function_in_open_hof_drops_tail_before_nested_handler`; open-prefix same/cross-module regressions | Migrated |
 | Returned/stored handler factories | Result expression and captured frame | Builds first-class handler values without losing ambient evidence | Contextual `CallableAbi` and `EvidenceFrame` | P2 | Handler-factory and paired-handler regressions | Migrated |
 
 ## Frame Constructors and Mutations
@@ -119,12 +119,11 @@ path. This preserves the current open-versus-closed installation fix.
 | `find_evidence/2` (`evidence.bridge.erl`) | Runtime frame and tag | Dynamic open-tail lookup | Execution of an `EvidenceAbi::resolve_slot` result | P3 | `open_row_inner_handler_preserves_same_family_tail` | Migrated |
 | `insert_canonical/2` | Frame and `{tag, handler}` entry | Installs/replaces canonical evidence while preserving ordering | Execution of `EvidenceAbi::plan_install` | P1/P3 | Nested applied handlers and non-resuming rollback | Migrated |
 | `insert_static/3` | Frame, known static-prefix length, and handler entry | Installs into the canonical prefix without reordering an unknown tail | Execution of `EvidenceAbi::plan_install` | P1/P3 | Open handler insertion tests | Migrated |
-| `project_evidence/2` | Frame and canonical target tags | Legacy bridge retained for compatibility; production narrowing uses the selector language | `EvidenceReframePlan` execution | P3 | First/middle/last closed-selector unit cases | Migrated |
 | `select_evidence/2` | Frame and positional/tag selectors | Selects static entries and/or dynamic tags | `EvidenceReframePlan` execution | P3 | Cross-module applied effects selecting generic open slots | Migrated |
 | `reframe_evidence/3` | Frame, source prefix/tail-forwarding plan, and selectors | Selects and retags entries into callee order, forwards closed-row extras that instantiate a target tail, and excludes omitted declaration slots from an already-open source | `EvidenceReframePlan` execution | P3/P5 | Same-family sibling-tail, Fail+Repo wrong-slot, and nested group/route regressions | Migrated |
 | `append_tail/3` | Call frame, captured frame, and target ABI | Combines locally installed evidence with a caller tail | Target `EvidenceAbi` supplies the static labels | P1/P3 | Imported nested handler and open callback tests | Migrated |
 
-All seven bridge operations remain runtime implementation details. Lowering
+All six bridge operations remain runtime implementation details. Lowering
 must consume a typed plan and may not independently infer positions, ordering,
 or relabeling from canonical strings.
 
@@ -174,7 +173,7 @@ constructor ownership are stable.
 | `lower/exprs/dispatch.rs` | Planned source-lambda ABI | Emit lambda evidence parameter and establish its frame | `CallableAbi` / `EvidenceFrame` | P1/P2 | Callback/frame preservation tests | Migrated |
 | `lower/calls.rs` | Residual partial-application ABI | Emit closure parameter and forwarded evidence argument | `CallableAbi` | P2 | Partial-application regressions | Migrated |
 | `lower/function_values.rs` | Adapter or eta-operation ABI | Emit adapter/operation parameter, selector source, and forwarded argument | `CallableAbi` / `EvidenceReframePlan` | P2/P3 | Adapter and stored operation tests | Migrated |
-| `lower/evidence.rs` tests | Synthetic test frame | Exercise bridge-expression construction without defining a production callable ABI | Seven runtime bridge implementations | P3 | Bridge unit tests | Exempt |
+| `lower/evidence.rs` tests | Synthetic test frame | Exercise bridge-expression construction without defining a production callable ABI | Six runtime bridge implementations | P3 | Bridge unit tests | Exempt |
 
 ## Regression Ownership
 
@@ -199,6 +198,8 @@ Existing tests attach to the matrix as follows:
   `closed_lambda_in_open_hof_keeps_tail_shape_for_nested_handler_insertion`,
   `closed_imported_function_in_open_hof_drops_tail_before_nested_handler`,
   `nested_cross_module_open_hofs_drop_handled_static_prefix`,
+  `open_cps_function_value_reframes_a_different_static_prefix`,
+  `cross_module_open_cps_function_value_reframes_a_different_static_prefix`,
   `open_row_callback_param_normalizes_function_value_shape`, and
   `open_row_pattern_bound_callback_forwards_static_prefix_and_tail`.
 - Partial application:
@@ -208,8 +209,8 @@ Existing tests attach to the matrix as follows:
 
 The final migration added or retained coverage for:
 
-1. interface fingerprint changes when an exported callable's evidence slots or
-   open-tail bit changes, plus dependency fingerprint/rebuild-plan tests;
+1. scheme/interface fingerprint changes when an exported callable's effect row
+   or open-tail bit changes, plus dependency fingerprint/rebuild-plan tests;
 2. planner unit cases for exact reuse, relabel, unique tail lookup, ambiguous
    family lookup, and missing evidence;
 3. ABI assertions for every adapter, static-helper, and direct-HOF variant; and
@@ -223,7 +224,7 @@ Run these searches after every migration phase:
 rg -n 'CpsShape \{|CpsShape::|RuntimeFunctionShape::' src/codegen --glob '*.rs'
 rg -n 'EvidenceLayout::|EvidenceCtx \{|lambda_effect_context|current_evidence\s*=' src/codegen --glob '*.rs'
 rg -n 'arity_and_effects_from_type|has_open_effect_row|expanded_arity|effects_from_type' src/codegen src/typechecker/check_module src/cli/cache.rs --glob '*.rs'
-rg -n 'build_call_evidence_with|evidence_op_lookup|insert_canonical|insert_static|project_evidence|select_evidence|reframe_evidence|append_tail|find_evidence' src/codegen src/stdlib --glob '*.rs' --glob '*.erl'
+rg -n 'build_call_evidence_with|evidence_op_lookup|insert_canonical|insert_static|select_evidence|reframe_evidence|append_tail|find_evidence' src/codegen src/stdlib --glob '*.rs' --glob '*.erl'
 rg -n '"_Evidence"\.to_string\(\)' src/codegen/lower --glob '*.rs'
 ```
 

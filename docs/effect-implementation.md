@@ -373,7 +373,8 @@ atom selector relabels a unique polymorphic-family entry to the concrete
 applied identity requested by the callee; a position/tag pair does the same
 without searching a forwarded tail that may contain a sibling application.
 Closed-row
-`project_evidence` performs the same exact-first, unique-family relabeling.
+Closed projection and relabeling use the same selector language as open-row
+reframing.
 When a closed CPS function value is passed through an open callback slot,
 `select_evidence` uses the position/tag selector language above but drops every
 unselected entry. The open tail belongs to the adapter ABI and must not enter
@@ -576,14 +577,14 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/call_effects.rs` -- `EffectAbiPlan`, `CallEffectInfo`, and the planner for declaration, call, and function-value ABIs.
 - `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
 - `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
-- `codegen/lower/evidence.rs` -- `EvidenceFrame` and thin Core emitters for the seven runtime bridge operations.
+- `codegen/lower/evidence.rs` -- `EvidenceFrame` and thin Core emitters for the six runtime bridge operations.
 - `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values and executes `EvidenceReframePlan` for every effectful head shape.
 - `codegen/lower/effects/ops.rs` -- resolves static or dynamic operation slots through `EvidenceAbi`.
 - `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- registers local/imported `FunInfo` entries carrying `CallableAbi` plus non-ABI HOF parameter metadata.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `project_evidence/2`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.
+- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.
 
 ### Optimization Opportunities
 

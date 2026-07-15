@@ -191,14 +191,6 @@ impl ResolvedCodegenKind {
             ResolvedCodegenKind::Intrinsic { .. } => &[],
         }
     }
-
-    pub fn callable_abi(&self) -> Option<&crate::codegen::runtime_shape::CallableAbi> {
-        match self {
-            ResolvedCodegenKind::BeamFunction { abi, .. }
-            | ResolvedCodegenKind::ExternalFunction { abi, .. } => Some(abi),
-            ResolvedCodegenKind::Intrinsic { .. } => None,
-        }
-    }
 }
 
 /// How a name resolves at a particular Var or QualifiedName usage site.
@@ -1030,14 +1022,11 @@ fn register_local_scope_funs(
             .collect::<Vec<_>>(),
     );
     for (name, arity) in local_funs {
-        let kind = classify_codegen_kind(
-            info,
-            name,
-            *arity,
-            crate::codegen::runtime_shape::CallableAbi::pure(*arity),
-            None,
-            &source_erlang_mod,
-        );
+        let abi = info
+            .and_then(|info| info.fun_abi(name))
+            .cloned()
+            .unwrap_or_else(|| crate::codegen::runtime_shape::CallableAbi::pure(*arity));
+        let kind = classify_codegen_kind(info, name, *arity, abi, None, &source_erlang_mod);
         scope.insert(
             name.clone(),
             ScopedName::Symbol {
@@ -1061,20 +1050,15 @@ fn build_imported_fun_scoped(
     info: &ModuleCodegenInfo,
 ) -> ScopedName {
     let (arity, _) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
-    let abi = info
-        .fun_abis
-        .iter()
-        .find(|(fun_name, _)| fun_name == name)
-        .map(|(_, abi)| abi.clone())
-        .unwrap_or_else(|| {
-            assert!(
-                !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
-                "missing exported CallableAbi for '{}.{}'",
-                mod_name,
-                name
-            );
-            crate::codegen::runtime_shape::CallableAbi::pure(arity)
-        });
+    let abi = info.fun_abi(name).cloned().unwrap_or_else(|| {
+        assert!(
+            !matches!(scheme.ty, crate::typechecker::Type::Fun(..)),
+            "missing exported CallableAbi for '{}.{}'",
+            mod_name,
+            name
+        );
+        crate::codegen::runtime_shape::CallableAbi::pure(arity)
+    });
     let canonical_name = format!("{}.{}", mod_name, name);
 
     let kind = classify_codegen_kind(

@@ -34,7 +34,7 @@ impl CpsCallee {
 }
 
 struct RuntimeCpsApplySite<'a> {
-    plan: super::super::call_effects::CpsCallPlan,
+    abi: crate::codegen::runtime_shape::CallableAbi,
     callee: CpsCallee,
     args: &'a [&'a Expr],
     return_k: Option<CExpr>,
@@ -59,14 +59,12 @@ impl<'a> Lowerer<'a> {
         // and which effects the callee declares; both used to be recomputed here
         // from `resolved_effects` + `effect_handler_ops`.
         let cps_plan = self
-            .effect_abi_plan
-            .calls
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan());
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned());
         let is_effectful = cps_plan.is_some();
         let target_evidence = cps_plan
             .as_ref()
-            .and_then(|plan| plan.abi.evidence.as_ref())
+            .and_then(|abi| abi.evidence.as_ref())
             .cloned();
         let total_arity = self
             .resolved_fun_info(head.id, lookup_name)
@@ -271,22 +269,19 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a call to an already-materialized runtime CPS callable value.
     ///
-    /// The call shape still comes from `CallEffectInfo::cps_call_plan()`;
+    /// The call shape still comes from `CallEffectInfo::cps_call_abi()`;
     /// callers supply only the callee expression and the narrow argument
     /// lowering mode needed to preserve existing value-boundary behavior.
     fn lower_runtime_cps_apply(&mut self, site: RuntimeCpsApplySite<'_>) -> CExpr {
         let RuntimeCpsApplySite {
-            plan,
+            abi,
             callee,
             args,
             return_k,
             nested_pure_arg_lowering,
             flat_arg_lowering,
         } = site;
-        let evidence_abi = plan
-            .abi
-            .evidence
-            .expect("CPS call plan missing evidence ABI");
+        let evidence_abi = abi.evidence.expect("CPS call plan missing evidence ABI");
         let effectful_arg_idxs: Vec<usize> = args
             .iter()
             .enumerate()
@@ -372,10 +367,8 @@ impl<'a> Lowerer<'a> {
         //     without narrowing — including when `static_ops` is empty, which
         //     is the open-row-only case (`f: Unit -> Unit needs {..e}`).
         let plan = self
-            .effect_abi_plan
-            .calls
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
         let callee = if let Some(source_module) = self.imported_handler_function_source(var_name) {
             CpsCallee::Remote {
                 erlang_mod: Self::module_name_to_erlang(source_module),
@@ -385,7 +378,7 @@ impl<'a> Lowerer<'a> {
             CpsCallee::Value(CExpr::Var(core_var(var_name)))
         };
         Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee,
             args,
             return_k,
@@ -600,10 +593,8 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
         let plan = self
-            .effect_abi_plan
-            .calls
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
 
         // Statically-known impl with a hoisted method — call it directly,
         // skipping the dict tuple build and `element/2`: a local `FunRef`
@@ -618,7 +609,7 @@ impl<'a> Lowerer<'a> {
             true,
         ) {
             return Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-                plan,
+                abi: plan,
                 callee,
                 args,
                 return_k,
@@ -641,7 +632,7 @@ impl<'a> Lowerer<'a> {
         );
 
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee: CpsCallee::Value(CExpr::Var(method_var.clone())),
             args,
             return_k,
@@ -670,14 +661,11 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
         let plan = self
-            .effect_abi_plan
-            .calls
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
 
         let implementation = self
-            .effect_abi_plan
-            .function_value_implementation(lambda.id)
+            .planned_function_value_implementation(lambda.id)
             .unwrap_or_else(|| {
                 panic!(
                     "internal ABI planning error: missing immediate-lambda ABI for {:?}",
@@ -685,14 +673,14 @@ impl<'a> Lowerer<'a> {
                 )
             });
         assert_eq!(
-            implementation, &plan.abi,
+            implementation, &plan,
             "internal ABI planning error: immediate-lambda ABI disagrees with its call ABI"
         );
         let func_ce = self.lower_expr(lambda);
 
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
             args,
             return_k,
@@ -720,14 +708,12 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
         let plan = self
-            .effect_abi_plan
-            .calls
-            .get(&app_id)
-            .and_then(|info| info.cps_call_plan())?;
+            .planned_call(app_id)
+            .and_then(|info| info.cps_call_abi().cloned())?;
         let func_ce = self.lower_expr_value(head);
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            plan,
+            abi: plan,
             callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
             args,
             return_k,
@@ -1293,13 +1279,10 @@ impl<'a> Lowerer<'a> {
     /// let-binding that produces the evidence
     /// (`(var_name, value_expr)`).
     ///
-    /// - Closed-row caller (`current_evidence` is `Some` with `is_open == false`)
-    ///   and callee effects are a strict subset: emit a runtime
-    ///   `project_evidence` narrowing call.
-    /// - Otherwise: forward the caller's evidence directly. When the caller
-    ///   has no evidence in scope (pure caller installing first effect via a
-    ///   `with` further out, or handler-bound value paths), emit an empty
-    ///   tuple as a placeholder so arity matches.
+    /// The authoritative `EvidenceReframePlan` selects/relabels the callee's
+    /// prefix and forwards only the row tail described by the target ABI.
+    /// When no evidence is in scope, emit an empty tuple placeholder so the
+    /// CPS arity remains valid for handler-bound paths.
     ///
     pub(super) fn build_call_evidence_with(
         &mut self,

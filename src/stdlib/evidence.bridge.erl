@@ -1,6 +1,6 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
-         project_evidence/2, select_evidence/2, reframe_evidence/3,
+         select_evidence/2, reframe_evidence/3,
          append_tail/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
@@ -66,11 +66,6 @@ insert_static(Evidence, StaticCount, {NewTag, _} = NewEntry) ->
     CleanTail = [Entry || {Tag, _} = Entry <- Tail, Tag =/= NewTag],
     NewPrefix = tuple_to_list(insert_at(CleanPrefix, NewTag, NewEntry, [])),
     list_to_tuple(NewPrefix ++ CleanTail).
-
-%% Build a new evidence tuple containing only the named tags, in the order
-%% supplied (the caller is expected to pass them in canonical order).
-project_evidence(Evidence, Tags) ->
-    list_to_tuple([entry_for(Evidence, T) || T <- Tags]).
 
 %% Build a closed callee frame from positional/tag selectors. Unlike
 %% reframe_evidence/3, this deliberately drops every unselected entry. It is
@@ -172,19 +167,3 @@ unique_family_position(Evidence, Tag) ->
 effect_family(Tag) ->
     [Family | _] = binary:split(atom_to_binary(Tag, utf8), <<"<">>),
     Family.
-
-entry_for(Evidence, Tag) ->
-    case entry_at(Evidence, Tag, 1, tuple_size(Evidence)) of
-        {ok, Ops} -> {Tag, Ops};
-        not_found ->
-            Position = unique_family_position(Evidence, Tag),
-            {_OldTag, Ops} = element(Position, Evidence),
-            {Tag, Ops}
-    end.
-
-entry_at(_Evidence, _Tag, I, N) when I > N -> not_found;
-entry_at(Evidence, Tag, I, N) ->
-    case element(I, Evidence) of
-        {Tag, Ops} -> {ok, Ops};
-        _ -> entry_at(Evidence, Tag, I + 1, N)
-    end.

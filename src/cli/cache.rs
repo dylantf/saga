@@ -131,20 +131,6 @@ pub(super) fn module_interface_fingerprint(exports: &typechecker::ModuleExports)
 fn hash_module_exports(exports: &typechecker::ModuleExports, state: &mut impl Hasher) {
     "ModuleExports".hash(state);
     hash_sorted_pairs(&exports.bindings, state, hash_scheme);
-    let callable_abis = exports
-        .bindings
-        .iter()
-        .filter(|(_, scheme)| matches!(scheme.ty, typechecker::Type::Fun(..)))
-        .map(|(name, scheme)| {
-            let mut abi = saga::codegen::runtime_shape::CallableAbi::from_type(
-                &scheme.ty,
-                std::convert::identity,
-            );
-            abi.user_arity += saga::codegen::lower::util::dict_param_count(&scheme.constraints);
-            (name.clone(), abi)
-        })
-        .collect::<Vec<_>>();
-    hash_sorted_pairs(&callable_abis, state, hash_callable_abi);
     hash_string_map(&exports.binding_origins, state);
     hash_string_vec_map(&exports.type_constructors, state);
     hash_sorted_map(&exports.inlinable_constructors, state, |ctors, state| {
@@ -169,19 +155,6 @@ fn hash_module_exports(exports: &typechecker::ModuleExports, state: &mut impl Ha
             name.hash(state);
         },
     );
-}
-
-fn hash_callable_abi<H: Hasher>(abi: &saga::codegen::runtime_shape::CallableAbi, state: &mut H) {
-    abi.user_arity.hash(state);
-    abi.is_intrinsic.hash(state);
-    match &abi.evidence {
-        Some(evidence) => {
-            true.hash(state);
-            evidence.static_slots().hash(state);
-            evidence.is_open().hash(state);
-        }
-        None => false.hash(state),
-    }
 }
 
 fn hash_sorted_pairs<T, H: Hasher>(
@@ -1348,22 +1321,5 @@ mod tests {
             module_interface_fingerprint(&left),
             module_interface_fingerprint(&right)
         );
-    }
-
-    #[test]
-    fn callable_abi_fingerprint_includes_slots_and_open_tail() {
-        use saga::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
-
-        let hash = |abi: &CallableAbi| {
-            let mut state = std::collections::hash_map::DefaultHasher::new();
-            hash_callable_abi(abi, &mut state);
-            state.finish()
-        };
-        let closed = CallableAbi::cps(1, EvidenceAbi::closed(["Main.Repo<UsersDb>"]));
-        let open = CallableAbi::cps(1, EvidenceAbi::new(["Main.Repo<UsersDb>"], true));
-        let sibling = CallableAbi::cps(1, EvidenceAbi::closed(["Main.Repo<DataDb>"]));
-
-        assert_ne!(hash(&closed), hash(&open));
-        assert_ne!(hash(&closed), hash(&sibling));
     }
 }
