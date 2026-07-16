@@ -2216,6 +2216,22 @@ fn with_inline_arms_multiline_no_commas() {
     }
 }
 
+#[test]
+fn with_layout_named_handlers_accept_trailing_commas() {
+    let expr =
+        parse_expr("run () with\n  console_log,\n  Metrics.metrics_handler,\n  fail msg = Err msg");
+    let ExprKind::With { handler, .. } = &expr.kind else {
+        panic!("expected With, got {:?}", expr);
+    };
+    let Handler::Inline { items, .. } = handler.as_ref() else {
+        panic!("expected Inline handler, got {:?}", handler);
+    };
+    assert_eq!(items.len(), 3);
+    assert!(matches!(&items[0].node, HandlerItem::Named(r) if r.name == "console_log"));
+    assert!(matches!(&items[1].node, HandlerItem::Named(r) if r.name == "Metrics.metrics_handler"));
+    assert!(matches!(&items[2].node, HandlerItem::Arm(a) if a.op_name == "fail"));
+}
+
 // --- Mixed-order handler items ---
 
 #[test]

@@ -929,6 +929,7 @@ impl Parser {
         let next = self.pos + i + 1;
         next >= self.tokens.len()
             || matches!(self.tokens[next].token, Token::Eof)
+            || matches!(self.tokens[next].token, Token::Comma)
             || (self.tokens[next].preceded_by_newline && self.tokens[next].column <= item_indent)
     }
 

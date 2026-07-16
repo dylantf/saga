@@ -876,7 +876,7 @@ fn format_with_suffix(handler: &Handler) -> Doc {
                 body_items.push(format_trivia(&ann.leading_trivia));
                 match &ann.node {
                     HandlerItem::Named(r) => {
-                        body_items.push(Doc::text(&r.name));
+                        body_items.push(Doc::text(format!("{},", r.name)));
                     }
                     HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
                         body_items.push(format_handler_arm(arm));

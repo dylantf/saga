@@ -2019,8 +2019,8 @@ fn inline_handler_named_then_inline_no_comma_before_inline() {
     let src = "f x = compute () with {\n  console,\n  fail msg = Err msg\n}";
     let result = fmt80(src);
     assert!(
-        result.contains("console\n  fail"),
-        "layout separates handler items without commas: {}",
+        result.contains("console,\n  fail"),
+        "named handlers should retain a trailing comma: {}",
         result
     );
     assert!(
@@ -2035,9 +2035,14 @@ fn inline_handler_only_named_uses_layout() {
     let src = "f x = compute () with {\n  console,\n  to_result,\n}";
     let result = fmt80(src);
     assert!(
-        result.contains("with\n  console\n  to_result"),
+        result.contains("with\n  console,\n  to_result,"),
         "result: {}",
         result
+    );
+    assert_eq!(
+        try_parse_normalized(src),
+        try_parse_normalized(&result),
+        "formatted named handler suite should preserve the AST"
     );
 }
 
@@ -2053,7 +2058,7 @@ fn inline_handler_named_with_comments_preserves_multiline() {
         result
     );
     assert!(
-        result.contains("console_log\n"),
+        result.contains("console_log,\n"),
         "must stay multiline: {}",
         result
     );
