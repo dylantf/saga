@@ -1,6 +1,5 @@
-effect Log {
+effect Log
   fun log : String -> Unit
-}
 
 pub fun do_log : Unit -> Unit needs {Log}
 do_log () = log! "hello"

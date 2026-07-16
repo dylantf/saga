@@ -3,23 +3,19 @@ module Std.Bool
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
-impl Show for Bool {
-  show b = case b {
-    True -> "True"
-    False -> "False"
-  }
-}
+impl Show for Bool
+  show b =
+    case b of
+      True -> "True"
+      False -> "False"
 
-impl Debug for Bool {
-  debug b = case b {
-    True -> "True"
-    False -> "False"
-  }
-}
+impl Debug for Bool
+  debug b =
+    case b of
+      True -> "True"
+      False -> "False"
 
 #@ Negates a boolean value.
 pub fun not : Bool -> Bool
 not True = False
 not False = True
-
-

@@ -1,0 +1,38 @@
+# Converted from examples/16-traits.saga
+
+# Traits and implementations
+
+record User {
+  name: String,
+  age: Int,
+}
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+trait Describe a
+  fun describe : (x: a) -> String
+
+impl Describe for User
+  describe user = $"{user.name} (age: {user.age})"
+
+impl Describe for Point
+  describe p = $"({p.x}, {p.y})"
+
+# Supertrait: Verbose requires Describe
+trait Verbose a where {a: Describe}
+  fun verbose : (x: a) -> String
+
+impl Verbose for User
+  verbose user = $"User: {describe user}, registered=true"
+
+main () =
+  let alice = User { name: "Alice", age: 30 }
+  let origin = Point { x: 0, y: 0 }
+
+  println (describe alice)
+  println (describe origin)
+  println (verbose alice)
+with console

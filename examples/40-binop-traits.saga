@@ -1,11 +1,10 @@
 type USD = USD deriving (Eq)
 type NOK = NOK deriving (Eq)
 
-type Currency c = Currency(Float) deriving (Eq)
+type Currency c = Currency Float deriving (Eq)
 
-impl Show for Currency c {
+impl Show for Currency c
   show (Currency a) = show a
-}
 
 fun add : Currency c -> Currency c -> Currency c
 add (Currency a) (Currency b) = Currency (a + b)
@@ -16,18 +15,16 @@ usd amount = Currency amount
 fun nok : Float -> Currency NOK
 nok amount = Currency amount
 
-trait ConvertTo a b {
+trait ConvertTo a b
   fun rate : Unit -> Float
-}
 
-impl ConvertTo NOK for USD {
+impl ConvertTo NOK for USD
   rate () = 10.5
-}
 
 fun convert : Currency a -> Currency b where {a: ConvertTo b}
 convert (Currency amount) = Currency (amount * rate ())
 
-main () = {
+main () =
   let amount1 = usd 23.50
   let amount2 = usd 50.00
   let sum = add amount1 amount2
@@ -41,4 +38,3 @@ main () = {
 
   let amount1_in_nok: Currency NOK = convert amount1
   dbg (show (add amount1_in_nok (nok 500.00)))
-}

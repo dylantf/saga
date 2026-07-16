@@ -2,10 +2,7 @@ module Main
 
 import Lib (Options)
 
-main () = {
+main () =
   let default = 10
-  Lib.compute 5 with {
+  Lib.compute 5 with
     get_options () = resume default
-  }
-}
-

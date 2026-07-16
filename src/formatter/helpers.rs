@@ -183,13 +183,14 @@ pub fn format_handler_arm(arm: &crate::ast::HandlerArm) -> Doc {
                 .append(super::pat::format_pat_atom(pat));
         }
     }
-    d = d
-        .append(Doc::text(" = "))
-        .append(super::expr::format_expr(&arm.body));
+    d = super::expr::format_body_after(d.append(Doc::text(" =")), &arm.body);
     if let Some(ref finally_expr) = arm.finally_block {
         d = d
-            .append(Doc::text(" finally "))
-            .append(super::expr::format_expr(finally_expr));
+            .append(Doc::hardline())
+            .append(super::expr::format_body_after(
+                Doc::text("finally"),
+                finally_expr,
+            ));
     }
     d
 }

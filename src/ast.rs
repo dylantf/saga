@@ -337,7 +337,7 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `add x y = x + y` or `main () = { ... }`
+    /// `add x y = x + y` or an indented body after `main () =`
     FunBinding {
         id: NodeId,
         name: String,
@@ -419,8 +419,8 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `effect Console { fun print : (msg: String) -> Unit }`
-    /// `effect State s { fun get : Unit -> s; fun put (val: s) -> Unit }`
+    /// `effect Console` followed by indented operation signatures.
+    /// Effects may have type parameters, as in `effect State s`.
     EffectDef {
         id: NodeId,
         doc: Vec<String>,
@@ -429,7 +429,7 @@ pub enum Decl {
         name_span: Span,
         type_params: Vec<TypeParam>,
         operations: Vec<Annotated<EffectOp>>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last operation with no following sibling.
         dangling_trivia: Vec<Trivia>,
         span: Span,
     },
@@ -447,9 +447,9 @@ pub enum Decl {
         span: Span,
     },
 
-    /// `handler console_log for Log needs {Http} { ... }`
-    /// `handler counter for State Int { ... }`
-    /// `handler show_store for Store a where {a: Show} { ... }`
+    /// `handler console_log for Log needs {Http}` plus indented arms.
+    /// `handler counter for State Int` handles an applied effect.
+    /// `handler show_store for Store a where {a: Show}` carries constraints.
     HandlerDef {
         id: NodeId,
         doc: Vec<String>,
@@ -459,13 +459,13 @@ pub enum Decl {
         body: HandlerBody,
         /// Partially parsed arms from error recovery (for LSP hover, not typechecked).
         recovered_arms: Vec<Annotated<HandlerArm>>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last handler member with no following sibling.
         dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
-    /// `trait Show a { fun show (x: a) -> String }`
-    /// `trait ConvertTo a b { ... }` -- a is self, b is an extra type param
+    /// `trait Show a` followed by indented method signatures and defaults.
+    /// `trait ConvertTo a b` -- a is self, b is an extra type param.
     TraitDef {
         id: NodeId,
         doc: Vec<String>,
@@ -477,14 +477,14 @@ pub enum Decl {
         type_params: Vec<TypeParam>,
         supertraits: Vec<TraitRef>,
         methods: Vec<Annotated<TraitMethod>>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last trait member with no following sibling.
         dangling_trivia: Vec<Trivia>,
         span: Span,
     },
 
-    /// `impl Show for User { show user = ... }`
-    /// `impl ConvertTo NOK for USD { ... }` -- NOK is a trait type arg
-    /// `impl Store for Redis needs {Http, Fail} { ... }`
+    /// `impl Show for User` followed by indented method bindings.
+    /// `impl ConvertTo NOK for USD` -- NOK is a trait type arg.
+    /// `impl Store for Redis needs {Http, Fail}` declares implementation effects.
     ImplDef {
         id: NodeId,
         doc: Vec<String>,
@@ -506,7 +506,7 @@ pub enum Decl {
         where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last impl member with no following sibling.
         dangling_trivia: Vec<Trivia>,
         span: Span,
     },
@@ -630,18 +630,18 @@ pub enum ExprKind {
         multiline: bool,
     },
 
-    /// `case expr { Pat -> Expr, ... }`
+    /// `case expr of` followed by indented pattern arms.
     Case {
         scrutinee: Box<Expr>,
         arms: Vec<Annotated<CaseArm>>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last arm with no following sibling.
         dangling_trivia: Vec<Trivia>,
     },
 
-    /// `{ stmt1; stmt2; expr }`
+    /// A sequential indented expression body.
     Block {
         stmts: Vec<Annotated<Stmt>>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last statement with no following sibling.
         dangling_trivia: Vec<Trivia>,
     },
 
@@ -697,7 +697,7 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
 
-    /// `expr with handler_name` or `expr with { ... }`
+    /// `expr with handler_name` or `expr with` followed by indented handler items.
     With {
         expr: Box<Expr>,
         handler: Box<Handler>,
@@ -719,21 +719,21 @@ pub enum ExprKind {
         canonical_module: Option<String>,
     },
 
-    /// `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
+    /// `do` bindings and success expression followed by an indented `else` arm list.
     Do {
         bindings: Vec<(Pat, Expr)>,
         success: Box<Expr>,
         else_arms: Vec<Annotated<CaseArm>>,
-        /// Comments before the closing `}` of the else block
+        /// Comments after the final `else` arm.
         dangling_trivia: Vec<Trivia>,
     },
 
-    /// `receive { Pat -> body, after N -> timeout_body }`
+    /// `receive` followed by indented arms and an optional `after` clause.
     Receive {
         arms: Vec<Annotated<CaseArm>>,
         /// Optional (timeout_expr, timeout_body)
         after_clause: Option<(Box<Expr>, Box<Expr>)>,
-        /// Comments before the closing `}` with no following sibling
+        /// Comments after the last receive member with no following sibling.
         dangling_trivia: Vec<Trivia>,
     },
 
@@ -746,7 +746,7 @@ pub enum ExprKind {
         type_expr: TypeExpr,
     },
 
-    /// `handler for Effect { op param = body ... }` -- anonymous handler expression
+    /// `handler for Effect` followed by indented arms -- anonymous handler expression.
     HandlerExpr { body: HandlerBody },
 
     // --- Surface syntax (desugared before typechecking) ---

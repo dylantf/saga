@@ -3,18 +3,17 @@ module Std.Dict
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
-import Std.List as List
+import Std.List
 
-impl Debug for Dict k v where {k: Debug, v: Debug} {
+impl Debug for Dict k v where {k: Debug, v: Debug}
   debug d = "{" <> debug_entries (to_list d) <> "}"
-}
 
 fun debug_entries : List (k, v) -> String where {k: Debug, v: Debug}
-debug_entries xs = case xs {
-  [] -> ""
-  [(k, v)] -> debug k <> ": " <> debug v
-  (k, v) :: t -> debug k <> ": " <> debug v <> ", " <> debug_entries t
-}
+debug_entries xs =
+  case xs of
+    [] -> ""
+    [(k, v)] -> debug k <> ": " <> debug v
+    (k, v) :: t -> debug k <> ": " <> debug v <> ", " <> debug_entries t
 
 #@ Creates an empty dictionary.
 @external("erlang", "std_dict_bridge", "new")

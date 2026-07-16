@@ -2,36 +2,31 @@
 module Std.IO
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+import Std.IO.Unsafe (print_stdout, print_stderr, read_stdin)
 
 import Std.String
-import Std.IO.Unsafe (print_stdout, print_stderr, read_stdin)
 
 #@ prints debug representation to stderr and returns the value
 @builtin
 pub fun dbg : a -> Unit where {a: Debug}
 
 #@ Effect for standard I/O: printing to stdout/stderr and reading from stdin.
-pub effect Stdio {
+pub effect Stdio
   fun print : String -> Unit
   fun eprint : String -> Unit
   fun read : String -> String
-}
 
 #@ Default handler that prints to the real console.
-pub handler console for Stdio {
-  print message = {
+pub handler console for Stdio
+  print message =
     print_stdout message
     resume ()
-  }
-  eprint message = {
+  eprint message =
     print_stderr message
     resume ()
-  }
-  read message = {
+  read message =
     print_stdout message
-    resume (read_stdin ())
-  }
-}
+    resume read_stdin ()
 
 #@ Prints a string to stdout followed by a newline.
 pub fun println : String -> Unit needs {Stdio}

@@ -37,59 +37,65 @@ record Opts {
 
 default_opts = Opts { prefix: "" }
 
-trait ToJson a {
+trait ToJson a
   fun to_json_with : Opts -> a -> String
   fun to_json : a -> String
   to_json x = to_json_with default_opts x
-}
 
-impl ToJson for Int {
+impl ToJson for Int
   to_json_with _ n = show n
-}
 
-impl ToJson for String {
+impl ToJson for String
   to_json_with _ s = s
-}
 
-impl ToJson for Bool {
+impl ToJson for Bool
   to_json_with _ b = if b then "true" else "false"
-}
 
-impl ToJson for (a, b) where {a: ToJson, b: ToJson} {
-  to_json_with opts t = {
+impl ToJson for (a, b) where {a: ToJson, b: ToJson}
+  to_json_with opts t =
     let (x, y) = t
     "[" <> to_json_with opts x <> ", " <> to_json_with opts y <> "]"
-  }
-}
 
-impl ToJson for (a, b, c) where {a: ToJson, b: ToJson, c: ToJson} {
-  to_json_with opts t = {
+impl ToJson for (a, b, c) where {a: ToJson, b: ToJson, c: ToJson}
+  to_json_with opts t =
     let (x, y, z) = t
-    "[" <> to_json_with opts x <> ", " <> to_json_with opts y
-      <> ", " <> to_json_with opts z <> "]"
-  }
-}
+    "["
+      <> to_json_with opts x
+      <> ", "
+      <> to_json_with opts y
+      <> ", "
+      <> to_json_with opts z
+      <> "]"
 
-impl ToJson for (a, b, c, d)
-  where {a: ToJson, b: ToJson, c: ToJson, d: ToJson} {
-  to_json_with opts t = {
+impl ToJson for (a, b, c, d) where {a: ToJson, b: ToJson, c: ToJson, d: ToJson}
+  to_json_with opts t =
     let (x1, x2, x3, x4) = t
-    "[" <> to_json_with opts x1 <> ", " <> to_json_with opts x2
-      <> ", " <> to_json_with opts x3 <> ", " <> to_json_with opts x4 <> "]"
-  }
-}
+    "["
+      <> to_json_with opts x1
+      <> ", "
+      <> to_json_with opts x2
+      <> ", "
+      <> to_json_with opts x3
+      <> ", "
+      <> to_json_with opts x4
+      <> "]"
 
-impl ToJson for (a, b, c, d, e)
-  where {a: ToJson, b: ToJson, c: ToJson, d: ToJson, e: ToJson} {
-  to_json_with opts t = {
+impl ToJson for (a, b, c, d, e) where {a: ToJson, b: ToJson, c: ToJson, d: ToJson, e: ToJson}
+  to_json_with opts t =
     let (x1, x2, x3, x4, x5) = t
-    "[" <> to_json_with opts x1 <> ", " <> to_json_with opts x2
-      <> ", " <> to_json_with opts x3 <> ", " <> to_json_with opts x4
-      <> ", " <> to_json_with opts x5 <> "]"
-  }
-}
+    "["
+      <> to_json_with opts x1
+      <> ", "
+      <> to_json_with opts x2
+      <> ", "
+      <> to_json_with opts x3
+      <> ", "
+      <> to_json_with opts x4
+      <> ", "
+      <> to_json_with opts x5
+      <> "]"
 
-main () = {
+main () =
   # Calling the primary method directly works for ALL arities:
   println (to_json_with default_opts (1, "hi"))
   println (to_json_with default_opts (1, "hi", True))
@@ -97,8 +103,8 @@ main () = {
   println (to_json_with default_opts (1, "a", True, 2, "b"))
 
   # Calling via the default-bodied convenience method panics:
-  println (to_json (1, "hi", True))             # arity 3 also panics here
-  println (to_json (1, "a", True, 2, "b"))      # arity 5 also panics here
-  println (to_json (1, "hi"))                   # arity 2
-  println (to_json (1, "a", True, 2))           # arity 4
-} with console
+  println (to_json (1, "hi", True)) # arity 3 also panics here
+  println (to_json (1, "a", True, 2, "b")) # arity 5 also panics here
+  println (to_json (1, "hi")) # arity 2
+  println (to_json (1, "a", True, 2)) # arity 4
+with console

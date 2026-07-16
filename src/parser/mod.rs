@@ -39,6 +39,11 @@ pub struct Parser {
     /// When true, `{` is not treated as starting a function argument.
     /// Used when parsing case scrutinees where `{` begins the branch block.
     pub(super) no_brace_app: bool,
+    /// Minimum indentation required for an application argument on a later
+    /// line while parsing a legacy braced statement block. This prevents the
+    /// next block statement from being consumed as an argument when the first
+    /// statement appeared on the same line as `{`.
+    pub(super) legacy_statement_indent: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -55,6 +60,7 @@ impl Parser {
             tokens,
             pos: 0,
             no_brace_app: false,
+            legacy_statement_indent: None,
         }
     }
 
@@ -159,8 +165,7 @@ impl Parser {
         stolen
     }
 
-    /// Check if the next token is on a new line (at top-level nesting).
-    /// Used to stop greedy parsing at line boundaries.
+    /// Check if the next token begins on a later physical line.
     pub(super) fn next_on_new_line(&self) -> bool {
         self.tokens[self.pos].preceded_by_newline
     }
@@ -178,6 +183,75 @@ impl Parser {
 
     pub(super) fn next_column(&self) -> usize {
         self.tokens[self.pos].column
+    }
+
+    /// Indentation of the first significant token on the current token's line.
+    /// This is the layout anchor for constructs that may begin part-way through
+    /// a line, such as `try (fun () ->`.
+    pub(super) fn current_line_indent(&self) -> usize {
+        let mut i = self.pos;
+        while i > 0 && !self.tokens[i].preceded_by_newline {
+            i -= 1;
+        }
+        self.tokens[i].column
+    }
+
+    pub(super) fn token_line_indent(&self, pos: usize) -> usize {
+        let mut i = pos;
+        while i > 0 && !self.tokens[i].preceded_by_newline {
+            i -= 1;
+        }
+        self.tokens[i].column
+    }
+
+    /// Require the next token to begin an indented layout body and return the
+    /// column shared by that body's items.
+    pub(super) fn begin_layout(
+        &self,
+        owner_indent: usize,
+        context: &str,
+    ) -> Result<usize, ParseError> {
+        let token = &self.tokens[self.pos];
+        if !token.preceded_by_newline || token.column <= owner_indent {
+            return Err(ParseError {
+                message: format!(
+                    "expected an indented {} body (more than column {})",
+                    context, owner_indent
+                ),
+                span: token.span,
+            });
+        }
+        Ok(token.column)
+    }
+
+    pub(super) fn optional_layout_indent(&self, owner_indent: usize) -> Option<usize> {
+        (self.next_on_new_line() && self.next_column() > owner_indent).then_some(self.next_column())
+    }
+
+    pub(super) fn layout_has_item(&self, indent: usize) -> bool {
+        !matches!(
+            self.peek(),
+            Token::Eof | Token::RParen | Token::RBracket | Token::RBrace | Token::Comma
+        ) && (!self.next_on_new_line() || self.next_column() >= indent)
+    }
+
+    pub(super) fn require_layout_item(
+        &self,
+        indent: usize,
+        context: &str,
+    ) -> Result<(), ParseError> {
+        if self.next_on_new_line() && self.next_column() > indent {
+            return Err(ParseError {
+                message: format!(
+                    "unexpected indentation in {}; expected column {}, found {}",
+                    context,
+                    indent,
+                    self.next_column()
+                ),
+                span: self.tokens[self.pos].span,
+            });
+        }
+        Ok(())
     }
 
     // Determines whether the next token can start a primary expression.

@@ -1,19 +1,15 @@
-effect Ask {
+effect Ask
   fun ask : Unit -> Int
-}
 
-effect Log {
+effect Log
   fun log : String -> Unit
-}
 
-handler mixed for Ask, Log {
+handler mixed for Ask, Log
   ask () = resume 41
-  log _ = resume () finally {
-    ()
-  }
-}
+  log _ = resume ()
+  finally ()
 
-main () = {
+main () =
   log! "x"
   ask! ()
-} with mixed
+with mixed

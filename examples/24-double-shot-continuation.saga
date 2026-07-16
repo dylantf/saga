@@ -12,23 +12,19 @@
 #   [1] B
 #   [2] B
 
-effect Log {
+effect Log
   fun log : (msg: String) -> Unit
-}
 
-handler double_log for Log {
-  log msg = {
+handler double_log for Log
+  log msg =
     dbg ("[1] " <> msg)
     resume ()
     dbg ("[2] " <> msg)
     resume ()
-  }
-}
 
 fun do_work : Unit -> Unit needs {Log}
-do_work () = {
+do_work () =
   log! "A"
   log! "B"
-}
 
 main () = do_work () with double_log

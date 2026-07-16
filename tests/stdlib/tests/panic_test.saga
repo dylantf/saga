@@ -1,35 +1,34 @@
 module PanicTest
 
-import Std.Test (Testing, describe, test, assert_panics, assert_ok, assert_err)
-import Std.List as List
+import Std.Int
+import Std.List
 import Std.Process (catch_panic)
-import Std.Int as Int
 
+import Std.Test (Testing, describe, test, assert_panics, assert_ok, assert_err)
 
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "panic recovery" (fun () -> {
-    test "List.head on empty list panics" (fun () -> {
-      assert_panics (fun () -> List.head [])
-    })
+tests () =
+  describe "panic recovery" (fun () ->
+    test
+      "List.head on empty list panics"
+      (fun () -> assert_panics (fun () -> List.head []))
 
-    test "catch_panic returns Ok on success" (fun () -> {
-      assert_ok (catch_panic (fun () -> 42))
-    })
+    test
+      "catch_panic returns Ok on success"
+      (fun () -> assert_ok (catch_panic (fun () -> 42)))
 
-    test "catch_panic returns Err on panic" (fun () -> {
-      assert_err (catch_panic (fun () -> panic "boom") : Result Int String)
-    })
+    test
+      "catch_panic returns Err on panic"
+      (fun () ->
+        assert_err (catch_panic (fun () -> panic "boom") : Result Int String))
 
-    test "catch_panic returns Err on BEAM arithmetic error" (fun () -> {
-      assert_err (catch_panic (fun () -> Int.div 10 0) : Result Int String)
-    })
+    test
+      "catch_panic returns Err on BEAM arithmetic error"
+      (fun () ->
+        assert_err (catch_panic (fun () -> Int.div 10 0) : Result Int String))
 
-    test "panic inside multi-expression thunk" (fun () -> {
-      assert_panics (fun () -> {
-        let _ = 1 + 1
-        panic "after some work"
-      })
-    })
-  })
-}
+    test "panic inside multi-expression thunk" (fun () -> assert_panics (fun () ->
+      let _ = 1 + 1
+      panic "after some work"
+    ))
+  )

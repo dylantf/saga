@@ -1,13 +1,12 @@
 import Std.Stream (Stream, Gen)
-import Std.Stream as Stream
+import Std.Stream
 
 fun naturals_from : Int -> Unit needs {Gen Int}
-naturals_from n = {
+naturals_from n =
   yield! n
   naturals_from (n + 1)
-}
 
-main () = {
+main () =
   let nats = Stream.from_gen (fun () -> naturals_from 0)
 
   # The original demo
@@ -46,5 +45,3 @@ main () = {
   |> Stream.fold (fun acc x -> acc + x) 0
   |> dbg
   # 55
-
-}

@@ -87,7 +87,7 @@ impl Parser {
             name = format!("{}.{}", name, next);
         }
         let mut type_args = Vec::new();
-        while self.can_start_type_atom_no_brace() {
+        while self.can_start_type_atom_no_brace() && !self.next_on_new_line() {
             type_args.push(self.parse_type_atom()?);
         }
         let end = self.tokens[self.pos - 1].span;
@@ -660,8 +660,9 @@ impl Parser {
         Ok(annotations)
     }
 
-    // Parses: effect <Name> { fun <op> (<p>: <T>) ... -> <T> ... }
+    // Parses an effect header followed by an indented operation list.
     fn parse_effect_def(&mut self, public: bool) -> Result<Decl, ParseError> {
+        let owner_indent = self.current_line_indent();
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'effect'
         let name_span = self.tokens[self.pos].span;
@@ -670,10 +671,23 @@ impl Parser {
         while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
             type_params.push(self.parse_type_param()?);
         }
-        self.expect(Token::LBrace)?;
+        let legacy_braces = matches!(self.peek(), Token::LBrace);
+        let body_indent = if legacy_braces {
+            self.advance();
+            None
+        } else {
+            self.optional_layout_indent(owner_indent)
+        };
 
         let mut operations = Vec::new();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+        while if legacy_braces {
+            !matches!(self.peek(), Token::RBrace | Token::Eof)
+        } else {
+            body_indent.is_some_and(|indent| self.layout_has_item(indent))
+        } {
+            if let Some(indent) = body_indent {
+                self.require_layout_item(indent, "effect")?;
+            }
             let start = self.pos;
             let op_start = self.tokens[self.pos].span;
             self.expect(Token::Fun)?;
@@ -711,9 +725,18 @@ impl Parser {
             });
         }
 
-        let dangling_trivia = self.take_leading_trivia(self.pos);
-        let end = self.tokens[self.pos].span;
-        self.expect(Token::RBrace)?;
+        let (dangling_trivia, end) = if legacy_braces {
+            let dangling = self.take_leading_trivia(self.pos);
+            let end = self.tokens[self.pos].span;
+            self.expect(Token::RBrace)?;
+            (dangling, end)
+        } else {
+            let end = operations
+                .last()
+                .map(|op| op.node.span)
+                .unwrap_or(self.tokens[self.pos.saturating_sub(1)].span);
+            (vec![], end)
+        };
 
         Ok(Decl::EffectDef {
             id: NodeId::fresh(),
@@ -751,6 +774,7 @@ impl Parser {
     /// Shared by handler declarations and handler expressions.
     /// Returns (HandlerBody, recovered_arms, dangling_trivia).
     pub(super) fn parse_handler_body(&mut self) -> Result<ParsedHandlerBody, ParseError> {
+        let owner_indent = self.current_line_indent();
         self.expect(Token::For)?;
 
         let mut effects = vec![self.parse_effect_ref()?];
@@ -784,14 +808,28 @@ impl Parser {
             });
         }
 
-        self.expect(Token::LBrace)?;
+        let legacy_braces = matches!(self.peek(), Token::LBrace);
+        let body_indent = if legacy_braces {
+            self.advance();
+            None
+        } else {
+            self.optional_layout_indent(owner_indent)
+        };
 
         let mut arms = Vec::new();
         let mut recovered_arms = Vec::new();
         let mut return_clause = None;
 
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+        while if legacy_braces {
+            !matches!(self.peek(), Token::RBrace | Token::Eof)
+        } else {
+            body_indent.is_some_and(|indent| self.layout_has_item(indent))
+        } {
+            if let Some(indent) = body_indent {
+                self.require_layout_item(indent, "handler")?;
+            }
             let arm_start_pos = self.pos;
+            let arm_indent = self.current_line_indent();
             let arm_start = self.tokens[self.pos].span;
             let save = self.pos;
 
@@ -801,7 +839,7 @@ impl Parser {
                     self.advance();
                     let param = self.parse_pattern()?;
                     self.expect(Token::Eq)?;
-                    let body = self.parse_expr(0)?;
+                    let body = self.parse_expr_body(arm_indent, "handler return")?;
                     let arm_end = body.span;
                     return_clause = Some(Box::new(HandlerArm {
                         id: NodeId::fresh(),
@@ -827,13 +865,13 @@ impl Parser {
                         params.push(self.parse_pattern()?);
                     }
                     self.expect(Token::Eq)?;
-                    let body = self.parse_expr(0)?;
+                    let body = self.parse_expr_body(arm_indent, "handler arm")?;
                     let mut arm_end = body.span;
 
                     // Parse optional `finally { cleanup }` block
                     let finally_block = if matches!(self.peek(), Token::Finally) {
                         self.advance(); // consume 'finally'
-                        let fb = self.parse_expr(0)?;
+                        let fb = self.parse_expr_body(arm_indent, "finally")?;
                         arm_end = fb.span;
                         Some(Box::new(fb))
                     } else {
@@ -859,7 +897,10 @@ impl Parser {
                 Ok(())
             })();
 
-            if arm_result.is_err() {
+            if let Err(error) = arm_result {
+                if !legacy_braces {
+                    return Err(error);
+                }
                 // Recovery: try to salvage the op name for LSP hover
                 self.pos = save;
                 if let Token::Ident(_) = self.peek() {
@@ -899,8 +940,13 @@ impl Parser {
             }
         }
 
-        let dangling_trivia = self.take_leading_trivia(self.pos);
-        self.expect(Token::RBrace)?;
+        let dangling_trivia = if legacy_braces {
+            let dangling = self.take_leading_trivia(self.pos);
+            self.expect(Token::RBrace)?;
+            dangling
+        } else {
+            self.steal_trailing_trivia()
+        };
 
         Ok(ParsedHandlerBody {
             body: HandlerBody {
@@ -937,6 +983,7 @@ impl Parser {
     }
 
     fn parse_trait_def(&mut self, public: bool) -> Result<Decl, ParseError> {
+        let owner_indent = self.current_line_indent();
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'trait'
         let name_span = self.tokens[self.pos].span;
@@ -991,10 +1038,23 @@ impl Parser {
             self.expect(Token::RBrace)?;
         }
 
-        self.expect(Token::LBrace)?;
+        let legacy_braces = matches!(self.peek(), Token::LBrace);
+        let body_indent = if legacy_braces {
+            self.advance();
+            None
+        } else {
+            self.optional_layout_indent(owner_indent)
+        };
 
         let mut methods = Vec::new();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+        while if legacy_braces {
+            !matches!(self.peek(), Token::RBrace | Token::Eof)
+        } else {
+            body_indent.is_some_and(|indent| self.layout_has_item(indent))
+        } {
+            if let Some(indent) = body_indent {
+                self.require_layout_item(indent, "trait")?;
+            }
             let start_pos = self.pos;
             let method_start = self.tokens[self.pos].span;
             self.expect(Token::Fun)?;
@@ -1018,7 +1078,8 @@ impl Parser {
                     params.push(self.parse_pattern()?);
                 }
                 self.expect(Token::Eq)?;
-                let body = self.parse_expr(0)?;
+                let method_indent = self.token_line_indent(start_pos);
+                let body = self.parse_expr_body(method_indent, "trait default method")?;
                 method_end = self.tokens[self.pos - 1].span;
                 Some(crate::ast::TraitDefaultBody {
                     params,
@@ -1047,9 +1108,18 @@ impl Parser {
             });
         }
 
-        let dangling_trivia = self.take_leading_trivia(self.pos);
-        let end = self.tokens[self.pos].span;
-        self.expect(Token::RBrace)?;
+        let (dangling_trivia, end) = if legacy_braces {
+            let dangling = self.take_leading_trivia(self.pos);
+            let end = self.tokens[self.pos].span;
+            self.expect(Token::RBrace)?;
+            (dangling, end)
+        } else {
+            let end = methods
+                .last()
+                .map(|method| method.node.span)
+                .unwrap_or(self.tokens[self.pos.saturating_sub(1)].span);
+            (vec![], end)
+        };
 
         Ok(Decl::TraitDef {
             id: NodeId::fresh(),
@@ -1191,6 +1261,7 @@ impl Parser {
     }
 
     fn parse_impl_def(&mut self) -> Result<Decl, ParseError> {
+        let owner_indent = self.current_line_indent();
         let start = self.tokens[self.pos].span;
         self.advance(); // consume impl
 
@@ -1237,7 +1308,9 @@ impl Parser {
                 let span = self.tokens[self.pos - 1].span;
                 let mut params = Vec::new();
                 // Parse optional type params: `impl Show for Box a b`
-                while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+                while matches!(self.peek(), Token::Ident(_) | Token::LParen)
+                    && !self.next_on_new_line()
+                {
                     params.push(self.parse_type_param()?);
                 }
                 let expr = impl_target_expr_from_parts(&name, span, &params);
@@ -1261,11 +1334,25 @@ impl Parser {
             self.expect(Token::RBrace)?;
         }
 
-        self.expect(Token::LBrace)?;
+        let legacy_braces = matches!(self.peek(), Token::LBrace);
+        let body_indent = if legacy_braces {
+            self.advance();
+            None
+        } else {
+            self.optional_layout_indent(owner_indent)
+        };
 
         let mut methods = Vec::new();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+        while if legacy_braces {
+            !matches!(self.peek(), Token::RBrace | Token::Eof)
+        } else {
+            body_indent.is_some_and(|indent| self.layout_has_item(indent))
+        } {
+            if let Some(indent) = body_indent {
+                self.require_layout_item(indent, "impl")?;
+            }
             let start_pos = self.pos;
+            let method_indent = self.current_line_indent();
             let name = self.expect_ident()?;
             let name_span = self.tokens[self.pos - 1].span;
             let mut params = Vec::new();
@@ -1274,7 +1361,7 @@ impl Parser {
             }
 
             self.expect(Token::Eq)?;
-            let body = self.parse_expr(0)?;
+            let body = self.parse_expr_body(method_indent, "impl method")?;
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
             methods.push(Annotated {
                 node: ImplMethod {
@@ -1289,9 +1376,18 @@ impl Parser {
             });
         }
 
-        let dangling_trivia = self.take_leading_trivia(self.pos);
-        let end = self.tokens[self.pos].span;
-        self.expect(Token::RBrace)?;
+        let (dangling_trivia, end) = if legacy_braces {
+            let dangling = self.take_leading_trivia(self.pos);
+            let end = self.tokens[self.pos].span;
+            self.expect(Token::RBrace)?;
+            (dangling, end)
+        } else {
+            let end = methods
+                .last()
+                .map(|method| method.node.body.span)
+                .unwrap_or(self.tokens[self.pos.saturating_sub(1)].span);
+            (vec![], end)
+        };
 
         Ok(Decl::ImplDef {
             id: NodeId::fresh(),
@@ -1314,6 +1410,7 @@ impl Parser {
 
     // Parses: <name> <pat> ... [| <guard>] = <body>
     fn parse_fun_binding(&mut self) -> Result<Decl, ParseError> {
+        let owner_indent = self.current_line_indent();
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_ident()?;
 
@@ -1333,7 +1430,7 @@ impl Parser {
         };
 
         self.expect(Token::Eq)?;
-        let body = self.parse_expr(0)?;
+        let body = self.parse_expr_body(owner_indent, "function")?;
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunBinding {

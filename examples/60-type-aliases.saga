@@ -12,16 +12,16 @@ fun next_user_id : UserId -> UserId
 next_user_id n = n + 1
 
 fun bag_sum : Bag Int -> Int
-bag_sum xs = case xs {
-  [] -> 0
-  x :: rest -> x + bag_sum rest
-}
+bag_sum xs =
+  case xs of
+    [] -> 0
+    x :: rest -> x + bag_sum rest
 
-main () = {
-  let uid : UserId = 42
+main () =
+  let uid: UserId = 42
   println (show (next_user_id uid))
 
-  let xs : Bag Int = [1, 2, 3]
+  let xs: Bag Int = [1, 2, 3]
   println (show (bag_sum xs))
   println "type aliases ok"
-} with console
+with console

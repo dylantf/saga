@@ -935,17 +935,17 @@ fn fun_binding_long_breaks_after_eq() {
 }
 
 #[test]
-fn fun_binding_block_body_stays_on_eq_line() {
+fn fun_binding_single_expression_block_is_unwrapped() {
     let src = "process path = {\n  log! path\n}";
-    assert_eq!(fmt80(src), "process path = {\n  log! path\n}\n");
+    assert_eq!(fmt80(src), "process path = log! path\n");
 }
 
 #[test]
-fn fun_binding_case_body_stays_on_eq_line() {
+fn fun_binding_case_body_uses_layout() {
     let src = "dispatch shape = case shape {\n  Circle(r) -> r\n  Point -> 0.0\n}";
     assert_eq!(
         fmt80(src),
-        "dispatch shape = case shape {\n  Circle r -> r\n  Point -> 0.0\n}\n"
+        "dispatch shape =\n  case shape of\n    Circle r -> r\n    Point -> 0.0\n"
     );
 }
 
@@ -954,7 +954,7 @@ fn case_scrutinee_application_stays_parseable_when_long() {
     let src = "decode rows = case load_rel_entries conn prepared.relations rows slots {\n  Err err -> Err err\n  Ok entries -> decode_rows prepared.decode (Core.rel_data_of entries) rows\n}";
     let formatted = fmt(src, 60);
     assert!(
-        formatted.contains("case load_rel_entries conn prepared.relations rows slots {"),
+        formatted.contains("case load_rel_entries conn prepared.relations rows slots of"),
         "case scrutinee application should stay attached: {}",
         formatted
     );
@@ -966,13 +966,8 @@ fn long_application_with_list_breaks_after_equals_first() {
     let src = "router req = choose [static_dir \"/static\" \"src/static\", mount \"/timing\" Timing.app, fun r -> home r] req with {fs}";
     let formatted = fmt(src, 60);
     assert!(
-        formatted.contains("router req =\n  choose"),
-        "application should break after = before breaking arguments: {}",
-        formatted
-    );
-    assert!(
-        !formatted.contains("router req = choose\n"),
-        "application must not leave the head on the = line: {}",
+        formatted.contains("router req = choose\n  ["),
+        "the list argument should use continuation indentation: {}",
         formatted
     );
     assert_eq!(try_parse_normalized(src), try_parse_normalized(&formatted));
@@ -1000,7 +995,7 @@ fn let_decl_long_breaks_after_eq() {
 #[test]
 fn let_stmt_short_stays_on_one_line() {
     let src = "main () = {\n  let x = 42\n}";
-    assert_eq!(fmt80(src), "main () = {\n  let x = 42\n}\n");
+    assert_eq!(fmt80(src), "main () =\n  let x = 42\n");
 }
 
 #[test]
@@ -1009,7 +1004,7 @@ fn let_stmt_long_breaks_after_eq() {
     let result = fmt(src, 40);
     assert_eq!(
         result,
-        "main () = {\n  let result =\n    some_very_long_function\n      applied_to\n      arguments\n}\n"
+        "main () =\n  let result =\n    some_very_long_function\n      applied_to\n      arguments\n"
     );
 }
 
@@ -1087,15 +1082,15 @@ fn if_long_breaks_before_else() {
 // --- Blocks ---
 
 #[test]
-fn block_preserves_braces() {
+fn single_expression_block_is_unwrapped() {
     let src = "main () = {\n  println \"hello\"\n}";
-    assert_eq!(fmt80(src), "main () = {\n  println \"hello\"\n}\n");
+    assert_eq!(fmt80(src), "main () = println \"hello\"\n");
 }
 
 #[test]
 fn block_with_multiple_stmts() {
     let src = "main () = {\n  let x = 1\n  println x\n}";
-    assert_eq!(fmt80(src), "main () = {\n  let x = 1\n  println x\n}\n");
+    assert_eq!(fmt80(src), "main () =\n  let x = 1\n  println x\n");
 }
 
 // --- Comments ---
@@ -1153,8 +1148,8 @@ fn commented_choose_application_preserves_comments_and_reparses() {
     let src = "fun router : Request -> Response needs {RequestParserConfig}\nrouter req = choose [\n  # static_dir \"/static\" \"src/static\",\n  # mount \"/timing\" Timing.app,\n  fun r -> home r,\n] req with {fs}";
     let formatted = fmt(src, 80);
     assert!(
-        formatted.contains("router req =\n  choose"),
-        "application should break after = before breaking list: {}",
+        formatted.contains("router req = choose\n  ["),
+        "result: {}",
         formatted
     );
     assert!(
@@ -1504,10 +1499,10 @@ fn with_named_handler_long_stays_attached_to_expression() {
 }
 
 #[test]
-fn with_inline_handler_braces_on_same_line() {
+fn with_inline_handler_uses_layout() {
     let src = "f x = do_thing x with {\n  log msg = { println msg; resume () },\n}";
     let result = fmt80(src);
-    assert!(result.contains("with {"), "result: {}", result);
+    assert!(result.contains("with\n  log msg ="), "result: {}", result);
 }
 
 #[test]
@@ -1884,16 +1879,13 @@ fn trait_default_method_body_preserved() {
 }
 
 #[test]
-fn empty_trait_body_stays_inline() {
-    assert_eq!(fmt80("trait PgType a {\n}"), "trait PgType a {}\n");
+fn empty_trait_body_needs_no_delimiter() {
+    assert_eq!(fmt80("trait PgType a {\n}"), "trait PgType a\n");
 }
 
 #[test]
-fn empty_impl_body_stays_inline() {
-    assert_eq!(
-        fmt80("impl PgType for Int {\n}"),
-        "impl PgType for Int {}\n"
-    );
+fn empty_impl_body_needs_no_delimiter() {
+    assert_eq!(fmt80("impl PgType for Int {\n}"), "impl PgType for Int\n");
 }
 
 #[test]
@@ -1902,7 +1894,7 @@ fn impl_parenthesized_trait_type_arg_round_trips() {
         fmt80(
             "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}"
         ),
-        "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}\n"
+        "impl Selectable (Selected2 a b) for Select2 a b\n  to_projection selection = selection\n"
     );
 }
 
@@ -1912,7 +1904,7 @@ fn impl_for_target_with_concrete_arg_keeps_parens() {
     // `for` target are required to round-trip and must be preserved.
     assert_eq!(
         fmt80("impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}"),
-        "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}\n"
+        "impl Selectable User for (Users source Db.Required)\n  to_projection u = u\n"
     );
 }
 
@@ -1922,7 +1914,7 @@ fn impl_structured_tuple_target_round_trips() {
         fmt80(
             "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}"
         ),
-        "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}\n"
+        "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType}\n  to_projection pair = pair\n"
     );
 }
 
@@ -1932,7 +1924,7 @@ fn impl_where_app_round_trips() {
         fmt80(
             "impl Selectable (Labeled n out) for (Labeled n field)\n  where {Selectable field out}\n{\n  to_row selection = selection\n}"
         ),
-        "impl Selectable (Labeled n out) for Labeled n field\n  where {Selectable field out}\n{\n  to_row selection = selection\n}\n"
+        "impl Selectable (Labeled n out) for Labeled n field\n  where {Selectable field out}\n  to_row selection = selection\n"
     );
 }
 
@@ -1942,7 +1934,7 @@ fn impl_mixed_where_bounds_and_apps_round_trips() {
         fmt80(
             "impl Selectable (Record out) for (Record fields) where {fields: HasLabel, Selectable fields out} {\n  to_row selection = selection\n}"
         ),
-        "impl Selectable (Record out) for Record fields\n  where {fields: HasLabel, Selectable fields out}\n{\n  to_row selection = selection\n}\n"
+        "impl Selectable (Record out) for Record fields\n  where {fields: HasLabel, Selectable fields out}\n  to_row selection = selection\n"
     );
 }
 
@@ -1960,8 +1952,8 @@ fn fun_sig_nested_arrow_param_gets_parens() {
 fn trailing_lambda_with_block_body() {
     let src = "f x = try (fun () -> {\n  let y = 1\n  y\n})";
     let result = fmt80(src);
-    assert!(result.contains("try (fun () -> {"), "result: {}", result);
-    assert!(result.contains("})"), "result: {}", result);
+    assert!(result.contains("try (fun () ->\n"), "result: {}", result);
+    assert!(result.ends_with("  )\n"), "result: {}", result);
 }
 
 /// A list literal before a trailing lambda should stay on one line even when
@@ -2026,10 +2018,9 @@ fn named_handler_def_zero_arg_gets_unit() {
 fn inline_handler_named_then_inline_no_comma_before_inline() {
     let src = "f x = compute () with {\n  console,\n  fail msg = Err msg\n}";
     let result = fmt80(src);
-    // Named handler always gets trailing comma
     assert!(
-        result.contains("console,\n"),
-        "named handler should have trailing comma: {}",
+        result.contains("console\n  fail"),
+        "layout separates handler items without commas: {}",
         result
     );
     assert!(
@@ -2040,12 +2031,11 @@ fn inline_handler_named_then_inline_no_comma_before_inline() {
 }
 
 #[test]
-fn inline_handler_only_named_gets_commas() {
+fn inline_handler_only_named_uses_layout() {
     let src = "f x = compute () with {\n  console,\n  to_result,\n}";
     let result = fmt80(src);
-    // Named-only handlers go on one line: `{ console, to_result }`
     assert!(
-        result.contains("{console, to_result}"),
+        result.contains("with\n  console\n  to_result"),
         "result: {}",
         result
     );
@@ -2063,7 +2053,7 @@ fn inline_handler_named_with_comments_preserves_multiline() {
         result
     );
     assert!(
-        result.contains("console_log,\n"),
+        result.contains("console_log\n"),
         "must stay multiline: {}",
         result
     );
@@ -2085,10 +2075,10 @@ fn comment_indentation_preserved() {
 // --- With on block-like ---
 
 #[test]
-fn with_named_on_block_stays_on_closing_brace_line() {
+fn with_named_on_single_expression_block_is_inline() {
     let src = "f x = {\n  compute ()\n} with handler_name";
     let result = fmt80(src);
-    assert!(result.contains("} with handler_name"), "result: {}", result);
+    assert_eq!(result, "f x = compute () with handler_name\n");
 }
 
 // --- Ascription ---

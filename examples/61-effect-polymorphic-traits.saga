@@ -11,53 +11,45 @@
 # the constraint's row variable: `needs {..a}` for `where {a: Renderable}`.
 # Omitting it is a compile error -- effects never escape silently.
 
-effect Config {
+effect Config
   fun config : (key: String) -> String
-}
-effect Audit {
+effect Audit
   fun audit : (msg: String) -> Unit
-}
 
 # `render` opts into an open row, so impls may use any effects they like.
-trait Renderable a {
+trait Renderable a
   fun render : a -> String needs {..e}
-}
 
 record Banner { title: String }
 record Receipt { amount: Int }
 
 # This impl reads from Config to render...
-impl Renderable for Banner needs {Config} {
+impl Renderable for Banner needs {Config}
   render b = $"== {b.title} ({config! "env"}) =="
-}
 
 # ...while this one writes to an Audit log. Each impl picks its own effects;
 # the trait method signature permits any because of `needs {..e}`.
-impl Renderable for Receipt needs {Audit} {
-  render r = {
+impl Renderable for Receipt needs {Audit}
+  render r =
     audit! $"rendered receipt for {show r.amount}"
     $"Receipt total: {show r.amount}"
-  }
-}
 
 # Generic over Renderable. We can't name the impl's effects here, so we forward
 # them as `..a`. Drop the `needs {..a}` and the compiler rejects this function.
 fun render_twice : a -> String needs {..a} where {a: Renderable}
 render_twice x = $"{render x} | {render x}"
 
-main () = {
+main () =
   # The forwarded effects surface at the concrete call site, where we know the
   # type and can install the right handler.
-  let banner = render_twice (Banner { title: "Sale" }) with {
+  let banner = render_twice (Banner { title: "Sale" }) with
     config _key = resume "prod"
-  }
   println banner
 
-  let receipt = render_twice (Receipt { amount: 42 }) with {
-    audit msg = {
+  let receipt = render_twice (Receipt { amount: 42 }) with
+    audit msg =
       println $"[audit] {msg}"
       resume ()
-    }
-  }
   println receipt
-} with {console}
+with
+  console

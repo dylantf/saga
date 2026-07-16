@@ -10,22 +10,22 @@ int n = if n == 0 then fail! (Failure []) else n
 #@ A HOF that wraps another effectful function. Same shape as
 #@ SagaJson's `nullable` / `list_of` — meant to be partially applied
 #@ at a use site.
-pub fun wrap : (Int -> a needs {Fail Failure, ..e}) -> Int -> a needs {Fail Failure, ..e}
+pub fun wrap : (Int -> a needs {Fail Failure, ..e}) -> Int -> a
+  needs {Fail Failure, ..e}
 wrap f n = f n
 
 #@ at: applies decoder, on fail re-fails with prefixed path.
 #@ Same shape as SagaJson.at.
-pub fun at : String -> (Int -> a needs {Fail Failure, ..e}) -> Int -> a needs {Fail Failure, ..e}
-at name decoder n = decoder n with {
-  fail e = case e {
-    Failure path -> fail! (Failure (name :: path))
-  }
-}
+pub fun at : String -> (Int -> a needs {Fail Failure, ..e}) -> Int -> a
+  needs {Fail Failure, ..e}
+at name decoder n = decoder n with
+  fail e =
+    case e of
+      Failure path -> fail! (Failure (name :: path))
 
-pub handler to_result for Fail a {
+pub handler to_result for Fail a
   fail e = Err e
   return v = Ok v
-}
 
 pub fun run : (Int -> a needs {Fail Failure}) -> Int -> Result a Failure
 run decoder n = decoder n with to_result

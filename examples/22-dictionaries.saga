@@ -1,7 +1,7 @@
 # Dictionaries: built-in Dict k v type
 # Keys require Eq, all operations return new dicts (immutable)
 
-main () = {
+main () =
   # Create from list of tuples
   let ages = Dict.from_list [("alice", 30), ("bob", 25), ("charlie", 35)]
   dbg $"ages: {debug ages}"
@@ -43,4 +43,3 @@ main () = {
     |> Dict.put "y" 2
     |> Dict.put "x" 1
   dbg $"from empty: {debug d}"
-}

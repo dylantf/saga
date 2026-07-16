@@ -5,32 +5,23 @@ type PingMsg = Ping (Pid PongMsg)
 type PongMsg = Pong Int
 
 fun pong_server : (count: Int) -> Unit needs {Process, Actor PingMsg}
-pong_server count = {
-  receive {
-    Ping sender -> {
+pong_server count =
+  receive
+    Ping sender ->
       send! sender (Pong count)
       pong_server (count + 1)
-    }
-  }
-}
 
 fun run : Unit -> Unit needs {Process, Actor PongMsg}
-run () = {
+run () =
   let server = spawn! (fun () -> pong_server 0)
   send! server <| Ping (self! ())
-  receive {
+  receive
     Pong n -> dbg $"got pong #{show n}"
-  }
   send! server <| Ping (self! ())
-  receive {
+  receive
     Pong n -> dbg $"got pong #{show n}"
-  }
   send! server <| Ping (self! ())
-  receive {
+  receive
     Pong n -> dbg $"got pong #{show n}"
-  }
-}
 
-main () = {
-  run ()
-} with beam_actor
+main () = run () with beam_actor

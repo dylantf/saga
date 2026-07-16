@@ -14,28 +14,24 @@ type WorkerMsg = Done
 
 # A worker that increments a shared ref `n` times, then signals done.
 fun worker : MutRef Int -> Int -> Pid WorkerMsg -> Unit needs {Ref, Process}
-worker counter n parent = {
+worker counter n parent =
   worker_loop counter n
   send! parent Done
-}
 
 fun worker_loop : MutRef Int -> Int -> Unit needs {Ref}
 worker_loop _ 0 = ()
-worker_loop counter n = {
+worker_loop counter n =
   let _ = modify! counter (fun x -> x + 1)
   worker_loop counter (n - 1)
-}
 
 # Wait for `n` Done messages.
 fun wait_for : Int -> Unit needs {Actor WorkerMsg}
 wait_for 0 = ()
-wait_for n = {
-  receive {
+wait_for n =
+  receive
     Done -> wait_for (n - 1)
-  }
-}
 
-main () = {
+main () =
   let counter = new! 0
 
   let me = self! ()
@@ -45,23 +41,23 @@ main () = {
   # Spawn workers — each one gets the same shared ref
   let _ = spawn! (fun () -> worker counter increments_per_worker me)
   # Wait between spawns to avoid race conditions on modify
-  receive {
+  receive
     Done -> ()
-  }
 
   let _ = spawn! (fun () -> worker counter increments_per_worker me)
-  receive {
+  receive
     Done -> ()
-  }
 
   let _ = spawn! (fun () -> worker counter increments_per_worker me)
-  receive {
+  receive
     Done -> ()
-  }
 
   # Small delay to ensure final ETS write is visible
   sleep! 10
 
   let total = get! counter
-  dbg $"{show num_workers} workers x {show increments_per_worker} increments = {show total}"
-} with {ets_ref, beam_actor}
+  dbg
+    $"{show num_workers} workers x {show increments_per_worker} increments = {show total}"
+with
+  ets_ref
+  beam_actor

@@ -2,10 +2,10 @@ module Main
 
 import Std.IO (console)
 
-main () = {
+main () =
   Lib.foo ()
 
   println "Hello, world!"
 
   println $"The imported constant is {Lib.bar}"
-} with console
+with console

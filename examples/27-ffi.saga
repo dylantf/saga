@@ -9,10 +9,9 @@ fun sort : (list: List Int) -> List Int
 @external("erlang", "erlang", "length")
 fun len : (list: List a) -> Int
 
-main () = {
+main () =
   let nums = [5, 3, 1, 4, 2]
 
   dbg (debug (reverse nums))
   dbg (debug (sort nums))
   dbg (show (len nums))
-}

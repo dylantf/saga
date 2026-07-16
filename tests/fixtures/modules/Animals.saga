@@ -5,6 +5,5 @@ pub record Animal {
   species: String,
 }
 
-impl Show for Animal {
+impl Show for Animal
   show a = a.name <> " (" <> a.species <> ")"
-}

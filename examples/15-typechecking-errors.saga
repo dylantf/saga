@@ -17,29 +17,27 @@ add a b = a + b
 # Record with typed fields
 record Point { x: Float, y: Float }
 
-distance p = {
+distance p =
   let dx = p.x
   let dy = p.y
   dx + dy
-}
 
 # Pattern matching: all branches must return the same type
 fun describe : (m: Maybe Int) -> String
-describe m = case m {
-  Just x -> $"got: {x}"
-  Nothing -> "nothing"
-}
+describe m =
+  case m of
+    Just x -> $"got: {x}"
+    Nothing -> "nothing"
 
 # Effect ops get proper types through the handler
-effect Fail {
+effect Fail
   fun fail : (msg: String) -> a
-}
 
 fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
-main () = {
+main () =
   # Polymorphism: id works on any type
   dbg (show (id 42))
   dbg (id "hello")
@@ -56,11 +54,8 @@ main () = {
   dbg (describe Nothing)
 
   # Effects with handler
-  let result = {
-    safe_div 100 4
-  } with {
+  let result = safe_div 100 4 with
     fail _ = 0 - 1
-  }
   dbg ("safe_div result: " <> show result)
 
   # Let bindings with type annotations: guides inference and catches mismatches
@@ -68,11 +63,10 @@ main () = {
   let greeting: String = "hello"
   dbg (show n)
   dbg greeting
-  # --- Uncomment any line below to see a type error: ---
-  # let bad = 1 + "hello"               # type mismatch: expected Int, got String
-  # let bad = if True then 1 else "no"   # branch type mismatch
-  # let bad = add 1 "two"               # expected Int, got String
-  # let bad = Point { x: "bad", y: 2.0 } # field type mismatch
-  # let bad = nope                       # undefined variable
-  # let bad: String = 42                 # annotation mismatch: expected String, got Int
-}
+# --- Uncomment any line below to see a type error: ---
+# let bad = 1 + "hello"               # type mismatch: expected Int, got String
+# let bad = if True then 1 else "no"   # branch type mismatch
+# let bad = add 1 "two"               # expected Int, got String
+# let bad = Point { x: "bad", y: 2.0 } # field type mismatch
+# let bad = nope                       # undefined variable
+# let bad: String = 42                 # annotation mismatch: expected String, got Int

@@ -25,11 +25,10 @@ record Request {
   flags: Set String,
 }
 
-effect RequestContext {
+effect RequestContext
   fun current_user : Unit -> User
   fun request_id : Unit -> String
   fun feature_enabled : (name: String) -> Bool
-}
 
 # ----- Pure pricing helpers -----
 
@@ -55,25 +54,21 @@ cart_total [] = 0
 cart_total (item :: rest) = price_for item + cart_total rest
 
 fun checkout : (cart: List String) -> String needs {RequestContext}
-checkout cart = {
+checkout cart =
   let user = current_user! ()
   let rid = request_id! ()
   let total = cart_total cart
   $"[req={rid}] {user.name} checked out {List.length cart} items, total {total}"
-}
 
 # ----- The request boundary installs the context once -----
 
 fun handle : (req: Request) -> String
-handle req = {
-  checkout ["book", "pen", "mug"]
-} with {
+handle req = checkout ["book", "pen", "mug"] with
   current_user () = resume req.user
   request_id () = resume req.id
   feature_enabled name = resume Set.member name req.flags
-}
 
-main () = {
+main () =
   # Alice's request has the new_pricing flag enabled.
   let alice_req = Request {
     id: "req-001",
@@ -90,4 +85,3 @@ main () = {
 
   handle alice_req |> dbg
   handle bob_req |> dbg
-}

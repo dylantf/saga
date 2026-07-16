@@ -529,7 +529,7 @@ fn formatting_uses_current_document_text() {
     let edit = &edits[0];
     assert_eq!(
         edit["newText"].as_str(),
-        Some("main () = {\n  let x = 1\n  println x\n}\n")
+        Some("main () =\n  let x = 1\n  println x\n")
     );
     assert_eq!(edit["range"]["start"]["line"].as_u64(), Some(0));
     assert_eq!(edit["range"]["start"]["character"].as_u64(), Some(0));

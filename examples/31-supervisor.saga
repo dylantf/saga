@@ -6,7 +6,6 @@ import Std.Supervisor (supervised)
 fun unreliable : Unit -> Int needs {Fail String}
 unreliable () = fail! "something went wrong"
 
-main () = {
+main () =
   let r1 = supervised 3 (fun () -> unreliable ())
   dbg $"unreliable: {debug r1}"
-}

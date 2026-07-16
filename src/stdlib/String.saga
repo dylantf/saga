@@ -5,13 +5,11 @@ import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
 import Std.Maybe (Maybe)
 
-impl Show for String {
+impl Show for String
   show x = x
-}
 
-impl Debug for String {
+impl Debug for String
   debug x = "\"" <> x <> "\""
-}
 
 #@ Returns the number of grapheme clusters in the string.
 @external("erlang", "string", "length")
@@ -71,11 +69,13 @@ pub fun split : (sep: String) -> (s: String) -> List String
 
 #@ Replaces the first occurrence of a pattern with a replacement.
 @external("erlang", "std_string_bridge", "replace")
-pub fun replace : (pattern: String) -> (replacement: String) -> (s: String) -> String
+pub fun replace :
+  (pattern: String) -> (replacement: String) -> (s: String) -> String
 
 #@ Replaces all occurrences of a pattern with a replacement.
 @external("erlang", "std_string_bridge", "replace_all")
-pub fun replace_all : (pattern: String) -> (replacement: String) -> (s: String) -> String
+pub fun replace_all :
+  (pattern: String) -> (replacement: String) -> (s: String) -> String
 
 #@ Joins a list of strings with a separator.
 @external("erlang", "std_string_bridge", "join")
@@ -117,16 +117,14 @@ repeat n s =
 
 #@ Pads a string on the left to the given width using the fill string.
 pub fun pad_left : (width: Int) -> (fill: String) -> (s: String) -> String
-pad_left width fill s = {
+pad_left width fill s =
   let pad = width - length s
   if pad <= 0 then s
   else repeat pad fill <> s
-}
 
 #@ Pads a string on the right to the given width using the fill string.
 pub fun pad_right : (width: Int) -> (fill: String) -> (s: String) -> String
-pad_right width fill s = {
+pad_right width fill s =
   let pad = width - length s
   if pad <= 0 then s
   else s <> repeat pad fill
-}

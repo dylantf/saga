@@ -1,10 +1,8 @@
-effect Log {
+effect Log
   fun log : String -> Unit
-}
 
-handler ignore_log for Log {
+handler ignore_log for Log
   log _ = resume ()
-}
 
 opaque type StoredLogHandler = StoredLogHandler (Handler Log)
 
@@ -20,17 +18,15 @@ fun program : Unit -> Unit needs {Log}
 program () = log! "hello"
 
 fun run : App -> Unit
-run (App maybe_log_handler) = {
+run (App maybe_log_handler) =
   let go = fun () -> program ()
-  case maybe_log_handler {
-    Just (StoredLogHandler log_handler) -> go () with {
-      log_handler,
-    }
-    Nothing -> go () with {
-      ignore_log,
-    }
-  }
-}
+  case maybe_log_handler of
+    Just (StoredLogHandler log_handler) ->
+      go () with
+        log_handler
+    Nothing ->
+      go () with
+        ignore_log
 
 main () =
   create_app

@@ -1,6 +1,6 @@
 import Std.BitString
 
-main () = {
+main () =
   # Construction from stdlib functions
   let bs = BitString.from_list [72, 101, 108, 108, 111]
   dbg (debug bs)
@@ -19,14 +19,12 @@ main () = {
   dbg (debug packet)
 
   # Pattern matching with variable-sized segments
-  case packet {
-    <<tag:8, len:16/big, rest/binary>> -> {
+  case packet of
+    <<tag:8, len:16/big, rest/binary>> ->
       dbg ("tag: " <> show tag)
       dbg ("len: " <> show len)
       dbg ("rest: " <> debug rest)
-    }
     _ -> dbg "no match"
-  }
 
   # Empty bitstring
   let empty = <<>>
@@ -34,11 +32,8 @@ main () = {
 
   # String literals as pattern segments: split on a literal byte sequence
   let line = <<"hello\r\nworld">>
-  case line {
-    <<head:5/binary, "\r\n", rest/binary>> -> {
+  case line of
+    <<head:5/binary, "\r\n", rest/binary>> ->
       dbg ("head: " <> debug head)
       dbg ("rest: " <> debug rest)
-    }
     _ -> dbg "no crlf"
-  }
-}

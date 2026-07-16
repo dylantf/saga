@@ -27,49 +27,49 @@ record House {
 # --- Helper functions ---
 
 fun area : Shape -> Float
-area shape = case shape {
-  Circle r -> r * r
-  Rect w h -> w * h
-  Triangle b h _ -> b * h / 2.0
-}
+area shape =
+  case shape of
+    Circle r -> r * r
+    Rect w h -> w * h
+    Triangle b h _ -> b * h / 2.0
 
 fun describe_shape : Shape -> String
-describe_shape shape = case shape {
-  Circle _ -> "circle"
-  Rect _ _ -> "rectangle"
-  Triangle _ _ _ -> "triangle"
-}
+describe_shape shape =
+  case shape of
+    Circle _ -> "circle"
+    Rect _ _ -> "rectangle"
+    Triangle _ _ _ -> "triangle"
 
 fun quadrant : Point -> String
-quadrant p = case p {
-  Point { x, y } when x > 0 && y > 0 -> "Q1"
-  Point { x, y } when x < 0 && y > 0 -> "Q2"
-  Point { x, y } when x < 0 && y < 0 -> "Q3"
-  Point { x, y } when x > 0 && y < 0 -> "Q4"
-  _ -> "origin or axis"
-}
+quadrant p =
+  case p of
+    Point { x, y } when x > 0 && y > 0 -> "Q1"
+    Point { x, y } when x < 0 && y > 0 -> "Q2"
+    Point { x, y } when x < 0 && y < 0 -> "Q3"
+    Point { x, y } when x > 0 && y < 0 -> "Q4"
+    _ -> "origin or axis"
 
 fun describe_list : (xs: List a) -> String
-describe_list items = case items {
-  [] -> "empty"
-  [_] -> "one"
-  [_, _] -> "two"
-  _ :: _ -> "many"
-}
+describe_list items =
+  case items of
+    [] -> "empty"
+    [_] -> "one"
+    [_, _] -> "two"
+    _ :: _ -> "many"
 
 fun classify_log : String -> String
-classify_log msg = case msg {
-  "[ERROR]: " <> detail -> "Error: " <> detail
-  "[WARN]: " <> detail -> "Warning: " <> detail
-  "hello" -> "greeting"
-  _ -> "unknown"
-}
+classify_log msg =
+  case msg of
+    "[ERROR]: " <> detail -> "Error: " <> detail
+    "[WARN]: " <> detail -> "Warning: " <> detail
+    "hello" -> "greeting"
+    _ -> "unknown"
 
 fun is_shape_fun : Shape -> Bool
-is_shape_fun shape = case shape {
-  Circle _ | Rect _ _ -> True
-  Triangle _ _ _ -> False
-}
+is_shape_fun shape =
+  case shape of
+    Circle _ | Rect _ _ -> True
+    Triangle _ _ _ -> False
 
 # Regression: or-pattern arms share a cloned body after desugaring. Before
 # NodeIds were freshened on clone, resolve would overwrite the body's
@@ -77,10 +77,10 @@ is_shape_fun shape = case shape {
 # reported as "unused". Also verifies that `n` resolves correctly at runtime
 # regardless of which branch matched.
 fun first_or_only : (Int, Maybe Int) -> Int
-first_or_only pair = case pair {
-  (1, Just n) | (2, Just n) -> n * 10
-  _ -> 0
-}
+first_or_only pair =
+  case pair of
+    (1, Just n) | (2, Just n) -> n * 10
+    _ -> 0
 
 fun fizzbuzz : Int -> String
 fizzbuzz n when n % 15 == 0 = "FizzBuzz"
@@ -94,33 +94,33 @@ fib 1 = 1
 fib n = fib (n - 1) + fib (n - 2)
 
 fun bst_insert : Tree -> Int -> Tree
-bst_insert t x = case t {
-  Empty -> Node Empty x Empty
-  Node l v r ->
-    if x < v then Node (bst_insert l x) v r
-    else if x > v then Node l v (bst_insert r x)
-    else t
-}
+bst_insert t x =
+  case t of
+    Empty -> Node Empty x Empty
+    Node l v r ->
+      if x < v then Node (bst_insert l x) v r
+      else if x > v then Node l v (bst_insert r x)
+      else t
 
 fun bst_contains : Tree -> Int -> Bool
-bst_contains t x = case t {
-  Empty -> False
-  Node l v r ->
-    if x == v then True
-    else if x < v then bst_contains l x
-    else bst_contains r x
-}
+bst_contains t x =
+  case t of
+    Empty -> False
+    Node l v r ->
+      if x == v then True
+      else if x < v then bst_contains l x
+      else bst_contains r x
 
 fun bst_to_list : Tree -> List Int
-bst_to_list t = case t {
-  Empty -> []
-  Node l v r -> List.append (bst_to_list l) (v :: bst_to_list r)
-}
+bst_to_list t =
+  case t of
+    Empty -> []
+    Node l v r -> List.append (bst_to_list l) (v :: bst_to_list r)
 
 fun unwrap_box : Box a -> a
-unwrap_box b = case b {
-  Box { value: v } -> v
-}
+unwrap_box b =
+  case b of
+    Box { value: v } -> v
 
 fun add_pairs : (Int, Int) -> (Int, Int) -> (Int, Int)
 add_pairs (a, b) (c, d) = (a + c, b + d)
@@ -146,23 +146,23 @@ grade score =
   else Err $"failing: {score}"
 
 fun lookup_grade : Int -> Result String String
-lookup_grade id = do {
-  Ok name <- find_user id
-  Ok score <- find_score name
-  Ok g <- grade score
-  Ok g
-} else {
-  Err e -> Err e
-}
+lookup_grade id =
+  do
+    Ok name <- find_user id
+    Ok score <- find_score name
+    Ok g <- grade score
+    Ok g
+  else
+    Err e -> Err e
 
 fun score_or_zero : Int -> Int
-score_or_zero id = do {
-  Ok name <- find_user id
-  Ok score <- find_score name
-  score
-} else {
-  Err _ -> 0
-}
+score_or_zero id =
+  do
+    Ok name <- find_user id
+    Ok score <- find_score name
+    score
+  else
+    Err _ -> 0
 
 type Gate = Open | Closed | Stuck
 
@@ -178,356 +178,341 @@ second_gate ok =
   else Closed
 
 fun guarded_gate_chain : Int -> Bool -> Int
-guarded_gate_chain n ok = do {
-  Open <- first_gate n
-  Open <- second_gate ok
-  1
-} else {
-  Closed -> 2
-  _ -> 3
-}
+guarded_gate_chain n ok =
+  do
+    Open <- first_gate n
+    Open <- second_gate ok
+    1
+  else
+    Closed -> 2
+    _ -> 3
 
 # --- Tests ---
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "pattern matching" (fun () -> {
+tests () =
+  describe "pattern matching" (fun () ->
 
-    describe "ADT patterns" (fun () -> {
-      test "match Circle" (fun () -> {
-        assert_eq (describe_shape (Circle 5.0)) "circle"
-      })
+    describe "ADT patterns" (fun () ->
+      test
+        "match Circle"
+        (fun () -> assert_eq (describe_shape (Circle 5.0)) "circle")
 
-      test "match Rect" (fun () -> {
-        assert_eq (describe_shape (Rect 3.0 4.0)) "rectangle"
-      })
+      test
+        "match Rect"
+        (fun () -> assert_eq (describe_shape (Rect 3.0 4.0)) "rectangle")
 
-      test "match Triangle" (fun () -> {
-        assert_eq (describe_shape (Triangle 3.0 4.0 5.0)) "triangle"
-      })
+      test
+        "match Triangle"
+        (fun () -> assert_eq (describe_shape (Triangle 3.0 4.0 5.0)) "triangle")
 
-      test "extract fields from constructors" (fun () -> {
+      test "extract fields from constructors" (fun () ->
         assert_eq (area (Circle 5.0)) 25.0
         assert_eq (area (Rect 3.0 4.0)) 12.0
         assert_eq (area (Triangle 6.0 8.0 10.0)) 24.0
-      })
-    })
+      )
+    )
 
-    describe "record patterns with guards" (fun () -> {
-      test "quadrant I" (fun () -> {
-        assert_eq (quadrant (Point { x: 3, y: 4 })) "Q1"
-      })
+    describe "record patterns with guards" (fun () ->
+      test
+        "quadrant I"
+        (fun () -> assert_eq (quadrant (Point { x: 3, y: 4 })) "Q1")
 
-      test "quadrant II" (fun () -> {
-        assert_eq (quadrant (Point { x: -2, y: 5 })) "Q2"
-      })
+      test
+        "quadrant II"
+        (fun () -> assert_eq (quadrant (Point { x: -2, y: 5 })) "Q2")
 
-      test "quadrant III" (fun () -> {
-        assert_eq (quadrant (Point { x: -1, y: -1 })) "Q3"
-      })
+      test
+        "quadrant III"
+        (fun () -> assert_eq (quadrant (Point { x: -1, y: -1 })) "Q3")
 
-      test "quadrant IV" (fun () -> {
-        assert_eq (quadrant (Point { x: 3, y: -4 })) "Q4"
-      })
+      test
+        "quadrant IV"
+        (fun () -> assert_eq (quadrant (Point { x: 3, y: -4 })) "Q4")
 
-      test "origin" (fun () -> {
-        assert_eq (quadrant (Point { x: 0, y: 0 })) "origin or axis"
-      })
-    })
+      test
+        "origin"
+        (fun () -> assert_eq (quadrant (Point { x: 0, y: 0 })) "origin or axis")
+    )
 
-    describe "list patterns" (fun () -> {
-      test "empty list" (fun () -> {
-        assert_eq (describe_list ([] : List Int)) "empty"
-      })
+    describe "list patterns" (fun () ->
+      test
+        "empty list"
+        (fun () -> assert_eq (describe_list ([] : List Int)) "empty")
 
-      test "single element" (fun () -> {
-        assert_eq (describe_list [42]) "one"
-      })
+      test "single element" (fun () -> assert_eq (describe_list [42]) "one")
 
-      test "two elements" (fun () -> {
-        assert_eq (describe_list [1, 2]) "two"
-      })
+      test "two elements" (fun () -> assert_eq (describe_list [1, 2]) "two")
 
-      test "many elements" (fun () -> {
-        assert_eq (describe_list [1, 2, 3]) "many"
-      })
-    })
+      test
+        "many elements"
+        (fun () -> assert_eq (describe_list [1, 2, 3]) "many")
+    )
 
-    describe "string patterns" (fun () -> {
-      test "prefix split" (fun () -> {
-        assert_eq (classify_log "[ERROR]: disk full") "Error: disk full"
-      })
+    describe "string patterns" (fun () ->
+      test
+        "prefix split"
+        (fun () ->
+          assert_eq (classify_log "[ERROR]: disk full") "Error: disk full")
 
-      test "prefix split warn" (fun () -> {
-        assert_eq (classify_log "[WARN]: low memory") "Warning: low memory"
-      })
+      test
+        "prefix split warn"
+        (fun () ->
+          assert_eq (classify_log "[WARN]: low memory") "Warning: low memory")
 
-      test "exact match" (fun () -> {
-        assert_eq (classify_log "hello") "greeting"
-      })
+      test "exact match" (fun () -> assert_eq (classify_log "hello") "greeting")
 
-      test "wildcard fallback" (fun () -> {
-        assert_eq (classify_log "something else") "unknown"
-      })
-    })
+      test
+        "wildcard fallback"
+        (fun () -> assert_eq (classify_log "something else") "unknown")
+    )
 
-    describe "disjunctive patterns" (fun () -> {
-      test "circle matches fun shapes" (fun () -> {
-        assert_true (is_shape_fun (Circle 1.0))
-      })
+    describe "disjunctive patterns" (fun () ->
+      test
+        "circle matches fun shapes"
+        (fun () -> assert_true (is_shape_fun (Circle 1.0)))
 
-      test "rect matches fun shapes" (fun () -> {
-        assert_true (is_shape_fun (Rect 1.0 2.0))
-      })
+      test
+        "rect matches fun shapes"
+        (fun () -> assert_true (is_shape_fun (Rect 1.0 2.0)))
 
-      test "triangle is not fun" (fun () -> {
-        assert_false (is_shape_fun (Triangle 1.0 2.0 3.0))
-      })
+      test
+        "triangle is not fun"
+        (fun () -> assert_false (is_shape_fun (Triangle 1.0 2.0 3.0)))
 
       # Regression: or-pattern arms that bind a variable used to trigger a
       # spurious "unused variable" warning on the first disjunct because the
       # cloned arm bodies shared NodeIds, so resolve's usage→def map would
       # overwrite the first arm's binding.
-      test "or-pattern binding resolves in first arm" (fun () -> {
-        assert_eq (first_or_only (1, Just 7)) 70
-      })
+      test
+        "or-pattern binding resolves in first arm"
+        (fun () -> assert_eq (first_or_only (1, Just 7)) 70)
 
-      test "or-pattern binding resolves in second arm" (fun () -> {
-        assert_eq (first_or_only (2, Just 9)) 90
-      })
+      test
+        "or-pattern binding resolves in second arm"
+        (fun () -> assert_eq (first_or_only (2, Just 9)) 90)
 
-      test "or-pattern fallthrough when no arm matches" (fun () -> {
-        assert_eq (first_or_only (3, Just 5)) 0
-      })
-    })
+      test
+        "or-pattern fallthrough when no arm matches"
+        (fun () -> assert_eq (first_or_only (3, Just 5)) 0)
+    )
 
-    describe "function head guards" (fun () -> {
-      test "fizzbuzz 15 is FizzBuzz" (fun () -> {
-        assert_eq (fizzbuzz 15) "FizzBuzz"
-      })
+    describe "function head guards" (fun () ->
+      test
+        "fizzbuzz 15 is FizzBuzz"
+        (fun () -> assert_eq (fizzbuzz 15) "FizzBuzz")
 
-      test "fizzbuzz 3 is Fizz" (fun () -> {
-        assert_eq (fizzbuzz 3) "Fizz"
-      })
+      test "fizzbuzz 3 is Fizz" (fun () -> assert_eq (fizzbuzz 3) "Fizz")
 
-      test "fizzbuzz 5 is Buzz" (fun () -> {
-        assert_eq (fizzbuzz 5) "Buzz"
-      })
+      test "fizzbuzz 5 is Buzz" (fun () -> assert_eq (fizzbuzz 5) "Buzz")
 
-      test "fizzbuzz 7 is 7" (fun () -> {
-        assert_eq (fizzbuzz 7) "7"
-      })
-    })
+      test "fizzbuzz 7 is 7" (fun () -> assert_eq (fizzbuzz 7) "7")
+    )
 
-    describe "recursion" (fun () -> {
-      test "fibonacci" (fun () -> {
-        assert_eq (fib 0) 0
-        assert_eq (fib 1) 1
-        assert_eq (fib 10) 55
-      })
-    })
+    describe "recursion" (fun () -> test "fibonacci" (fun () ->
+      assert_eq (fib 0) 0
+      assert_eq (fib 1) 1
+      assert_eq (fib 10) 55
+    ))
 
-    describe "recursive data structures (BST)" (fun () -> {
+    describe "recursive data structures (BST)" (fun () ->
       let tree = List.foldl bst_insert Empty [5, 3, 7, 1, 4, 6, 8]
 
-      test "in-order traversal is sorted" (fun () -> {
-        assert_eq (bst_to_list tree) [1, 3, 4, 5, 6, 7, 8]
-      })
+      test
+        "in-order traversal is sorted"
+        (fun () -> assert_eq (bst_to_list tree) [1, 3, 4, 5, 6, 7, 8])
 
-      test "contains inserted element" (fun () -> {
-        assert_true (bst_contains tree 4)
-      })
+      test
+        "contains inserted element"
+        (fun () -> assert_true (bst_contains tree 4))
 
-      test "does not contain missing element" (fun () -> {
-        assert_false (bst_contains tree 9)
-      })
-    })
+      test
+        "does not contain missing element"
+        (fun () -> assert_false (bst_contains tree 9))
+    )
 
     # Regression: the case scrutinee used to greedily parse `Ctor { ... }` as a
     # record create even under `no_brace_app`, so `case f x Nothing { ... }`
     # would swallow the case arms into a bogus `Nothing { ... }` record literal.
-    describe "case scrutinee ending in a bare constructor" (fun () -> {
-      test "application ending in Nothing" (fun () -> {
-        let r = case Maybe.or_else Nothing (Just 5) {
-          Just n -> n
-          Nothing -> 0
-        }
+    describe "case scrutinee ending in a bare constructor" (fun () ->
+      test "application ending in Nothing" (fun () ->
+        let r =
+          case Maybe.or_else Nothing (Just 5) of
+            Just n -> n
+            Nothing -> 0
         assert_eq r 5
-      })
+      )
 
-      test "application with trailing bare constructor arg" (fun () -> {
+      test "application with trailing bare constructor arg" (fun () ->
         # Simulates `case derive sesh.date Nothing { ... }` shape
         let pair = (True, Nothing)
-        let r = case Maybe.unwrap_or 99 (snd pair) {
-          n -> n
-        }
+        let r =
+          case Maybe.unwrap_or 99 (snd pair) of
+            n -> n
         assert_eq r 99
-      })
-    })
-  })
+      )
+    )
+  )
 
-  describe "destructuring" (fun () -> {
+  describe "destructuring" (fun () ->
 
-    describe "let destructuring" (fun () -> {
-      test "tuple destructuring" (fun () -> {
+    describe "let destructuring" (fun () ->
+      test "tuple destructuring" (fun () ->
         let (a, b) = (10, 20)
         assert_eq a 10
         assert_eq b 20
-      })
+      )
 
-      test "nested tuple destructuring" (fun () -> {
+      test "nested tuple destructuring" (fun () ->
         let ((a, b), (c, d)) = ((1, 2), (3, 4))
         assert_eq (a + b + c + d) 10
-      })
+      )
 
-      test "record destructuring" (fun () -> {
+      test "record destructuring" (fun () ->
         let origin = Point { x: 5, y: 10 }
         let Point { x, y } = origin
         assert_eq x 5
         assert_eq y 10
-      })
+      )
 
-      test "record destructuring with field alias" (fun () -> {
+      test "record destructuring with field alias" (fun () ->
         let p = Point { x: 7, y: 8 }
         let Point { x: px, .. } = p
         assert_eq px 7
-      })
+      )
 
-      test "single-constructor type destructuring" (fun () -> {
+      test "single-constructor type destructuring" (fun () ->
         let Wrapped inner = Wrapped 42
         assert_eq inner 42
-      })
-    })
+      )
+    )
 
-    describe "function argument destructuring" (fun () -> {
-      test "tuple args" (fun () -> {
-        assert_eq (add_pairs (1, 2) (3, 4)) (4, 6)
-      })
-    })
+    describe
+      "function argument destructuring"
+      (fun () ->
+        test
+          "tuple args"
+          (fun () -> assert_eq (add_pairs (1, 2) (3, 4)) (4, 6)))
 
-    describe "tuples" (fun () -> {
-      test "swap" (fun () -> {
-        assert_eq (swap (1, 2)) (2, 1)
-      })
+    describe "tuples" (fun () ->
+      test "swap" (fun () -> assert_eq (swap (1, 2)) (2, 1))
 
-      test "fst and snd" (fun () -> {
+      test "fst and snd" (fun () ->
         let p = ("hello", 42)
         assert_eq (fst p) "hello"
         assert_eq (snd p) 42
-      })
+      )
 
-      test "nested tuple pattern" (fun () -> {
-        let result = case ((1, 2), (3, 4)) {
-          ((a, b), (c, d)) -> a + b + c + d
-        }
+      test "nested tuple pattern" (fun () ->
+        let result =
+          case ((1, 2), (3, 4)) of
+            ((a, b), (c, d)) -> a + b + c + d
         assert_eq result 10
-      })
-    })
-  })
+      )
+    )
+  )
 
-  describe "records" (fun () -> {
+  describe "records" (fun () ->
 
-    describe "creation and access" (fun () -> {
-      test "create and access fields" (fun () -> {
+    describe "creation and access" (fun () ->
+      test "create and access fields" (fun () ->
         let p = Point { x: 3, y: 4 }
         assert_eq p.x 3
         assert_eq p.y 4
-      })
+      )
 
-      test "record update" (fun () -> {
+      test "record update" (fun () ->
         let p = Point { x: 3, y: 4 }
         let p2 = { p | x: 10 }
         assert_eq p2.x 10
         assert_eq p2.y 4
-      })
-    })
+      )
+    )
 
-    describe "polymorphic records" (fun () -> {
-      test "int box" (fun () -> {
-        assert_eq (unwrap_box (Box { value: 42 })) 42
-      })
+    describe "polymorphic records" (fun () ->
+      test "int box" (fun () -> assert_eq (unwrap_box (Box { value: 42 })) 42)
 
-      test "string box" (fun () -> {
-        assert_eq (unwrap_box (Box { value: "hello" })) "hello"
-      })
+      test
+        "string box"
+        (fun () -> assert_eq (unwrap_box (Box { value: "hello" })) "hello")
 
-      test "update same type" (fun () -> {
+      test "update same type" (fun () ->
         let b = Box { value: 42 }
         let b2 = { b | value: 99 }
         assert_eq (unwrap_box b2) 99
-      })
-    })
+      )
+    )
 
-    describe "anonymous record updates" (fun () -> {
-      test "update nested anonymous record" (fun () -> {
-        let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
+    describe "anonymous record updates" (fun () ->
+      test "update nested anonymous record" (fun () ->
+        let h = House {
+          year_built: 2005,
+          address: { number: 123, street: "Fake Street" },
+        }
         let h2 = { h | address: { h.address | street: "Real Street" } }
         assert_eq h2.address.street "Real Street"
         assert_eq h2.address.number 123
         assert_eq h2.year_built 2005
-      })
+      )
 
-      test "update named record containing anonymous record" (fun () -> {
-        let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
+      test "update named record containing anonymous record" (fun () ->
+        let h = House {
+          year_built: 2005,
+          address: { number: 123, street: "Fake Street" },
+        }
         let h2 = { h | year_built: 2020 }
         assert_eq h2.year_built 2020
         assert_eq h2.address.street "Fake Street"
-      })
-    })
-  })
+      )
+    )
+  )
 
-  describe "do...else" (fun () -> {
+  describe "do...else" (fun () ->
 
-    test "successful chain" (fun () -> {
-      assert_eq (lookup_grade 1) (Ok "A")
-    })
+    test "successful chain" (fun () -> assert_eq (lookup_grade 1) (Ok "A"))
 
-    test "early bail on first step" (fun () -> {
-      assert_eq (lookup_grade 99) (Err "no user 99")
-    })
+    test
+      "early bail on first step"
+      (fun () -> assert_eq (lookup_grade 99) (Err "no user 99"))
 
-    test "success returns unwrapped value" (fun () -> {
-      assert_eq (score_or_zero 1) 95
-    })
+    test
+      "success returns unwrapped value"
+      (fun () -> assert_eq (score_or_zero 1) 95)
 
-    test "failure returns default" (fun () -> {
-      assert_eq (score_or_zero 99) 0
-    })
+    test "failure returns default" (fun () -> assert_eq (score_or_zero 99) 0)
 
-    test "constructor else arm can handle a later failed binding" (fun () -> {
-      assert_eq (guarded_gate_chain 1 False) 2
-    })
+    test
+      "constructor else arm can handle a later failed binding"
+      (fun () -> assert_eq (guarded_gate_chain 1 False) 2)
 
-    test "constructor else arm can handle a first-step mismatch" (fun () -> {
-      assert_eq (guarded_gate_chain (-1) True) 2
-    })
+    test
+      "constructor else arm can handle a first-step mismatch"
+      (fun () -> assert_eq (guarded_gate_chain (-1) True) 2)
 
-    test "wildcard else arm handles constructors not matched by constructor else arm" (fun () -> {
-      assert_eq (guarded_gate_chain 0 True) 3
-    })
-  })
+    test
+      "wildcard else arm handles constructors not matched by constructor else arm"
+      (fun () -> assert_eq (guarded_gate_chain 0 True) 3)
+  )
 
-  describe "list comprehensions" (fun () -> {
+  describe "list comprehensions" (fun () ->
 
-    test "simple map" (fun () -> {
-      assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
-    })
+    test "simple map" (fun () -> assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6])
 
-    test "filter" (fun () -> {
-      assert_eq ([x | x <- [1, 2, 3, 4, 5], x % 2 == 0]) [2, 4]
-    })
+    test
+      "filter"
+      (fun () -> assert_eq ([x | x <- [1, 2, 3, 4, 5], x % 2 == 0]) [2, 4])
 
-    test "nested generators (cartesian product)" (fun () -> {
-      assert_eq ([x * 10 + y | x <- [1, 2], y <- [3, 4]]) [13, 14, 23, 24]
-    })
+    test
+      "nested generators (cartesian product)"
+      (fun () ->
+        assert_eq ([x * 10 + y | x <- [1, 2], y <- [3, 4]]) [13, 14, 23, 24])
 
-    test "guard with transform" (fun () -> {
-      assert_eq ([x * 2 | x <- [1, 2, 3, 4, 5], x > 3]) [8, 10]
-    })
+    test
+      "guard with transform"
+      (fun () -> assert_eq ([x * 2 | x <- [1, 2, 3, 4, 5], x > 3]) [8, 10])
 
-    test "let binding in comprehension" (fun () -> {
-      assert_eq ([y | x <- [1, 2, 3, 4, 5], let y = x + 10, y > 13]) [14, 15]
-    })
-  })
-}
+    test
+      "let binding in comprehension"
+      (fun () ->
+        assert_eq ([y | x <- [1, 2, 3, 4, 5], let y = x + 10, y > 13]) [14, 15])
+  )

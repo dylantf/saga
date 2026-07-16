@@ -1,22 +1,19 @@
 module Main
 
-import Effects (DbConfig, query)
 import Std.IO.Unsafe (print_stdout)
 
-effect SystemConfig {
-  fun read_config : Unit -> Int
-}
+import Effects (DbConfig, query)
 
-handler system_config for SystemConfig {
+effect SystemConfig
+  fun read_config : Unit -> Int
+
+handler system_config for SystemConfig
   read_config () = resume 41
-}
 
 pub fun main : Unit -> Unit
-main () = {
+main () =
   let config = read_config! () with system_config
-  let value = query () with {
+  let value = query () with
     db_url () = resume config
-  }
   if value == 42 then print_stdout "ok\n"
   else print_stdout "bad\n"
-}

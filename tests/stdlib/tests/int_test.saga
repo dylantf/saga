@@ -1,198 +1,149 @@
 module IntTest
 
-import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
-import Std.Int as Int
+import Std.Int
 
+import Std.Test (
+  Testing,
+  describe,
+  test,
+  assert_eq,
+  assert_true,
+  assert_false,
+  assert_just,
+  assert_nothing
+)
 
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "Int" (fun () -> {
+tests () =
+  describe "Int" (fun () ->
 
-    describe "parse" (fun () -> {
-      test "valid integer" (fun () -> {
-        "42" |> Int.parse |> assert_eq (Just 42)
-      })
+    describe "parse" (fun () ->
+      test "valid integer" (fun () -> "42" |> Int.parse |> assert_eq (Just 42))
 
-      test "negative" (fun () -> {
-        "-7" |> Int.parse |> assert_eq (Just (-7))
-      })
+      test "negative" (fun () -> "-7" |> Int.parse |> assert_eq (Just (-7)))
 
-      test "invalid" (fun () -> {
-        "abc" |> Int.parse |> assert_nothing
-      })
-    })
+      test "invalid" (fun () -> "abc" |> Int.parse |> assert_nothing)
+    )
 
-    describe "to_float" (fun () -> {
-      test "converts to float" (fun () -> {
-        assert_eq (Int.to_float 5) 5.0
-      })
-    })
+    describe
+      "to_float"
+      (fun () ->
+        test "converts to float" (fun () -> assert_eq (Int.to_float 5) 5.0))
 
-    describe "abs" (fun () -> {
-      test "positive" (fun () -> {
-        assert_eq (Int.abs 5) 5
-      })
+    describe "abs" (fun () ->
+      test "positive" (fun () -> assert_eq (Int.abs 5) 5)
 
-      test "negative" (fun () -> {
-        assert_eq (Int.abs (-5)) 5
-      })
+      test "negative" (fun () -> assert_eq (Int.abs (-5)) 5)
 
-      test "zero" (fun () -> {
-        assert_eq (Int.abs 0) 0
-      })
-    })
+      test "zero" (fun () -> assert_eq (Int.abs 0) 0)
+    )
 
-    describe "min and max" (fun () -> {
-      test "min" (fun () -> {
-        assert_eq (Int.min 3 7) 3
-      })
+    describe "min and max" (fun () ->
+      test "min" (fun () -> assert_eq (Int.min 3 7) 3)
 
-      test "max" (fun () -> {
-        assert_eq (Int.max 3 7) 7
-      })
-    })
+      test "max" (fun () -> assert_eq (Int.max 3 7) 7)
+    )
 
-    describe "clamp" (fun () -> {
-      test "within range" (fun () -> {
-        assert_eq (Int.clamp 0 10 5) 5
-      })
+    describe "clamp" (fun () ->
+      test "within range" (fun () -> assert_eq (Int.clamp 0 10 5) 5)
 
-      test "below range" (fun () -> {
-        assert_eq (Int.clamp 0 10 (-5)) 0
-      })
+      test "below range" (fun () -> assert_eq (Int.clamp 0 10 (-5)) 0)
 
-      test "above range" (fun () -> {
-        assert_eq (Int.clamp 0 10 20) 10
-      })
-    })
+      test "above range" (fun () -> assert_eq (Int.clamp 0 10 20) 10)
+    )
 
-    describe "sign" (fun () -> {
-      test "positive" (fun () -> {
-        assert_eq (Int.sign 42) 1
-      })
+    describe "sign" (fun () ->
+      test "positive" (fun () -> assert_eq (Int.sign 42) 1)
 
-      test "negative" (fun () -> {
-        assert_eq (Int.sign (-42)) (-1)
-      })
+      test "negative" (fun () -> assert_eq (Int.sign (-42)) (-1))
 
-      test "zero" (fun () -> {
-        assert_eq (Int.sign 0) 0
-      })
-    })
+      test "zero" (fun () -> assert_eq (Int.sign 0) 0)
+    )
 
-    describe "bitwise" (fun () -> {
-      test "band" (fun () -> {
-        assert_eq (Int.band 12 10) 8
-      })
+    describe "bitwise" (fun () ->
+      test "band" (fun () -> assert_eq (Int.band 12 10) 8)
 
-      test "bor" (fun () -> {
-        assert_eq (Int.bor 12 10) 14
-      })
+      test "bor" (fun () -> assert_eq (Int.bor 12 10) 14)
 
-      test "bxor" (fun () -> {
-        assert_eq (Int.bxor 12 10) 6
-      })
+      test "bxor" (fun () -> assert_eq (Int.bxor 12 10) 6)
 
-      test "bnot" (fun () -> {
-        assert_eq (Int.bnot 0) (-1)
-      })
+      test "bnot" (fun () -> assert_eq (Int.bnot 0) (-1))
 
-      test "shift_left" (fun () -> {
-        assert_eq (Int.shift_left 4 1) 16
-      })
+      test "shift_left" (fun () -> assert_eq (Int.shift_left 4 1) 16)
 
-      test "shift_right" (fun () -> {
-        assert_eq (Int.shift_right 4 16) 1
-      })
+      test "shift_right" (fun () -> assert_eq (Int.shift_right 4 16) 1)
 
-      test "round-trip shift" (fun () -> {
-        assert_eq (1 |> Int.shift_left 8 |> Int.shift_right 8) 1
-      })
+      test
+        "round-trip shift"
+        (fun () -> assert_eq (1 |> Int.shift_left 8 |> Int.shift_right 8) 1)
 
-      test "mask with band" (fun () -> {
-        assert_eq (0xFF |> Int.band 0xF0) 0xF0
-      })
-    })
+      test "mask with band" (fun () -> assert_eq (0xFF |> Int.band 0xF0) 0xF0)
+    )
 
-    describe "hex literals" (fun () -> {
-      test "basic hex" (fun () -> {
-        assert_eq 0xFF 255
-      })
+    describe "hex literals" (fun () ->
+      test "basic hex" (fun () -> assert_eq 0xFF 255)
 
-      test "uppercase" (fun () -> {
-        assert_eq 0XFF 255
-      })
+      test "uppercase" (fun () -> assert_eq 0XFF 255)
 
-      test "with underscores" (fun () -> {
-        assert_eq 0xDEAD_BEEF 3735928559
-      })
+      test "with underscores" (fun () -> assert_eq 0xDEAD_BEEF 3735928559)
 
-      test "zero" (fun () -> {
-        assert_eq 0x0 0
-      })
+      test "zero" (fun () -> assert_eq 0x0 0)
 
-      test "hex in arithmetic" (fun () -> {
-        assert_eq (0x10 + 0x10) 32
-      })
-    })
+      test "hex in arithmetic" (fun () -> assert_eq (0x10 + 0x10) 32)
+    )
 
-    describe "to_hex" (fun () -> {
-      test "zero" (fun () -> {
-        assert_eq (Int.to_hex 0) "0"
-      })
+    describe "to_hex" (fun () ->
+      test "zero" (fun () -> assert_eq (Int.to_hex 0) "0")
 
-      test "small values" (fun () -> {
+      test "small values" (fun () ->
         assert_eq (Int.to_hex 1) "1"
         assert_eq (Int.to_hex 10) "a"
         assert_eq (Int.to_hex 15) "f"
         assert_eq (Int.to_hex 16) "10"
-      })
+      )
 
-      test "byte boundary" (fun () -> {
+      test "byte boundary" (fun () ->
         assert_eq (Int.to_hex 255) "ff"
         assert_eq (Int.to_hex 256) "100"
-      })
+      )
 
-      test "larger values" (fun () -> {
+      test "larger values" (fun () ->
         assert_eq (Int.to_hex 65535) "ffff"
         assert_eq (Int.to_hex 0xDEAD_BEEF) "deadbeef"
-      })
+      )
 
-      test "negative" (fun () -> {
+      test "negative" (fun () ->
         assert_eq (Int.to_hex (-255)) "-ff"
         assert_eq (Int.to_hex (-1)) "-1"
-      })
-    })
+      )
+    )
 
-    describe "parse_hex" (fun () -> {
-      test "lowercase" (fun () -> {
-        "ff" |> Int.parse_hex |> assert_eq (Just 255)
-      })
+    describe "parse_hex" (fun () ->
+      test "lowercase" (fun () -> "ff" |> Int.parse_hex |> assert_eq (Just 255))
 
-      test "uppercase" (fun () -> {
-        "FF" |> Int.parse_hex |> assert_eq (Just 255)
-      })
+      test "uppercase" (fun () -> "FF" |> Int.parse_hex |> assert_eq (Just 255))
 
-      test "mixed case" (fun () -> {
-        "DeAdBeEf" |> Int.parse_hex |> assert_eq (Just 0xDEAD_BEEF)
-      })
+      test
+        "mixed case"
+        (fun () ->
+          "DeAdBeEf"
+          |> Int.parse_hex
+          |> assert_eq (Just 0xDEAD_BEEF))
 
-      test "negative" (fun () -> {
-        "-ff" |> Int.parse_hex |> assert_eq (Just (-255))
-      })
+      test
+        "negative"
+        (fun () ->
+          "-ff"
+          |> Int.parse_hex
+          |> assert_eq (Just (-255)))
 
-      test "round-trip" (fun () -> {
+      test "round-trip" (fun () ->
         let n = 0xCAFE_BABE
         n |> Int.to_hex |> Int.parse_hex |> assert_eq (Just n)
-      })
+      )
 
-      test "invalid" (fun () -> {
-        "xyz" |> Int.parse_hex |> assert_nothing
-      })
+      test "invalid" (fun () -> "xyz" |> Int.parse_hex |> assert_nothing)
 
-      test "empty" (fun () -> {
-        "" |> Int.parse_hex |> assert_nothing
-      })
-    })
-  })
-}
+      test "empty" (fun () -> "" |> Int.parse_hex |> assert_nothing)
+    )
+  )

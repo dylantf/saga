@@ -1,33 +1,29 @@
 import Std.File (File, FileError, fs)
 
 fun process : Unit -> Unit needs {File}
-process () = {
+process () =
   let result = File.write! "test_output.txt" "hello from saga!"
-  case result {
+  case result of
     Ok () -> ()
     Err _ -> dbg "write failed"
-  }
 
   let result = File.read! "test_output.txt"
-  case result {
+  case result of
     Ok content -> dbg content
-    Err e -> case e {
-      Std.File.NotFound -> dbg "file not found"
-      Std.File.PermissionDenied -> dbg "permission denied"
-      _ -> dbg "other error"
-    }
-  }
+    Err e ->
+      case e of
+        Std.File.NotFound -> dbg "file not found"
+        Std.File.PermissionDenied -> dbg "permission denied"
+        _ -> dbg "other error"
 
   let _ = File.delete! "test_output.txt"
   dbg $"file exists after delete?: {File.exists! "test_output.txt"}"
 
   # Reading a file that doesn't exist
   let missing = File.read! "nonexistent.txt"
-  case missing {
+  case missing of
     Ok _ -> dbg "unexpected"
     Err File.NotFound -> dbg "correctly got NotFound"
     Err e -> dbg $"wrong error {debug e}"
-  }
-}
 
 main () = process () with fs

@@ -5,21 +5,17 @@ pub record Point {
   y: Int,
 }
 
-pub trait Describe a {
+pub trait Describe a
   fun describe_it : a -> String
-}
 
-impl Describe for Point {
+impl Describe for Point
   describe_it p = $"({p.x}, {p.y})"
-}
 
-pub trait Verbose a where {a: Describe} {
+pub trait Verbose a where {a: Describe}
   fun verbose : a -> String
-}
 
-impl Verbose for Point {
+impl Verbose for Point
   verbose p = $"Point: {describe_it p}"
-}
 
 pub fun add : (a: Int) -> (b: Int) -> Int
 add a b = a + b
@@ -27,10 +23,8 @@ add a b = a + b
 pub fun double : (x: Int) -> Int
 double x = add x x
 
-pub effect EffectfulMath {
+pub effect EffectfulMath
   fun multiply : (a: Int) -> (b: Int) -> Int
-}
 
-pub handler math_handler for EffectfulMath {
+pub handler math_handler for EffectfulMath
   multiply a b = resume a * b
-}

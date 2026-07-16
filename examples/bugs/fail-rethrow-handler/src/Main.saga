@@ -10,13 +10,13 @@
 #@ themselves call `fail!`.
 module Main
 
-import Std.IO (console)
 import Std.Fail (Fail)
 
-handler outer for Fail a {
+import Std.IO (console)
+
+handler outer for Fail a
   fail e = Err e
   return v = Ok v
-}
 
 # A function whose body is `fail!` directly (no inline handler).
 fun bare : Unit -> Int needs {Fail String}
@@ -25,20 +25,17 @@ bare _ = fail! "bare boom"
 # A function that handles Fail with an inline handler that itself calls fail!.
 # Compiles, but erlc emits "unbound variable" when lowering.
 fun rethrowing : Unit -> Int needs {Fail String}
-rethrowing _ = bare () with {
+rethrowing _ = bare () with
   fail e = fail! $"rethrown: {e}"
-}
 
-main () = {
-  let r1 : Result Int String = bare () with outer
-  case r1 {
+main () =
+  let r1: Result Int String = bare () with outer
+  case r1 of
     Ok _ -> println "bare Ok (BUG)"
     Err e -> println $"bare Err: {e}"
-  }
 
-  let r2 : Result Int String = rethrowing () with outer
-  case r2 {
+  let r2: Result Int String = rethrowing () with outer
+  case r2 of
     Ok _ -> println "rethrowing Ok (BUG)"
     Err e -> println $"rethrowing Err: {e}"
-  }
-} with console
+with console

@@ -7,7 +7,7 @@ import Std.Maybe (Maybe)
 #@ A persistent, immutable indexed collection backed by Erlang's `array` module.
 #@ Provides O(log n) random access by index — much faster than linked lists
 #@ for index-heavy workloads, but slower than lists for sequential processing.
-opaque type Array a = Array(a)
+opaque type Array a = Array a
 
 #@ Creates a new empty array.
 @external("erlang", "std_array_bridge", "new")

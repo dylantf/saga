@@ -1,7 +1,7 @@
 import Std.Actor (Timer, beam_actor)
 
-main () = {
+main () =
   dbg "Sleeping for 1 second..."
   sleep! 1000
   dbg "Done!"
-} with beam_actor
+with beam_actor

@@ -1,11 +1,9 @@
 module Logger
 
-pub effect Log {
+pub effect Log
   fun log : (msg: String) -> Unit
-}
 
 pub fun greet : (name: String) -> String needs {Log}
-greet name = {
+greet name =
   log! ("Hello, " <> name)
   "greeted " <> name
-}

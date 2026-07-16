@@ -14,9 +14,8 @@ type UserDb = UserDb
 type DataDb = DataDb
 
 # One generic effect, parameterized by a phantom db tag.
-effect Repo db {
+effect Repo db
   fun execute : String -> String
-}
 
 # Fresh nominal effect identities derived from the generic Repo interface.
 neweffect UserRepo = Repo UserDb
@@ -25,14 +24,14 @@ neweffect DataRepo = Repo DataDb
 # Factories are explicitly typed because the nominal effect identity determines
 # which evidence slot the produced handler installs.
 fun user_repo : String -> Handler UserRepo
-user_repo pool = handler for UserRepo {
+user_repo pool =
+  handler for UserRepo
     execute query = resume pool <> " <- " <> query
-  }
 
 fun data_repo : String -> Handler DataRepo
-data_repo pool = handler for DataRepo {
+data_repo pool =
+  handler for DataRepo
     execute query = resume pool <> " <- " <> query
-  }
 
 # --- 1. Single repo in scope: bare op call ---
 
@@ -42,13 +41,12 @@ one_repo () = UserRepo.execute! "SELECT 1"
 # --- 2. Both repos in scope: qualified op calls must dispatch per-tag ---
 
 fun both_repos : Unit -> String needs {UserRepo, DataRepo}
-both_repos () = {
+both_repos () =
   let u = UserRepo.execute! "SELECT * FROM users"
   let s = DataRepo.execute! "SELECT * FROM seshes"
   u <> " | " <> s
-}
 
-main () = {
+main () =
   let users = user_repo "users_pool"
   let data = data_repo "seshes_pool"
 
@@ -58,6 +56,8 @@ main () = {
 
   # Both repos installed side by side. Distinct effects, so
   # the inner install does NOT shadow the outer — both handlers stay live.
-  let r3 = both_repos () with {users, data}
+  let r3 = both_repos () with
+    users
+    data
   println ("both_repos:       " <> r3)
-} with console
+with console

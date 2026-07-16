@@ -5,9 +5,8 @@ import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
 import Std.List
 
-impl Debug for Set a where {a: Debug} {
+impl Debug for Set a where {a: Debug}
   debug s = "Set(" <> debug (to_list s) <> ")"
-}
 
 #@ Creates an empty set.
 @external("erlang", "std_set_bridge", "new")

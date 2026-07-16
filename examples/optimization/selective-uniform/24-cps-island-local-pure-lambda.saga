@@ -1,13 +1,11 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
 pub fun read_then_call_lambda : Unit -> Int needs {ReadInt}
-read_then_call_lambda () = {
+read_then_call_lambda () =
   let inc = fun x -> x + 1
   let value = read! ()
   inc value
-}
 
 fun main : Unit -> Unit
 main () = ()

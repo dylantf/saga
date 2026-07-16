@@ -1,7 +1,5 @@
-effect Fail {
+effect Fail
   fun fail : Unit -> Int
-}
 
-main () = fail! () with {
+main () = fail! () with
   fail () = 0
-}

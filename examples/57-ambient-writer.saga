@@ -32,16 +32,14 @@ ship_order item =
 # Note: place_order returns a plain String. The audit trail rides
 # alongside via the effect, not in the return type.
 fun place_order : (item: String) -> (price: Int) -> String needs {Tell Event}
-place_order item price = {
+place_order item price =
   reserve_inventory item
   charge_card price
   ship_order item
   $"order placed: {item}"
-}
 
-main () = {
+main () =
   let (result, audit) = run_writer (fun () -> place_order "book" 1299)
   dbg result
   dbg $"audit trail ({List.length audit} events):"
   List.iter dbg audit
-}

@@ -14,7 +14,6 @@ default_opts = Opts { tag: "default" }
 # Mirrors saga_json's `J.run : (Json -> a needs {Fail Error}) -> Json -> Result a Error`.
 # Takes a decoder function and applies it to an input under a handler.
 pub fun run : (Int -> a needs {Fail e}) -> Int -> Result a e
-run decoder n = decoder n with {
+run decoder n = decoder n with
   fail e = Err e
   return v = Ok v
-}

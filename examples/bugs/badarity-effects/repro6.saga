@@ -6,9 +6,8 @@ import Std.IO (console, println)
 # closure was compiled with the row solved to {} (its inner is pure), so
 # the runtime arity doesn't match what the caller expects.
 
-effect Foo {
+effect Foo
   fun foo : Unit -> Unit
-}
 
 # Row-polymorphic wrap.
 fun wrap : (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}
@@ -21,21 +20,19 @@ fun do_foo : Unit -> Unit needs {Foo}
 do_foo () = foo! ()
 
 fun take : List (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}
-take fs () = case fs {
-  [] -> ()
-  f :: _ -> f ()
-}
+take fs () =
+  case fs of
+    [] -> ()
+    f :: _ -> f ()
 
-main () = {
+main () =
   # Partial application of wrap with a pure inner.
   # Its row at construction time solves to {} (inner is pure).
   # The list it's placed in widens the element row to {Foo} to fit do_foo.
   # When take calls f (), the call site expects a function with the wider row.
   let wrapped: Unit -> Unit = wrap pure_fn
-  take [wrapped, do_foo] () with {
-    foo () = {
+  take [wrapped, do_foo] () with
+    foo () =
       println "foo!"
       resume ()
-    }
-  }
-} with console
+with console

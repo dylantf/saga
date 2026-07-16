@@ -10,20 +10,19 @@
 #@ B: Lib.at given a partially applied HOF — crashes
 module Main
 
-import Std.IO (console)
 import Std.Fail (Fail)
+
+import Std.IO (console)
 import Lib
 
-main () = {
+main () =
   # A
-  case Lib.run (fun n -> Lib.at "outer" Lib.int n) 42 {
+  case Lib.run (fun n -> Lib.at "outer" Lib.int n) 42 of
     Ok n -> println $"A: Ok {n}"
     Err _ -> println "A: Err"
-  }
 
   # B — only difference is `(Lib.wrap Lib.int)` instead of `Lib.int`.
-  case Lib.run (fun n -> Lib.at "outer" (Lib.wrap Lib.int) n) 42 {
+  case Lib.run (fun n -> Lib.at "outer" (Lib.wrap Lib.int) n) 42 of
     Ok n -> println $"B: Ok {n}"
     Err _ -> println "B: Err"
-  }
-} with console
+with console

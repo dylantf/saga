@@ -11,13 +11,11 @@ import Std.IO (console, println)
 # The Foo handler is installed at the outermost `with`, far from the call
 # site, matching how `handle` provides ReqCtx for `whoami`.
 
-effect Foo {
+effect Foo
   fun foo : Unit -> Unit
-}
 
-effect Skip {
+effect Skip
   fun skip : Unit -> a
-}
 
 fun do_foo : Unit -> Unit needs {Foo}
 do_foo () = foo! ()
@@ -28,19 +26,17 @@ route match h () =
   else skip! ()
 
 fun choose : List (Unit -> Unit needs {Skip, ..e}) -> Unit -> Unit needs {..e}
-choose rs () = case rs {
-  [] -> ()
-  r :: rest -> r () with {
-    skip () = choose rest ()
-  }
-}
+choose rs () =
+  case rs of
+    [] -> ()
+    r :: rest ->
+      r () with
+        skip () = choose rest ()
 
-main () = {
+main () =
   # Expected: prints "foo!".
-  choose [route True do_foo] () with {
-    foo () = {
+  choose [route True do_foo] () with
+    foo () =
       println "foo!"
       resume ()
-    }
-  }
-} with console
+with console

@@ -1,6 +1,5 @@
-effect Ask {
+effect Ask
   fun ask : Unit -> Int
-}
 
 fun pure_fun1 : Unit -> Int
 pure_fun1 () = 10
@@ -8,10 +7,8 @@ pure_fun1 () = 10
 fun pure_fun2 : Unit -> Int
 pure_fun2 () = 20
 
-main () = ask! () with {
-  ask () = {
+main () = ask! () with
+  ask () =
     let _ = pure_fun1 ()
     let _ = pure_fun2 ()
     resume 42
-  }
-}

@@ -1,4 +1,4 @@
-main () = {
+main () =
   let nums = [1, 2, 3, 4, 5]
   dbg nums
 
@@ -31,4 +31,3 @@ main () = {
 
   let words = ["hello", "world"]
   dbg words
-}

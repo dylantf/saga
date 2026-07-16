@@ -6,14 +6,14 @@ import Std.IO (console)
 import SagaCsv (parse)
 
 fun read_csv : String -> String needs {File}
-read_csv filename = case File.read! filename {
-  Ok content -> content
-  Err _ -> panic $"Failed to read {filename}"
-}
+read_csv filename =
+  case File.read! filename of
+    Ok content -> content
+    Err _ -> panic $"Failed to read {filename}"
 
-main () = {
+main () =
   "data.csv"
   |> read_csv
   |> parse 44
-  |> List.iter dbg
-} with {fs}
+  |> List.iter dbg with
+    fs

@@ -75,7 +75,9 @@ pub fun atan : Float -> Float
 
 #@ Returns the absolute value.
 pub fun abs : Float -> Float
-abs x = if x < 0.0 then 0.0 - x else x
+abs x =
+  if x < 0.0 then 0.0 - x
+  else x
 
 #@ Returns the smaller of two floats.
 pub fun min : Float -> Float -> Float
@@ -91,7 +93,10 @@ clamp low high x = min high (max low x)
 
 #@ Returns -1.0 for negative, 0.0 for zero, 1.0 for positive.
 pub fun sign : Float -> Float
-sign x = if x < 0.0 then 0.0 - 1.0 else if x > 0.0 then 1.0 else 0.0
+sign x =
+  if x < 0.0 then 0.0 - 1.0
+  else if x > 0.0 then 1.0
+  else 0.0
 
 #@ Converts degrees to radians.
 pub fun deg_to_rad : Float -> Float

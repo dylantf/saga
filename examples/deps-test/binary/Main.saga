@@ -17,7 +17,7 @@ fun b64_round_trip : String -> (String, String)
 @external("erlang", "argon2_bridge", "hash")
 fun argon2_hash : String -> String
 
-main () = {
+main () =
   let result = add 3 4
   println (show result)
 
@@ -42,4 +42,5 @@ main () = {
   # NIF call via rebar3-compiled hex dep
   let hashed = argon2_hash "my_password"
   println $"argon2 hash: {hashed}"
-} with {console}
+with
+  console

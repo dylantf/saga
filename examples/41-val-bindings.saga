@@ -5,9 +5,8 @@ greeting = "hello world"
 max_retries = 5
 origins = ["localhost", "example.com"]
 
-main () = {
+main () =
   dbg (show pi)
   dbg greeting
   dbg (show max_retries)
   dbg (debug origins)
-}

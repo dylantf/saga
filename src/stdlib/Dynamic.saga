@@ -14,21 +14,19 @@ pub type DecodeError =
   | DecodeError (expected: String) (found: String) (List String)
   deriving (Eq)
 
-impl Debug for DecodeError {
-  debug e = case e {
-    DecodeError expected found path ->
-      $"DecodeError(expected: {debug expected}, found: {debug found}, path: {debug path})"
-  }
-}
+impl Debug for DecodeError
+  debug e =
+    case e of
+      DecodeError expected found path ->
+        $"DecodeError(expected: {debug expected}, found: {debug found}, path: {debug path})"
 
-impl Show for DecodeError {
-  show e = case e {
-    DecodeError expected found path -> case path {
-      [] -> $"Expected {expected}, got {found}"
-      _ -> $"At {debug path}: expected {expected}, got {found}"
-    }
-  }
-}
+impl Show for DecodeError
+  show e =
+    case e of
+      DecodeError expected found path ->
+        case path of
+          [] -> $"Expected {expected}, got {found}"
+          _ -> $"At {debug path}: expected {expected}, got {found}"
 
 #@ A decoder is a function from a Dynamic to a typed value or a DecodeError.
 #@ Decoders are pure values — composable, introspection-free, no placeholders.
@@ -89,43 +87,45 @@ fun raw_element_lookup : Int -> Dynamic -> Result Dynamic DecodeError
 
 #@ Apply a decoder to a Dynamic value.
 pub fun decode : Decoder a -> Dynamic -> Result a DecodeError
-decode dec dyn = case dec {
-  Decoder f -> f dyn
-}
+decode dec dyn =
+  case dec of
+    Decoder f -> f dyn
 
 #@ Look up a field by name in a map-like Dynamic and decode it.
 #@ Returns Err if the field is missing or its value fails to decode.
 pub fun decode_field : String -> Decoder a -> Dynamic -> Result a DecodeError
-decode_field name dec data = case raw_field_lookup name data {
-  Ok(dyn) -> decode dec dyn
-  Err(e) -> Err(e)
-}
+decode_field name dec data =
+  case raw_field_lookup name data of
+    Ok dyn -> decode dec dyn
+    Err e -> Err e
 
 #@ Look up an element by index in a tuple/list-like Dynamic and decode it.
 #@ Returns Err if the index is out of bounds or its value fails to decode.
 pub fun decode_element : Int -> Decoder a -> Dynamic -> Result a DecodeError
-decode_element idx dec data = case raw_element_lookup idx data {
-  Ok(dyn) -> decode dec dyn
-  Err(e) -> Err(e)
-}
+decode_element idx dec data =
+  case raw_element_lookup idx data of
+    Ok dyn -> decode dec dyn
+    Err e -> Err e
 
 # --- Combinators ---
 
 @external("erlang", "std_dynamic_bridge", "decode_list")
-fun decode_list_raw : (Dynamic -> Result a DecodeError) -> Dynamic -> Result (List a) DecodeError
+fun decode_list_raw :
+  (Dynamic -> Result a DecodeError) -> Dynamic -> Result (List a) DecodeError
 
 #@ Decoder for a list where every element is decoded with the given decoder.
 pub fun list_of : Decoder a -> Decoder (List a)
-list_of dec = case dec {
-  Decoder f -> Decoder (decode_list_raw f)
-}
+list_of dec =
+  case dec of
+    Decoder f -> Decoder (decode_list_raw f)
 
 @external("erlang", "std_dynamic_bridge", "decode_optional")
-fun decode_optional_raw : (Dynamic -> Result a DecodeError) -> Dynamic -> Result (Maybe a) DecodeError
+fun decode_optional_raw :
+  (Dynamic -> Result a DecodeError) -> Dynamic -> Result (Maybe a) DecodeError
 
 #@ Decoder for optional/nullable values. Decodes nil/undefined/null as Nothing,
 #@ otherwise tries the inner decoder and wraps in Just.
 pub fun optional : Decoder a -> Decoder (Maybe a)
-optional dec = case dec {
-  Decoder f -> Decoder (decode_optional_raw f)
-}
+optional dec =
+  case dec of
+    Decoder f -> Decoder (decode_optional_raw f)

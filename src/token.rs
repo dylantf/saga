@@ -17,6 +17,7 @@ pub enum Token {
     Let,
     Type,
     Case,
+    Of,
     If,
     Then,
     Else,
@@ -162,9 +163,9 @@ pub struct Spanned {
     pub leading_trivia: Vec<Trivia>,
     /// A same-line comment appearing after this token (at most one).
     pub trailing_comment: Option<String>,
-    /// True if there was a newline between the previous token and this one,
-    /// at top-level nesting (outside parens/brackets). Used by the parser
-    /// to stop greedy parsing (e.g. type application) at line boundaries.
+    /// True if there was a physical newline between the previous token and
+    /// this one. Layout remains significant inside parenthesized expressions
+    /// when an explicit layout introducer (such as `->`) opens a body.
     pub preceded_by_newline: bool,
     /// True if the line boundary before this token was an explicit semicolon.
     pub preceded_by_semicolon: bool,

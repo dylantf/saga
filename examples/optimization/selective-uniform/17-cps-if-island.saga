@@ -1,10 +1,8 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
 pub fun maybe_read : Bool -> Int needs {ReadInt}
-maybe_read use_read =
-  if use_read then read! () else 0
+maybe_read use_read = if use_read then read! () else 0
 
 fun main : Unit -> Unit
 main () = ()

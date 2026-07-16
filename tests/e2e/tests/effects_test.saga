@@ -5,143 +5,113 @@ import Std.Test (Testing, describe, test, skip, assert_eq, assert_true)
 
 # --- Effect declarations ---
 
-effect Log {
+effect Log
   fun log : String -> Unit
-}
 
-effect State s {
+effect State s
   fun get : Unit -> s
   fun put : (v: s) -> Unit
-}
 
-effect FailG e {
+effect FailG e
   fun failg : (err: e) -> a
-}
 
-effect Choose {
+effect Choose
   fun choose : Unit -> Bool
-}
 
-effect Recorder a {
+effect Recorder a
   fun log_state : (entity: a) -> Unit
-}
 
-effect Validate {
+effect Validate
   fun invalid : String -> Unit
-}
 
 # An operation whose own `where` clause constrains its abstract type variable.
 # The dictionary is threaded per call, so a single handler installation can
 # serve calls at different concrete types (Int and String below).
-trait Encodable a {
+trait Encodable a
   fun encode : a -> String
-}
 
-impl Encodable for Int {
+impl Encodable for Int
   encode n = $"i{show n}"
-}
 
-impl Encodable for String {
+impl Encodable for String
   encode s = $"s{s}"
-}
 
-effect Encode {
+effect Encode
   fun push : a -> String where {a: Encodable}
-}
 
 # --- Named handlers ---
 
-handler console_log for Log {
-  log msg = {
+handler console_log for Log
+  log msg =
     dbg msg
     resume ()
-  }
-}
 
-handler silent_log for Log {
+handler silent_log for Log
   log _ = resume ()
-}
 
-handler encoder for Encode {
-  push val = resume (encode val)
-}
+handler encoder for Encode
+  push val = resume encode val
 
-handler swallow_fail for Fail String {
+handler swallow_fail for Fail String
   fail _ = 0
-}
 
-handler to_result for Fail String {
+handler to_result for Fail String
   fail reason = Err reason
   return value = Ok value
-}
 
-handler int_fallback for Fail String {
+handler int_fallback for Fail String
   fail _ = resume 0
-}
 
-handler to_result_g for FailG a {
+handler to_result_g for FailG a
   failg msg = Err msg
   return value = Ok value
-}
 
-handler to_default_g for FailG String {
+handler to_default_g for FailG String
   failg _ = 0
-}
 
-handler all_choices for Choose {
-  choose () = {
+handler all_choices for Choose
+  choose () =
     let a = resume True
     let b = resume False
     List.append a b
-  }
   return v = [v]
-}
 
-handler recording for Recorder a where {a: Show} {
-  log_state entity = {
+handler recording for Recorder a where {a: Show}
+  log_state entity =
     let _ = show entity
     resume ()
-  }
-}
 
-handler collecting for Validate {
-  invalid err = {
+handler collecting for Validate
+  invalid err =
     let (v, errs) = resume ()
     (v, err :: errs)
-  }
   return v = (v, [])
-}
 
 # --- Helper functions ---
 
 fun do_work : Unit -> Int needs {Log}
-do_work () = {
+do_work () =
   log! "starting"
   let x = 10 + 20
   log! ("computed " <> show x)
   x
-}
 
 fun safe_div : Int -> Int -> Int needs {Fail String}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
 fun outer_swallow : Unit -> Unit needs {Log}
-outer_swallow () = {
+outer_swallow () =
   let result = inner_swallow () with swallow_fail
   log! (show result)
-}
 
 fun inner_swallow : Unit -> Int needs {Fail String}
-inner_swallow () = {
-  fail! "boom"
-}
+inner_swallow () = fail! "boom"
 
 fun swallow_marker : Unit -> String
-swallow_marker () = {
+swallow_marker () =
   outer_swallow () with silent_log
   "after"
-}
 
 fun terminal_to_result : Unit -> Result Int String
 terminal_to_result () = safe_div 10 0 with to_result
@@ -154,7 +124,9 @@ parse_or_fail 0 = fail! "zero not allowed"
 parse_or_fail x = x
 
 fun double_positive : Int -> Int needs {Fail String}
-double_positive x = if x > 0 then x * 2 else fail! "not positive"
+double_positive x =
+  if x > 0 then x * 2
+  else fail! "not positive"
 
 fun nested_inner_fails : Unit -> Result Int String
 nested_inner_fails () = double_positive (parse_or_fail 0) with to_result
@@ -166,10 +138,9 @@ fun nested_both_succeed : Unit -> Result Int String
 nested_both_succeed () = double_positive (parse_or_fail 5) with to_result
 
 fun let_wrapped_fallback : Unit -> String
-let_wrapped_fallback () = {
+let_wrapped_fallback () =
   let x = safe_div 10 0 with int_fallback
   if x == 0 then "after" else "wrong"
-}
 
 fun branch_terminal_with : Bool -> Result Int String
 branch_terminal_with cond =
@@ -178,67 +149,55 @@ branch_terminal_with cond =
 
 fun branch_statement_with : Bool -> String
 branch_statement_with cond =
-  if cond then {
+  if cond then
     outer_swallow () with silent_log
     "after"
-  }
   else "no"
 
 fun nested_with_marker : Unit -> String
-nested_with_marker () = {
+nested_with_marker () =
   # NB: intentionally testing multiple with-boundaries, should be a warning too
-  let x = (inner_swallow () with swallow_fail) with {
+  let x = (inner_swallow () with swallow_fail) with
     fail _ = 1
-  }
   if x == 0 then "after" else "wrong"
-}
 
 fun nonterminal_return_clause_marker : Unit -> String
-nonterminal_return_clause_marker () = {
-  let x = safe_div 10 0 with {
+nonterminal_return_clause_marker () =
+  let x = safe_div 10 0 with
     fail _ = 0
     return value = value + 1
-  }
   if x == 0 then "after" else "wrong"
-}
 
 fun terminal_return_clause : Unit -> Int
-terminal_return_clause () = safe_div 10 2 with {
+terminal_return_clause () = safe_div 10 2 with
   fail _ = 0
   return value = value + 1
-}
 
 fun return_clause_inside_branch : Bool -> Int
 return_clause_inside_branch cond =
-  if cond then safe_div 10 2 with {
-    fail _ = 0
-    return value = value + 1
-  }
+  if cond then
+    safe_div 10 2 with
+      fail _ = 0
+      return value = value + 1
   else 0
 
 fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)
-run_state init f = {
-  let state_fn = f () with {
+run_state init f =
+  let state_fn = f () with
     get () = fun s -> (resume s) s
     put new_s = fun _ -> (resume ()) new_s
     return value = fun s -> (value, s)
-  }
   state_fn init
-}
 
 fun modify : (f: s -> s) -> Unit needs {State s}
-modify f = {
+modify f =
   let x = get! ()
   put! (f x)
-}
 
 fun try_fail : (computation: Unit -> a needs {Fail String}) -> Result a String
-try_fail computation = {
-  computation () with {
-    fail msg = Err msg
-    return value = Ok value
-  }
-}
+try_fail computation = computation () with
+  fail msg = Err msg
+  return value = Ok value
 
 fun parse_positive : Int -> Int needs {Fail String}
 parse_positive x =
@@ -248,17 +207,15 @@ parse_positive x =
 fun count_up : Int -> Int needs {State Int}
 count_up n =
   if n == 0 then get! ()
-  else {
+  else
     modify (fun x -> x + 1)
     count_up (n - 1)
-  }
 
 fun build_msg : Unit -> String needs {State String}
-build_msg () = {
+build_msg () =
   modify (fun s -> s <> "hello ")
   modify (fun s -> s <> "world")
   get! ()
-}
 
 # An effectful function (performs `get!`) that returns a computed value.
 # Used to exercise an effectful call in *argument position* of another effect
@@ -267,20 +224,19 @@ build_msg () = {
 # with an identity continuation feeds the handler's yielded value into the
 # enclosing op instead of the function's real return value.
 fun doubled : Unit -> Int needs {State Int}
-doubled () = {
+doubled () =
   let n = get! ()
   n * 2
-}
 
 # Pure consumers used to nest an effectful call *deeper* than the top-level
 # argument of an op: inside a list element and inside a record field. The
 # effectful call must still be sequenced before the enclosing op runs.
 record Cell { v: Int }
 fun first_of : List Int -> Int
-first_of xs = case xs {
-  [] -> -1
-  x :: _ -> x
-}
+first_of xs =
+  case xs of
+    [] -> -1
+    x :: _ -> x
 fun uncell : Cell -> Int
 uncell c = c.v
 
@@ -292,14 +248,25 @@ uncell c = c.v
 # `no evidence in scope` at codegen and an arity mismatch at runtime.
 record Adder { bump: Int -> Int needs {State Int} }
 fun mk_adder : Unit -> Adder
-mk_adder () = Adder { bump: fun n -> { let c = get! (); put! (c + 1); n + c } }
+mk_adder () = Adder {
+  bump: fun n ->
+    let c = get! ()
+    put! (c + 1)
+    n + c,
+}
 fun apply_bump : Adder -> Int -> Int needs {State Int}
 apply_bump a n = a.bump n
 
 # Same, but the effectful function is held in an anonymous record field.
 fun mk_anon_adder : Unit -> { bump: Int -> Int needs {State Int} }
-mk_anon_adder () = { bump: fun n -> { let c = get! (); put! (c + 1); n + c } }
-fun apply_anon_bump : { bump: Int -> Int needs {State Int} } -> Int -> Int needs {State Int}
+mk_anon_adder () = {
+  bump: fun n ->
+    let c = get! ()
+    put! (c + 1)
+    n + c,
+}
+fun apply_anon_bump : { bump: Int -> Int needs {State Int} } -> Int -> Int
+  needs {State Int}
 apply_anon_bump a n = a.bump n
 
 fun safe_div_g : Int -> Int -> Int needs {FailG String}
@@ -307,17 +274,15 @@ safe_div_g _ 0 = failg! "division by zero"
 safe_div_g x y = x / y
 
 fun run_with_log : (f: Unit -> a needs {Log, ..e}) -> a needs {..e}
-run_with_log f = f () with {
+run_with_log f = f () with
   log _ = resume ()
-}
 
 fun make_logger : Bool -> Handler Log
-make_logger verbose = handler for Log {
-  log msg = {
-    if verbose then dbg msg else ()
-    resume ()
-  }
-}
+make_logger verbose =
+  handler for Log
+    log msg =
+      if verbose then dbg msg else ()
+      resume ()
 
 fun require_non_empty : String -> String -> Unit needs {Validate}
 require_non_empty label value =
@@ -331,508 +296,487 @@ require_min min age =
 
 # --- Finally / scoped resources ---
 
-effect Resource {
+effect Resource
   fun acquire : String -> String
-}
 
-effect Scope {
+effect Scope
   fun acquire_scoped : (acquire: Unit -> a) -> (release: a -> Unit) -> a
-}
 
-effect Counter {
+effect Counter
   fun get_counter : Unit -> Int
-}
 
-handler managed for Resource {
-  acquire name = {
+handler managed for Resource
+  acquire name =
     let r = $"[{name}]"
     resume r
-  } finally {
-    dbg $"released: {r}"
-  }
-}
+  finally dbg $"released: {r}"
 
-handler run_scoped for Scope {
-  acquire_scoped acquire release = {
+handler run_scoped for Scope
+  acquire_scoped acquire release =
     let resource = acquire ()
     resume resource
-  } finally {
-    release resource
-  }
-}
+  finally release resource
 
-handler add_one_counter for Counter {
+handler add_one_counter for Counter
   get_counter () = resume 10
   return value = value + 1
-}
 
-handler times_two_counter for Counter {
+handler times_two_counter for Counter
   get_counter () = resume 20
   return value = value * 2
-}
 
 fun work : Unit -> String needs {Resource}
-work () = {
+work () =
   let db = acquire! "db"
   dbg $"working with {db}"
   "done"
-}
 
 fun work_and_fail : Unit -> String needs {Resource, Fail String}
-work_and_fail () = {
+work_and_fail () =
   let _db = acquire! "db"
   fail! "something went wrong"
-}
 
 fun nested_named_returns_first_order : Unit -> Int
-nested_named_returns_first_order () = get_counter! () with {add_one_counter, times_two_counter}
+nested_named_returns_first_order () = get_counter! () with
+  add_one_counter
+  times_two_counter
 
 fun nested_named_returns_reversed_order : Unit -> Int
-nested_named_returns_reversed_order () = get_counter! () with {times_two_counter, add_one_counter}
+nested_named_returns_reversed_order () = get_counter! () with
+  times_two_counter
+  add_one_counter
 
 fun stacked_named_returns_match_list_sugar : Unit -> Int
 stacked_named_returns_match_list_sugar () =
   (get_counter! () with add_one_counter) with times_two_counter
 
 fun return_only_inline_inside_named_handler : Unit -> Int
-return_only_inline_inside_named_handler () = get_counter! () with {
+return_only_inline_inside_named_handler () = get_counter! () with
   return value = value + 1
-  times_two_counter,
-}
+  times_two_counter
 
 fun return_only_inline_outside_named_handler : Unit -> Int
-return_only_inline_outside_named_handler () = get_counter! () with {
-  times_two_counter,
+return_only_inline_outside_named_handler () = get_counter! () with
+  times_two_counter
   return value = value + 1
-}
 
 fun nested_returns_stop_at_binding_boundary : Unit -> Int
-nested_returns_stop_at_binding_boundary () = {
-  let x = get_counter! () with {add_one_counter, times_two_counter}
+nested_returns_stop_at_binding_boundary () =
+  let x = get_counter! () with
+    add_one_counter
+    times_two_counter
   x + 1
-}
 
 fun nested_returns_in_block_remain_local : Unit -> Int
-nested_returns_in_block_remain_local () = {
-  let x = {
-    get_counter! () with {add_one_counter, times_two_counter}
-  }
+nested_returns_in_block_remain_local () =
+  let x = get_counter! () with
+    add_one_counter
+    times_two_counter
   x
-}
 
 fun counter_inner_return_only : Unit -> Int needs {Counter}
-counter_inner_return_only () = get_counter! () with {
+counter_inner_return_only () = get_counter! () with
   return value = value + 1
-}
 
 fun counter_middle_handles : Unit -> Int
 counter_middle_handles () = counter_inner_return_only () with times_two_counter
 
 fun counter_outer_wraps : Unit -> Int
-counter_outer_wraps () = counter_middle_handles () with {
+counter_outer_wraps () = counter_middle_handles () with
   return value = value - 2
-}
 
 fun counter_bubble_a : Unit -> Int needs {Counter}
-counter_bubble_a () = get_counter! () with {
+counter_bubble_a () = get_counter! () with
   return value = value + 1
-}
 
 fun counter_bubble_b : Unit -> Int needs {Counter}
-counter_bubble_b () = counter_bubble_a () with {
+counter_bubble_b () = counter_bubble_a () with
   return value = value * 2
-}
 
 fun counter_bubble_c : Unit -> Int
 counter_bubble_c () = counter_bubble_b () with times_two_counter
 
 fun counter_bubble_outer : Unit -> Int
-counter_bubble_outer () = counter_bubble_c () with {
+counter_bubble_outer () = counter_bubble_c () with
   return value = value - 3
-}
 
 # --- Tests ---
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "effects" (fun () -> {
-    describe "basic effect and handler" (fun () -> {
-      test "named handler processes effect" (fun () -> {
+tests () =
+  describe "effects" (fun () ->
+    describe "basic effect and handler" (fun () ->
+      test "named handler processes effect" (fun () ->
         let result = do_work () with silent_log
         assert_eq result 30
-      })
-      test "inline handler" (fun () -> {
-        let result = do_work () with {
+      )
+      test "inline handler" (fun () ->
+        let result = do_work () with
           log _ = resume ()
-        }
         assert_eq result 30
-      })
-    })
+      )
+    )
 
-    describe "operation where-clause constraints" (fun () -> {
-      test "named handler threads per-call dict for differing types" (fun () -> {
-        let result = {
+    describe "operation where-clause constraints" (fun () ->
+      test "named handler threads per-call dict for differing types" (fun () ->
+        let result =
           let a = push! 7
           let b = push! "x"
           a <> b
-        } with encoder
+        with encoder
         assert_eq result "i7sx"
-      })
-      test "inline handler threads per-call dict" (fun () -> {
-        let result = {
+      )
+      test "inline handler threads per-call dict" (fun () ->
+        let result =
           let a = push! 7
           let b = push! "x"
           a <> b
-        } with {
-          push val = resume (encode val)
-        }
+        with
+          push val = resume encode val
         assert_eq result "i7sx"
-      })
-    })
+      )
+    )
 
-    describe "multiple named handlers for same computation" (fun () -> {
-      test "same computation, different handlers yield same value" (fun () -> {
-        let a = do_work () with console_log
-        let b = do_work () with silent_log
-        assert_eq a b
-      })
-    })
+    describe "multiple named handlers for same computation" (fun () -> test "same computation, different handlers yield same value" (fun () ->
+      let a = do_work () with console_log
+      let b = do_work () with silent_log
+      assert_eq a b
+    ))
 
-    describe "fail effect" (fun () -> {
-      test "successful computation wraps in Ok" (fun () -> {
+    describe "fail effect" (fun () ->
+      test "successful computation wraps in Ok" (fun () ->
         let result = safe_div 10 2 with to_result
         assert_eq result (Ok 5)
-      })
-      test "failing computation wraps in Err" (fun () -> {
+      )
+      test "failing computation wraps in Err" (fun () ->
         let result = safe_div 10 0 with to_result
         assert_eq result (Err "division by zero")
-      })
-      test "resume with fallback value" (fun () -> {
+      )
+      test "resume with fallback value" (fun () ->
         let result = safe_div 10 0 with int_fallback
         assert_eq result 0
-      })
-      test "statement-level with remains delimited" (fun () -> {
+      )
+      test "statement-level with remains delimited" (fun () ->
         let marker = swallow_marker ()
         assert_eq marker "after"
-      })
-      test "terminal with still returns handler result" (fun () -> {
+      )
+      test "terminal with still returns handler result" (fun () ->
         let result = terminal_to_result ()
         assert_eq result (Err "division by zero")
-      })
-      test "nested effectful call: inner fails skips outer" (fun () -> {
+      )
+      test "nested effectful call: inner fails skips outer" (fun () ->
         let result = nested_inner_fails ()
         assert_eq result (Err "zero not allowed")
-      })
-      test "nested effectful call: outer fails after inner succeeds" (fun () -> {
+      )
+      test "nested effectful call: outer fails after inner succeeds" (fun () ->
         let result = nested_outer_fails ()
         assert_eq result (Err "not positive")
-      })
-      test "nested effectful call: both succeed" (fun () -> {
+      )
+      test "nested effectful call: both succeed" (fun () ->
         let result = nested_both_succeed ()
         assert_eq result (Ok 10)
-      })
-      test "let-bound with remains delimited" (fun () -> {
+      )
+      test "let-bound with remains delimited" (fun () ->
         let marker = let_wrapped_fallback ()
         assert_eq marker "after"
-      })
-      test "terminal with inside branch stays branch-local" (fun () -> {
+      )
+      test "terminal with inside branch stays branch-local" (fun () ->
         let result = branch_terminal_with True
         assert_eq result (Err "division by zero")
-      })
-      test "statement-level with inside branch remains delimited" (fun () -> {
+      )
+      test "statement-level with inside branch remains delimited" (fun () ->
         let result = branch_statement_with True
         assert_eq result "after"
-      })
-      test "nested with remains delimited" (fun () -> {
+      )
+      test "nested with remains delimited" (fun () ->
         let result = nested_with_marker ()
         assert_eq result "after"
-      })
-      test "nonterminal return clause does not swallow following code" (fun () -> {
+      )
+      test "nonterminal return clause does not swallow following code" (fun () ->
         let result = nonterminal_return_clause_marker ()
         assert_eq result "after"
-      })
-      test "terminal return clause still applies" (fun () -> {
+      )
+      test "terminal return clause still applies" (fun () ->
         let result = terminal_return_clause ()
         assert_eq result 6
-      })
-      test "return clause inside branch still applies" (fun () -> {
+      )
+      test "return clause inside branch still applies" (fun () ->
         let result = return_clause_inside_branch True
         assert_eq result 6
-      })
-      test "inline fail handler" (fun () -> {
-        let result = safe_div 10 0 with {
+      )
+      test "inline fail handler" (fun () ->
+        let result = safe_div 10 0 with
           fail _ = resume 42
-        }
         assert_eq result 42
-      })
-    })
+      )
+    )
 
-    describe "fail-to-result pattern" (fun () -> {
-      test "successful try" (fun () -> {
-        let result = try_fail (fun () -> {
-          let x = safe_div 100 4
-          parse_positive x
-        })
+    describe "fail-to-result pattern" (fun () ->
+      test "successful try" (fun () ->
+        let result =
+          try_fail (fun () ->
+            let x = safe_div 100 4
+            parse_positive x
+          )
         assert_eq result (Ok 25)
-      })
-      test "failed try - division by zero" (fun () -> {
+      )
+      test "failed try - division by zero" (fun () ->
         let result = try_fail (fun () -> safe_div 10 0)
         assert_eq result (Err "division by zero")
-      })
-      test "failed try - negative number" (fun () -> {
+      )
+      test "failed try - negative number" (fun () ->
         let result = try_fail (fun () -> parse_positive (-5))
         assert_eq result (Err "expected positive, got -5")
-      })
-      test "pipe results after try" (fun () -> {
+      )
+      test "pipe results after try" (fun () ->
         let result =
           try_fail (fun () -> safe_div 42 6)
           |> Result.map (fun x -> x * 10)
         assert_eq result (Ok 70)
-      })
-    })
+      )
+    )
 
-    describe "nested handler return composition" (fun () -> {
-      test "lexical order composes returns from inner to outer" (fun () -> {
+    describe "nested handler return composition" (fun () ->
+      test "lexical order composes returns from inner to outer" (fun () ->
         let result = nested_named_returns_first_order ()
         assert_eq result 22
-      })
+      )
 
-      test "reversed lexical order changes the composed result" (fun () -> {
+      test "reversed lexical order changes the composed result" (fun () ->
         let result = nested_named_returns_reversed_order ()
         assert_eq result 41
-      })
+      )
 
-      test "stacked with matches list sugar" (fun () -> {
+      test "stacked with matches list sugar" (fun () ->
         let result = stacked_named_returns_match_list_sugar ()
         assert_eq result 22
-      })
+      )
 
-      test "return-only inline layer inside named handler still composes" (fun () -> {
+      test "return-only inline layer inside named handler still composes" (fun () ->
         let result = return_only_inline_inside_named_handler ()
         assert_eq result 42
-      })
+      )
 
-      test "return-only inline layer outside named handler still composes" (fun () -> {
+      test "return-only inline layer outside named handler still composes" (fun () ->
         let result = return_only_inline_outside_named_handler ()
         assert_eq result 41
-      })
+      )
 
-      test "returns stop at let binding boundary" (fun () -> {
+      test "returns stop at let binding boundary" (fun () ->
         let result = nested_returns_stop_at_binding_boundary ()
         assert_eq result 23
-      })
+      )
 
-      test "returns stay local to the wrapped block result" (fun () -> {
+      test "returns stay local to the wrapped block result" (fun () ->
         let result = nested_returns_in_block_remain_local ()
         assert_eq result 22
-      })
+      )
 
-      test "effects propagate across function boundaries before outer handlers apply" (fun () -> {
+      test "effects propagate across function boundaries before outer handlers apply" (fun () ->
         let result = counter_outer_wraps ()
         assert_eq result 40
-      })
+      )
 
-      test "effect can bubble through multiple wrapped functions before being handled" (fun () -> {
+      test "effect can bubble through multiple wrapped functions before being handled" (fun () ->
         let result = counter_bubble_outer ()
         assert_eq result 81
-      })
-    })
+      )
+    )
 
-    describe "state effect" (fun () -> {
-      test "count up from 0" (fun () -> {
+    describe "state effect" (fun () ->
+      test "count up from 0" (fun () ->
         let (value, final_state) = run_state 0 (fun () -> count_up 5)
         assert_eq value 5
         assert_eq final_state 5
-      })
-      test "string accumulator" (fun () -> {
+      )
+      test "string accumulator" (fun () ->
         let (msg, _) = run_state "" build_msg
         assert_eq msg "hello world"
-      })
-      test "get returns initial state" (fun () -> {
+      )
+      test "get returns initial state" (fun () ->
         let (value, _) = run_state 42 (fun () -> get! ())
         assert_eq value 42
-      })
-      test "put then get" (fun () -> {
-        let (value, _) = run_state 0 (fun () -> {
-          put! 99
-          get! ()
-        })
+      )
+      test "put then get" (fun () ->
+        let (value, _) =
+          run_state 0 (fun () ->
+            put! 99
+            get! ()
+          )
         assert_eq value 99
-      })
-      test "effectful call in op argument position" (fun () -> {
+      )
+      test "effectful call in op argument position" (fun () ->
         # `doubled ()` is an effectful function consumed by `put!` in argument
         # position. It reads 21 and returns 42 without mutating; `put! 42` then
         # sets the state to 42. Before the arg-position CPS fix this crashed
         # (the State handler's yielded closure reached `put!` instead of 42).
-        let (value, final_state) = run_state 21 (fun () -> {
-          put! (doubled ())
-          get! ()
-        })
+        let (value, final_state) =
+          run_state 21 (fun () ->
+            put! (doubled ())
+            get! ()
+          )
         assert_eq value 42
         assert_eq final_state 42
-      })
-      test "effectful call nested in list element of op argument" (fun () -> {
+      )
+      test "effectful call nested in list element of op argument" (fun () ->
         # `doubled ()` is nested inside a list element passed to the pure
         # `first_of`, whose result feeds `put!`. The effectful call must be
         # sequenced at arbitrary depth, not just when it is the whole argument.
-        let (final_state, _) = run_state 21 (fun () -> {
-          put! (first_of [doubled ()])
-          get! ()
-        })
+        let (final_state, _) =
+          run_state 21 (fun () ->
+            put! (first_of [doubled ()])
+            get! ()
+          )
         assert_eq final_state 42
-      })
-      test "effectful call nested in record field of op argument" (fun () -> {
+      )
+      test "effectful call nested in record field of op argument" (fun () ->
         # `doubled ()` is nested inside a record field, consumed by pure
         # `uncell`, whose result feeds `put!`.
-        let (final_state, _) = run_state 21 (fun () -> {
-          put! (uncell (Cell { v: doubled () }))
-          get! ()
-        })
+        let (final_state, _) =
+          run_state 21 (fun () ->
+            put! (uncell (Cell { v: doubled () }))
+            get! ()
+          )
         assert_eq final_state 42
-      })
-      test "effectful function value stored in a record field" (fun () -> {
+      )
+      test "effectful function value stored in a record field" (fun () ->
         # mk_adder stores an effectful closure; apply_bump calls it via the
         # field. bump 5: c = get! () = 10; put! 11; returns 5 + 10 = 15.
-        let (result, final_state) = run_state 10 (fun () -> apply_bump (mk_adder ()) 5)
+        let (result, final_state) =
+          run_state 10 (fun () -> apply_bump (mk_adder ()) 5)
         assert_eq result 15
         assert_eq final_state 11
-      })
-      test "effectful function value stored in an anon record field" (fun () -> {
-        let (result, final_state) = run_state 10 (fun () -> apply_anon_bump (mk_anon_adder ()) 5)
+      )
+      test "effectful function value stored in an anon record field" (fun () ->
+        let (result, final_state) =
+          run_state 10 (fun () -> apply_anon_bump (mk_anon_adder ()) 5)
         assert_eq result 15
         assert_eq final_state 11
-      })
-    })
+      )
+    )
 
-    describe "generic effects" (fun () -> {
-      test "generic fail to Result Ok" (fun () -> {
+    describe "generic effects" (fun () ->
+      test "generic fail to Result Ok" (fun () ->
         let result = safe_div_g 10 2 with to_result_g
         assert_eq result (Ok 5 : Result Int String)
-      })
-      test "generic fail to Result Err" (fun () -> {
+      )
+      test "generic fail to Result Err" (fun () ->
         let result = safe_div_g 10 0 with to_result_g
         assert_eq result (Err "division by zero" : Result Int String)
-      })
-      test "generic fail to default" (fun () -> {
+      )
+      test "generic fail to default" (fun () ->
         let result = safe_div_g 10 0 with to_default_g
         assert_eq result 0
-      })
-    })
-    describe "effect row polymorphism" (fun () -> {
-      test "handles Log for pure computation" (fun () -> {
-        let result = run_with_log (fun () -> {
+      )
+    )
+    describe "effect row polymorphism" (fun () -> test "handles Log for pure computation" (fun () ->
+      let result =
+        run_with_log (fun () ->
           log! "computing"
           42
-        })
-        assert_eq result 42
-      })
-    })
+        )
+      assert_eq result 42
+    ))
 
-    describe "handler bindings" (fun () -> {
-      test "let-bound handler" (fun () -> {
+    describe "handler bindings" (fun () ->
+      test "let-bound handler" (fun () ->
         let logger = silent_log
         let result = do_work () with logger
         assert_eq result 30
-      })
-      test "conditional handler selection" (fun () -> {
+      )
+      test "conditional handler selection" (fun () ->
         let dev = False
         let logger = if dev then console_log else silent_log
         let result = do_work () with logger
         assert_eq result 30
-      })
-      test "handler expression" (fun () -> {
-        let my_handler = handler for Log {
-          log _ = resume ()
-        }
+      )
+      test "handler expression" (fun () ->
+        let my_handler =
+          handler for Log
+            log _ = resume ()
         let result = do_work () with my_handler
         assert_eq result 30
-      })
-      test "handler factory function" (fun () -> {
+      )
+      test "handler factory function" (fun () ->
         let logger = make_logger False
         let result = do_work () with logger
         assert_eq result 30
-      })
-    })
+      )
+    )
 
-    describe "multishot continuations" (fun () -> {
-      test "branching with double resume" (fun () -> {
-        let results = {
-          let x = if choose! () then 1 else 2
-          let y = if choose! () then 10 else 20
-          x + y
-        } with all_choices
-        assert_eq results [11, 21, 12, 22]
-      })
-    })
+    describe "multishot continuations" (fun () -> test "branching with double resume" (fun () ->
+      let results =
+        let x = if choose! () then 1 else 2
+        let y = if choose! () then 10 else 20
+        x + y
+      with all_choices
+      assert_eq results [11, 21, 12, 22]
+    ))
 
-    describe "trait-constrained handlers" (fun () -> {
-      test "handler with trait constraint" (fun () -> {
-        let result = {
-          log_state! 42
-          log_state! 99
-          "done"
-        } with recording
-        assert_eq result "done"
-      })
-    })
-  })
+    describe "trait-constrained handlers" (fun () -> test "handler with trait constraint" (fun () ->
+      let result =
+        log_state! 42
+        log_state! 99
+        "done"
+      with recording
+      assert_eq result "done"
+    ))
+  )
 
-  describe "validation with effects" (fun () -> {
-    test "valid input has no errors" (fun () -> {
-      let (_, errs) = {
+  describe "validation with effects" (fun () ->
+    test "valid input has no errors" (fun () ->
+      let (_, errs) =
         require_non_empty "name" "Alice"
         require_min 18 25
-      } with collecting
+      with collecting
       assert_eq errs []
-    })
-    test "single validation error" (fun () -> {
-      let (_, errs) = {
+    )
+    test "single validation error" (fun () ->
+      let (_, errs) =
         require_non_empty "name" ""
         require_min 18 25
-      } with collecting
+      with collecting
       assert_eq errs ["name is required"]
-    })
-    test "multiple validation errors collected" (fun () -> {
-      let (_, errs) = {
+    )
+    test "multiple validation errors collected" (fun () ->
+      let (_, errs) =
         require_non_empty "name" ""
         require_min 18 15
-      } with collecting
+      with collecting
       assert_eq (List.length errs) 2
-    })
-  })
+    )
+  )
 
-  describe "finally" (fun () -> {
-    test "cleanup runs on normal completion" (fun () -> {
+  describe "finally" (fun () ->
+    test "cleanup runs on normal completion" (fun () ->
       let result = work () with managed
       assert_eq result "done"
-    })
+    )
 
-    test "cleanup runs on abort" (fun () -> {
-      let result = {
-        work_and_fail () with managed
-      } with to_result
+    test "cleanup runs on abort" (fun () ->
+      let result = (work_and_fail () with managed) with to_result
       assert_eq result (Err "something went wrong" : Result String String)
-    })
-  })
+    )
+  )
 
-  describe "scoped resources" (fun () -> {
-    test "normal completion with multiple resources" (fun () -> {
-      let result = {
+  describe "scoped resources" (fun () ->
+    test "normal completion with multiple resources" (fun () ->
+      let result =
         let db = acquire_scoped! (fun () -> "postgres") (fun _ -> ())
         let cache = acquire_scoped! (fun () -> "redis") (fun _ -> ())
         db <> "+" <> cache
-      } with run_scoped
+      with run_scoped
       assert_eq result "postgres+redis"
-    })
+    )
 
-    test "abort still cleans up" (fun () -> {
-      let result = {
+    test "abort still cleans up" (fun () ->
+      let result =
         let _db = acquire_scoped! (fun () -> "postgres") (fun _ -> ())
         let _cache = acquire_scoped! (fun () -> "redis") (fun _ -> ())
         fail! "something broke"
-      } with {run_scoped, to_result}
+      with
+        run_scoped
+        to_result
       assert_eq result (Err "something broke" : Result String String)
-    })
-  })
-}
+    )
+  )

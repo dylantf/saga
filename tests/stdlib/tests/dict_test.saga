@@ -13,164 +13,167 @@ import Std.Test (
   assert_nothing
 )
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "Dict" (fun () -> {
+tests () =
+  describe "Dict" (fun () ->
 
-    describe "new" (fun () -> {
-      test "creates empty dict" (fun () -> {
-        Dict.new () |> Dict.size |> assert_eq 0
-      })
-    })
+    describe
+      "new"
+      (fun () ->
+        test
+          "creates empty dict"
+          (fun () ->
+            Dict.new ()
+            |> Dict.size
+            |> assert_eq 0))
 
-    describe "from_list and to_list" (fun () -> {
-      test "round-trips" (fun () -> {
-        let d = Dict.from_list [("a", 1), ("b", 2)]
-        assert_eq (Dict.size d) 2
-        assert_eq (Dict.get "a" d) (Just 1)
-        assert_eq (Dict.get "b" d) (Just 2)
-      })
-    })
+    describe "from_list and to_list" (fun () -> test "round-trips" (fun () ->
+      let d = Dict.from_list [("a", 1), ("b", 2)]
+      assert_eq (Dict.size d) 2
+      assert_eq (Dict.get "a" d) (Just 1)
+      assert_eq (Dict.get "b" d) (Just 2)
+    ))
 
-    describe "put and get" (fun () -> {
-      test "inserts and retrieves" (fun () -> {
+    describe "put and get" (fun () ->
+      test "inserts and retrieves" (fun () ->
         let d = Dict.new () |> Dict.put "x" 42
         assert_eq (Dict.get "x" d) (Just 42)
-      })
+      )
 
-      test "overwrites existing key" (fun () -> {
+      test "overwrites existing key" (fun () ->
         let d = Dict.from_list [("x", 1)] |> Dict.put "x" 2
         assert_eq (Dict.get "x" d) (Just 2)
-      })
+      )
 
-      test "missing key returns Nothing" (fun () -> {
-        Dict.from_list [("x", 1)]
-        |> Dict.get "y"
-        |> assert_nothing
-      })
-    })
+      test
+        "missing key returns Nothing"
+        (fun () ->
+          Dict.from_list [("x", 1)]
+          |> Dict.get "y"
+          |> assert_nothing)
+    )
 
-    describe "remove" (fun () -> {
-      test "removes a key" (fun () -> {
+    describe "remove" (fun () ->
+      test "removes a key" (fun () ->
         let d = Dict.from_list [("a", 1), ("b", 2)] |> Dict.remove "a"
         d |> Dict.get "a" |> assert_nothing
         d |> Dict.size |> assert_eq 1
-      })
+      )
 
-      test "removing missing key is a no-op" (fun () -> {
-        Dict.from_list [("a", 1)]
-        |> Dict.remove "z"
-        |> Dict.size
-        |> assert_eq 1
-      })
-    })
+      test
+        "removing missing key is a no-op"
+        (fun () ->
+          Dict.from_list [("a", 1)]
+          |> Dict.remove "z"
+          |> Dict.size
+          |> assert_eq 1)
+    )
 
-    describe "member" (fun () -> {
-      test "true for present key" (fun () -> {
-        Dict.from_list [("a", 1)] |> Dict.member "a" |> assert_true
-      })
+    describe "member" (fun () ->
+      test
+        "true for present key"
+        (fun () ->
+          Dict.from_list [("a", 1)]
+          |> Dict.member "a"
+          |> assert_true)
 
-      test "false for missing key" (fun () -> {
-        Dict.from_list [("a", 1)] |> Dict.member "z" |> assert_false
-      })
-    })
+      test
+        "false for missing key"
+        (fun () ->
+          Dict.from_list [("a", 1)]
+          |> Dict.member "z"
+          |> assert_false)
+    )
 
-    describe "size" (fun () -> {
-      test "empty dict" (fun () -> {
-        Dict.new () |> Dict.size |> assert_eq 0
-      })
+    describe "size" (fun () ->
+      test "empty dict" (fun () -> Dict.new () |> Dict.size |> assert_eq 0)
 
-      test "non-empty dict" (fun () -> {
-        Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
-        |> Dict.size
-        |> assert_eq 3
-      })
-    })
+      test
+        "non-empty dict"
+        (fun () ->
+          Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
+          |> Dict.size
+          |> assert_eq 3)
+    )
 
-    describe "is_empty" (fun () -> {
-      test "empty dict" (fun () -> {
-        Dict.new () |> Dict.is_empty |> assert_true
-      })
+    describe "is_empty" (fun () ->
+      test "empty dict" (fun () -> Dict.new () |> Dict.is_empty |> assert_true)
 
-      test "non-empty dict" (fun () -> {
-        Dict.from_list [("a", 1)] |> Dict.is_empty |> assert_false
-      })
-    })
+      test
+        "non-empty dict"
+        (fun () ->
+          Dict.from_list [("a", 1)]
+          |> Dict.is_empty
+          |> assert_false)
+    )
 
-    describe "keys and values" (fun () -> {
-      test "returns keys" (fun () -> {
-        Dict.from_list [("a", 1), ("b", 2)]
-        |> Dict.keys
-        |> List.sort
-        |> assert_eq ["a", "b"]
-      })
-
-      test "returns values" (fun () -> {
-        Dict.from_list [("a", 1), ("b", 2)]
-        |> Dict.values
-        |> List.sort
-        |> assert_eq [1, 2]
-      })
-    })
-
-    describe "map" (fun () -> {
-      test "transforms values" (fun () -> {
-        let d =
+    describe "keys and values" (fun () ->
+      test
+        "returns keys"
+        (fun () ->
           Dict.from_list [("a", 1), ("b", 2)]
-          |> Dict.map (fun v -> v * 10)
-        assert_eq (Dict.get "a" d) (Just 10)
-        assert_eq (Dict.get "b" d) (Just 20)
-      })
-    })
+          |> Dict.keys
+          |> List.sort
+          |> assert_eq ["a", "b"])
 
-    describe "filter" (fun () -> {
-      test "keeps matching entries" (fun () -> {
-        let d =
-          Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
-          |> Dict.filter (fun _k v -> v > 1)
-        d |> Dict.size |> assert_eq 2
-        d |> Dict.get "a" |> assert_nothing
-        d |> Dict.get "b" |> assert_just
-        d |> Dict.get "c" |> assert_just
-      })
-    })
+      test
+        "returns values"
+        (fun () ->
+          Dict.from_list [("a", 1), ("b", 2)]
+          |> Dict.values
+          |> List.sort
+          |> assert_eq [1, 2])
+    )
 
-    describe "fold" (fun () -> {
-      test "accumulates over entries" (fun () -> {
-        let total =
-          Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
-          |> Dict.fold (fun acc _k v -> acc + v) 0
-        assert_eq total 6
-      })
-    })
+    describe "map" (fun () -> test "transforms values" (fun () ->
+      let d =
+        Dict.from_list [("a", 1), ("b", 2)]
+        |> Dict.map (fun v -> v * 10)
+      assert_eq (Dict.get "a" d) (Just 10)
+      assert_eq (Dict.get "b" d) (Just 20)
+    ))
 
-    describe "merge" (fun () -> {
-      test "combines two dicts, second wins on conflicts" (fun () -> {
-        let a = Dict.from_list [("x", 1), ("y", 2)]
-        let b = Dict.from_list [("y", 99), ("z", 3)]
-        let merged = Dict.merge a b
-        assert_eq (Dict.get "x" merged) (Just 1)
-        assert_eq (Dict.get "y" merged) (Just 99)
-        assert_eq (Dict.get "z" merged) (Just 3)
-      })
-    })
+    describe "filter" (fun () -> test "keeps matching entries" (fun () ->
+      let d =
+        Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
+        |> Dict.filter (fun _k v -> v > 1)
+      d |> Dict.size |> assert_eq 2
+      d |> Dict.get "a" |> assert_nothing
+      d |> Dict.get "b" |> assert_just
+      d |> Dict.get "c" |> assert_just
+    ))
 
-    describe "update" (fun () -> {
-      test "updates existing key" (fun () -> {
-        Dict.from_list [("a", 10)]
-        |> Dict.update "a" (fun v -> v + 5)
-        |> Dict.get "a"
-        |> assert_eq (Just 15)
-      })
+    describe "fold" (fun () -> test "accumulates over entries" (fun () ->
+      let total =
+        Dict.from_list [("a", 1), ("b", 2), ("c", 3)]
+        |> Dict.fold (fun acc _k v -> acc + v) 0
+      assert_eq total 6
+    ))
 
-      test "missing key is a no-op" (fun () -> {
+    describe "merge" (fun () -> test "combines two dicts, second wins on conflicts" (fun () ->
+      let a = Dict.from_list [("x", 1), ("y", 2)]
+      let b = Dict.from_list [("y", 99), ("z", 3)]
+      let merged = Dict.merge a b
+      assert_eq (Dict.get "x" merged) (Just 1)
+      assert_eq (Dict.get "y" merged) (Just 99)
+      assert_eq (Dict.get "z" merged) (Just 3)
+    ))
+
+    describe "update" (fun () ->
+      test
+        "updates existing key"
+        (fun () ->
+          Dict.from_list [("a", 10)]
+          |> Dict.update "a" (fun v -> v + 5)
+          |> Dict.get "a"
+          |> assert_eq (Just 15))
+
+      test "missing key is a no-op" (fun () ->
         let d =
           Dict.from_list [("a", 10)]
           |> Dict.update "z" (fun v -> v + 5)
         d |> Dict.size |> assert_eq 1
         d |> Dict.get "z" |> assert_nothing
-      })
-    })
-  })
-}
+      )
+    )
+  )

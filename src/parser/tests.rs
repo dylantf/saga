@@ -3711,3 +3711,94 @@ fn parses_public_neweffect() {
     assert_eq!(source.name, "Repo");
     assert_eq!(source.type_args.len(), 1);
 }
+
+// --- Significant-whitespace layout ---
+
+#[test]
+fn layout_function_body_collects_multiple_statements() {
+    let decls = parse("compute value =\n  let doubled = value * 2\n  doubled + 1");
+    let Decl::FunBinding { body, .. } = &decls[0] else {
+        panic!("expected function binding");
+    };
+    let ExprKind::Block { stmts, .. } = &body.kind else {
+        panic!(
+            "expected layout body to become a block, got {:?}",
+            body.kind
+        );
+    };
+    assert_eq!(stmts.len(), 2);
+    assert!(matches!(stmts[0].node, Stmt::Let { .. }));
+    assert!(matches!(stmts[1].node, Stmt::Expr(_)));
+}
+
+#[test]
+fn layout_case_uses_of_and_indented_arms() {
+    let expr = parse_expr("case value of\n  Just item ->\n    item + 1\n  Nothing -> 0");
+    let ExprKind::Case { arms, .. } = expr.kind else {
+        panic!("expected case expression");
+    };
+    assert_eq!(arms.len(), 2);
+    assert!(matches!(arms[0].node.pattern, Pat::Constructor { ref name, .. } if name == "Just"));
+}
+
+#[test]
+fn layout_declaration_member_bodies_need_no_braces() {
+    let source = r#"effect Log
+  fun log : String -> Unit
+
+handler console for Log
+  log message = print! message
+
+trait Render a
+  fun render : a -> String
+
+impl Render for Int
+  render value = int_to_string value"#;
+    let decls = parse(source);
+    assert!(matches!(&decls[0], Decl::EffectDef { operations, .. } if operations.len() == 1));
+    assert!(matches!(&decls[1], Decl::HandlerDef { body, .. } if body.arms.len() == 1));
+    assert!(matches!(&decls[2], Decl::TraitDef { methods, .. } if methods.len() == 1));
+    assert!(matches!(&decls[3], Decl::ImplDef { methods, .. } if methods.len() == 1));
+}
+
+#[test]
+fn layout_inline_with_and_whole_body_with_parse() {
+    let decls = parse(
+        "run value =\n  use value\n  |> finish\nwith\n  fail reason = Err reason\n  return result = Ok result",
+    );
+    let Decl::FunBinding { body, .. } = &decls[0] else {
+        panic!("expected function binding");
+    };
+    let ExprKind::With { expr, handler } = &body.kind else {
+        panic!("expected with expression, got {:?}", body.kind);
+    };
+    assert!(matches!(expr.kind, ExprKind::Pipe { ref segments, .. } if segments.len() == 2));
+    assert!(matches!(handler.as_ref(), Handler::Inline { items, .. } if items.len() == 2));
+}
+
+#[test]
+fn layout_pipe_at_parent_indent_continues_expression() {
+    let decls = parse("stream values =\n  values\n  |> map normalize\n  |> collect");
+    let Decl::FunBinding { body, .. } = &decls[0] else {
+        panic!("expected function binding");
+    };
+    assert!(
+        matches!(body.kind, ExprKind::Pipe { ref segments, multiline: true } if segments.len() == 3)
+    );
+}
+
+#[test]
+fn layout_do_else_and_receive_parse() {
+    let do_expr = parse_expr(
+        "do\n  Some first <- one\n  Some second <- two\n  Some (first + second)\nelse\n  None -> None",
+    );
+    assert!(
+        matches!(do_expr.kind, ExprKind::Do { ref bindings, ref else_arms, .. } if bindings.len() == 2 && else_arms.len() == 1)
+    );
+
+    let receive_expr =
+        parse_expr("receive\n  Message value -> value\n  after 1000 ->\n    timeout ()");
+    assert!(
+        matches!(receive_expr.kind, ExprKind::Receive { ref arms, after_clause: Some(_), .. } if arms.len() == 1)
+    );
+}

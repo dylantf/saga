@@ -1,33 +1,27 @@
 # Parameterized dictionary: the outer impl receives and uses a sub-dictionary.
 
-effect Options {
+effect Options
   fun get_options : Unit -> Int
-}
 
-handler options_10 for Options {
+handler options_10 for Options
   get_options () = resume 10
-}
 
 type Box a = Box a
 
-trait Encodable a {
+trait Encodable a
   fun encode : a -> Int needs {Options}
-}
 
-impl Encodable for Int needs {Options} {
+impl Encodable for Int needs {Options}
   encode x = x + get_options! ()
-}
 
-impl Encodable for Box a where {a: Encodable} needs {Options} {
-  encode boxed = case boxed {
-    Box value -> encode value + 1
-  }
-}
+impl Encodable for Box a where {a: Encodable} needs {Options}
+  encode boxed =
+    case boxed of
+      Box value -> encode value + 1
 
 fun serialize : (x: a) -> Int needs {Options} where {a: Encodable}
 serialize x = encode x
 
-main () = {
+main () =
   let result = serialize (Box 5) with options_10
   dbg (show result)
-}

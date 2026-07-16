@@ -1,6 +1,5 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
 pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
 apply_eff f = f ()

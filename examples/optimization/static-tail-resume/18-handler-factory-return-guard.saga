@@ -1,13 +1,11 @@
-effect Ask {
+effect Ask
   fun ask : Unit -> Int
-}
 
-make_ask n = handler for Ask {
-  ask () = resume n
-  return value = value + 1
-}
+make_ask n =
+  handler for Ask
+    ask () = resume n
+    return value = value + 1
 
-main () = {
+main () =
   let h = make_ask 41
   ask! () with h
-}

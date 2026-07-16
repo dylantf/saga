@@ -4,145 +4,137 @@ import Std.List
 import Std.Set
 import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "Set" (fun () -> {
+tests () =
+  describe "Set" (fun () ->
 
-    describe "new" (fun () -> {
-      test "creates empty set" (fun () -> {
-        assert_eq (Set.size (Set.new ())) 0
-      })
-    })
+    describe
+      "new"
+      (fun () ->
+        test
+          "creates empty set"
+          (fun () -> assert_eq (Set.size (Set.new ())) 0))
 
-    describe "from_list" (fun () -> {
-      test "creates set from list" (fun () -> {
-        assert_eq (Set.size (Set.from_list [1, 2, 3])) 3
-      })
+    describe "from_list" (fun () ->
+      test
+        "creates set from list"
+        (fun () -> assert_eq (Set.size (Set.from_list [1, 2, 3])) 3)
 
-      test "deduplicates" (fun () -> {
-        assert_eq (Set.size (Set.from_list [1, 2, 2, 3, 3])) 3
-      })
-    })
+      test
+        "deduplicates"
+        (fun () -> assert_eq (Set.size (Set.from_list [1, 2, 2, 3, 3])) 3)
+    )
 
-    describe "to_list" (fun () -> {
-      test "round-trips through list" (fun () -> {
-        let s = Set.from_list [3, 1, 2]
-        assert_eq (List.sort (Set.to_list s)) [1, 2, 3]
-      })
-    })
+    describe "to_list" (fun () -> test "round-trips through list" (fun () ->
+      let s = Set.from_list [3, 1, 2]
+      assert_eq (List.sort (Set.to_list s)) [1, 2, 3]
+    ))
 
-    describe "insert" (fun () -> {
-      test "adds element" (fun () -> {
+    describe "insert" (fun () ->
+      test "adds element" (fun () ->
         let s = Set.new () |> Set.insert 1 |> Set.insert 2
         assert_eq (Set.size s) 2
-      })
+      )
 
-      test "duplicate has no effect" (fun () -> {
+      test "duplicate has no effect" (fun () ->
         let s = Set.new () |> Set.insert 1 |> Set.insert 1
         assert_eq (Set.size s) 1
-      })
-    })
+      )
+    )
 
-    describe "remove" (fun () -> {
-      test "removes element" (fun () -> {
+    describe "remove" (fun () ->
+      test "removes element" (fun () ->
         let s = Set.from_list [1, 2, 3] |> Set.remove 2
         assert_eq (Set.size s) 2
         assert_false (Set.member 2 s)
-      })
+      )
 
-      test "removing absent element is no-op" (fun () -> {
+      test "removing absent element is no-op" (fun () ->
         let s = Set.from_list [1, 2, 3] |> Set.remove 99
         assert_eq (Set.size s) 3
-      })
-    })
+      )
+    )
 
-    describe "member" (fun () -> {
-      test "true when present" (fun () -> {
-        assert_true (Set.member 2 (Set.from_list [1, 2, 3]))
-      })
+    describe "member" (fun () ->
+      test
+        "true when present"
+        (fun () -> assert_true (Set.member 2 (Set.from_list [1, 2, 3])))
 
-      test "false when absent" (fun () -> {
-        assert_false (Set.member 99 (Set.from_list [1, 2, 3]))
-      })
+      test
+        "false when absent"
+        (fun () -> assert_false (Set.member 99 (Set.from_list [1, 2, 3])))
 
-      test "empty set" (fun () -> {
-        assert_false (Set.member 1 (Set.new ()))
-      })
-    })
+      test "empty set" (fun () -> assert_false (Set.member 1 (Set.new ())))
+    )
 
-    describe "size" (fun () -> {
-      test "empty set" (fun () -> {
-        assert_eq (Set.size (Set.new ())) 0
-      })
+    describe "size" (fun () ->
+      test "empty set" (fun () -> assert_eq (Set.size (Set.new ())) 0)
 
-      test "non-empty set" (fun () -> {
-        assert_eq (Set.size (Set.from_list [1, 2, 3])) 3
-      })
-    })
+      test
+        "non-empty set"
+        (fun () -> assert_eq (Set.size (Set.from_list [1, 2, 3])) 3)
+    )
 
-    describe "is_empty" (fun () -> {
-      test "empty set" (fun () -> {
-        assert_true (Set.is_empty (Set.new ()))
-      })
+    describe "is_empty" (fun () ->
+      test "empty set" (fun () -> assert_true (Set.is_empty (Set.new ())))
 
-      test "non-empty set" (fun () -> {
-        assert_false (Set.is_empty (Set.from_list [1]))
-      })
-    })
+      test
+        "non-empty set"
+        (fun () -> assert_false (Set.is_empty (Set.from_list [1])))
+    )
 
-    describe "union" (fun () -> {
-      test "combines two sets" (fun () -> {
+    describe "union" (fun () ->
+      test "combines two sets" (fun () ->
         let a = Set.from_list [1, 2, 3]
         let b = Set.from_list [3, 4, 5]
         assert_eq (Set.size (Set.union a b)) 5
-      })
+      )
 
-      test "union with empty" (fun () -> {
+      test "union with empty" (fun () ->
         let s = Set.from_list [1, 2]
         assert_eq (Set.size (Set.union s (Set.new ()))) 2
-      })
+      )
 
-      test "union with self" (fun () -> {
+      test "union with self" (fun () ->
         let s = Set.from_list [1, 2, 3]
         assert_eq (Set.size (Set.union s s)) 3
-      })
-    })
+      )
+    )
 
-    describe "intersection" (fun () -> {
-      test "common elements" (fun () -> {
+    describe "intersection" (fun () ->
+      test "common elements" (fun () ->
         let a = Set.from_list [1, 2, 3]
         let b = Set.from_list [2, 3, 4]
         let i = Set.intersection a b
         assert_eq (Set.size i) 2
         assert_true (Set.member 2 i)
         assert_true (Set.member 3 i)
-      })
+      )
 
-      test "disjoint sets" (fun () -> {
+      test "disjoint sets" (fun () ->
         let a = Set.from_list [1, 2]
         let b = Set.from_list [3, 4]
         assert_true (Set.is_empty (Set.intersection a b))
-      })
-    })
+      )
+    )
 
-    describe "difference" (fun () -> {
-      test "elements in first but not second" (fun () -> {
+    describe "difference" (fun () ->
+      test "elements in first but not second" (fun () ->
         let a = Set.from_list [1, 2, 3]
         let b = Set.from_list [2, 3, 4]
         let d = Set.difference a b
         assert_eq (Set.size d) 1
         assert_true (Set.member 1 d)
-      })
+      )
 
-      test "difference with empty" (fun () -> {
+      test "difference with empty" (fun () ->
         let s = Set.from_list [1, 2, 3]
         assert_eq (Set.size (Set.difference s (Set.new ()))) 3
-      })
-    })
+      )
+    )
 
-    describe "symmetric_difference" (fun () -> {
-      test "elements in either but not both" (fun () -> {
+    describe "symmetric_difference" (fun () ->
+      test "elements in either but not both" (fun () ->
         let a = Set.from_list [1, 2, 3]
         let b = Set.from_list [2, 3, 4, 5]
         let sd = Set.symmetric_difference a b
@@ -150,77 +142,76 @@ tests () = {
         assert_true (Set.member 1 sd)
         assert_true (Set.member 4 sd)
         assert_true (Set.member 5 sd)
-      })
+      )
 
-      test "identical sets" (fun () -> {
+      test "identical sets" (fun () ->
         let s = Set.from_list [1, 2, 3]
         assert_true (Set.is_empty (Set.symmetric_difference s s))
-      })
-    })
+      )
+    )
 
-    describe "is_subset" (fun () -> {
-      test "true when subset" (fun () -> {
-        assert_true (Set.is_subset (Set.from_list [
-          1,
-          2,
-        ]) (Set.from_list [1, 2, 3]))
-      })
+    describe "is_subset" (fun () ->
+      test
+        "true when subset"
+        (fun () ->
+          assert_true
+            (Set.is_subset (Set.from_list [1, 2]) (Set.from_list [1, 2, 3])))
 
-      test "false when not subset" (fun () -> {
-        assert_false (Set.is_subset (Set.from_list [
-          1,
-          99,
-        ]) (Set.from_list [1, 2, 3]))
-      })
+      test
+        "false when not subset"
+        (fun () ->
+          assert_false
+            (Set.is_subset (Set.from_list [1, 99]) (Set.from_list [1, 2, 3])))
 
-      test "empty is subset of anything" (fun () -> {
-        assert_true (Set.is_subset (Set.new ()) (Set.from_list [1, 2]))
-      })
+      test
+        "empty is subset of anything"
+        (fun () ->
+          assert_true (Set.is_subset (Set.new ()) (Set.from_list [1, 2])))
 
-      test "set is subset of itself" (fun () -> {
+      test "set is subset of itself" (fun () ->
         let s = Set.from_list [1, 2, 3]
         assert_true (Set.is_subset s s)
-      })
-    })
+      )
+    )
 
-    describe "map" (fun () -> {
-      test "transforms elements" (fun () -> {
+    describe "map" (fun () ->
+      test "transforms elements" (fun () ->
         let s = Set.from_list [1, 2, 3] |> Set.map (fun x -> x * 10)
         assert_eq (Set.size s) 3
         assert_true (Set.member 10 s)
         assert_true (Set.member 20 s)
         assert_true (Set.member 30 s)
-      })
+      )
 
-      test "may reduce size on collisions" (fun () -> {
+      test "may reduce size on collisions" (fun () ->
         let s = Set.from_list [1, 2, 3] |> Set.map (fun _ -> 0)
         assert_eq (Set.size s) 1
-      })
-    })
+      )
+    )
 
-    describe "filter" (fun () -> {
-      test "keeps matching elements" (fun () -> {
+    describe "filter" (fun () ->
+      test "keeps matching elements" (fun () ->
         let s = Set.from_list [1, 2, 3, 4, 5] |> Set.filter (fun x -> x > 3)
         assert_eq (Set.size s) 2
         assert_true (Set.member 4 s)
         assert_true (Set.member 5 s)
-      })
+      )
 
-      test "no matches gives empty" (fun () -> {
+      test "no matches gives empty" (fun () ->
         let s = Set.from_list [1, 2, 3] |> Set.filter (fun x -> x > 10)
         assert_true (Set.is_empty s)
-      })
-    })
+      )
+    )
 
-    describe "fold" (fun () -> {
-      test "accumulates over elements" (fun () -> {
+    describe "fold" (fun () ->
+      test "accumulates over elements" (fun () ->
         let total = Set.fold (fun acc x -> acc + x) 0 (Set.from_list [1, 2, 3])
         assert_eq total 6
-      })
+      )
 
-      test "empty set returns init" (fun () -> {
-        assert_eq (Set.fold (fun acc x -> acc + x) 42 (Set.new ())) 42
-      })
-    })
-  })
-}
+      test
+        "empty set returns init"
+        (fun () ->
+          assert_eq (Set.fold (fun acc x -> acc + x) 42 (Set.new ())) 42)
+    )
+  )

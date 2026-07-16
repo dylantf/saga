@@ -4,22 +4,19 @@
 # Different handlers can catch failures and transform the error
 # into a result value.
 
-effect Fail e {
+effect Fail e
   fun fail : (err: e) -> a
-}
 
 fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail String}
 safe_div _ 0 = fail! "division by zero"
 safe_div x y = x / y
 
-handler to_result for Fail a {
+handler to_result for Fail a
   fail msg = Err msg
   return value = Ok value
-}
 
-handler to_default for Fail String {
+handler to_default for Fail String
   fail _ = 0
-}
 
 fun test_result : (x: Int) -> (y: Int) -> Result Int String
 test_result x y = safe_div x y with to_result
@@ -27,8 +24,7 @@ test_result x y = safe_div x y with to_result
 fun test_default : (x: Int) -> (y: Int) -> Int
 test_default x y = safe_div x y with to_default
 
-main () = {
+main () =
   dbg (debug (test_result 10 2))
   dbg (debug (test_result 10 0))
   dbg (show (test_default 10 0))
-}

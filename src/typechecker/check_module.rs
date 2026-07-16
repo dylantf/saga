@@ -969,6 +969,16 @@ impl Checker {
                 .impls
                 .entry(key.clone())
                 .or_insert_with(|| info.clone());
+            // A Std module may have reached the cache transitively before it
+            // is imported directly by the prelude. Keep its impls in the base
+            // layer on both paths so later builtin module checkers do not
+            // depend on prelude import order.
+            if module_name.starts_with("Std.") {
+                self.modules
+                    .base_trait_impls
+                    .entry(key.clone())
+                    .or_insert_with(|| info.clone());
+            }
         }
 
         // Effects: always register under both bare and qualified forms in

@@ -3,13 +3,11 @@ module Std.Int
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
-impl Show for Int {
+impl Show for Int
   show x = to_string x
-}
 
-impl Debug for Int {
+impl Debug for Int
   debug x = to_string x
-}
 
 #@ Converts an integer to a float.
 @external("erlang", "erlang", "float")
@@ -44,7 +42,9 @@ mod x y = x % y
 
 #@ Returns the absolute value.
 pub fun abs : Int -> Int
-abs x = if x < 0 then 0 - x else x
+abs x =
+  if x < 0 then 0 - x
+  else x
 
 #@ Returns the smaller of two integers.
 pub fun min : Int -> Int -> Int
@@ -60,7 +60,10 @@ clamp low high x = min high (max low x)
 
 #@ Returns -1 for negative, 0 for zero, 1 for positive.
 pub fun sign : Int -> Int
-sign x = if x < 0 then 0 - 1 else if x > 0 then 1 else 0
+sign x =
+  if x < 0 then 0 - 1
+  else if x > 0 then 1
+  else 0
 
 # --- Bitwise operations ---
 

@@ -1,21 +1,21 @@
 # --- Insertion sort ---
 
-insert_sorted x xs = case xs {
-  [] -> [x]
-  h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
-}
+insert_sorted x xs =
+  case xs of
+    [] -> [x]
+    h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
 
 insertion_sort xs = List.foldl (fun sorted x -> insert_sorted x sorted) [] xs
 
 # --- Bubble sort ---
 
-bubble_pass xs = case xs {
-  [] -> []
-  [x] -> [x]
-  x :: y :: rest ->
-    if x <= y then x :: bubble_pass (y :: rest)
-    else y :: bubble_pass (x :: rest)
-}
+bubble_pass xs =
+  case xs of
+    [] -> []
+    [x] -> [x]
+    x :: y :: rest ->
+      if x <= y then x :: bubble_pass (y :: rest)
+      else y :: bubble_pass (x :: rest)
 
 bubble_times n xs =
   if n == 0 then xs
@@ -25,52 +25,48 @@ bubblesort xs = bubble_times (List.length xs) xs
 
 # --- Quicksort ---
 
-quicksort xs = case xs {
-  [] -> []
-  h :: t -> {
-    let lte x = x <= h
-    let gt x = x > h
-    let smaller = List.filter lte t
-    let larger = List.filter gt t
-    List.append (quicksort smaller) (h :: quicksort larger)
-  }
-}
+quicksort xs =
+  case xs of
+    [] -> []
+    h :: t ->
+      let lte x = x <= h
+      let gt x = x > h
+      let smaller = List.filter lte t
+      let larger = List.filter gt t
+      List.append (quicksort smaller) (h :: quicksort larger)
 
 # --- Merge sort ---
 
 record Split { left: List Int, right: List Int }
 
-split xs = case xs {
-  [] -> Split { left: [], right: [] }
-  [x] -> Split { left: [x], right: [] }
-  x :: y :: rest -> {
-    let s = split rest
-    Split { left: x :: s.left, right: y :: s.right }
-  }
-}
+split xs =
+  case xs of
+    [] -> Split { left: [], right: [] }
+    [x] -> Split { left: [x], right: [] }
+    x :: y :: rest ->
+      let s = split rest
+      Split { left: x :: s.left, right: y :: s.right }
 
-merge xs ys = case xs {
-  [] -> ys
-  h :: t -> case ys {
-    [] -> xs
-    h2 :: t2 -> if h <= h2 then h :: merge t ys else h2 :: merge xs t2
-  }
-}
+merge xs ys =
+  case xs of
+    [] -> ys
+    h :: t ->
+      case ys of
+        [] -> xs
+        h2 :: t2 -> if h <= h2 then h :: merge t ys else h2 :: merge xs t2
 
-mergesort xs = case xs {
-  [] -> []
-  [x] -> [x]
-  _ -> {
-    let s = split xs
-    merge (mergesort s.left) (mergesort s.right)
-  }
-}
+mergesort xs =
+  case xs of
+    [] -> []
+    [x] -> [x]
+    _ ->
+      let s = split xs
+      merge (mergesort s.left) (mergesort s.right)
 
-main () = {
+main () =
   let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
 
   insertion_sort nums |> dbg
   bubblesort nums |> dbg
   quicksort nums |> dbg
   mergesort nums |> dbg
-}

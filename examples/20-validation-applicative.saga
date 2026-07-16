@@ -1,9 +1,8 @@
 # An example of how to get applicative chaining style validation
 # through a Validate effect with continuations holding an accumulator
 
-effect Validate {
+effect Validate
   fun invalid : (err: String) -> Unit
-}
 
 fun require_non_empty : (label: String) -> (value: String) -> Unit
   needs {Validate}
@@ -23,40 +22,34 @@ type Validation e a =
   | Valid a
   | Invalid e
 
-impl Debug for Validation e a where {e: Debug, a: Debug} {
-  debug v = case v {
-    Valid x -> $"Valid: {debug x}"
-    Invalid e -> $"Invalid: {debug e}"
-  }
-}
+impl Debug for Validation e a where {e: Debug, a: Debug}
+  debug v =
+    case v of
+      Valid x -> $"Valid: {debug x}"
+      Invalid e -> $"Invalid: {debug e}"
 
-handler collecting for Validate {
-  invalid err = {
+handler collecting for Validate
+  invalid err =
     let (v, errs) = resume ()
     (v, err :: errs)
-  }
   return v = (v, [])
-}
 
 fun validate_user : UserInput -> Validation (List String) ValidUser
-validate_user input = {
-  let (v, errs) = {
+validate_user input =
+  let (v, errs) =
     require_non_empty "name" input.name
     require_min_age 18 input.age
     ValidUser { name: input.name, age: input.age }
-  } with collecting
+  with collecting
 
-  case errs {
+  case errs of
     [] -> Valid v
     _ -> Invalid errs
-  }
-}
 
-main () = {
+main () =
   let print_result = validate_user >> debug >> dbg
 
   print_result (UserInput { name: "Alice", age: 25 })
   print_result (UserInput { name: "", age: 25 })
   print_result (UserInput { name: "Bob", age: 15 })
   print_result (UserInput { name: "", age: 15 })
-}

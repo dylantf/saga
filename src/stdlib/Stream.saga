@@ -12,16 +12,14 @@ pub type Stream a = Stream (Unit -> Step a)
 
 #@ Producer effect. A function that performs `yield!` can be turned into
 #@ a Stream via `from_gen`.
-pub effect Gen a {
+pub effect Gen a
   fun yield : a -> Unit
-}
 
 #@ Handler that converts a Gen-style producer into a Stream. Each `yield!`
 #@ captures the continuation and packages it as the next Stream cell.
-pub handler stream_of for Gen a {
+pub handler stream_of for Gen a
   yield v = More v (Stream (fun () -> resume ()))
   return _ = Done
-}
 
 # ---------- Constructors ----------
 
@@ -45,10 +43,10 @@ singleton x = Stream (fun () -> More x (empty ()))
 
 #@ Convert a list into a stream.
 pub fun from_list : List a -> Stream a
-from_list xs = Stream (fun () -> case xs {
-  [] -> Done
-  h :: t -> More h (from_list t)
-})
+from_list xs =
+  Stream (fun () -> case xs of
+    [] -> Done
+    h :: t -> More h (from_list t))
 
 #@ An infinite stream that yields the same value forever.
 pub fun repeat : a -> Stream a
@@ -61,9 +59,11 @@ iterate f x = Stream (fun () -> More x (iterate f (f x)))
 
 #@ A finite stream of integers from `lo` (inclusive) to `hi` (exclusive).
 pub fun range : Int -> Int -> Stream Int
-range lo hi = Stream (fun () ->
-  if lo >= hi then Done
-  else More lo (range (lo + 1) hi))
+range lo hi =
+  Stream
+    (fun () ->
+      if lo >= hi then Done
+      else More lo (range (lo + 1) hi))
 
 #@ An infinite stream of integers starting at `lo`.
 pub fun range_from : Int -> Stream Int
@@ -74,127 +74,128 @@ range_from lo = Stream (fun () -> More lo (range_from (lo + 1)))
 #@ Pull the next element. Returns `Nothing` if the stream is exhausted,
 #@ or `Just (value, rest)` if a value is available.
 pub fun next : Stream a -> Maybe (a, Stream a)
-next (Stream pull) = case pull () {
-  Done -> Nothing
-  More v rest -> Just (v, rest)
-}
+next (Stream pull) =
+  case pull () of
+    Done -> Nothing
+    More v rest -> Just (v, rest)
 
 #@ Returns True if the stream has no more elements.
 pub fun is_empty : Stream a -> Bool
-is_empty (Stream pull) = case pull () {
-  Done -> True
-  More _ _ -> False
-}
+is_empty (Stream pull) =
+  case pull () of
+    Done -> True
+    More _ _ -> False
 
 # ---------- Transformations ----------
 
 #@ Apply `f` to each element. Lazy: nothing is computed until pulled.
 pub fun map : (a -> b) -> Stream a -> Stream b
-map f (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More v rest -> More (f v) (map f rest)
-})
+map f (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More v rest -> More (f v) (map f rest))
 
 #@ Keep only elements for which `p` returns True. Lazy.
 pub fun filter : (a -> Bool) -> Stream a -> Stream a
-filter p (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More v rest ->
-    if p v then More v (filter p rest)
-    else case filter p rest {
-      Stream pull2 -> pull2 ()
-    }
-})
+filter p (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More v rest ->
+      if p v then More v (filter p rest)
+      else
+        case filter p rest of
+          Stream pull2 -> pull2 ())
 
 #@ Map each element to a stream and concatenate the results.
 pub fun flat_map : (a -> Stream b) -> Stream a -> Stream b
-flat_map f (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More v rest ->
-    case append (f v) (flat_map f rest) {
-      Stream pull2 -> pull2 ()
-    }
-})
+flat_map f (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More v rest ->
+      case append (f v) (flat_map f rest) of
+        Stream pull2 -> pull2 ())
 
 #@ Concatenate two streams. The second is only pulled once the first is exhausted.
 pub fun append : Stream a -> Stream a -> Stream a
-append (Stream pull) ys = Stream (fun () -> case pull () {
-  Done -> case ys { Stream pull2 -> pull2 () }
-  More v rest -> More v (append rest ys)
-})
+append (Stream pull) ys =
+  Stream (fun () -> case pull () of
+    Done ->
+      case ys of
+        Stream pull2 -> pull2 ()
+    More v rest -> More v (append rest ys))
 
 #@ Pair up two streams element-wise. Stops when either runs out.
 pub fun zip : Stream a -> Stream b -> Stream (a, b)
-zip (Stream pa) (Stream pb) = Stream (fun () -> case pa () {
-  Done -> Done
-  More a ra -> case pb () {
+zip (Stream pa) (Stream pb) =
+  Stream (fun () -> case pa () of
     Done -> Done
-    More b rb -> More (a, b) (zip ra rb)
-  }
-})
+    More a ra ->
+      case pb () of
+        Done -> Done
+        More b rb -> More (a, b) (zip ra rb))
 
 # ---------- Slicing ----------
 
 #@ Take the first `n` elements.
 pub fun take : Int -> Stream a -> Stream a
 take 0 _ = Stream (fun () -> Done)
-take n (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More v rest -> More v (take (n - 1) rest)
-})
+take n (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More v rest -> More v (take (n - 1) rest))
 
 #@ Skip the first `n` elements.
 pub fun drop : Int -> Stream a -> Stream a
 drop 0 s = s
-drop n (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More _ rest -> case drop (n - 1) rest {
-    Stream pull2 -> pull2 ()
-  }
-})
+drop n (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More _ rest ->
+      case drop (n - 1) rest of
+        Stream pull2 -> pull2 ())
 
 #@ Take elements while `p` returns True; stop at the first False.
 pub fun take_while : (a -> Bool) -> Stream a -> Stream a
-take_while p (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More v rest -> if p v then More v (take_while p rest) else Done
-})
+take_while p (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More v rest -> if p v then More v (take_while p rest) else Done)
 
 #@ Skip elements while `p` returns True; yield the rest including the first False.
 pub fun drop_while : (a -> Bool) -> Stream a -> Stream a
-drop_while p (Stream pull) = Stream (fun () -> case pull () {
-  Done -> Done
-  More v rest ->
-    if p v then case drop_while p rest {
-      Stream pull2 -> pull2 ()
-    } else More v rest
-})
+drop_while p (Stream pull) =
+  Stream (fun () -> case pull () of
+    Done -> Done
+    More v rest ->
+      if p v then
+        case drop_while p rest of
+          Stream pull2 -> pull2 ()
+      else More v rest)
 
 # ---------- Consumers ----------
 
 #@ Materialize the stream into a list. Will not terminate on infinite streams.
 pub fun to_list : Stream a -> List a
-to_list (Stream pull) = case pull () {
-  Done -> []
-  More v rest -> v :: to_list rest
-}
+to_list (Stream pull) =
+  case pull () of
+    Done -> []
+    More v rest -> v :: to_list rest
 
 #@ Left fold over the stream.
 pub fun fold : (b -> a -> b) -> b -> Stream a -> b
-fold f acc (Stream pull) = case pull () {
-  Done -> acc
-  More v rest -> fold f (f acc v) rest
-}
+fold f acc (Stream pull) =
+  case pull () of
+    Done -> acc
+    More v rest -> fold f (f acc v) rest
 
 #@ Run `f` for every element, in order. The callback may use any effects.
 pub fun for_each : (a -> Unit needs {..e}) -> Stream a -> Unit needs {..e}
-for_each f (Stream pull) = case pull () {
-  Done -> ()
-  More v rest -> {
-    f v
-    for_each f rest
-  }
-}
+for_each f (Stream pull) =
+  case pull () of
+    Done -> ()
+    More v rest ->
+      f v
+      for_each f rest
 
 #@ Count the elements. Will not terminate on infinite streams.
 pub fun length : Stream a -> Int

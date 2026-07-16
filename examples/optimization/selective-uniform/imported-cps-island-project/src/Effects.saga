@@ -1,8 +1,7 @@
 module Effects
 
-pub effect ReadInt {
+pub effect ReadInt
   fun read : Unit -> Int
-}
 
 pub fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()

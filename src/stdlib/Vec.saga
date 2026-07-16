@@ -10,7 +10,7 @@ opaque type MutVec a = MutVec a
 
 #@ Mutable vector effect. Provides efficient O(1) indexed access and
 #@ mutation backed by ETS composite keys.
-pub effect Vec {
+pub effect Vec
   fun vec_new : Unit -> MutVec a
   fun vec_push : MutVec a -> a -> Unit
   fun vec_get : MutVec a -> Int -> a
@@ -19,10 +19,8 @@ pub effect Vec {
   fun vec_len : MutVec a -> Int
   fun freeze : MutVec a -> List a
   fun thaw : List a -> MutVec a
-}
 
 #@ ETS-backed handler. Elements are stored in a dedicated `saga_vec_store`
 #@ named ETS table with composite keys {VecId, Index}.
-pub handler beam_vec for Vec {
+pub handler beam_vec for Vec
   # Compiler builtin — ops lower to ETS calls with composite keys.
-}

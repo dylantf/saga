@@ -6,11 +6,10 @@ record User {
   age: Int,
 }
 
-impl Show for User {
+impl Show for User
   show user = user.name
-}
 
-main () = {
+main () =
   let alice = User { name: "Alice", age: 30 }
   let bob = User { name: "Bob", age: 25 }
 
@@ -25,4 +24,3 @@ main () = {
   let nums = [1, 2, 3, 4, 5]
   dbg $"List has {List.length nums} elements."
   dbg $"Sum: {List.foldl (fun acc x -> acc + x) 0 nums}"
-}

@@ -3,6 +3,236 @@ use crate::ast::*;
 use crate::token::{Span, Token};
 
 impl Parser {
+    /// Parse an expression body following `=`, `->`, `then`, or another
+    /// explicit body introducer. A body on the same line is a single
+    /// expression; a body beginning on the next line is a layout block.
+    pub(super) fn parse_expr_body(
+        &mut self,
+        owner_indent: usize,
+        context: &str,
+    ) -> Result<Expr, ParseError> {
+        if self.next_on_new_line() {
+            self.parse_layout_block(owner_indent, context, true)
+        } else {
+            self.parse_expr(0)
+        }
+    }
+
+    fn parse_branch_body(
+        &mut self,
+        owner_indent: usize,
+        context: &str,
+    ) -> Result<Expr, ParseError> {
+        if self.next_on_new_line() {
+            self.parse_layout_block(owner_indent, context, false)
+        } else {
+            self.parse_expr(0)
+        }
+    }
+
+    fn parse_layout_block(
+        &mut self,
+        owner_indent: usize,
+        context: &str,
+        attach_with: bool,
+    ) -> Result<Expr, ParseError> {
+        let indent = self.begin_layout(owner_indent, context)?;
+        let block_start = self.tokens[self.pos].span;
+        let mut stmts = Vec::new();
+
+        while self.layout_has_item(indent) {
+            if self.next_on_new_line() && !self.next_after_semicolon() {
+                if self.next_column() < indent {
+                    break;
+                }
+                self.require_layout_item(indent, context)?;
+            }
+
+            let start = self.pos;
+            let stmt = self.parse_stmt()?;
+            let trailing_comment = self.take_trailing_comment(self.pos - 1);
+            stmts.push(Annotated {
+                node: stmt,
+                leading_trivia: self.take_leading_trivia(start),
+                trailing_comment,
+                trailing_trivia: vec![],
+            });
+
+            // A parser bug or malformed construct must not leave us spinning
+            // within the layout loop.
+            if self.pos == start {
+                return Err(ParseError {
+                    message: format!("could not make progress while parsing {}", context),
+                    span: self.tokens[self.pos].span,
+                });
+            }
+        }
+
+        if stmts.is_empty() {
+            return Err(ParseError {
+                message: format!("{} body cannot be empty", context),
+                span: self.tokens[self.pos].span,
+            });
+        }
+        let collapse_single_expr = stmts.len() == 1
+            && stmts[0].leading_trivia.is_empty()
+            && stmts[0].trailing_comment.is_none()
+            && stmts[0].trailing_trivia.is_empty();
+        let mut expr = if collapse_single_expr {
+            match stmts.pop().unwrap().node {
+                Stmt::Expr(expr) => expr,
+                stmt => {
+                    let end = match &stmt {
+                        Stmt::Let { span, .. } | Stmt::LetFun { span, .. } => *span,
+                        Stmt::Expr(expr) => expr.span,
+                    };
+                    Expr {
+                        id: self.next_id(),
+                        span: block_start.to(end),
+                        kind: ExprKind::Block {
+                            stmts: vec![Annotated::bare(stmt)],
+                            dangling_trivia: vec![],
+                        },
+                    }
+                }
+            }
+        } else {
+            let last = stmts.last().unwrap();
+            let end = match &last.node {
+                Stmt::Let { span, .. } | Stmt::LetFun { span, .. } => *span,
+                Stmt::Expr(expr) => expr.span,
+            };
+            Expr {
+                id: self.next_id(),
+                span: block_start.to(end),
+                kind: ExprKind::Block {
+                    stmts,
+                    dangling_trivia: vec![],
+                },
+            }
+        };
+
+        // A `with` aligned with the construct that opened this layout block
+        // applies to the completed block, not merely its last statement.
+        if attach_with
+            && matches!(self.peek(), Token::With)
+            && self.next_on_new_line()
+            && self.next_column() == owner_indent
+        {
+            self.advance();
+            let handler = self.parse_handler_ref(owner_indent)?;
+            let end = self.tokens[self.pos.saturating_sub(1)].span;
+            let span = expr.span.to(end);
+            expr = Expr {
+                id: self.next_id(),
+                span,
+                kind: ExprKind::With {
+                    expr: Box::new(expr),
+                    handler: Box::new(handler),
+                },
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        if !matches!(self.peek(), Token::Let) {
+            return Ok(Stmt::Expr(self.parse_expr(0)?));
+        }
+
+        let owner_indent = self.current_line_indent();
+        let let_start = self.tokens[self.pos].span;
+        self.advance(); // consume `let`
+        let is_assert = matches!(self.peek(), Token::Ident(s) if s == "assert");
+        if is_assert {
+            self.advance();
+        }
+        let pattern = self.parse_pattern()?;
+
+        // Local function definition: `let f x y = body`.
+        if let Pat::Var {
+            name,
+            span: fn_name_span,
+            ..
+        } = &pattern
+            && !matches!(self.peek(), Token::Eq | Token::Colon)
+        {
+            let fun_name = name.clone();
+            let fn_name_span = *fn_name_span;
+            let mut params = Vec::new();
+            while !matches!(self.peek(), Token::Eq | Token::When | Token::Eof) {
+                params.push(self.parse_pattern()?);
+            }
+            let guard = if matches!(self.peek(), Token::When) {
+                self.advance();
+                Some(Box::new(self.parse_expr(0)?))
+            } else {
+                None
+            };
+            self.expect(Token::Eq)?;
+            let body = self.parse_expr_body(owner_indent, "local function")?;
+            let stmt_span = let_start.to(body.span);
+            return Ok(Stmt::LetFun {
+                id: NodeId::fresh(),
+                name: fun_name,
+                name_span: fn_name_span,
+                params,
+                guard,
+                body,
+                span: stmt_span,
+            });
+        }
+
+        let annotation =
+            if matches!(self.peek(), Token::Colon) && matches!(pattern, Pat::Var { .. }) {
+                self.advance();
+                Some(self.parse_type_expr()?)
+            } else {
+                None
+            };
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr_body(owner_indent, "let binding")?;
+        let stmt_span = let_start.to(value.span);
+        Ok(Stmt::Let {
+            pattern,
+            annotation,
+            value,
+            assert: is_assert,
+            span: stmt_span,
+        })
+    }
+
+    fn parse_case_arm(&mut self, arm_indent: usize) -> Result<Annotated<CaseArm>, ParseError> {
+        let start = self.pos;
+        let arm_start = self.tokens[self.pos].span;
+        let pattern = self.parse_pattern()?;
+        let guard = if matches!(self.peek(), Token::When) {
+            self.advance();
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
+        self.expect(Token::Arrow)?;
+        let body = self.parse_expr_body(arm_indent, "case arm")?;
+        let end_span = body.span.end;
+        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+        Ok(Annotated {
+            node: CaseArm {
+                pattern,
+                guard,
+                body,
+                span: Span {
+                    start: arm_start.start,
+                    end: end_span,
+                },
+            },
+            leading_trivia: self.take_leading_trivia(start),
+            trailing_comment,
+            trailing_trivia: vec![],
+        })
+    }
+
     /// Parse record fields: `field: expr, field2: expr2, ...`
     /// Handles recovery for incomplete fields (missing `:` or value) so that
     /// the rest of the file can still be parsed for LSP features.
@@ -149,6 +379,7 @@ impl Parser {
     ///     6 = multiplication * /
     ///     (function application is handled separately, above all binary ops)
     pub fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        let owner_indent = self.current_line_indent();
         let mut left = self.parse_application()?;
 
         loop {
@@ -375,9 +606,11 @@ impl Parser {
         }
 
         // `with` has lowest precedence - checked after all binary ops
-        if matches!(self.peek(), Token::With) && !self.next_on_new_line() {
+        if matches!(self.peek(), Token::With)
+            && (!self.next_on_new_line() || self.next_column() == owner_indent)
+        {
             self.advance();
-            let handler = self.parse_handler_ref()?;
+            let handler = self.parse_handler_ref(owner_indent)?;
             let end = self.tokens[self.pos - 1].span;
             let span = left.span.to(end);
             left = Expr {
@@ -412,14 +645,24 @@ impl Parser {
     /// Function application: `f x y` -> App(App(f, x), y)
     /// Greedily consumes arguments while the next token can start a primary.
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
-        let head_column = self.next_column();
+        let head_pos = self.pos;
+        let head_column = self.legacy_statement_indent.map_or_else(
+            || self.current_line_indent(),
+            |floor| floor.max(self.current_line_indent()),
+        );
+        let soft_delimited_line = head_pos > 0
+            && matches!(
+                self.tokens[head_pos - 1].token,
+                Token::LParen | Token::LBracket | Token::Comma
+            );
         let mut expr = self.parse_postfix()?;
 
         while self.can_start_primary()
             && (!self.next_on_new_line()
                 || (!self.next_after_semicolon()
                     && !self.next_starts_blank_line()
-                    && self.next_column() >= head_column + 2))
+                    && (self.next_column() >= head_column + 2
+                        || (soft_delimited_line && self.next_column() >= head_column))))
         {
             let arg = self.parse_postfix()?;
             let span = expr.span.to(arg.span);
@@ -673,6 +916,22 @@ impl Parser {
             && matches!(self.peek_at(i + 1), Token::Comma | Token::RBrace)
     }
 
+    fn is_layout_named_handler_ref(&self, item_indent: usize) -> bool {
+        let mut i = 0;
+        while matches!(self.peek_at(i), Token::UpperIdent(_) | Token::Ident(_))
+            && matches!(self.peek_at(i + 1), Token::Dot)
+        {
+            i += 2;
+        }
+        if !matches!(self.peek_at(i), Token::Ident(_)) {
+            return false;
+        }
+        let next = self.pos + i + 1;
+        next >= self.tokens.len()
+            || matches!(self.tokens[next].token, Token::Eof)
+            || (self.tokens[next].preceded_by_newline && self.tokens[next].column <= item_indent)
+    }
+
     /// Parse a named handler ref: a (possibly module-qualified) dotted path.
     fn parse_named_handler_ref(&mut self) -> Result<Annotated<HandlerItem>, ParseError> {
         let start = self.pos;
@@ -714,6 +973,7 @@ impl Parser {
     /// Parse an inline handler arm: `[Qualifier.]op params = body [finally cleanup]`
     fn parse_inline_handler_arm(&mut self) -> Result<Annotated<HandlerItem>, ParseError> {
         let start = self.pos;
+        let owner_indent = self.current_line_indent();
         let arm_start = self.tokens[self.pos].span;
 
         // Check for qualified name: `Effect.op` (UpperIdent.Ident)
@@ -741,13 +1001,13 @@ impl Parser {
             params.push(self.parse_pattern()?);
         }
         self.expect(Token::Eq)?;
-        let body = self.parse_expr(0)?;
+        let body = self.parse_expr_body(owner_indent, "handler arm")?;
         let mut arm_end = body.span;
 
         // Parse optional `finally { cleanup }` block
         let finally_block = if matches!(self.peek(), Token::Finally) {
             self.advance(); // consume 'finally'
-            let fb = self.parse_expr(0)?;
+            let fb = self.parse_expr_body(owner_indent, "finally")?;
             arm_end = fb.span;
             Some(Box::new(fb))
         } else {
@@ -774,11 +1034,12 @@ impl Parser {
     /// Parse a return clause: `return param = body`
     fn parse_return_clause(&mut self) -> Result<Annotated<HandlerItem>, ParseError> {
         let start = self.pos;
+        let owner_indent = self.current_line_indent();
         let arm_start = self.tokens[self.pos].span;
         self.advance(); // consume 'return'
         let param = self.parse_pattern()?;
         self.expect(Token::Eq)?;
-        let body = self.parse_expr(0)?;
+        let body = self.parse_expr_body(owner_indent, "handler return")?;
         let arm_end = body.span;
         let trailing_comment = self.take_trailing_comment(self.pos - 1);
         Ok(Annotated {
@@ -808,7 +1069,7 @@ impl Parser {
     /// Parses the handler reference after `with`:
     /// - `with console_log` -> Handler::Named
     /// - `with { h1, h2, op args -> body }` -> Handler::Inline
-    pub(super) fn parse_handler_ref(&mut self) -> Result<Handler, ParseError> {
+    pub(super) fn parse_handler_ref(&mut self, owner_indent: usize) -> Result<Handler, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
             self.advance(); // consume '{'
 
@@ -858,6 +1119,39 @@ impl Parser {
                 items,
                 dangling_trivia,
             })
+        } else if self.next_on_new_line() {
+            let item_indent = self.begin_layout(owner_indent, "with")?;
+            let mut items: Vec<Annotated<HandlerItem>> = Vec::new();
+            while self.layout_has_item(item_indent) {
+                self.require_layout_item(item_indent, "with")?;
+                if matches!(self.peek(), Token::Return) {
+                    if Self::current_inline_segment_has_return(&items) {
+                        return Err(ParseError {
+                            message: "inline handler segment may contain at most one return clause"
+                                .to_string(),
+                            span: self.tokens[self.pos].span,
+                        });
+                    }
+                    items.push(self.parse_return_clause()?);
+                } else if self.is_layout_named_handler_ref(item_indent) {
+                    items.push(self.parse_named_handler_ref()?);
+                } else {
+                    items.push(self.parse_inline_handler_arm()?);
+                }
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
+            }
+            if items.is_empty() {
+                return Err(ParseError {
+                    message: "with body cannot be empty".to_string(),
+                    span: self.tokens[self.pos].span,
+                });
+            }
+            Ok(Handler::Inline {
+                items,
+                dangling_trivia: vec![],
+            })
         } else {
             // Single named handler: `with console_log` or `with DateTime.system_clock`
             let handler_span = self.tokens[self.pos].span;
@@ -887,6 +1181,7 @@ impl Parser {
 
     pub(super) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let span = self.tokens[self.pos].span;
+        let owner_indent = self.current_line_indent();
 
         match self.advance() {
             Token::True => Ok(Expr {
@@ -1140,7 +1435,7 @@ impl Parser {
                 }
                 self.expect(Token::Arrow)?;
 
-                let body = self.parse_expr(0)?;
+                let body = self.parse_expr_body(owner_indent, "lambda")?;
                 let end_span = body.span;
 
                 Ok(Expr {
@@ -1199,105 +1494,52 @@ impl Parser {
                     });
                 }
 
-                let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
-                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                    let start = self.pos;
-                    let stmt = if matches!(self.peek(), Token::Let) {
-                        let let_start = self.tokens[self.pos].span;
-                        self.advance(); // consume 'let'
-                        let is_assert = matches!(self.peek(), Token::Ident(s) if s == "assert");
-                        if is_assert {
-                            self.advance(); // consume 'assert'
-                        }
-                        let pattern = self.parse_pattern()?;
-
-                        // Check for local function definition: `let f x y = body`
-                        // If the first pattern is a variable and next token is NOT
-                        // `=` or `:`, we have parameter patterns following the name.
-                        if let Pat::Var {
-                            name,
-                            span: fn_name_span,
-                            ..
-                        } = &pattern
-                            && !matches!(self.peek(), Token::Eq | Token::Colon)
-                        {
-                            let fun_name = name.clone();
-                            let fn_name_span = *fn_name_span;
-                            let mut params = Vec::new();
-                            while !matches!(self.peek(), Token::Eq | Token::When | Token::Eof) {
-                                params.push(self.parse_pattern()?);
-                            }
-                            let guard = if matches!(self.peek(), Token::When) {
-                                self.advance();
-                                Some(Box::new(self.parse_expr(0)?))
-                            } else {
-                                None
-                            };
-                            self.expect(Token::Eq)?;
-                            let body = self.parse_expr(0)?;
-                            let stmt_span = let_start.to(body.span);
-                            Stmt::LetFun {
-                                id: NodeId::fresh(),
-                                name: fun_name,
-                                name_span: fn_name_span,
-                                params,
-                                guard,
-                                body,
-                                span: stmt_span,
-                            }
-                        } else {
-                            let annotation = if matches!(self.peek(), Token::Colon)
-                                && matches!(pattern, Pat::Var { .. })
-                            {
-                                self.advance(); // consume ':'
-                                Some(self.parse_type_expr()?)
-                            } else {
-                                None
-                            };
-                            self.expect(Token::Eq)?;
-                            let value = self.parse_expr(0)?;
-                            let stmt_span = let_start.to(value.span);
-                            Stmt::Let {
-                                pattern,
-                                annotation,
-                                value,
-                                assert: is_assert,
-                                span: stmt_span,
-                            }
-                        }
-                    } else {
-                        Stmt::Expr(self.parse_expr(0)?)
-                    };
-                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    stmts.push(Annotated {
-                        node: stmt,
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
-                }
-                let dangling_trivia = self.take_leading_trivia(self.pos);
-                let end_span = self.tokens[self.pos].span; // the RBrace
-                self.expect(Token::RBrace)?;
-                Ok(Expr {
-                    id: self.next_id(),
-                    span: span.to(end_span),
-                    kind: ExprKind::Block {
-                        stmts,
-                        dangling_trivia,
-                    },
-                })
+                let statement_indent = if self.next_on_new_line() {
+                    self.next_column()
+                } else {
+                    owner_indent + 2
+                };
+                let previous_indent = self
+                    .legacy_statement_indent
+                    .replace(statement_indent.max(self.legacy_statement_indent.unwrap_or(0)));
+                let result = (|| -> Result<Expr, ParseError> {
+                    let mut stmts: Vec<Annotated<Stmt>> = Vec::new();
+                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        let start = self.pos;
+                        let stmt = self.parse_stmt()?;
+                        let trailing_comment = self.take_trailing_comment(self.pos - 1);
+                        stmts.push(Annotated {
+                            node: stmt,
+                            leading_trivia: self.take_leading_trivia(start),
+                            trailing_comment,
+                            trailing_trivia: vec![],
+                        });
+                    }
+                    let dangling_trivia = self.take_leading_trivia(self.pos);
+                    let end_span = self.tokens[self.pos].span; // the RBrace
+                    self.expect(Token::RBrace)?;
+                    Ok(Expr {
+                        id: self.next_id(),
+                        span: span.to(end_span),
+                        kind: ExprKind::Block {
+                            stmts,
+                            dangling_trivia,
+                        },
+                    })
+                })();
+                self.legacy_statement_indent = previous_indent;
+                result
             }
 
             Token::If => {
                 let cond = self.parse_expr(0)?;
                 self.expect(Token::Then)?;
 
-                let then_branch = self.parse_expr(0)?;
+                let then_branch = self.parse_branch_body(owner_indent, "then")?;
                 let multiline = self.tokens[self.pos].preceded_by_newline;
                 self.expect(Token::Else)?;
 
-                let else_branch = self.parse_expr(0)?;
+                let else_branch = self.parse_branch_body(owner_indent, "else")?;
                 let end_span = else_branch.span;
 
                 Ok(Expr {
@@ -1316,44 +1558,36 @@ impl Parser {
                 self.no_brace_app = true;
                 let scrutinee = self.parse_expr(0)?;
                 self.no_brace_app = false;
-                self.expect(Token::LBrace)?;
-
                 let mut branches = Vec::new();
-                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                    let start = self.pos;
-                    let arm_start = self.tokens[self.pos].span;
-                    let pattern = self.parse_pattern()?;
-
-                    let guard = if matches!(self.peek(), Token::When) {
-                        self.advance();
-                        Some(self.parse_expr(0)?)
-                    } else {
-                        None
-                    };
-
-                    self.expect(Token::Arrow)?;
-                    let body = self.parse_expr(0)?;
-                    let end_span = body.span.end;
-                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    branches.push(Annotated {
-                        node: CaseArm {
-                            pattern,
-                            guard,
-                            body,
-                            span: Span {
-                                start: arm_start.start,
-                                end: end_span,
-                            },
-                        },
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
-                }
-
-                let dangling_trivia = self.take_leading_trivia(self.pos);
-                let end = self.tokens[self.pos].span; // the RBrace
-                self.expect(Token::RBrace)?;
+                let (end, dangling_trivia) = if matches!(self.peek(), Token::Of) {
+                    self.advance();
+                    let arm_indent = self.begin_layout(owner_indent, "case")?;
+                    while self.layout_has_item(arm_indent) {
+                        self.require_layout_item(arm_indent, "case")?;
+                        branches.push(self.parse_case_arm(arm_indent)?);
+                    }
+                    let end =
+                        branches
+                            .last()
+                            .map(|arm| arm.node.span)
+                            .ok_or_else(|| ParseError {
+                                message: "case expression requires at least one arm".to_string(),
+                                span: self.tokens[self.pos].span,
+                            })?;
+                    (end, vec![])
+                } else {
+                    // Legacy braced form, retained so the formatter can migrate
+                    // existing source files in one pass.
+                    self.expect(Token::LBrace)?;
+                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        let arm_indent = self.token_line_indent(self.pos);
+                        branches.push(self.parse_case_arm(arm_indent)?);
+                    }
+                    let dangling = self.take_leading_trivia(self.pos);
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
+                    (end, dangling)
+                };
 
                 Ok(Expr {
                     id: self.next_id(),
@@ -1367,56 +1601,54 @@ impl Parser {
             }
 
             Token::Receive => {
-                self.expect(Token::LBrace)?;
-
                 let mut branches = Vec::new();
                 let mut after_clause = None;
+                let legacy_braces = matches!(self.peek(), Token::LBrace);
+                let body_indent = if legacy_braces {
+                    self.advance();
+                    None
+                } else {
+                    Some(self.begin_layout(owner_indent, "receive")?)
+                };
 
-                while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                while if legacy_braces {
+                    !matches!(self.peek(), Token::RBrace | Token::Eof)
+                } else {
+                    self.layout_has_item(body_indent.unwrap())
+                } {
+                    if let Some(indent) = body_indent {
+                        self.require_layout_item(indent, "receive")?;
+                    }
                     // Check for `after` clause
                     if matches!(self.peek(), Token::After) {
+                        let after_indent = self.current_line_indent();
                         self.advance(); // consume 'after'
                         let timeout = self.parse_expr(0)?;
                         self.expect(Token::Arrow)?;
-                        let body = self.parse_expr(0)?;
+                        let body = self.parse_expr_body(after_indent, "receive after")?;
                         after_clause = Some((Box::new(timeout), Box::new(body)));
                         break; // after must be last
                     }
-
-                    let start = self.pos;
-                    let arm_start = self.tokens[self.pos].span;
-                    let pattern = self.parse_pattern()?;
-
-                    let guard = if matches!(self.peek(), Token::When) {
-                        self.advance();
-                        Some(self.parse_expr(0)?)
-                    } else {
-                        None
-                    };
-
-                    self.expect(Token::Arrow)?;
-                    let body = self.parse_expr(0)?;
-                    let end_span = body.span.end;
-                    let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                    branches.push(Annotated {
-                        node: CaseArm {
-                            pattern,
-                            guard,
-                            body,
-                            span: Span {
-                                start: arm_start.start,
-                                end: end_span,
-                            },
-                        },
-                        leading_trivia: self.take_leading_trivia(start),
-                        trailing_comment,
-                        trailing_trivia: vec![],
-                    });
+                    let arm_indent = body_indent.unwrap_or_else(|| self.current_line_indent());
+                    branches.push(self.parse_case_arm(arm_indent)?);
                 }
 
-                let dangling_trivia = self.take_leading_trivia(self.pos);
-                let end = self.tokens[self.pos].span;
-                self.expect(Token::RBrace)?;
+                let (dangling_trivia, end) = if legacy_braces {
+                    let dangling = self.take_leading_trivia(self.pos);
+                    let end = self.tokens[self.pos].span;
+                    self.expect(Token::RBrace)?;
+                    (dangling, end)
+                } else {
+                    let end = after_clause
+                        .as_ref()
+                        .map(|(_, body)| body.span)
+                        .or_else(|| branches.last().map(|arm| arm.node.span))
+                        .ok_or_else(|| ParseError {
+                            message: "receive body cannot be empty".to_string(),
+                            span: self.tokens[self.pos].span,
+                        })?;
+                    (vec![], end)
+                };
 
                 Ok(Expr {
                     id: self.next_id(),
@@ -1470,73 +1702,81 @@ impl Parser {
                 })
             }
 
-            // do...else block: `do { Pat <- expr ... SuccessExpr } else { Pat -> expr ... }`
+            // Sequential pattern binding with an explicit success expression.
             Token::Do => {
-                // See LParen branch: inside the do/else braces, reset
-                // `no_brace_app` so inner expressions can use record literals.
                 let saved_nba = std::mem::replace(&mut self.no_brace_app, false);
                 let result: Result<Expr, ParseError> = (|| {
-                    self.expect(Token::LBrace)?;
-
                     let mut bindings = Vec::new();
-                    // Parse bindings (`Pat <- expr`) until we find the success expression
-                    // (a line without `<-`). Distinguish by trying to parse a pattern and
-                    // checking whether `<-` follows; backtrack if not.
+                    let mut else_arms = Vec::new();
+                    let legacy_braces = matches!(self.peek(), Token::LBrace);
+                    let do_indent = if legacy_braces {
+                        self.advance();
+                        None
+                    } else {
+                        Some(self.begin_layout(owner_indent, "do")?)
+                    };
+
                     let success = loop {
-                        if matches!(self.peek(), Token::RBrace | Token::Eof) {
+                        if legacy_braces && matches!(self.peek(), Token::RBrace | Token::Eof) {
                             return Err(ParseError {
-                                message: "do block missing success expression before '}'"
-                                    .to_string(),
+                                message: "do block missing success expression".to_string(),
                                 span: self.tokens[self.pos].span,
                             });
                         }
-                        let saved_pos = self.pos;
+                        if let Some(indent) = do_indent {
+                            if !self.layout_has_item(indent) {
+                                return Err(ParseError {
+                                    message: "do block missing success expression".to_string(),
+                                    span: self.tokens[self.pos].span,
+                                });
+                            }
+                            self.require_layout_item(indent, "do")?;
+                        }
+                        let saved = self.save();
                         match self.parse_pattern() {
                             Ok(pat) if matches!(self.peek(), Token::LeftArrow) => {
-                                self.advance(); // consume `<-`
-                                let expr = self.parse_expr(0)?;
+                                self.advance();
+                                let binding_indent =
+                                    do_indent.unwrap_or_else(|| self.token_line_indent(saved.pos));
+                                let expr = self.parse_expr_body(binding_indent, "do binding")?;
                                 bindings.push((pat, expr));
                             }
                             _ => {
-                                // Not a binding -- restore and parse as success expression
-                                self.pos = saved_pos;
-                                let success = self.parse_expr(0)?;
-                                break success;
+                                self.restore(saved);
+                                break self.parse_expr(0)?;
                             }
                         }
                     };
-                    self.expect(Token::RBrace)?;
+                    if legacy_braces {
+                        self.expect(Token::RBrace)?;
+                    }
 
                     self.expect(Token::Else)?;
-                    self.expect(Token::LBrace)?;
-
-                    let mut else_arms = Vec::new();
-                    while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-                        let start = self.pos;
-                        let arm_start = self.tokens[self.pos].span;
-                        let pattern = self.parse_pattern()?;
-                        self.expect(Token::Arrow)?;
-                        let body = self.parse_expr(0)?;
-                        let end_span = body.span.end;
-                        let trailing_comment = self.take_trailing_comment(self.pos - 1);
-                        else_arms.push(Annotated {
-                            node: CaseArm {
-                                pattern,
-                                guard: None,
-                                body,
-                                span: Span {
-                                    start: arm_start.start,
-                                    end: end_span,
-                                },
-                            },
-                            leading_trivia: self.take_leading_trivia(start),
-                            trailing_comment,
-                            trailing_trivia: vec![],
-                        });
-                    }
-                    let dangling_trivia = self.take_leading_trivia(self.pos);
-                    let end = self.tokens[self.pos].span;
-                    self.expect(Token::RBrace)?;
+                    let dangling_trivia = if matches!(self.peek(), Token::LBrace) {
+                        self.advance();
+                        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                            let arm_indent = self.token_line_indent(self.pos);
+                            else_arms.push(self.parse_case_arm(arm_indent)?);
+                        }
+                        let dangling = self.take_leading_trivia(self.pos);
+                        self.expect(Token::RBrace)?;
+                        dangling
+                    } else {
+                        let arm_indent = self.begin_layout(owner_indent, "do else")?;
+                        while self.layout_has_item(arm_indent) {
+                            self.require_layout_item(arm_indent, "do else")?;
+                            else_arms.push(self.parse_case_arm(arm_indent)?);
+                        }
+                        vec![]
+                    };
+                    let end =
+                        else_arms
+                            .last()
+                            .map(|arm| arm.node.span)
+                            .ok_or_else(|| ParseError {
+                                message: "do else body cannot be empty".to_string(),
+                                span: self.tokens[self.pos].span,
+                            })?;
 
                     Ok(Expr {
                         id: self.next_id(),

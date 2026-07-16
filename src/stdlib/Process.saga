@@ -37,11 +37,9 @@ pub type SignalKind =
   | SigTstp
 
 #@ Signal effect: blocks the calling process until the given OS signal arrives.
-pub effect Signal {
+pub effect Signal
   fun await_signal : (kind: SignalKind) -> Unit
-}
 
 #@ Native handler for the Signal effect.
-pub handler beam_signal for Signal {
+pub handler beam_signal for Signal
   # LSP error expected: compiler builtin. Op is lowered to a direct call into saga_runtime.
-}

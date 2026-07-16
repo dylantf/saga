@@ -109,12 +109,24 @@ pub fn format_fun_binding(
 }
 
 /// Format `lhs = body` with smart line-breaking.
-/// Block-like bodies (blocks, case, etc.) stay on the `=` line since they
-/// handle their own multi-line layout. Other bodies break after `=` when
-/// the whole thing doesn't fit on one line.
+/// Layout bodies break after `=` and establish an indented suite. Other
+/// expressions break after `=` only when the whole binding does not fit.
 pub fn format_binding(lhs: Doc, body: &Expr) -> Doc {
-    let body_doc = format_expr(body);
-    if is_layout_sensitive_app(body) {
+    if let Some(inner) = super::expr::single_expr_block(body) {
+        return format_binding(lhs, inner);
+    }
+    if super::expr::requires_layout_body(body) {
+        super::expr::format_body_after(lhs.append(Doc::text(" =")), body)
+    } else if matches!(
+        &body.kind,
+        ExprKind::With {
+            handler,
+            ..
+        } if matches!(handler.as_ref(), Handler::Inline { .. })
+    ) {
+        docs![lhs, Doc::text(" = "), format_expr(body)]
+    } else if is_layout_sensitive_app(body) {
+        let body_doc = format_expr(body);
         Doc::group(docs![
             lhs,
             Doc::text(" ="),
@@ -127,9 +139,9 @@ pub fn format_binding(lhs: Doc, body: &Expr) -> Doc {
             )
         ])
     } else if is_block_like(body) {
-        // { and case stay on the = line; the body handles its own breaking
-        docs![lhs, Doc::text(" = "), body_doc]
+        docs![lhs, Doc::text(" = "), format_expr(body)]
     } else {
+        let body_doc = format_expr(body);
         // Try one line; break after = if too long
         Doc::group(docs![
             lhs,
@@ -438,7 +450,6 @@ pub fn format_effect_def(
         header.push(' ');
         write!(header, "{}", tp).unwrap();
     }
-    header.push_str(" {");
     parts.push(Doc::text(header));
 
     let body = format_annotated_body(
@@ -458,8 +469,6 @@ pub fn format_effect_def(
         dangling,
     );
     parts.push(Doc::nest(2, body));
-    parts.push(Doc::hardline());
-    parts.push(Doc::text("}"));
     docs_from_vec(parts)
 }
 
@@ -501,13 +510,6 @@ pub fn format_trait_def(
         )));
     }
 
-    if methods.is_empty() && dangling.is_empty() {
-        parts.push(Doc::text(" {}"));
-        return docs_from_vec(parts);
-    }
-
-    parts.push(Doc::text(" {"));
-
     let body = format_annotated_body(
         methods,
         |method| {
@@ -533,8 +535,6 @@ pub fn format_trait_def(
         dangling,
     );
     parts.push(Doc::nest(2, body));
-    parts.push(Doc::hardline());
-    parts.push(Doc::text("}"));
     docs_from_vec(parts)
 }
 
@@ -573,8 +573,6 @@ pub fn format_handler_def(
         parts.push(format_where_clause(where_clause));
     }
 
-    parts.push(Doc::text(" {"));
-
     let mut body_items = Vec::new();
     for ann in arms {
         body_items.push(Doc::hardline());
@@ -588,8 +586,6 @@ pub fn format_handler_def(
     }
     let body = format_braced_body(&body_items, dangling);
     parts.push(Doc::nest(2, body));
-    parts.push(Doc::hardline());
-    parts.push(Doc::text("}"));
     docs_from_vec(parts)
 }
 
@@ -666,8 +662,6 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
             parts.push(Doc::text(" "));
             parts.push(format_needs(needs, &[]));
         }
-        parts.push(Doc::hardline());
-        parts.push(Doc::text("{"));
     } else {
         if !where_clause.is_empty() {
             parts.push(Doc::text(" "));
@@ -677,11 +671,9 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
             parts.push(Doc::text(" "));
             parts.push(format_needs(needs, &[]));
         }
-        parts.push(Doc::text(" {"));
     }
 
     if methods.is_empty() && dangling.is_empty() {
-        parts.push(Doc::text("}"));
         return docs_from_vec(parts);
     }
 
@@ -691,7 +683,5 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
         dangling,
     );
     parts.push(Doc::nest(2, body));
-    parts.push(Doc::hardline());
-    parts.push(Doc::text("}"));
     docs_from_vec(parts)
 }

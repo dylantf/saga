@@ -42,47 +42,43 @@ pub record NaiveDateTime {
   microsecond: Int,
 } deriving (Show, Debug, Eq)
 
-impl Ord for Date {
-  compare a b = do {
-    Eq <- compare a.year b.year
-    Eq <- compare a.month b.month
-    compare a.day b.day
-  } else {
-    r -> r
-  }
-}
+impl Ord for Date
+  compare a b =
+    do
+      Eq <- compare a.year b.year
+      Eq <- compare a.month b.month
+      compare a.day b.day
+    else
+      r -> r
 
-impl Ord for Time {
-  compare a b = do {
-    Eq <- compare a.hour b.hour
-    Eq <- compare a.minute b.minute
-    Eq <- compare a.second b.second
-    compare a.microsecond b.microsecond
-  } else {
-    r -> r
-  }
-}
+impl Ord for Time
+  compare a b =
+    do
+      Eq <- compare a.hour b.hour
+      Eq <- compare a.minute b.minute
+      Eq <- compare a.second b.second
+      compare a.microsecond b.microsecond
+    else
+      r -> r
 
-impl Ord for NaiveDateTime {
-  compare a b = do {
-    Eq <- compare a.year b.year
-    Eq <- compare a.month b.month
-    Eq <- compare a.day b.day
-    Eq <- compare a.hour b.hour
-    Eq <- compare a.minute b.minute
-    Eq <- compare a.second b.second
-    compare a.microsecond b.microsecond
-  } else {
-    r -> r
-  }
-}
+impl Ord for NaiveDateTime
+  compare a b =
+    do
+      Eq <- compare a.year b.year
+      Eq <- compare a.month b.month
+      Eq <- compare a.day b.day
+      Eq <- compare a.hour b.hour
+      Eq <- compare a.minute b.minute
+      Eq <- compare a.second b.second
+      compare a.microsecond b.microsecond
+    else
+      r -> r
 
 #@ Effect for accessing the current wall-clock time.
-pub effect Clock {
+pub effect Clock
   fun now : Unit -> NaiveDateTime
   fun today : Unit -> Date
   fun time_of_day : Unit -> Time
-}
 
 #@ Combines a Date and Time into a NaiveDateTime.
 pub fun from_date_time : Date -> Time -> NaiveDateTime
@@ -97,7 +93,14 @@ from_date_time d t = NaiveDateTime {
 }
 
 #@ Constructs a NaiveDateTime from individual components. Microsecond is set to 0.
-pub fun new : (year: Int) -> (month: Int) -> (day: Int) -> (hour: Int) -> (minute: Int) -> (second: Int) -> NaiveDateTime
+pub fun new :
+     (year: Int)
+  -> (month: Int)
+  -> (day: Int)
+  -> (hour: Int)
+  -> (minute: Int)
+  -> (second: Int)
+  -> NaiveDateTime
 new year month day hour minute second = NaiveDateTime {
   year: year,
   month: month,
@@ -124,10 +127,10 @@ to_time dt = Time {
 # --- Formatting ---
 
 fun hour24_to_12 : Int -> Int
-hour24_to_12 h = case h % 12 {
-  0 -> 12
-  n -> n
-}
+hour24_to_12 h =
+  case h % 12 of
+    0 -> 12
+    n -> n
 
 fun pad2 : Int -> String
 pad2 n = show n |> String.pad_left 2 "0"
@@ -181,10 +184,10 @@ long_days = [
 ]
 
 fun nth : Int -> List String -> String
-nth n xs = case xs {
-  [] -> ""
-  h :: t -> if n == 0 then h else nth (n - 1) t
-}
+nth n xs =
+  case xs of
+    [] -> ""
+    h :: t -> if n == 0 then h else nth (n - 1) t
 
 fun month_short : Int -> String
 month_short m = nth (m - 1) short_months
@@ -202,10 +205,10 @@ fun find_index : String -> List String -> Maybe Int
 find_index target xs = find_index_loop target xs 0
 
 fun find_index_loop : String -> List String -> Int -> Maybe Int
-find_index_loop target xs i = case xs {
-  [] -> Nothing
-  h :: t -> if h == target then Just i else find_index_loop target t (i + 1)
-}
+find_index_loop target xs i =
+  case xs of
+    [] -> Nothing
+    h :: t -> if h == target then Just i else find_index_loop target t (i + 1)
 
 #@ Format a NaiveDateTime using strftime-style specifiers.
 #@ Supported: %Y (year), %m (month), %d (day), %H (hour), %M (minute),
@@ -215,45 +218,53 @@ pub fun format : String -> NaiveDateTime -> String
 format fmt dt = format_loop fmt dt ""
 
 fun format_loop : String -> NaiveDateTime -> String -> String
-format_loop fmt dt acc = case fmt {
-  "" -> acc
-  "%" <> rest -> case rest {
-    "Y" <> r -> format_loop r dt (acc <> pad4 dt.year)
-    "m" <> r -> format_loop r dt (acc <> pad2 dt.month)
-    "d" <> r -> format_loop r dt (acc <> pad2 dt.day)
-    "H" <> r -> format_loop r dt (acc <> pad2 dt.hour)
-    "M" <> r -> format_loop r dt (acc <> pad2 dt.minute)
-    "S" <> r -> format_loop r dt (acc <> pad2 dt.second)
-    "f" <> r -> format_loop r dt (acc <> pad6 dt.microsecond)
-    "T" <> r ->
-      format_loop r dt (acc
-        <> pad2 dt.hour
-        <> ":"
-        <> pad2 dt.minute
-        <> ":"
-        <> pad2 dt.second)
-    "F" <> r ->
-      format_loop r dt (acc
-        <> pad4 dt.year
-        <> "-"
-        <> pad2 dt.month
-        <> "-"
-        <> pad2 dt.day)
-    "I" <> r -> format_loop r dt (acc <> pad2 (hour24_to_12 dt.hour))
-    "p" <> r -> format_loop r dt (acc <> if dt.hour < 12 then "AM" else "PM")
-    "b" <> r -> format_loop r dt (acc <> month_short dt.month)
-    "B" <> r -> format_loop r dt (acc <> month_long dt.month)
-    "a" <> r -> format_loop r dt (acc <> day_short (day_of_week (to_date dt)))
-    "A" <> r -> format_loop r dt (acc <> day_long (day_of_week (to_date dt)))
-    "%" <> r -> format_loop r dt (acc <> "%")
-    _ -> format_loop rest dt (acc <> "%")
-  }
-  _ -> {
-    let ch = String.slice 0 1 fmt
-    let rest = String.slice 1 (String.length fmt - 1) fmt
-    format_loop rest dt (acc <> ch)
-  }
-}
+format_loop fmt dt acc =
+  case fmt of
+    "" -> acc
+    "%" <> rest ->
+      case rest of
+        "Y" <> r -> format_loop r dt (acc <> pad4 dt.year)
+        "m" <> r -> format_loop r dt (acc <> pad2 dt.month)
+        "d" <> r -> format_loop r dt (acc <> pad2 dt.day)
+        "H" <> r -> format_loop r dt (acc <> pad2 dt.hour)
+        "M" <> r -> format_loop r dt (acc <> pad2 dt.minute)
+        "S" <> r -> format_loop r dt (acc <> pad2 dt.second)
+        "f" <> r -> format_loop r dt (acc <> pad6 dt.microsecond)
+        "T" <> r ->
+          format_loop
+            r
+            dt
+            (acc
+              <> pad2 dt.hour
+              <> ":"
+              <> pad2 dt.minute
+              <> ":"
+              <> pad2 dt.second)
+        "F" <> r ->
+          format_loop
+            r
+            dt
+            (acc
+              <> pad4 dt.year
+              <> "-"
+              <> pad2 dt.month
+              <> "-"
+              <> pad2 dt.day)
+        "I" <> r -> format_loop r dt (acc <> pad2 (hour24_to_12 dt.hour))
+        "p" <> r ->
+          format_loop r dt (acc <> if dt.hour < 12 then "AM" else "PM")
+        "b" <> r -> format_loop r dt (acc <> month_short dt.month)
+        "B" <> r -> format_loop r dt (acc <> month_long dt.month)
+        "a" <> r ->
+          format_loop r dt (acc <> day_short (day_of_week (to_date dt)))
+        "A" <> r ->
+          format_loop r dt (acc <> day_long (day_of_week (to_date dt)))
+        "%" <> r -> format_loop r dt (acc <> "%")
+        _ -> format_loop rest dt (acc <> "%")
+    _ ->
+      let ch = String.slice 0 1 fmt
+      let rest = String.slice 1 (String.length fmt - 1) fmt
+      format_loop rest dt (acc <> ch)
 
 #@ Formats a NaiveDateTime as an ISO 8601 string ("YYYY-MM-DDTHH:MM:SS").
 pub fun to_iso8601 : NaiveDateTime -> String
@@ -305,14 +316,13 @@ floor_mod a b = a - floor_div a b * b
 
 #@ Adds the given number of months to a datetime, clamping the day if needed.
 pub fun add_months : Int -> NaiveDateTime -> NaiveDateTime
-add_months n dt = {
+add_months n dt =
   let total = dt.month + n - 1
   let y = dt.year + floor_div total 12
   let m = floor_mod total 12 + 1
   let max_day = days_in_month y m
   let d = if dt.day > max_day then max_day else dt.day
   { dt | year: y, month: m, day: d }
-}
 
 #@ Adds the given number of years to a datetime.
 pub fun add_years : Int -> NaiveDateTime -> NaiveDateTime
@@ -348,35 +358,38 @@ empty_parts () = ParseParts {
 }
 
 fun require_field : String -> Maybe Int -> Result Int ParseError
-require_field name m = case m {
-  Just n -> Ok n
-  Nothing -> Err (MissingField name)
-}
+require_field name m =
+  case m of
+    Just n -> Ok n
+    Nothing -> Err (MissingField name)
 
 fun apply_ampm : Int -> Maybe Bool -> Int
-apply_ampm h is_pm = case is_pm {
-  Nothing -> h
-  Just True -> if h == 12 then 12 else h + 12
-  Just False -> if h == 12 then 0 else h
-}
+apply_ampm h is_pm =
+  case is_pm of
+    Nothing -> h
+    Just True ->
+      if h == 12 then 12
+      else h + 12
+    Just False -> if h == 12 then 0 else h
 
 fun parts_to_datetime : ParseParts -> Result NaiveDateTime ParseError
-parts_to_datetime p = do {
-  Ok year <- require_field "year" p.year
-  Ok month <- require_field "month" p.month
-  Ok day <- require_field "day" p.day
-  Ok (NaiveDateTime {
-    year: year,
-    month: month,
-    day: day,
-    hour: apply_ampm (p.hour |> Maybe.unwrap_or 0) p.is_pm,
-    minute: p.minute |> Maybe.unwrap_or 0,
-    second: p.second |> Maybe.unwrap_or 0,
-    microsecond: p.microsecond |> Maybe.unwrap_or 0,
-  })
-} else {
-  Err e -> Err e
-}
+parts_to_datetime p =
+  do
+    Ok year <- require_field "year" p.year
+    Ok month <- require_field "month" p.month
+    Ok day <- require_field "day" p.day
+    Ok
+      (NaiveDateTime {
+        year: year,
+        month: month,
+        day: day,
+        hour: apply_ampm (p.hour |> Maybe.unwrap_or 0) p.is_pm,
+        minute: p.minute |> Maybe.unwrap_or 0,
+        second: p.second |> Maybe.unwrap_or 0,
+        microsecond: p.microsecond |> Maybe.unwrap_or 0,
+      })
+  else
+    Err e -> Err e
 
 fun set_year : ParseParts -> Int -> ParseParts
 set_year p n = { p | year: Just n }
@@ -399,160 +412,183 @@ set_second p n = { p | second: Just n }
 fun set_microsecond : ParseParts -> Int -> ParseParts
 set_microsecond p n = { p | microsecond: Just n }
 
-fun parse_loop : String -> String -> ParseParts -> Result (ParseParts, String) ParseError
-parse_loop fmt input parts = case fmt {
-  "" -> Ok (parts, input)
-  "%" <> rest -> case rest {
-    "Y" <> r -> parse_digits 4 r input parts set_year
-    "m" <> r -> parse_digits 2 r input parts set_month
-    "d" <> r -> parse_digits 2 r input parts set_day
-    "H" <> r -> parse_digits 2 r input parts set_hour
-    "I" <> r -> parse_digits 2 r input parts set_hour
-    "p" <> r -> parse_ampm r input parts
-    "M" <> r -> parse_digits 2 r input parts set_minute
-    "S" <> r -> parse_digits 2 r input parts set_second
-    "f" <> r -> parse_micro r input parts
-    "b" <> r -> parse_month_name 3 short_months r input parts
-    "B" <> r -> parse_month_name_var long_months r input parts
-    "F" <> r -> parse_loop ("%Y-%m-%d" <> r) input parts
-    "T" <> r -> parse_loop ("%H:%M:%S" <> r) input parts
-    "%" <> r -> match_literal "%" r input parts
-    _ -> Err (UnknownSpecifier (String.slice 0 1 rest))
-  }
-  _ -> {
-    let ch = String.slice 0 1 fmt
-    let rest = String.slice 1 (String.length fmt - 1) fmt
-    match_literal ch rest input parts
-  }
-}
+fun parse_loop :
+  String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+parse_loop fmt input parts =
+  case fmt of
+    "" -> Ok (parts, input)
+    "%" <> rest ->
+      case rest of
+        "Y" <> r -> parse_digits 4 r input parts set_year
+        "m" <> r -> parse_digits 2 r input parts set_month
+        "d" <> r -> parse_digits 2 r input parts set_day
+        "H" <> r -> parse_digits 2 r input parts set_hour
+        "I" <> r -> parse_digits 2 r input parts set_hour
+        "p" <> r -> parse_ampm r input parts
+        "M" <> r -> parse_digits 2 r input parts set_minute
+        "S" <> r -> parse_digits 2 r input parts set_second
+        "f" <> r -> parse_micro r input parts
+        "b" <> r -> parse_month_name 3 short_months r input parts
+        "B" <> r -> parse_month_name_var long_months r input parts
+        "F" <> r -> parse_loop ("%Y-%m-%d" <> r) input parts
+        "T" <> r -> parse_loop ("%H:%M:%S" <> r) input parts
+        "%" <> r -> match_literal "%" r input parts
+        _ -> Err (UnknownSpecifier (String.slice 0 1 rest))
+    _ ->
+      let ch = String.slice 0 1 fmt
+      let rest = String.slice 1 (String.length fmt - 1) fmt
+      match_literal ch rest input parts
 
 fun count_leading_digits : Int -> String -> Int -> Int
 count_leading_digits max_width input acc =
   if acc >= max_width then acc
   else if String.length input <= acc then acc
-  else if String.is_digit (String.slice acc 1 input) then count_leading_digits max_width input (acc
-    + 1)
+  else if String.is_digit (String.slice acc 1 input) then
+    count_leading_digits max_width input (acc + 1)
   else acc
 
 # Right-pad a fractional digit count to microseconds: "5" -> 500000, "12" -> 120000.
 fun micro_scale : Int -> Int
-micro_scale digits = case digits {
-  1 -> 100000
-  2 -> 10000
-  3 -> 1000
-  4 -> 100
-  5 -> 10
-  _ -> 1
-}
+micro_scale digits =
+  case digits of
+    1 -> 100000
+    2 -> 10000
+    3 -> 1000
+    4 -> 100
+    5 -> 10
+    _ -> 1
 
 # Parse a fractional-second field (%f): 1-6 digits, right-padded to microseconds.
-fun parse_micro : String -> String -> ParseParts -> Result (ParseParts, String) ParseError
-parse_micro fmt_rest input parts = {
+fun parse_micro :
+  String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+parse_micro fmt_rest input parts =
   let len = String.length input
   if len == 0 then Err UnexpectedEnd
-  else {
+  else
     let n_digits = count_leading_digits 6 input 0
-    if n_digits == 0 then {
+    if n_digits == 0 then
       let preview_len = if 6 < len then 6 else len
       Err (InvalidDigits (String.slice 0 preview_len input))
-    }
-    else {
+    else
       let chunk = String.slice 0 n_digits input
       let remaining = String.slice n_digits (len - n_digits) input
-      case Int.parse chunk {
-        Just n -> parse_loop fmt_rest remaining (set_microsecond parts (n * micro_scale n_digits))
+      case Int.parse chunk of
+        Just n ->
+          parse_loop
+            fmt_rest
+            remaining
+            (set_microsecond parts (n * micro_scale n_digits))
         Nothing -> Err (InvalidDigits chunk)
-      }
-    }
-  }
-}
 
 # Greedy: consume up to `max_width` leading digits (at least 1).
 # Stops early on a non-digit, so "%Y-%m-%d" parses both "2026-04-08" and "2026-4-8".
-fun parse_digits : Int -> String -> String -> ParseParts -> (ParseParts -> Int -> ParseParts) -> Result (ParseParts, String) ParseError
-parse_digits max_width fmt_rest input parts setter = {
+fun parse_digits :
+     Int
+  -> String
+  -> String
+  -> ParseParts
+  -> (ParseParts -> Int -> ParseParts)
+  -> Result (ParseParts, String) ParseError
+parse_digits max_width fmt_rest input parts setter =
   let len = String.length input
   if len == 0 then Err UnexpectedEnd
-  else {
+  else
     let n_digits = count_leading_digits max_width input 0
-    if n_digits == 0 then {
+    if n_digits == 0 then
       let preview_len = if max_width < len then max_width else len
       Err (InvalidDigits (String.slice 0 preview_len input))
-    }
-    else {
+    else
       let chunk = String.slice 0 n_digits input
       let remaining = String.slice n_digits (len - n_digits) input
-      case Int.parse chunk {
+      case Int.parse chunk of
         Just n -> parse_loop fmt_rest remaining (setter parts n)
         Nothing -> Err (InvalidDigits chunk)
-      }
-    }
-  }
-}
 
-fun match_literal : String -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+fun match_literal :
+     String
+  -> String
+  -> String
+  -> ParseParts
+  -> Result (ParseParts, String) ParseError
 match_literal expected fmt_rest input parts =
-  if String.starts_with expected input then {
+  if String.starts_with expected input then
     let remaining =
-      String.slice (String.length expected) (String.length input
-        - String.length expected) input
+      String.slice
+        (String.length expected)
+        (String.length input - String.length expected)
+        input
     parse_loop fmt_rest remaining parts
-  }
   else Err (UnexpectedChar (expected, String.slice 0 1 input))
 
-fun parse_ampm : String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+fun parse_ampm :
+  String -> String -> ParseParts -> Result (ParseParts, String) ParseError
 parse_ampm fmt_rest input parts =
   if String.length input < 2 then Err UnexpectedEnd
-  else {
+  else
     let chunk = String.to_upper (String.slice 0 2 input)
     let remaining = String.slice 2 (String.length input - 2) input
-    if chunk
-      == "PM" then parse_loop fmt_rest remaining ({ parts | is_pm: Just True })
-    else if chunk
-      == "AM" then parse_loop fmt_rest remaining ({ parts | is_pm: Just False })
+    if chunk == "PM" then
+      parse_loop fmt_rest remaining ({ parts | is_pm: Just True })
+    else if chunk == "AM" then
+      parse_loop fmt_rest remaining ({ parts | is_pm: Just False })
     else Err (InvalidDigits chunk)
-  }
 
 # Parse a fixed-width month name (e.g. %b = "Jan", 3 chars)
-fun parse_month_name : Int -> List String -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+fun parse_month_name :
+     Int
+  -> List String
+  -> String
+  -> String
+  -> ParseParts
+  -> Result (ParseParts, String) ParseError
 parse_month_name width names fmt_rest input parts =
   if String.length input < width then Err UnexpectedEnd
-  else {
+  else
     let chunk = String.slice 0 width input
     let remaining = String.slice width (String.length input - width) input
-    case find_index chunk names {
+    case find_index chunk names of
       Just i -> parse_loop fmt_rest remaining (set_month parts (i + 1))
       Nothing -> Err (InvalidDigits chunk)
-    }
-  }
 
 # Parse a variable-width month name (e.g. %B = "January")
-fun parse_month_name_var : List String -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
+fun parse_month_name_var :
+     List String
+  -> String
+  -> String
+  -> ParseParts
+  -> Result (ParseParts, String) ParseError
 parse_month_name_var names fmt_rest input parts =
   try_match_names names 0 fmt_rest input parts
 
-fun try_match_names : List String -> Int -> String -> String -> ParseParts -> Result (ParseParts, String) ParseError
-try_match_names names i fmt_rest input parts = case names {
-  [] -> Err (InvalidDigits (String.slice 0 3 input))
-  name :: rest ->
-    if String.starts_with name input then {
-      let remaining =
-        String.slice (String.length name) (String.length input
-          - String.length name) input
-      parse_loop fmt_rest remaining (set_month parts (i + 1))
-    }
-    else try_match_names rest (i + 1) fmt_rest input parts
-}
+fun try_match_names :
+     List String
+  -> Int
+  -> String
+  -> String
+  -> ParseParts
+  -> Result (ParseParts, String) ParseError
+try_match_names names i fmt_rest input parts =
+  case names of
+    [] -> Err (InvalidDigits (String.slice 0 3 input))
+    name :: rest ->
+      if String.starts_with name input then
+        let remaining =
+          String.slice
+            (String.length name)
+            (String.length input - String.length name)
+            input
+        parse_loop fmt_rest remaining (set_month parts (i + 1))
+      else try_match_names rest (i + 1) fmt_rest input parts
 
 #@ Parse a datetime string using a strftime-style format.
 #@ Supported: %Y, %m, %d, %H, %I, %p, %M, %S, %f (microseconds, 1-6 digits, right-padded),
 #@ %b, %B, %F (%Y-%m-%d), %T (%H:%M:%S), %% (literal %).
 #@ Numeric fields accept variable-width input (e.g. "%m" parses both "4" and "04").
 pub fun parse : String -> String -> Result NaiveDateTime ParseError
-parse fmt input = case parse_loop fmt input (empty_parts ()) {
-  Ok (parts, _) -> parts_to_datetime parts
-  Err e -> Err e
-}
+parse fmt input =
+  case parse_loop fmt input (empty_parts ()) of
+    Ok (parts, _) -> parts_to_datetime parts
+    Err e -> Err e
 
 #@ Parse an ISO 8601 datetime string ("YYYY-MM-DDTHH:MM:SS").
 pub fun from_iso8601 : String -> Result NaiveDateTime ParseError
@@ -568,8 +604,7 @@ fun today_utc : Unit -> Date
 fun time_of_day_utc : Unit -> Time
 
 #@ Handler that reads the system clock in UTC.
-pub handler system_clock for Clock {
+pub handler system_clock for Clock
   now () = resume now_utc ()
   today () = resume today_utc ()
   time_of_day () = resume time_of_day_utc ()
-}

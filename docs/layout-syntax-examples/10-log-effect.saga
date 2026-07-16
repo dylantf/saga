@@ -1,0 +1,11 @@
+# Converted from examples/10-log-effect.saga
+
+effect Log
+  fun log : (msg: String) -> Unit
+
+handler console_log for Log
+  log msg =
+    dbg msg
+    resume ()
+
+main () = log! "hello" with console_log

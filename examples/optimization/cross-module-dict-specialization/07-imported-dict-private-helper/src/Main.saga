@@ -2,11 +2,9 @@ module Main
 
 import Lib (Options, Encodable, Boxed)
 
-handler options for Options {
+handler options for Options
   get_options () = resume 10
-}
 
-main () = {
+main () =
   let result = Lib.serialize (Boxed 5) with options
   dbg (show result)
-}

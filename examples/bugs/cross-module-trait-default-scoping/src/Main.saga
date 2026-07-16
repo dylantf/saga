@@ -36,10 +36,7 @@ import Lib as L (Act)
 
 record Pair { a: Int, b: Int }
 
-impl L.Act for Pair {
+impl L.Act for Pair
   act_with c p = c.tag <> ":(" <> act p.a <> "," <> act p.b <> ")"
-}
 
-main () = {
-  println (act (Pair { a: 1, b: 2 }))
-} with console
+main () = println (act (Pair { a: 1, b: 2 })) with console

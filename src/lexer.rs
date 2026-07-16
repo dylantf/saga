@@ -316,6 +316,7 @@ impl Lexer {
             "assert" => Token::Ident("assert".into()),
             "type" => Token::Type,
             "case" => Token::Case,
+            "of" => Token::Of,
             "if" => Token::If,
             "then" => Token::Then,
             "else" => Token::Else,
@@ -773,8 +774,8 @@ impl Lexer {
                         Token::Eof,
                         start,
                         std::mem::take(&mut pending_trivia),
-                        seen_newline && self.nesting == 0,
-                        seen_semicolon && self.nesting == 0,
+                        seen_newline,
+                        seen_semicolon,
                     );
                     tokens.push(spanned);
                     return Ok(tokens);
@@ -832,11 +833,11 @@ impl Lexer {
             // Reset newline tracking - we're about to emit a significant token
             prev_was_newline = false;
 
-            // Capture whether this token is preceded by a newline at top-level nesting.
-            // This mirrors the old Terminator behavior: newlines at nesting depth 0
-            // signal line boundaries to the parser.
-            let newline_flag = seen_newline && self.nesting == 0;
-            let semicolon_flag = seen_semicolon && self.nesting == 0;
+            // Preserve physical line boundaries even inside parentheses and
+            // brackets. The parser decides whether a newline is structural in
+            // the current context.
+            let newline_flag = seen_newline;
+            let semicolon_flag = seen_semicolon;
 
             let trivia = std::mem::take(&mut pending_trivia);
 

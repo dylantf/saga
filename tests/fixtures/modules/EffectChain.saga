@@ -14,16 +14,17 @@ pub fun unwrap : Box -> Box needs {Fail Failure}
 unwrap (Box (II n)) = Box (II n)
 unwrap _ = fail! (Failure "expected container")
 
-pub handler to_result for Fail a {
+pub handler to_result for Fail a
   fail e = Err e
   return v = Ok v
-}
 
 pub fun run_decoder : (Box -> a needs {Fail Failure}) -> Box -> Result a Failure
 run_decoder decoder b = decoder b with to_result
 
-pub fun map_via : (Box -> a needs {Fail Failure, ..e}) -> Box -> a needs {Fail Failure, ..e}
+pub fun map_via : (Box -> a needs {Fail Failure, ..e}) -> Box -> a
+  needs {Fail Failure, ..e}
 map_via f b = f b
 
-pub fun at : String -> (Box -> a needs {Fail Failure, ..e}) -> Box -> a needs {Fail Failure, ..e}
+pub fun at : String -> (Box -> a needs {Fail Failure, ..e}) -> Box -> a
+  needs {Fail Failure, ..e}
 at _name decoder b = decoder b

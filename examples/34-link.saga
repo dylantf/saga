@@ -3,28 +3,23 @@ import Std.Actor (Actor, Process, beam_actor, Monitor)
 type WorkerMsg = Go | Crash
 
 fun worker : Unit -> Unit needs {Actor WorkerMsg}
-worker () = receive {
-  Go -> {
-    dbg "Worker doing work..."
-    worker ()
-  }
-  Crash -> panic "something broke!"
-}
+worker () =
+  receive
+    Go ->
+      dbg "Worker doing work..."
+      worker ()
+    Crash -> panic "something broke!"
 
 fun supervisor : Unit -> Unit needs {Process, Actor WorkerMsg, Monitor}
-supervisor () = {
+supervisor () =
   let pid = spawn! (fun () -> worker ())
   let _ref = monitor! pid
 
   send! pid Go
   send! pid Crash
 
-  receive {
+  receive
     Down _dead_pid reason -> dbg $"Child exited: {reason}"
     after 3000 -> dbg "No exit received"
-  }
-}
 
-main () = {
-  supervisor ()
-} with beam_actor
+main () = supervisor () with beam_actor

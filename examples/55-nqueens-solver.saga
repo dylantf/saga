@@ -12,19 +12,16 @@
 #
 #   8-Queens: found 92 solutions
 
-effect Choose {
+effect Choose
   fun choose : List a -> a
-}
 
-effect Fail {
+effect Fail
   fun fail : String -> a
-}
 
-handler all_solutions for Choose, Fail {
+handler all_solutions for Choose, Fail
   choose options = List.flat_map (fun x -> resume x) options
   fail _ = []
   return value = [value]
-}
 
 fun guard : Bool -> Unit needs {Fail}
 guard True = ()
@@ -34,29 +31,27 @@ guard False = fail! "pruned"
 # conflicts with any already-placed queen.
 # `placed` is a list of columns for rows 0..k-1 (bottom to top).
 fun safe : (col: Int) -> (placed: List Int) -> Bool
-safe col placed = {
+safe col placed =
   let rows_back = List.range 1 (List.length placed)
   let checks = List.zip placed rows_back
-  List.all (fun pair -> {
+  List.all (fun pair ->
     let (c, dist) = pair
     c != col && Int.abs (c - col) != dist
-  }) checks
-}
+  ) checks
 
 # Solve by placing one queen per row, choosing a column each time
 fun solve : (n: Int) -> (placed: List Int) -> List Int needs {Choose, Fail}
 solve n placed =
   if List.length placed == n then List.reverse placed
-  else {
+  else
     let col = choose! (List.range 1 n)
     guard (safe col placed)
     solve n (col :: placed)
-  }
 
 fun queens : (n: Int) -> List (List Int)
 queens n = solve n [] with all_solutions
 
-main () = {
+main () =
   println "4-Queens solutions:"
   let solutions = queens 4
   List.iter dbg solutions
@@ -65,4 +60,5 @@ main () = {
   println ""
   let eight = queens 8
   println $"8-Queens: found {List.length eight} solutions"
-} with {console}
+with
+  console

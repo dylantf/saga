@@ -1,6 +1,6 @@
 # String syntax showcase
 
-main () = {
+main () =
   # Regular strings
   let greeting = "hello, world"
   dbg greeting
@@ -59,4 +59,3 @@ main () = {
     sum = {show (x + y)}
     """
   dbg report
-}

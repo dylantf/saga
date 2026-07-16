@@ -6,29 +6,23 @@ type CounterMsg =
   | Stop
 
 fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
-counter count = {
-  receive {
+counter count =
+  receive
     Increment n -> counter (count + n)
-    GetCount caller -> {
+    GetCount caller ->
       send! caller count
       counter count
-    }
     Stop -> ()
-  }
-}
 
 fun run_counter : Unit -> Unit needs {Process, Actor Int}
-run_counter () = {
+run_counter () =
   let pid = spawn! (fun () -> counter 0)
   send! pid (Increment 5)
   send! pid (Increment 3)
   send! pid (GetCount (self! ()))
-  let result = receive {
-    n -> n
-  }
+  let result =
+    receive
+      n -> n
   dbg (show result)
-}
 
-main () = {
-  run_counter ()
-} with beam_actor
+main () = run_counter () with beam_actor

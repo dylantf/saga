@@ -1,18 +1,14 @@
-effect Log {
+effect Log
   fun log : String -> Unit
-}
 
-handler ignore_log for Log {
+handler ignore_log for Log
   log _ = resume ()
-}
 
-trait Announce a {
+trait Announce a
   fun announce : a -> Unit needs {Log}
-}
 
-impl Announce for Int needs {Log} {
+impl Announce for Int needs {Log}
   announce _ = log! "int"
-}
 
 pub fun run_trait_method : Unit -> Unit
 run_trait_method () = announce 1 with ignore_log

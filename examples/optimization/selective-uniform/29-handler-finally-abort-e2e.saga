@@ -2,24 +2,20 @@ module HandlerFinallyAbortE2e
 
 import Std.IO.Unsafe (print_stdout)
 
-effect Fail {
+effect Fail
   fun fail : Unit -> Int
-}
 
-handler abort_with_cleanup for Fail {
-  fail () = 0 finally {
-    print_stdout "cleanup\n"
-  }
-}
+handler abort_with_cleanup for Fail
+  fail () = 0
+  finally print_stdout "cleanup\n"
 
 fun main : Unit -> Unit
-main () = {
-  let value = {
+main () =
+  let value =
     let unreachable = fail! ()
     print_stdout "body\n"
     unreachable + 1
-  } with abort_with_cleanup
+  with abort_with_cleanup
 
   if value == 0 then print_stdout "after\n"
   else print_stdout "bad\n"
-}

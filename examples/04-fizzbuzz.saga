@@ -6,9 +6,8 @@ fizzbuzz n = show n
 
 loop i max =
   if i > max then ()
-  else {
+  else
     fizzbuzz i |> dbg
     loop (i + 1) max
-  }
 
 main () = loop 1 100

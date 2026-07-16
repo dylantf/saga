@@ -1,13 +1,10 @@
 module Effects
 
-pub effect ReadInt {
+pub effect ReadInt
   fun read : Unit -> Int
-}
 
 pub fun read_value : Unit -> Int needs {ReadInt}
-read_value () =
-  read! ()
+read_value () = read! ()
 
-pub handler forty_one for ReadInt {
+pub handler forty_one for ReadInt
   read () = resume 41
-}

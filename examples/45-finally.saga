@@ -5,53 +5,46 @@
 # This guarantees resource cleanup even when another handler
 # aborts the computation or a panic occurs.
 
-effect Fail {
+effect Fail
   fun fail : String -> a
-}
 
-effect Resource {
+effect Resource
   fun acquire : String -> String
-}
 
 # Handler that wraps failure in Result
-handler to_result for Fail {
+handler to_result for Fail
   fail reason = Err reason
   return value = Ok value
-}
 
 # Resource handler with cleanup via `finally`.
 # The finally block runs after resume's continuation returns.
 # Effects inside `finally` must be self-contained (fully handled).
-handler managed for Resource {
-  acquire name = {
+handler managed for Resource
+  acquire name =
     let r = $"[{name}]"
     dbg $"  acquired {r}"
     resume r
-  } finally {
+  finally
     # Effects in finally must be handled locally
     dbg $"  released: {r}"
-  }
-}
 
 # --- Use the resource ---
 
 fun work : Unit -> String needs {Resource}
-work () = {
+work () =
   let db = acquire! "db"
   dbg $"  working with {db}"
   "done"
-}
 
 fun work_and_fail : Unit -> String needs {Resource, Fail}
-work_and_fail () = {
+work_and_fail () =
   let db = acquire! "db"
   dbg $"  working with {db}"
   fail! "something went wrong"
-}
 
 # --- Run ---
 
-main () = {
+main () =
   # Normal completion: cleanup runs after the continuation finishes
   dbg "1. Normal completion:"
   let result = work () with managed
@@ -60,11 +53,7 @@ main () = {
   # Abort via Fail: cleanup still runs because WrappedK
   # catches the abort from to_result
   dbg "2. Abort via Fail:"
-  let result2 = {
-    work_and_fail () with managed
-  } with to_result
-  case result2 {
+  let result2 = (work_and_fail () with managed) with to_result
+  case result2 of
     Ok v -> dbg $"  result: Ok({v})"
     Err e -> dbg $"  result: Err({e})"
-  }
-}

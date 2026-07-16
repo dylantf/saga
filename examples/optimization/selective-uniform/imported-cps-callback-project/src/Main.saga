@@ -4,17 +4,16 @@ import Std.IO.Unsafe (print_stdout)
 import Effects (read_value, pure_value, apply_eff, forty_one)
 
 fun main : Unit -> Unit
-main () = {
-  let value = {
+main () =
+  let value =
     let choose = 1 == 2
-    let f = case choose {
-      True -> read_value
-      False -> pure_value
-    }
+    let f =
+      case choose of
+        True -> read_value
+        False -> pure_value
     let g = f
     apply_eff g
-  } with forty_one
+  with forty_one
 
   if value == 41 then print_stdout "ok\n"
   else print_stdout "bad\n"
-}

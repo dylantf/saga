@@ -1,25 +1,20 @@
 # Generic wrapper: the hot method body sits behind a dictionary parameter.
 
-effect Options {
+effect Options
   fun get_options : Unit -> Int
-}
 
-handler options_10 for Options {
+handler options_10 for Options
   get_options () = resume 10
-}
 
-trait Encodable a {
+trait Encodable a
   fun encode : a -> Int needs {Options}
-}
 
-impl Encodable for Int needs {Options} {
+impl Encodable for Int needs {Options}
   encode x = x + get_options! ()
-}
 
 fun serialize : (x: a) -> Int needs {Options} where {a: Encodable}
 serialize x = encode x
 
-main () = {
+main () =
   let result = serialize 5 with options_10
   dbg (show result)
-}

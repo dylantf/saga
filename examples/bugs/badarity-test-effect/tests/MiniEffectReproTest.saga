@@ -2,20 +2,18 @@ module MiniEffectReproTest
 
 import Std.Test (Testing, describe, test, assert_eq)
 
-effect TryNext {
+effect TryNext
   fun skip : Unit -> a
-}
 
-fun choose_string : List (String -> String needs {TryNext, ..e})
-  -> String
-  -> String
+fun choose_string :
+  List (String -> String needs {TryNext, ..e}) -> String -> String
   needs {..e}
-choose_string routes input = case routes {
-  [] -> "not found"
-  r :: rest -> r input with {
-    skip () = choose_string rest input
-  }
-}
+choose_string routes input =
+  case routes of
+    [] -> "not found"
+    r :: rest ->
+      r input with
+        skip () = choose_string rest input
 
 fun match_string : String -> (String -> String needs {..e}) -> String -> String
   needs {TryNext, ..e}
@@ -24,17 +22,15 @@ match_string pattern h input =
   else skip! ()
 
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "minimal effect repro" (fun () -> {
-    test "asserts inside a handler selected through an effectful choose" (fun () -> {
-      let app =
-        choose_string [
-          match_string "/ok" (fun _ -> {
+tests () =
+  describe "minimal effect repro" (fun () -> test "asserts inside a handler selected through an effectful choose" (fun () ->
+    let app =
+      choose_string
+        [
+          match_string "/ok" (fun _ ->
             assert_eq True True
             "ok"
-          }),
+          ),
         ]
-      assert_eq (app "/ok") "ok"
-    })
-  })
-}
+    assert_eq (app "/ok") "ok"
+  ))

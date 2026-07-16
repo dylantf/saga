@@ -2,7 +2,5 @@ module Main
 
 import Lib (Options)
 
-main () = Lib.compute 5 with {
+main () = Lib.compute 5 with
   get_options () = resume 10
-}
-

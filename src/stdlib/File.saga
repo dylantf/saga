@@ -31,7 +31,7 @@ pub record FileInfo {
 } deriving (Debug, Eq)
 
 #@ Effect for reading, writing, and querying files.
-pub effect File {
+pub effect File
   fun read : String -> Result String FileError
   fun read_bytes : String -> Result BitString FileError
   fun write : String -> String -> Result Unit FileError
@@ -39,7 +39,6 @@ pub effect File {
   fun delete : String -> Result Unit FileError
   fun exists : String -> Bool
   fun info : String -> Result FileInfo FileError
-}
 
 @external("erlang", "std_file_bridge", "read_file")
 fun read_file : (path: String) -> Result String FileError
@@ -63,12 +62,11 @@ fun file_exists : (path: String) -> Bool
 fun file_info : (path: String) -> Result FileInfo FileError
 
 #@ Handler that delegates to the real file system.
-pub handler fs for File {
-  read path = resume (read_file path)
-  read_bytes path = resume (read_file_bytes path)
-  write path content = resume (write_file path content)
-  append path content = resume (append_file path content)
-  delete path = resume (delete_file path)
-  exists path = resume (file_exists path)
-  info path = resume (file_info path)
-}
+pub handler fs for File
+  read path = resume read_file path
+  read_bytes path = resume read_file_bytes path
+  write path content = resume write_file path content
+  append path content = resume append_file path content
+  delete path = resume delete_file path
+  exists path = resume file_exists path
+  info path = resume file_info path

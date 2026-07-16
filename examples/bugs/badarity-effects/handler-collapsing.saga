@@ -21,9 +21,8 @@ type Reason =
   | Second String
   | Third String
 
-effect Fail {
+effect Fail
   fun fail : Reason -> a
-}
 
 fun call_first : Unit -> String needs {Fail}
 call_first () = fail! (First "1st")
@@ -50,16 +49,15 @@ call_third () = fail! (Third "3rd")
 
 # --- Working form: single arm, inner case ---
 fun fixed : (Unit -> String needs {Fail}) -> String
-fixed thunk = thunk () with {
-  fail reason = case reason {
-    First msg -> "got First: " <> msg
-    Second msg -> "got Second: " <> msg
-    Third msg -> "got Third: " <> msg
-  }
-}
+fixed thunk = thunk () with
+  fail reason =
+    case reason of
+      First msg -> "got First: " <> msg
+      Second msg -> "got Second: " <> msg
+      Third msg -> "got Third: " <> msg
 
-main () = {
+main () =
   println (fixed call_first)
   println (fixed call_second)
   println (fixed call_third)
-} with console
+with console

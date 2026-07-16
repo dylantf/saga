@@ -24,19 +24,18 @@
 # Only the zero-argument function is broken; arity >= 1 forces the call site to
 # apply it, which yields a value.
 
-effect Log {
+effect Log
   fun log : Int -> Unit
-}
 
 fun collect_log : Handler Log
-collect_log = handler for Log {
-  log _ = resume ()
-}
+collect_log =
+  handler for Log
+    log _ = resume ()
 
 fun go : Unit -> Int
-go () = {
+go () =
   log! 1
   5
-} with collect_log
+with collect_log
 
 main () = dbg (go ())

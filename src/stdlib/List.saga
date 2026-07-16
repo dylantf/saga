@@ -5,38 +5,37 @@ import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 import Std.Base (Ordering)
 import Std.Maybe (Maybe)
 
-impl Debug for List a where {a: Debug} {
+impl Debug for List a where {a: Debug}
   debug xs = "[" <> debug_join (map debug xs) <> "]"
-}
 
 fun debug_join : List String -> String
-debug_join xs = case xs {
-  [] -> ""
-  [x] -> x
-  h :: t -> h <> ", " <> debug_join t
-}
+debug_join xs =
+  case xs of
+    [] -> ""
+    [x] -> x
+    h :: t -> h <> ", " <> debug_join t
 
 #@ Returns the first element of a list. Panics on empty list.
 pub fun head : List a -> a
-head xs = case xs {
-  h :: _ -> h
-  [] -> panic "head: empty list"
-}
+head xs =
+  case xs of
+    h :: _ -> h
+    [] -> panic "head: empty list"
 
 #@ Returns all elements after the first. Panics on empty list.
 pub fun tail : List a -> List a
-tail xs = case xs {
-  _ :: t -> t
-  [] -> panic "tail: empty list"
-}
+tail xs =
+  case xs of
+    _ :: t -> t
+    [] -> panic "tail: empty list"
 
 #@ Returns the last element of a list. Panics on empty list.
 pub fun last : List a -> a
-last xs = case xs {
-  [x] -> x
-  _ :: t -> last t
-  [] -> panic "last: empty list"
-}
+last xs =
+  case xs of
+    [x] -> x
+    _ :: t -> last t
+    [] -> panic "last: empty list"
 
 #@ Returns the number of elements in a list.
 @external("erlang", "erlang", "length")
@@ -44,46 +43,46 @@ pub fun length : (xs: List a) -> Int
 
 #@ Returns True if the list has no elements.
 pub fun is_empty : List a -> Bool
-is_empty xs = case xs {
-  [] -> True
-  _ -> False
-}
+is_empty xs =
+  case xs of
+    [] -> True
+    _ -> False
 
 #@ Applies a function to every element, returning a new list of results.
 # @external("erlang", "lists", "map")
 pub fun map : (f: a -> b needs {..e}) -> (xs: List a) -> List b needs {..e}
-map f xs = case xs {
-  [] -> []
-  h :: t -> f h :: map f t
-}
+map f xs =
+  case xs of
+    [] -> []
+    h :: t -> f h :: map f t
 
 #@ Returns a list of elements for which the predicate returns True.
 # @external("erlang", "lists", "filter")
 pub fun filter : (pred: a -> Bool needs {..e}) -> (xs: List a) -> List a
   needs {..e}
-filter pred xs = case xs {
-  [] -> []
-  h :: t ->
-    if pred h then h :: filter pred t
-    else filter pred t
-}
+filter pred xs =
+  case xs of
+    [] -> []
+    h :: t ->
+      if pred h then h :: filter pred t
+      else filter pred t
 
 #@ Left fold. Applies f to the accumulator and each element, left to right.
 pub fun foldl : (f: b -> a -> b needs {..e}) -> (acc: b) -> (xs: List a) -> b
   needs {..e}
-foldl f acc xs = case xs {
-  [] -> acc
-  h :: t -> foldl f (f acc h) t
-}
+foldl f acc xs =
+  case xs of
+    [] -> acc
+    h :: t -> foldl f (f acc h) t
 
 #@ Right fold. Applies f to each element and the accumulator, right to left.
 # @external("erlang", "lists", "foldr")
 pub fun foldr : (f: a -> b -> b needs {..e}) -> (acc: b) -> (xs: List a) -> b
   needs {..e}
-foldr f acc xs = case xs {
-  [] -> acc
-  h :: t -> f h (foldr f acc t)
-}
+foldr f acc xs =
+  case xs of
+    [] -> acc
+    h :: t -> f h (foldr f acc t)
 
 #@ Returns a list with elements in reverse order.
 @external("erlang", "lists", "reverse")
@@ -97,63 +96,63 @@ pub fun append : (xs: List a) -> (ys: List a) -> List a
 # @external("erlang", "lists", "flatmap")
 pub fun flat_map : (f: a -> List b needs {..e}) -> (xs: List a) -> List b
   needs {..e}
-flat_map f xs = case xs {
-  [] -> []
-  h :: t -> append (f h) (flat_map f t)
-}
+flat_map f xs =
+  case xs of
+    [] -> []
+    h :: t -> append (f h) (flat_map f t)
 
 #@ Maps a function over a list and keeps only the Just results.
 pub fun filter_map : (f: a -> Maybe b needs {..e}) -> (xs: List a) -> List b
   needs {..e}
-filter_map f xs = case xs {
-  [] -> []
-  h :: t -> case f h {
-    Just v -> v :: filter_map f t
-    Nothing -> filter_map f t
-  }
-}
+filter_map f xs =
+  case xs of
+    [] -> []
+    h :: t ->
+      case f h of
+        Just v -> v :: filter_map f t
+        Nothing -> filter_map f t
 
 #@ Returns the first n elements of a list.
 pub fun take : (n: Int) -> (xs: List a) -> List a
 take n xs =
   if n <= 0 then []
-  else case xs {
-    [] -> []
-    h :: t -> h :: take (n - 1) t
-  }
+  else
+    case xs of
+      [] -> []
+      h :: t -> h :: take (n - 1) t
 
 #@ Drops the first n elements of a list and returns the rest.
 pub fun drop : (n: Int) -> (xs: List a) -> List a
 drop n xs =
   if n <= 0 then xs
-  else case xs {
-    [] -> []
-    _ :: t -> drop (n - 1) t
-  }
+  else
+    case xs of
+      [] -> []
+      _ :: t -> drop (n - 1) t
 
 #@ Pairs up elements from two lists. Stops at the shorter list.
 pub fun zip : (xs: List a) -> (ys: List b) -> List (a, b)
-zip xs ys = case xs {
-  [] -> []
-  x :: xt -> case ys {
+zip xs ys =
+  case xs of
     [] -> []
-    y :: yt -> (x, y) :: zip xt yt
-  }
-}
+    x :: xt ->
+      case ys of
+        [] -> []
+        y :: yt -> (x, y) :: zip xt yt
 
 #@ Returns True if any element satisfies the predicate.
 pub fun any : (pred: a -> Bool needs {..e}) -> (xs: List a) -> Bool needs {..e}
-any pred xs = case xs {
-  [] -> False
-  h :: t -> if pred h then True else any pred t
-}
+any pred xs =
+  case xs of
+    [] -> False
+    h :: t -> if pred h then True else any pred t
 
 #@ Returns True if all elements satisfy the predicate.
 pub fun all : (pred: a -> Bool needs {..e}) -> (xs: List a) -> Bool needs {..e}
-all pred xs = case xs {
-  [] -> True
-  h :: t -> if pred h then all pred t else False
-}
+all pred xs =
+  case xs of
+    [] -> True
+    h :: t -> if pred h then all pred t else False
 
 #@ Creates a list of integers from start to end, inclusive.
 pub fun range : (start: Int) -> (end: Int) -> List Int
@@ -178,10 +177,10 @@ pub fun sort_by : (key: a -> b) -> (xs: List a) -> List a
 #@ Returns the first element matching the predicate, or Nothing.
 pub fun find : (pred: a -> Bool needs {..e}) -> (xs: List a) -> Maybe a
   needs {..e}
-find pred xs = case xs {
-  [] -> Nothing
-  h :: t -> if pred h then Just h else find pred t
-}
+find pred xs =
+  case xs of
+    [] -> Nothing
+    h :: t -> if pred h then Just h else find pred t
 
 #@ Returns True if the element is in the list.
 @external("erlang", "lists", "member")
@@ -194,15 +193,16 @@ pub fun nth : (n: Int) -> (xs: List a) -> Maybe a
 # --- Transformations ---
 
 #@ Combines two lists element-wise using a function. Stops at the shorter list.
-pub fun zip_with : (f: a -> b -> c needs {..e}) -> (xs: List a) -> (ys: List b) -> List c
+pub fun zip_with :
+  (f: a -> b -> c needs {..e}) -> (xs: List a) -> (ys: List b) -> List c
   needs {..e}
-zip_with f xs ys = case xs {
-  [] -> []
-  x :: xt -> case ys {
+zip_with f xs ys =
+  case xs of
     [] -> []
-    y :: yt -> f x y :: zip_with f xt yt
-  }
-}
+    x :: xt ->
+      case ys of
+        [] -> []
+        y :: yt -> f x y :: zip_with f xt yt
 
 #@ Transforms a list of pairs into a pair of lists.
 @external("erlang", "lists", "unzip")
@@ -210,15 +210,16 @@ pub fun unzip : (xs: List (a, b)) -> (List a, List b)
 
 #@ Splits a list into two: elements that satisfy the predicate and those that don't.
 # @external("erlang", "lists", "partition")
-pub fun partition : (pred: a -> Bool needs {..e}) -> (xs: List a) -> (List a, List a)
+pub fun partition :
+  (pred: a -> Bool needs {..e}) -> (xs: List a) -> (List a, List a)
   needs {..e}
-partition pred xs = case xs {
-  [] -> ([], [])
-  h :: t -> {
-    let (yes, no) = partition pred t
-    if pred h then (h :: yes, no) else (yes, h :: no)
-  }
-}
+partition pred xs =
+  case xs of
+    [] -> ([], [])
+    h :: t ->
+      let (yes, no) = partition pred t
+      if pred h then (h :: yes, no)
+      else (yes, h :: no)
 
 #@ Pairs each element with its 0-based index.
 @external("erlang", "std_list_bridge", "enumerate")
@@ -226,23 +227,23 @@ pub fun enumerate : (xs: List a) -> List (Int, a)
 
 #@ Inserts a separator between each element of a list.
 pub fun intersperse : (sep: a) -> (xs: List a) -> List a
-intersperse sep xs = case xs {
-  [] -> []
-  [x] -> [x]
-  h :: t -> h :: sep :: intersperse sep t
-}
+intersperse sep xs =
+  case xs of
+    [] -> []
+    [x] -> [x]
+    h :: t -> h :: sep :: intersperse sep t
 
 #@ Removes duplicate elements, preserving the first occurrence of each.
 pub fun unique : (xs: List a) -> List a where {a: Eq}
 unique xs = unique_go [] xs
 
 fun unique_go : List a -> List a -> List a where {a: Eq}
-unique_go seen remaining = case remaining {
-  [] -> reverse seen
-  h :: t ->
-    if contains h seen then unique_go seen t
-    else unique_go (h :: seen) t
-}
+unique_go seen remaining =
+  case remaining of
+    [] -> reverse seen
+    h :: t ->
+      if contains h seen then unique_go seen t
+      else unique_go (h :: seen) t
 
 #@ Flattens a list of lists into a single list.
 @external("erlang", "lists", "append")
@@ -250,33 +251,32 @@ pub fun concat : (xss: List (List a)) -> List a
 
 #@ Applies a side-effecting function to each element.
 pub fun iter : (f: a -> Unit needs {..e}) -> (xs: List a) -> Unit needs {..e}
-iter f xs = case xs {
-  [] -> ()
-  h :: t -> {
-    f h
-    iter f t
-  }
-}
+iter f xs =
+  case xs of
+    [] -> ()
+    h :: t ->
+      f h
+      iter f t
 
 #@ Like foldl, but returns a list of all intermediate accumulator values.
-pub fun scan : (f: b -> a -> b needs {..e}) -> (acc: b) -> (xs: List a) -> List b
+pub fun scan :
+  (f: b -> a -> b needs {..e}) -> (acc: b) -> (xs: List a) -> List b
   needs {..e}
-scan f acc xs = case xs {
-  [] -> []
-  h :: t -> {
-    let next = f acc h
-    next :: scan f next t
-  }
-}
+scan f acc xs =
+  case xs of
+    [] -> []
+    h :: t ->
+      let next = f acc h
+      next :: scan f next t
 
 #@ Splits a list into chunks of the given size. The last chunk may be smaller.
 # NOTE: parameter named `n` to avoid name resolution bug where `size`
 # resolves to maps:size (see examples/scratch.saga for repro)
 pub fun chunks : (n: Int) -> (xs: List a) -> List (List a)
-chunks n xs = case xs {
-  [] -> []
-  _ -> take n xs :: chunks n (drop n xs)
-}
+chunks n xs =
+  case xs of
+    [] -> []
+    _ -> take n xs :: chunks n (drop n xs)
 
 #@ Returns a sliding window of the given size over the list.
 pub fun window : (n: Int) -> (xs: List a) -> List (List a)

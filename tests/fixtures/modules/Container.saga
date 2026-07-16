@@ -7,21 +7,18 @@ module Container
 
 pub type Box a = Box a
 
-pub trait Encodable a {
+pub trait Encodable a
   fun encode : (x: a) -> Int
-}
 
 # An internal trait that consumers do NOT import. The Box impl body calls its
 # `tag` method, so after the cross-module fold inlines that body into a consumer,
 # the consumer sees a `Tag` dict call for a trait it never imported — exercising
 # the saturation guard's dict-constructor arity fallback.
-trait Tag a {
+trait Tag a
   fun tag : (x: a) -> Int
-}
 
-impl Tag for Int {
+impl Tag for Int
   tag _ = 1000
-}
 
 # A private record. The Box impl body reads a field on it, so after the Box impl
 # body is inlined cross-module the consumer must know this (non-`pub`, never
@@ -33,16 +30,13 @@ record Opts {
 fun default_opts : Unit -> Opts
 default_opts () = Opts { scale: 3 }
 
-impl Encodable for Int {
+impl Encodable for Int
   encode x = bump x
-}
 
-impl Encodable for Box a where {a: Encodable, a: Tag} {
-  encode (Box x) = {
+impl Encodable for Box a where {a: Encodable, a: Tag}
+  encode (Box x) =
     let o = default_opts ()
     wrap_value (encode x) + tag x + o.scale
-  }
-}
 
 fun bump : (x: Int) -> Int
 bump x = x * 2

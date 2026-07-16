@@ -3,7 +3,7 @@ module Std.Regex
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
-import Std.Maybe as Maybe (Maybe)
+import Std.Maybe (Maybe)
 
 #@ Returns True if the string matches the pattern.
 @external("erlang", "std_regex_bridge", "match")
@@ -19,8 +19,10 @@ pub fun find_all : (pattern: String) -> (s: String) -> List String
 
 #@ Replaces the first match of the pattern with the replacement string.
 @external("erlang", "std_regex_bridge", "replace")
-pub fun replace : (pattern: String) -> (s: String) -> (replacement: String) -> String
+pub fun replace :
+  (pattern: String) -> (s: String) -> (replacement: String) -> String
 
 #@ Replaces all matches of the pattern with the replacement string.
 @external("erlang", "std_regex_bridge", "replace_all")
-pub fun replace_all : (pattern: String) -> (s: String) -> (replacement: String) -> String
+pub fun replace_all :
+  (pattern: String) -> (s: String) -> (replacement: String) -> String

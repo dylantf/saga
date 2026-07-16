@@ -1,11 +1,9 @@
-effect Ask {
+effect Ask
   fun ask : Unit -> Int
-}
 
-main () = {
+main () =
   let x = 40
   let _ = x + 1
   ask! ()
-} with {
+with
   ask () = resume 42
-}

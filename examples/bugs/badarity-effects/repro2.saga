@@ -2,9 +2,8 @@ module Main
 
 import Std.IO (console, println)
 
-effect Skip {
+effect Skip
   fun skip : Unit -> a
-}
 
 fun route : String -> (String -> String needs {..e}) -> String -> String
   needs {Skip, ..e}
@@ -14,12 +13,12 @@ route pattern h input =
 
 fun choose : List (String -> String needs {Skip, ..e}) -> String -> String
   needs {..e}
-choose routes input = case routes {
-  [] -> "no match"
-  r :: rest -> r input with {
-    skip () = choose rest input
-  }
-}
+choose routes input =
+  case routes of
+    [] -> "no match"
+    r :: rest ->
+      r input with
+        skip () = choose rest input
 
 fun greet : String -> String
 greet _ = "hello!"
@@ -27,9 +26,9 @@ greet _ = "hello!"
 fun bye : String -> String
 bye _ = "goodbye!"
 
-main () = {
+main () =
   let r1 = fun input -> route "/" greet input
   let r2 = fun input -> route "/bye" bye input
   let result = choose [r1, r2] "/bye"
   println result
-} with console
+with console

@@ -1,10 +1,8 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
-handler forty_one for ReadInt {
+handler forty_one for ReadInt
   read () = resume 41
-}
 
 fun handled_value : Unit -> Int
 handled_value () = read! () with forty_one

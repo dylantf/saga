@@ -1,11 +1,11 @@
 module Main
 
-import Lib (Options, Encodable, Boxed)
 import Std.IO.Unsafe (print_stdout)
 
-handler options for Options {
+import Lib (Options, Encodable, Boxed)
+
+handler options for Options
   get_options () = resume 10
-}
 
 fun main : Unit -> Unit
 main () =

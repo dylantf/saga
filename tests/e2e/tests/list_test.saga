@@ -3,117 +3,127 @@ module ListTest
 import Std.List
 import Std.Test (Testing, describe, test, assert_eq)
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "List" (fun () -> {
-    describe "map" (fun () -> {
-      test "doubles elements" (fun () -> {
-        assert_eq (List.map (fun x -> x * 2) [1, 2, 3]) [2, 4, 6]
-      })
+tests () =
+  describe "List" (fun () ->
+    describe "map" (fun () ->
+      test
+        "doubles elements"
+        (fun () -> assert_eq (List.map (fun x -> x * 2) [1, 2, 3]) [2, 4, 6])
 
-      test "empty list" (fun () -> {
-        let result : List Int = List.map (fun x -> x + 1) []
+      test "empty list" (fun () ->
+        let result: List Int = List.map (fun x -> x + 1) []
         assert_eq result []
-      })
+      )
 
-      test "changes element type" (fun () -> {
-        assert_eq (List.map show [1, 2, 3]) ["1", "2", "3"]
-      })
-    })
+      test
+        "changes element type"
+        (fun () -> assert_eq (List.map show [1, 2, 3]) ["1", "2", "3"])
+    )
 
-    describe "filter" (fun () -> {
-      test "keeps matching elements" (fun () -> {
-        assert_eq (List.filter (fun x -> x > 2) [1, 2, 3, 4]) [3, 4]
-      })
+    describe "filter" (fun () ->
+      test
+        "keeps matching elements"
+        (fun () -> assert_eq (List.filter (fun x -> x > 2) [1, 2, 3, 4]) [3, 4])
 
-      test "empty list" (fun () -> {
-        let result : List Int = List.filter (fun x -> x > 0) []
+      test "empty list" (fun () ->
+        let result: List Int = List.filter (fun x -> x > 0) []
         assert_eq result []
-      })
+      )
 
-      test "all filtered out" (fun () -> {
-        let result : List Int = List.filter (fun x -> x > 100) [1, 2, 3]
+      test "all filtered out" (fun () ->
+        let result: List Int = List.filter (fun x -> x > 100) [1, 2, 3]
         assert_eq result []
-      })
+      )
 
-      test "all kept" (fun () -> {
-        assert_eq (List.filter (fun x -> x > 0) [1, 2, 3]) [1, 2, 3]
-      })
-    })
+      test
+        "all kept"
+        (fun () -> assert_eq (List.filter (fun x -> x > 0) [1, 2, 3]) [1, 2, 3])
+    )
 
-    describe "foldr" (fun () -> {
-      test "sums right to left" (fun () -> {
-        assert_eq (List.foldr (fun x acc -> x + acc) 0 [1, 2, 3, 4]) 10
-      })
+    describe "foldr" (fun () ->
+      test
+        "sums right to left"
+        (fun () ->
+          assert_eq (List.foldr (fun x acc -> x + acc) 0 [1, 2, 3, 4]) 10)
 
-      test "preserves order via cons" (fun () -> {
-        assert_eq (List.foldr (fun x acc -> x :: acc) [] [1, 2, 3]) [1, 2, 3]
-      })
+      test
+        "preserves order via cons"
+        (fun () ->
+          assert_eq (List.foldr (fun x acc -> x :: acc) [] [1, 2, 3]) [1, 2, 3])
 
-      test "empty list returns accumulator" (fun () -> {
-        let result : Int = List.foldr (fun x acc -> x + acc) 42 []
+      test "empty list returns accumulator" (fun () ->
+        let result: Int = List.foldr (fun x acc -> x + acc) 42 []
         assert_eq result 42
-      })
+      )
 
-      test "non-associative builds string right-to-left" (fun () -> {
-        assert_eq (List.foldr (fun x acc -> x <> acc) "!" ["a", "b", "c"]) "abc!"
-      })
-    })
+      test
+        "non-associative builds string right-to-left"
+        (fun () ->
+          assert_eq
+            (List.foldr (fun x acc -> x <> acc) "!" ["a", "b", "c"])
+            "abc!")
+    )
 
-    describe "flat_map" (fun () -> {
-      test "duplicates each element" (fun () -> {
-        assert_eq (List.flat_map (fun x -> [x, x]) [1, 2, 3]) [1, 1, 2, 2, 3, 3]
-      })
+    describe "flat_map" (fun () ->
+      test
+        "duplicates each element"
+        (fun () ->
+          assert_eq
+            (List.flat_map (fun x -> [x, x]) [1, 2, 3])
+            [1, 1, 2, 2, 3, 3])
 
-      test "empty inner lists" (fun () -> {
-        let result : List Int = List.flat_map (fun _ -> []) [1, 2, 3]
+      test "empty inner lists" (fun () ->
+        let result: List Int = List.flat_map (fun _ -> []) [1, 2, 3]
         assert_eq result []
-      })
+      )
 
-      test "empty outer list" (fun () -> {
-        let result : List Int = List.flat_map (fun x -> [x]) []
+      test "empty outer list" (fun () ->
+        let result: List Int = List.flat_map (fun x -> [x]) []
         assert_eq result []
-      })
+      )
 
-      test "varying inner length" (fun () -> {
-        assert_eq (List.flat_map (fun x -> List.range 1 x) [1, 2, 3]) [1, 1, 2, 1, 2, 3]
-      })
-    })
+      test
+        "varying inner length"
+        (fun () ->
+          assert_eq
+            (List.flat_map (fun x -> List.range 1 x) [1, 2, 3])
+            [1, 1, 2, 1, 2, 3])
+    )
 
-    describe "partition" (fun () -> {
-      test "splits by predicate" (fun () -> {
+    describe "partition" (fun () ->
+      test "splits by predicate" (fun () ->
         let (yes, no) = List.partition (fun x -> x > 2) [1, 2, 3, 4, 5]
         assert_eq yes [3, 4, 5]
         assert_eq no [1, 2]
-      })
+      )
 
-      test "preserves original order in both halves" (fun () -> {
-        let (evens, odds) = List.partition (fun x -> x % 2 == 0) [1, 2, 3, 4, 5, 6]
+      test "preserves original order in both halves" (fun () ->
+        let (evens, odds) =
+          List.partition (fun x -> x % 2 == 0) [1, 2, 3, 4, 5, 6]
         assert_eq evens [2, 4, 6]
         assert_eq odds [1, 3, 5]
-      })
+      )
 
-      test "empty list" (fun () -> {
-        let input : List Int = []
+      test "empty list" (fun () ->
+        let input: List Int = []
         let (yes, no) = List.partition (fun x -> x > 0) input
         assert_eq yes input
         assert_eq no input
-      })
+      )
 
-      test "all match" (fun () -> {
+      test "all match" (fun () ->
         let (yes, no) = List.partition (fun x -> x > 0) [1, 2, 3]
         assert_eq yes [1, 2, 3]
-        let no_expected : List Int = []
+        let no_expected: List Int = []
         assert_eq no no_expected
-      })
+      )
 
-      test "none match" (fun () -> {
+      test "none match" (fun () ->
         let (yes, no) = List.partition (fun x -> x > 100) [1, 2, 3]
-        let yes_expected : List Int = []
+        let yes_expected: List Int = []
         assert_eq yes yes_expected
         assert_eq no [1, 2, 3]
-      })
-    })
-  })
-}
+      )
+    )
+  )

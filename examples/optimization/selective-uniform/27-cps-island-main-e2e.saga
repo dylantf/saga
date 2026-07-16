@@ -1,16 +1,13 @@
 import Std.IO.Unsafe (print_stdout)
 
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
-handler forty_one for ReadInt {
+handler forty_one for ReadInt
   read () = resume 41
-}
 
 fun main : Unit -> Unit
-main () = {
+main () =
   let value = read! () with forty_one
   if value + 1 == 42 then print_stdout "ok\n"
   else print_stdout "bad\n"
-}

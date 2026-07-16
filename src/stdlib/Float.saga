@@ -3,13 +3,11 @@ module Std.Float
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
-impl Show for Float {
+impl Show for Float
   show x = to_string x
-}
 
-impl Debug for Float {
+impl Debug for Float
   debug x = to_string x
-}
 
 @external("erlang", "std_float_bridge", "to_string")
 fun to_string : (x: Float) -> String

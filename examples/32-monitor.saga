@@ -5,28 +5,23 @@ type WorkerMsg =
   | Die
 
 fun worker : Unit -> Unit needs {Actor WorkerMsg}
-worker () = receive {
-  Work n -> {
-    dbg $"Working on {n}"
-    worker ()
-  }
-  Die -> dbg "Worker shutting down"
-}
+worker () =
+  receive
+    Work n ->
+      dbg $"Working on {n}"
+      worker ()
+    Die -> dbg "Worker shutting down"
 
 fun watcher : Unit -> Unit needs {Process, Actor WorkerMsg, Monitor}
-watcher () = {
+watcher () =
   let pid = spawn! (fun () -> worker ())
   let _ref = monitor! pid
 
   send! pid (Work 42)
   send! pid Die
 
-  receive {
+  receive
     Down _dead_pid reason -> dbg $"Worker died: {reason}"
     after 5000 -> dbg "Timed out waiting for Down"
-  }
-}
 
-main () = {
-  watcher ()
-} with beam_actor
+main () = watcher () with beam_actor

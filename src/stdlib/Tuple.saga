@@ -3,9 +3,8 @@ module Std.Tuple
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
-impl Debug for Unit {
+impl Debug for Unit
   debug _ = "()"
-}
 
 #@ Returns the first element of a pair.
 pub fun fst : (t: (a, b)) -> a

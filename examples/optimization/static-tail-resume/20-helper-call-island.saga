@@ -1,16 +1,13 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
 fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()
 
 fun read_plus_two : Unit -> Int needs {ReadInt}
-read_plus_two () = {
+read_plus_two () =
   let value = read_value ()
   value + 2
-}
 
-main () = read_plus_two () with {
+main () = read_plus_two () with
   read () = resume 40
-}

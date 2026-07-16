@@ -6,16 +6,14 @@ type Shape =
 
 type Wrapped a = Wrapped a
 
-impl Show for Point {
+impl Show for Point
   show p = $"({p.x}, {p.y})"
-}
 
-impl Show for Shape {
-  show s = case s {
-    Circle r -> $"Circle({r})"
-    Rect w h -> $"Rect({w}, {h})"
-  }
-}
+impl Show for Shape
+  show s =
+    case s of
+      Circle r -> $"Circle({r})"
+      Rect w h -> $"Rect({w}, {h})"
 
 # Function argument destructuring
 add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
@@ -23,7 +21,7 @@ add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
 area (Circle r) = r * r * 3.14
 area (Rect w h) = w * h
 
-main () = {
+main () =
   # Let with tuples
   let (name, age) = ("Alice", 30)
   dbg $"{name} is {age}"
@@ -42,21 +40,19 @@ main () = {
 
   # Case for multi-constructor types
   let shape = Circle 10.0
-  let r2 = case shape {
-    Circle r -> r
-    Rect w h -> w * h
-  }
+  let r2 =
+    case shape of
+      Circle r -> r
+      Rect w h -> w * h
   dbg $"r2: {r2}"
 
   # Let with list cons (case needed since list could be empty)
   let items = [1, 2, 3, 4, 5]
-  case items {
-    h :: t -> {
+  case items of
+    h :: t ->
       dbg $"head: {h}"
       dbg $"tail: {debug t}"
-    }
     [] -> dbg "empty"
-  }
 
   # Nested destructuring
   let ((a, b), (c, d)) = ((1, 2), (3, 4))
@@ -67,4 +63,3 @@ main () = {
   let rect = Rect 3.0 4.0
   dbg $"{c} has area {area c}"
   dbg $"{rect} has area {area rect}"
-}

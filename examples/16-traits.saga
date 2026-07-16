@@ -10,32 +10,28 @@ record Point {
   y: Int,
 }
 
-trait Describe a {
+trait Describe a
   fun describe : (x: a) -> String
-}
 
-impl Describe for User {
+impl Describe for User
   describe user = $"{user.name} (age: {user.age})"
-}
 
-impl Describe for Point {
+impl Describe for Point
   describe p = $"({p.x}, {p.y})"
-}
 
 # Supertrait: Verbose requires Describe
-trait Verbose a where {a: Describe} {
+trait Verbose a where {a: Describe}
   fun verbose : (x: a) -> String
-}
 
-impl Verbose for User {
+impl Verbose for User
   verbose user = $"User: {describe user}, registered=true"
-}
 
-main () = {
+main () =
   let alice = User { name: "Alice", age: 30 }
   let origin = Point { x: 0, y: 0 }
 
   println (describe alice)
   println (describe origin)
   println (verbose alice)
-} with {console}
+with
+  console

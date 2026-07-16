@@ -1,7 +1,8 @@
 module EffectOpConstraintCrossModuleTest
 
-import EffectOpConstraintLibTest (Describe, show_it)
 import Std.Test (Testing, describe, test, assert_eq)
+
+import EffectOpConstraintLibTest (Describe, show_it)
 
 # Regression: an `op!` call to an *imported* effect whose operation has a
 # method-level `where` constraint must thread the constraint's dictionary at the
@@ -11,17 +12,13 @@ import Std.Test (Testing, describe, test, assert_eq)
 # ("function called with N argument(s), but expects M").
 
 fun prog : Unit -> String needs {Describe}
-prog () = {
+prog () =
   let s = describe! 42
   s
-}
 
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "imported effect op with method-level constraint" (fun () -> {
-    test "threads the op's dictionary across the module boundary" (fun () -> {
-      let s = prog () with show_it
-      assert_eq s "42"
-    })
-  })
-}
+tests () =
+  describe "imported effect op with method-level constraint" (fun () -> test "threads the op's dictionary across the module boundary" (fun () ->
+    let s = prog () with show_it
+    assert_eq s "42"
+  ))

@@ -3,9 +3,8 @@ import Std.IO (console, println)
 # Repro of the indirect-effectful-call bug, follow-up to the previous one.
 # Two variants of the same root cause.
 
-effect Foo {
+effect Foo
   fun foo : Unit -> Unit
-}
 
 fun do_foo : Unit -> Unit needs {Foo}
 do_foo () = foo! ()
@@ -22,26 +21,21 @@ call_through h () = h ()
 # Same indirect call, but with more code after it. Runtime arity mismatch
 # in an internal continuation lambda.
 fun wrap : (Unit -> Unit needs {..e}) -> Unit -> Unit needs {Stdio, ..e}
-wrap f () = {
+wrap f () =
   println "before"
   f ()
   println "after"
-}
 
-main () = {
+main () =
   # Expected: prints "foo!". Actual: prints nothing.
-  call_through do_foo () with {
-    foo () = {
+  call_through do_foo () with
+    foo () =
       println "foo!"
       resume ()
-    }
-  }
   # Expected: "before", "foo!", "after". Actual: "before" then badarity crash.
   # Uncomment to reproduce Variant B:
-  wrap do_foo () with {
-    foo () = {
+  wrap do_foo () with
+    foo () =
       println "foo!"
       resume ()
-    }
-  }
-} with console
+with console

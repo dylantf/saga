@@ -1,12 +1,10 @@
 module Lib
 
-pub effect Options {
+pub effect Options
   fun get_options : Unit -> Int
-}
 
 fun read_value : Unit -> Int needs {Options}
 read_value () = get_options! ()
 
 pub fun compute : Int -> Int needs {Options}
 compute x = x + read_value ()
-

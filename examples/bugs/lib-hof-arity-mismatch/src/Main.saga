@@ -7,24 +7,23 @@
 #@   Stack trace: lib:at
 module Main
 
-import Std.IO (console)
 import Std.Fail (Fail)
+
+import Std.IO (console)
 import Lib
 
 # Effectful callback defined in Main.
 fun custom : Int -> Int needs {Fail Lib.Failure}
 custom n = Lib.int n
 
-main () = {
+main () =
   # Works: Lib.at receives a Lib-defined callback
-  case Lib.run (fun n -> Lib.at "x" Lib.int n) 42 {
+  case Lib.run (fun n -> Lib.at "x" Lib.int n) 42 of
     Ok n -> println $"lib callback Ok: {n}"
     Err _ -> println "lib callback Err"
-  }
 
   # Crashes: Lib.at receives a Main-defined callback
-  case Lib.run (fun n -> Lib.at "x" custom n) 42 {
+  case Lib.run (fun n -> Lib.at "x" custom n) 42 of
     Ok n -> println $"main callback Ok: {n}"
     Err _ -> println "main callback Err"
-  }
-} with console
+with console

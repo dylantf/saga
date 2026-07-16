@@ -1,8 +1,7 @@
 pub fun call_local_lambda : Unit -> Int
-call_local_lambda () = {
+call_local_lambda () =
   let inc = fun x -> x + 1
   inc 41
-}
 
 fun main : Unit -> Unit
 main () = ()

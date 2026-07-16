@@ -1,13 +1,11 @@
 module InlineReader
 
-effect Config {
+effect Config
   fun port : Unit -> Int
-}
 
 fun main : Unit -> Int
-main () = {
+main () =
   let value = port! ()
   value + 1
-} with {
+with
   port () = resume 41
-}

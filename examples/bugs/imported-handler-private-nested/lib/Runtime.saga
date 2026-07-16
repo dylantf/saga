@@ -2,19 +2,16 @@ module Repro.Runtime
 
 # Lower-level effects stand in for the database driver's execution and
 # transaction capabilities from the original Kraken failure.
-pub effect Base {
+pub effect Base
   fun base_value : Int -> Int
-}
 
-pub effect Runner {
+pub effect Runner
   fun run : (Unit -> Result a e needs {Base}) -> Result a (RunError e)
-}
 
 pub type RunError e =
   | RunFailed
   | Aborted e
 
-pub fun run_scoped : (Unit -> Result a e needs {Base})
-  -> Result a (RunError e)
+pub fun run_scoped : (Unit -> Result a e needs {Base}) -> Result a (RunError e)
   needs {Runner}
 run_scoped body = run! body

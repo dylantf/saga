@@ -7,33 +7,28 @@
 # This is essential for higher-order functions that need to forward
 # effects from their callbacks without knowing what those effects are.
 
-effect Log {
+effect Log
   fun log : (msg: String) -> Unit
-}
 
-effect Fail {
+effect Fail
   fun fail : (msg: String) -> a
-}
 
 # --- Open rows: forwarding unknown effects ---
 
 # `run_with_log` handles Log but forwards any other effects from the callback.
 # The `..e` captures extras and propagates them to the caller's needs.
 fun run_with_log : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
-run_with_log f = f () with {
-  log msg = {
+run_with_log f = f () with
+  log msg =
     dbg msg
     resume ()
-  }
-}
 
 # This caller uses both Log and Fail. Log is handled by run_with_log,
 # Fail propagates through `..e` to the caller.
 fun greet : (name: String) -> Unit needs {Fail}
-greet name = {
+greet name =
   run_with_log (fun () -> log! $"hello, {name}")
   if name == "" then fail! "empty name" else ()
-}
 
 # --- Pure callbacks: no effects allowed ---
 
@@ -44,17 +39,14 @@ twice f x = f (f x)
 
 # --- Putting it together ---
 
-main () = {
+main () =
   # twice requires a pure callback
   let result = twice (fun x -> x * 2) 5
   dbg $"5 doubled twice: {result}"
 
   # run_with_log handles Log, inline handler catches Fail
-  greet "world" with {
+  greet "world" with
     fail msg = dbg $"caught: {msg}"
-  }
 
-  greet "" with {
+  greet "" with
     fail msg = dbg $"caught: {msg}"
-  }
-}

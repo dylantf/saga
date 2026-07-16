@@ -16,124 +16,118 @@ import Std.Dynamic (
   list_of,
   optional
 )
-import Std.List as List
+import Std.List
 import Std.Test (Testing, describe, test, assert_eq)
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "Dynamic" (fun () -> {
+tests () =
+  describe "Dynamic" (fun () ->
 
-    describe "classify" (fun () -> {
-      test "classifies Int" (fun () -> {
-        assert_eq (classify (from_erlang 42)) "Int"
-      })
+    describe "classify" (fun () ->
+      test
+        "classifies Int"
+        (fun () -> assert_eq (classify (from_erlang 42)) "Int")
 
-      test "classifies String" (fun () -> {
-        assert_eq (classify (from_erlang "hello")) "String"
-      })
+      test
+        "classifies String"
+        (fun () -> assert_eq (classify (from_erlang "hello")) "String")
 
-      test "classifies Bool" (fun () -> {
-        assert_eq (classify (from_erlang True)) "Bool"
-      })
+      test
+        "classifies Bool"
+        (fun () -> assert_eq (classify (from_erlang True)) "Bool")
 
-      test "classifies Float" (fun () -> {
-        assert_eq (classify (from_erlang 1.5)) "Float"
-      })
+      test
+        "classifies Float"
+        (fun () -> assert_eq (classify (from_erlang 1.5)) "Float")
 
-      test "classifies List" (fun () -> {
-        assert_eq (classify (from_erlang [1, 2, 3])) "List"
-      })
+      test
+        "classifies List"
+        (fun () -> assert_eq (classify (from_erlang [1, 2, 3])) "List")
 
-      test "classifies Map" (fun () -> {
-        assert_eq (classify (from_erlang (Dict.from_list [("a", 1)]))) "Map"
-      })
-    })
+      test
+        "classifies Map"
+        (fun () ->
+          assert_eq (classify (from_erlang (Dict.from_list [("a", 1)]))) "Map")
+    )
 
-    describe "decode_field" (fun () -> {
-      test "decodes string and int fields" (fun () -> {
+    describe "decode_field" (fun () ->
+      test "decodes string and int fields" (fun () ->
         let data =
-          from_erlang (Dict.from_list [
-            ("name", from_erlang "Alice"),
-            ("age", from_erlang 30),
-          ])
+          from_erlang
+            (Dict.from_list
+              [("name", from_erlang "Alice"), ("age", from_erlang 30)])
 
-        let result = do {
-          Ok(name) <- decode_field "name" string data
-          Ok(age) <- decode_field "age" int data
-          Ok((name, age))
-        } else {
-          Err(e) -> Err(e)
-        }
+        let result =
+          do
+            Ok name <- decode_field "name" string data
+            Ok age <- decode_field "age" int data
+            Ok (name, age)
+          else
+            Err e -> Err e
 
         assert_eq result (Ok ("Alice", 30))
-      })
+      )
 
-      test "fails fast on first wrong type" (fun () -> {
+      test "fails fast on first wrong type" (fun () ->
         let data =
-          from_erlang (Dict.from_list [
-            ("name", from_erlang 42),
-            ("age", from_erlang "not a number"),
-          ])
+          from_erlang
+            (Dict.from_list
+              [("name", from_erlang 42), ("age", from_erlang "not a number")])
 
-        let result = do {
-          Ok(name) <- decode_field "name" string data
-          Ok(age) <- decode_field "age" int data
-          Ok((name, age))
-        } else {
-          Err(e) -> Err(e)
-        }
+        let result =
+          do
+            Ok name <- decode_field "name" string data
+            Ok age <- decode_field "age" int data
+            Ok (name, age)
+          else
+            Err e -> Err e
 
         assert_eq (Result.is_err result) True
-      })
+      )
 
-      test "reports missing field" (fun () -> {
+      test "reports missing field" (fun () ->
         let data = from_erlang (Dict.from_list [("name", from_erlang "Alice")])
 
-        let result = do {
-          Ok(name) <- decode_field "name" string data
-          Ok(age) <- decode_field "age" int data
-          Ok((name, age))
-        } else {
-          Err(e) -> Err(e)
-        }
+        let result =
+          do
+            Ok name <- decode_field "name" string data
+            Ok age <- decode_field "age" int data
+            Ok (name, age)
+          else
+            Err e -> Err e
 
         assert_eq (Result.is_err result) True
-      })
+      )
 
-      test "decodes float and bool fields" (fun () -> {
+      test "decodes float and bool fields" (fun () ->
         let data =
-          from_erlang (Dict.from_list [
-            ("score", from_erlang 9.5),
-            ("active", from_erlang True),
-          ])
+          from_erlang
+            (Dict.from_list
+              [("score", from_erlang 9.5), ("active", from_erlang True)])
 
-        let result = do {
-          Ok(score) <- decode_field "score" float data
-          Ok(active) <- decode_field "active" bool data
-          Ok((score, active))
-        } else {
-          Err(e) -> Err(e)
-        }
+        let result =
+          do
+            Ok score <- decode_field "score" float data
+            Ok active <- decode_field "active" bool data
+            Ok (score, active)
+          else
+            Err e -> Err e
 
         assert_eq result (Ok (9.5, True))
-      })
-    })
+      )
+    )
 
-    describe "decode_element" (fun () -> {
-      test "decodes tuple elements" (fun () -> {
-        let data = from_erlang ("Bob", 25)
+    describe "decode_element" (fun () -> test "decodes tuple elements" (fun () ->
+      let data = from_erlang ("Bob", 25)
 
-        let result = do {
-          Ok(name) <- decode_element 0 string data
-          Ok(age) <- decode_element 1 int data
-          Ok((name, age))
-        } else {
-          Err(e) -> Err(e)
-        }
+      let result =
+        do
+          Ok name <- decode_element 0 string data
+          Ok age <- decode_element 1 int data
+          Ok (name, age)
+        else
+          Err e -> Err e
 
-        assert_eq result (Ok ("Bob", 25))
-      })
-    })
-  })
-}
+      assert_eq result (Ok ("Bob", 25))
+    ))
+  )

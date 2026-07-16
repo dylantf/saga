@@ -5,13 +5,13 @@ record Point {
 
 translate dx dy p = { p | x: p.x + dx, y: p.y + dy }
 
-quadrant p = case p {
-  Point { x, y } when x > 0 && y > 0 -> "I"
-  Point { x, y } when x < 0 && y > 0 -> "II"
-  Point { x, y } when x < 0 && y < 0 -> "III"
-  Point { x, y } when x > 0 && y < 0 -> "IV"
-  _ -> "origin or axis"
-}
+quadrant p =
+  case p of
+    Point { x, y } when x > 0 && y > 0 -> "I"
+    Point { x, y } when x < 0 && y > 0 -> "II"
+    Point { x, y } when x < 0 && y < 0 -> "III"
+    Point { x, y } when x > 0 && y < 0 -> "IV"
+    _ -> "origin or axis"
 
 # Nested records
 record Student {
@@ -25,18 +25,16 @@ record School {
 } deriving (Debug)
 
 fun fake_school : Unit -> School
-fake_school () = {
+fake_school () =
   let students = [
     Student { name: "John", grade: 2 },
     Student { name: "Suzy", grade: 3 },
   ]
 
   School { name: "Some school", students: students }
-}
 
-enroll_student (Student { .. } as student) (School { .. } as school) = {
+enroll_student (Student { .. } as student) (School { .. } as school) =
   { school | students: student :: school.students }
-}
 
 # Nested record
 
@@ -50,11 +48,11 @@ record Box a {
   value: a,
 }
 
-unwrap b = case b {
-  Box { value: v } -> v
-}
+unwrap b =
+  case b of
+    Box { value: v } -> v
 
-main () = {
+main () =
   let my_point = Point { x: 3, y: 4 }
   dbg (show my_point)
 
@@ -96,10 +94,9 @@ main () = {
   let House { address: { number, street }, .. } = house
   dbg (show number)
   dbg street
-  # let incomplete_house = House { year_built: 2005 }
-  # let invalid_house = House {
-  #   year_builded: 2005,
-  #   year_built: "2005",
-  # }
-  # dbg (debug invalid_house)
-}
+# let incomplete_house = House { year_built: 2005 }
+# let invalid_house = House {
+#   year_builded: 2005,
+#   year_built: "2005",
+# }
+# dbg (debug invalid_house)

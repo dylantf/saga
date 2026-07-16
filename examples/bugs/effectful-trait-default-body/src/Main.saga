@@ -14,8 +14,8 @@
 module Main
 
 import Std.IO (console)
-import OtherModule (Decode, DecodeErr, to_result)
 import Defaults (Opts, run)
+import OtherModule (Decode, DecodeErr, to_result)
 
 # Works:
 pub fun via_with : Int -> Result Int DecodeErr
@@ -31,17 +31,14 @@ via_default n = decode n with to_result
 pub fun via_run : Int -> Result Int DecodeErr
 via_run n = run decode n
 
-main () = {
-  case via_with 0 {
+main () =
+  case via_with 0 of
     Ok n -> println $"with ok:    Ok {debug n}"
     Err e -> println $"with ok:    Err {debug e}"
-  }
-  case via_default 0 {
+  case via_default 0 of
     Ok n -> println $"default ok: Ok {debug n}"
     Err e -> println $"default ok: Err {debug e}"
-  }
-  case via_run 0 {
+  case via_run 0 of
     Ok n -> println $"run ok:     Ok {debug n}"
     Err e -> println $"run ok:     Err {debug e}"
-  }
-} with console
+with console

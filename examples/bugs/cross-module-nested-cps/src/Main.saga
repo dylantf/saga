@@ -9,27 +9,25 @@
 #@   B: Ok 7
 module Main
 
-import Std.IO (console)
 import Std.Fail (Fail)
+
+import Std.IO (console)
 import Lib (Boxed, Failure)
 
-handler local_to_result for Fail a {
+handler local_to_result for Fail a
   fail e = Err e
   return v = Ok v
-}
 
-main () = {
+main () =
   let input = Lib.Boxed (Lib.IInt 7)
 
   # A: call int directly through run — works
-  case Lib.run Lib.int input {
+  case Lib.run Lib.int input of
     Ok n -> println $"A: Ok {n}"
     Err _ -> println "A: Err (BUG)"
-  }
 
   # B: call int through Lib.map_via, then via run
-  case Lib.run (fun b -> Lib.map_via Lib.int b) input {
+  case Lib.run (fun b -> Lib.map_via Lib.int b) input of
     Ok n -> println $"B: Ok {n}"
     Err _ -> println "B: Err (BUG)"
-  }
-} with console
+with console

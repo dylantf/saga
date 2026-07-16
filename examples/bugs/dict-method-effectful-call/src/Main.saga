@@ -15,23 +15,21 @@
 #@ tests/effect_property_tests.rs.
 module Main
 
-import Std.IO (console)
 import Std.Fail (Fail)
 
-pub trait Decoder a {
+import Std.IO (console)
+
+pub trait Decoder a
   fun decode : a -> Int
-}
 
 pub type Box = Box Int
 
-impl Decoder for Box needs {Fail String} {
+impl Decoder for Box needs {Fail String}
   decode (Box n) = if n < 0 then fail! "neg" else n
-}
 
-pub handler to_result for Fail a {
+pub handler to_result for Fail a
   fail e = Err e
   return v = Ok v
-}
 
 #@ Outer effectful function. Its argument is `decode b`, a trait method
 #@ call that elaborates to DictMethodAccess and itself performs Fail.
@@ -41,13 +39,11 @@ double n = n * 2
 pub fun run : Box -> Result Int String
 run b = double (decode b) with to_result
 
-main () = {
-  case run (Box (-1)) {
+main () =
+  case run (Box (-1)) of
     Ok n -> println $"neg: Ok {n}"
     Err e -> println $"neg: Err \"{e}\""
-  }
-  case run (Box 5) {
+  case run (Box 5) of
     Ok n -> println $"ok: Ok {n}"
     Err e -> println $"ok: Err \"{e}\""
-  }
-} with console
+with console

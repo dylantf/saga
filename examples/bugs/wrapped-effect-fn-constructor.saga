@@ -21,10 +21,9 @@ import Std.Fail (Fail)
 
 type E = Boom deriving (Debug)
 
-handler to_result for Fail a {
+handler to_result for Fail a
   fail e = Err e
   return v = Ok v
-}
 
 # An inner decoder-like function that raises Fail.
 fun inner : Int -> String needs {Fail E}
@@ -36,14 +35,14 @@ fun wrap : (Int -> String needs {Fail E, ..e}) -> Int -> Maybe String
   needs {Fail E, ..e}
 wrap f x = Just (f x)
 
-fun run_it : (Int -> Maybe String needs {Fail E}) -> Int -> Result (Maybe String) E
+fun run_it :
+  (Int -> Maybe String needs {Fail E}) -> Int -> Result (Maybe String) E
 run_it dec n = dec n with to_result
 
 fun main : Unit -> Unit
-main () = {
+main () =
   let r = run_it (wrap inner) 1
-  case r {
+  case r of
     Ok _ -> print! "got Ok\n"
     Err _ -> print! "got Err\n"
-  }
-} with console
+with console

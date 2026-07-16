@@ -3,35 +3,30 @@
 # The same computation can be run with different handlers:
 # one that prints to console, one that silently discards.
 
-effect Log {
+effect Log
   fun log : (msg: String) -> Unit
-}
 
 # Handler that prints each message with a prefix
-handler console_log for Log {
-  log msg = {
+handler console_log for Log
+  log msg =
     dbg ("[LOG] " <> msg)
     resume ()
-  }
-}
 
 # Handler that silently discards all log messages
-handler silent_log for Log {
+handler silent_log for Log
   log _ = resume ()
-}
 
 # A computation that uses logging
 fun do_work : Unit -> Int needs {Log}
-do_work () = {
+do_work () =
   log! "starting"
   let x = 10 + 20
   log! ("computed x = " <> show x)
   let y = x * 2
   log! ("computed y = " <> show y)
   y
-}
 
-main () = {
+main () =
   # Run with console logging
   dbg "--- with console_log ---"
   let result = do_work () with console_log
@@ -41,4 +36,3 @@ main () = {
   dbg "--- with silent_log ---"
   let result2 = do_work () with silent_log
   dbg ("result: " <> show result2)
-}

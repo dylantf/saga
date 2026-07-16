@@ -29,53 +29,45 @@ record BookCard {
 }
 
 fun value : a -> Built a
-value inner = Built (BuildState {
-  fields: [],
-  value: inner,
-})
+value inner = Built (BuildState { fields: [], value: inner })
 
 fun start : (a -> b) -> Built (a -> b)
-start constructor = Built (BuildState {
-  fields: [],
-  value: constructor,
-})
+start constructor = Built (BuildState { fields: [], value: constructor })
 
 fun field : String -> Built a -> Built (a -> b) -> Built b
-field name arg partial = {
+field name arg partial =
   let Built arg_state = arg
   let Built partial_state = partial
-  Built (BuildState {
-    fields: List.append partial_state.fields [name],
-    value: partial_state.value arg_state.value,
-  })
-}
+  Built
+    (BuildState {
+      fields: List.append partial_state.fields [name],
+      value: partial_state.value arg_state.value,
+    })
 
 fun unwrap : Built a -> a
-unwrap built = case built {
-  Built state -> state.value
-}
+unwrap built =
+  case built of
+    Built state -> state.value
 
 fun field_names : Built a -> List String
-field_names built = case built {
-  Built state -> state.fields
-}
+field_names built =
+  case built of
+    Built state -> state.fields
 
 fun book_card : Built BookCard
-book_card =
-  build RecordBuilder BookCard {
-    title: value "Programming Saga",
-    author: value "Ada",
-    pages: value 128,
-  }
+book_card = build RecordBuilder BookCard {
+  title: value "Programming Saga",
+  author: value "Ada",
+  pages: value 128,
+}
 
 fun anonymous_card : Built { title: String, available: Bool }
-anonymous_card =
-  build RecordBuilder {
-    available: value True,
-    title: value "Record Builders",
-  }
+anonymous_card = build RecordBuilder {
+  available: value True,
+  title: value "Record Builders",
+}
 
-main () = {
+main () =
   let card = unwrap book_card
   let anon = unwrap anonymous_card
 
@@ -86,4 +78,5 @@ main () = {
   println "anonymous record:"
   println $"{anon.title}, available={show anon.available}"
   println ("fields: " <> String.join ", " (field_names anonymous_card))
-} with {console}
+with
+  console

@@ -21,6 +21,7 @@ import Repro.Runtime (Base, Runner, RunError)
 # makes the project compile, because the nested handler is then lowered in its
 # defining module instead of while expanding outer here.
 fun reproduce : Int -> Result Int (RunError String) needs {Base, Runner}
-reproduce input = Repro.Query.Work.scoped! input (fun () -> Err "stop") with outer
+reproduce input =
+  Repro.Query.Work.scoped! input (fun () -> Err "stop") with outer
 
 main () = ()

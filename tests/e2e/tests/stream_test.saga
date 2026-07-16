@@ -1,162 +1,156 @@
 module StreamTest
 
 import Std.Stream (Stream, Gen)
-import Std.Stream as Stream
+import Std.Stream
 import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
 # --- Helper producers ---
 
 fun naturals_from : Int -> Unit needs {Gen Int}
-naturals_from n = {
+naturals_from n =
   yield! n
   naturals_from (n + 1)
-}
 
 fun count_down : Int -> Unit needs {Gen Int}
 count_down 0 = yield! 0
-count_down n = {
+count_down n =
   yield! n
   count_down (n - 1)
-}
 
 # --- Tests ---
 
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "Stream constructors" (fun () -> {
-    test "empty produces no elements" (fun () -> {
-      assert_eq (Stream.to_list (Stream.empty ())) ([] : List Int)
-    })
+tests () =
+  describe "Stream constructors" (fun () ->
+    test
+      "empty produces no elements"
+      (fun () -> assert_eq (Stream.to_list (Stream.empty ())) ([] : List Int))
 
-    test "singleton produces one element" (fun () -> {
-      assert_eq (Stream.to_list (Stream.singleton 42)) [42]
-    })
+    test
+      "singleton produces one element"
+      (fun () -> assert_eq (Stream.to_list (Stream.singleton 42)) [42])
 
-    test "from_list round-trips" (fun () -> {
+    test "from_list round-trips" (fun () ->
       let xs = [1, 2, 3, 4, 5]
       assert_eq (Stream.to_list (Stream.from_list xs)) xs
-    })
+    )
 
-    test "from_list on empty list" (fun () -> {
-      assert_eq (Stream.to_list (Stream.from_list ([] : List Int))) []
-    })
+    test
+      "from_list on empty list"
+      (fun () ->
+        assert_eq (Stream.to_list (Stream.from_list ([] : List Int))) [])
 
-    test "range is half-open" (fun () -> {
-      assert_eq (Stream.to_list (Stream.range 1 5)) [1, 2, 3, 4]
-    })
+    test
+      "range is half-open"
+      (fun () -> assert_eq (Stream.to_list (Stream.range 1 5)) [1, 2, 3, 4])
 
-    test "range with lo == hi is empty" (fun () -> {
-      assert_eq (Stream.to_list (Stream.range 3 3)) []
-    })
+    test
+      "range with lo == hi is empty"
+      (fun () -> assert_eq (Stream.to_list (Stream.range 3 3)) [])
 
-    test "range with lo > hi is empty" (fun () -> {
-      assert_eq (Stream.to_list (Stream.range 5 1)) []
-    })
+    test
+      "range with lo > hi is empty"
+      (fun () -> assert_eq (Stream.to_list (Stream.range 5 1)) [])
 
-    test "repeat is infinite, take cuts it off" (fun () -> {
+    test "repeat is infinite, take cuts it off" (fun () ->
       let xs = Stream.repeat "x" |> Stream.take 4 |> Stream.to_list
       assert_eq xs ["x", "x", "x", "x"]
-    })
+    )
 
-    test "iterate yields starting value first" (fun () -> {
+    test "iterate yields starting value first" (fun () ->
       let xs =
-        Stream.iterate (fun x -> x * 2) 1 |> Stream.take 5 |> Stream.to_list
+        Stream.iterate (fun x -> x * 2) 1
+        |> Stream.take 5
+        |> Stream.to_list
       assert_eq xs [1, 2, 4, 8, 16]
-    })
+    )
 
-    test "range_from is infinite, take cuts it off" (fun () -> {
+    test "range_from is infinite, take cuts it off" (fun () ->
       let xs = Stream.range_from 10 |> Stream.take 3 |> Stream.to_list
       assert_eq xs [10, 11, 12]
-    })
-  })
+    )
+  )
 
-  describe "Stream from generator (Gen effect)" (fun () -> {
-    test "finite generator" (fun () -> {
+  describe "Stream from generator (Gen effect)" (fun () ->
+    test "finite generator" (fun () ->
       let s = Stream.from_gen (fun () -> count_down 3)
       assert_eq (Stream.to_list s) [3, 2, 1, 0]
-    })
+    )
 
-    test "infinite generator capped by take" (fun () -> {
+    test "infinite generator capped by take" (fun () ->
       let s = Stream.from_gen (fun () -> naturals_from 0)
       assert_eq (Stream.to_list (Stream.take 5 s)) [0, 1, 2, 3, 4]
-    })
+    )
 
-    test "generator restart: stream is re-traversable" (fun () -> {
+    test "generator restart: stream is re-traversable" (fun () ->
       # Pulling twice from the same Stream value re-runs the producer.
       let s = Stream.from_gen (fun () -> count_down 2)
       let a = Stream.to_list s
       let b = Stream.to_list s
       assert_eq a b
-    })
-  })
+    )
+  )
 
-  describe "Stream.next" (fun () -> {
-    test "next on empty is Nothing" (fun () -> {
-      case Stream.next (Stream.empty () : Stream Int) {
-        Nothing -> assert_true True
-        Just _ -> assert_true False
-      }
-    })
+  describe "Stream.next" (fun () ->
+    test "next on empty is Nothing" (fun () -> case Stream.next (Stream.empty () : Stream Int) of
+      Nothing -> assert_true True
+      Just _ -> assert_true False)
 
-    test "next yields head and tail" (fun () -> {
-      case Stream.next (Stream.from_list [10, 20, 30]) {
-        Just (h, rest) -> {
-          assert_eq h 10
-          assert_eq (Stream.to_list rest) [20, 30]
-        }
-        Nothing -> assert_true False
-      }
-    })
-  })
+    test "next yields head and tail" (fun () -> case Stream.next (Stream.from_list [10, 20, 30]) of
+      Just (h, rest) ->
+        assert_eq h 10
+        assert_eq (Stream.to_list rest) [20, 30]
+      Nothing -> assert_true False)
+  )
 
-  describe "Stream.is_empty" (fun () -> {
-    test "True on empty" (fun () -> {
-      assert_true (Stream.is_empty (Stream.empty () : Stream Int))
-    })
+  describe "Stream.is_empty" (fun () ->
+    test
+      "True on empty"
+      (fun () -> assert_true (Stream.is_empty (Stream.empty () : Stream Int)))
 
-    test "False on non-empty" (fun () -> {
-      assert_false (Stream.is_empty (Stream.from_list [1]))
-    })
+    test
+      "False on non-empty"
+      (fun () -> assert_false (Stream.is_empty (Stream.from_list [1])))
 
-    test "False on infinite" (fun () -> {
-      assert_false (Stream.is_empty (Stream.range_from 0))
-    })
-  })
+    test
+      "False on infinite"
+      (fun () -> assert_false (Stream.is_empty (Stream.range_from 0)))
+  )
 
-  describe "Stream.map" (fun () -> {
-    test "maps over finite stream" (fun () -> {
+  describe "Stream.map" (fun () ->
+    test "maps over finite stream" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3]
         |> Stream.map (fun x -> x * 10)
         |> Stream.to_list
       assert_eq xs [10, 20, 30]
-    })
+    )
 
-    test "lazy: maps over infinite stream" (fun () -> {
+    test "lazy: maps over infinite stream" (fun () ->
       let xs =
         Stream.range_from 1
         |> Stream.map (fun x -> x * x)
         |> Stream.take 4
         |> Stream.to_list
       assert_eq xs [1, 4, 9, 16]
-    })
+    )
 
-    test "map on empty is empty" (fun () -> {
+    test "map on empty is empty" (fun () ->
       let xs = Stream.empty () |> Stream.map (fun x -> x + 1) |> Stream.to_list
       assert_eq xs ([] : List Int)
-    })
-  })
+    )
+  )
 
-  describe "Stream.filter" (fun () -> {
-    test "keeps matching elements" (fun () -> {
+  describe "Stream.filter" (fun () ->
+    test "keeps matching elements" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3, 4, 5, 6]
         |> Stream.filter (fun x -> x % 2 == 0)
         |> Stream.to_list
       assert_eq xs [2, 4, 6]
-    })
+    )
 
-    test "filter then take on infinite stream" (fun () -> {
+    test "filter then take on infinite stream" (fun () ->
       # filter must repeatedly pull until it finds a match
       let xs =
         Stream.range_from 1
@@ -164,191 +158,192 @@ tests () = {
         |> Stream.take 3
         |> Stream.to_list
       assert_eq xs [7, 14, 21]
-    })
+    )
 
-    test "filter that matches nothing in finite range" (fun () -> {
+    test "filter that matches nothing in finite range" (fun () ->
       let xs =
         Stream.range 1 10
         |> Stream.filter (fun x -> x > 100)
         |> Stream.to_list
       assert_eq xs ([] : List Int)
-    })
-  })
+    )
+  )
 
-  describe "Stream.flat_map" (fun () -> {
-    test "flattens nested streams" (fun () -> {
+  describe "Stream.flat_map" (fun () ->
+    test "flattens nested streams" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3]
         |> Stream.flat_map (fun n -> Stream.from_list [n, n * 10])
         |> Stream.to_list
       assert_eq xs [1, 10, 2, 20, 3, 30]
-    })
+    )
 
-    test "flat_map with empty inner streams" (fun () -> {
+    test "flat_map with empty inner streams" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3]
         |> Stream.flat_map (fun _ -> Stream.empty ())
         |> Stream.to_list
       assert_eq xs ([] : List Int)
-    })
-  })
+    )
+  )
 
-  describe "Stream.append" (fun () -> {
-    test "concatenates two finite streams" (fun () -> {
+  describe "Stream.append" (fun () ->
+    test "concatenates two finite streams" (fun () ->
       let xs =
         Stream.append (Stream.from_list [1, 2]) (Stream.from_list [3, 4])
         |> Stream.to_list
       assert_eq xs [1, 2, 3, 4]
-    })
+    )
 
-    test "empty ++ s = s" (fun () -> {
+    test "empty ++ s = s" (fun () ->
       let xs =
         Stream.append (Stream.empty ()) (Stream.from_list [1, 2])
         |> Stream.to_list
       assert_eq xs [1, 2]
-    })
+    )
 
-    test "s ++ empty = s" (fun () -> {
+    test "s ++ empty = s" (fun () ->
       let xs =
         Stream.append (Stream.from_list [1, 2]) (Stream.empty ())
         |> Stream.to_list
       assert_eq xs [1, 2]
-    })
-  })
+    )
+  )
 
-  describe "Stream.zip" (fun () -> {
-    test "zips equal-length streams" (fun () -> {
+  describe "Stream.zip" (fun () ->
+    test "zips equal-length streams" (fun () ->
       let xs =
-        Stream.zip (Stream.from_list [
-          1,
-          2,
-          3,
-        ]) (Stream.from_list ["a", "b", "c"])
+        Stream.zip
+          (Stream.from_list [1, 2, 3])
+          (Stream.from_list ["a", "b", "c"])
         |> Stream.to_list
       assert_eq xs [(1, "a"), (2, "b"), (3, "c")]
-    })
+    )
 
-    test "stops at shorter stream (left short)" (fun () -> {
+    test "stops at shorter stream (left short)" (fun () ->
       let xs =
-        Stream.zip (Stream.from_list [
-          1,
-          2,
-        ]) (Stream.from_list ["a", "b", "c", "d"])
+        Stream.zip
+          (Stream.from_list [1, 2])
+          (Stream.from_list ["a", "b", "c", "d"])
         |> Stream.to_list
       assert_eq xs [(1, "a"), (2, "b")]
-    })
+    )
 
-    test "stops at shorter stream (right short)" (fun () -> {
+    test "stops at shorter stream (right short)" (fun () ->
       let xs =
         Stream.zip (Stream.from_list [1, 2, 3, 4]) (Stream.from_list ["a"])
         |> Stream.to_list
       assert_eq xs [(1, "a")]
-    })
+    )
 
-    test "infinite zipped with finite" (fun () -> {
+    test "infinite zipped with finite" (fun () ->
       let xs =
         Stream.zip (Stream.range_from 1) (Stream.from_list ["a", "b", "c"])
         |> Stream.to_list
       assert_eq xs [(1, "a"), (2, "b"), (3, "c")]
-    })
-  })
+    )
+  )
 
-  describe "Stream.take / Stream.drop" (fun () -> {
-    test "take 0 yields empty" (fun () -> {
+  describe "Stream.take / Stream.drop" (fun () ->
+    test "take 0 yields empty" (fun () ->
       let xs = Stream.range_from 0 |> Stream.take 0 |> Stream.to_list
       assert_eq xs ([] : List Int)
-    })
+    )
 
-    test "take more than length stops at end" (fun () -> {
+    test "take more than length stops at end" (fun () ->
       let xs = Stream.from_list [1, 2, 3] |> Stream.take 10 |> Stream.to_list
       assert_eq xs [1, 2, 3]
-    })
+    )
 
-    test "drop skips elements" (fun () -> {
+    test "drop skips elements" (fun () ->
       let xs =
-        Stream.from_list [1, 2, 3, 4, 5] |> Stream.drop 2 |> Stream.to_list
+        Stream.from_list [1, 2, 3, 4, 5]
+        |> Stream.drop 2
+        |> Stream.to_list
       assert_eq xs [3, 4, 5]
-    })
+    )
 
-    test "drop more than length yields empty" (fun () -> {
+    test "drop more than length yields empty" (fun () ->
       let xs = Stream.from_list [1, 2, 3] |> Stream.drop 10 |> Stream.to_list
       assert_eq xs ([] : List Int)
-    })
+    )
 
-    test "drop then take on infinite stream" (fun () -> {
+    test "drop then take on infinite stream" (fun () ->
       let xs =
-        Stream.range_from 0 |> Stream.drop 5 |> Stream.take 3 |> Stream.to_list
+        Stream.range_from 0
+        |> Stream.drop 5
+        |> Stream.take 3
+        |> Stream.to_list
       assert_eq xs [5, 6, 7]
-    })
-  })
+    )
+  )
 
-  describe "Stream.take_while / Stream.drop_while" (fun () -> {
-    test "take_while stops at first False" (fun () -> {
+  describe "Stream.take_while / Stream.drop_while" (fun () ->
+    test "take_while stops at first False" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3, 4, 1, 2]
         |> Stream.take_while (fun x -> x < 4)
         |> Stream.to_list
       assert_eq xs [1, 2, 3]
-    })
+    )
 
-    test "take_while on infinite stream" (fun () -> {
+    test "take_while on infinite stream" (fun () ->
       let xs =
         Stream.range_from 1
         |> Stream.take_while (fun x -> x < 5)
         |> Stream.to_list
       assert_eq xs [1, 2, 3, 4]
-    })
+    )
 
-    test "drop_while skips matching prefix" (fun () -> {
+    test "drop_while skips matching prefix" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3, 4, 1, 2]
         |> Stream.drop_while (fun x -> x < 4)
         |> Stream.to_list
       assert_eq xs [4, 1, 2]
-    })
+    )
 
-    test "drop_while removing everything yields empty" (fun () -> {
+    test "drop_while removing everything yields empty" (fun () ->
       let xs =
         Stream.from_list [1, 2, 3]
         |> Stream.drop_while (fun x -> x < 10)
         |> Stream.to_list
       assert_eq xs ([] : List Int)
-    })
-  })
+    )
+  )
 
-  describe "Stream.fold / Stream.length" (fun () -> {
-    test "fold sums" (fun () -> {
+  describe "Stream.fold / Stream.length" (fun () ->
+    test "fold sums" (fun () ->
       let s = Stream.from_list [1, 2, 3, 4, 5]
       assert_eq (Stream.fold (fun acc x -> acc + x) 0 s) 15
-    })
+    )
 
-    test "fold on empty returns initial accumulator" (fun () -> {
-      assert_eq (Stream.fold (fun acc x -> acc + x) 99 (Stream.empty ())) 99
-    })
+    test
+      "fold on empty returns initial accumulator"
+      (fun () ->
+        assert_eq (Stream.fold (fun acc x -> acc + x) 99 (Stream.empty ())) 99)
 
-    test "length of finite stream" (fun () -> {
-      assert_eq (Stream.length (Stream.range 0 7)) 7
-    })
+    test
+      "length of finite stream"
+      (fun () -> assert_eq (Stream.length (Stream.range 0 7)) 7)
 
-    test "length of empty stream" (fun () -> {
-      assert_eq (Stream.length (Stream.empty () : Stream Int)) 0
-    })
-  })
+    test
+      "length of empty stream"
+      (fun () -> assert_eq (Stream.length (Stream.empty () : Stream Int)) 0)
+  )
 
-  describe "Stream.for_each (effectful callback)" (fun () -> {
-    test "runs the callback for every element in order" (fun () -> {
-      # Use a generator to capture the call sequence into a list:
-      # we run for_each with a callback that yields, and re-collect to a list.
-      let input = Stream.from_list [1, 2, 3]
-      let s =
-        Stream.from_gen (fun () ->
-          Stream.for_each (fun x -> yield! (x * 2)) input)
-      assert_eq (Stream.to_list s) [2, 4, 6]
-    })
-  })
+  describe "Stream.for_each (effectful callback)" (fun () -> test "runs the callback for every element in order" (fun () ->
+    # Use a generator to capture the call sequence into a list:
+    # we run for_each with a callback that yields, and re-collect to a list.
+    let input = Stream.from_list [1, 2, 3]
+    let s =
+      Stream.from_gen
+        (fun () -> Stream.for_each (fun x -> yield! (x * 2)) input)
+    assert_eq (Stream.to_list s) [2, 4, 6]
+  ))
 
-  describe "Pipeline integration" (fun () -> {
-    test "the classic: squares, evens, take 5" (fun () -> {
+  describe "Pipeline integration" (fun () ->
+    test "the classic: squares, evens, take 5" (fun () ->
       let xs =
         Stream.from_gen (fun () -> naturals_from 0)
         |> Stream.map (fun x -> x * x)
@@ -356,9 +351,9 @@ tests () = {
         |> Stream.take 5
         |> Stream.to_list
       assert_eq xs [0, 4, 16, 36, 64]
-    })
+    )
 
-    test "zip range with mapped range and fold" (fun () -> {
+    test "zip range with mapped range and fold" (fun () ->
       let total =
         Stream.zip (Stream.range 1 4) (Stream.range 10 13)
         |> Stream.map (fun (a, b) -> a + b)
@@ -367,6 +362,5 @@ tests () = {
 
 
       assert_eq total 39
-    })
-  })
-}
+    )
+  )

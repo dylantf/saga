@@ -1,6 +1,6 @@
 import Std.Set
 
-main () = {
+main () =
   let s =
     Set.new ()
     |> Set.insert 1
@@ -44,4 +44,3 @@ main () = {
 
   let removed = Set.remove 2 s
   dbg (Set.size removed)
-}

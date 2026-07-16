@@ -1,8 +1,7 @@
 module Effects
 
-pub effect Log {
+pub effect Log
   fun log : String -> Unit
-}
 
 pub fun may_log : Unit -> Int needs {Log}
 may_log () = 42

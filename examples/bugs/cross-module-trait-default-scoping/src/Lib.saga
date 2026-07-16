@@ -14,12 +14,10 @@ pub record Cfg { tag: String }
 pub fun default_cfg : Cfg
 default_cfg = Cfg { tag: "default" }
 
-pub trait Act a {
+pub trait Act a
   fun act_with : Cfg -> a -> String
   fun act : a -> String
   act x = act_with default_cfg x
-}
 
-impl Act for Int {
+impl Act for Int
   act_with c n = c.tag <> ":" <> show n
-}

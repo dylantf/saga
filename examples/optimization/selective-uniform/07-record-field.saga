@@ -4,7 +4,6 @@ record Point {
 }
 
 fun main : Unit -> Int
-main () = {
+main () =
   let p = Point { x: 3, y: 4 }
   p.x + p.y
-}

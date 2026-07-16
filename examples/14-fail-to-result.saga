@@ -4,18 +4,14 @@
 # the outcome in Ok/Err. This is the effectful equivalent
 # of try/catch, but composable and explicit.
 
-effect Fail {
+effect Fail
   fun fail : (msg: String) -> a
-}
 
 # Run a computation that might fail, returning a Result
 fun try : (computation: Unit -> a needs {Fail}) -> Result a String
-try computation = {
-  computation () with {
-    fail msg = Err msg
-    return value = Ok value
-  }
-}
+try computation = computation () with
+  fail msg = Err msg
+  return value = Ok value
 
 # --- Some functions that can fail ---
 
@@ -30,27 +26,30 @@ parse_positive x =
 
 # --- Putting it together ---
 
-main () = {
+main () =
   # Successful computation
-  let a = try (fun () -> {
-    let x = safe_div 100 4
-    let y = parse_positive x
-    y * 2
-  })
+  let a =
+    try (fun () ->
+      let x = safe_div 100 4
+      let y = parse_positive x
+      y * 2
+    )
   dbg ("success: " <> debug a)
 
   # Failing computation -- div by zero
-  let b = try (fun () -> {
-    let x = safe_div 100 0
-    x * 2
-  })
+  let b =
+    try (fun () ->
+      let x = safe_div 100 0
+      x * 2
+    )
   dbg ("div by zero: " <> debug b)
 
   # Failing computation -- negative number
-  let c = try (fun () -> {
-    let x = safe_div 100 4
-    parse_positive (0 - x)
-  })
+  let c =
+    try (fun () ->
+      let x = safe_div 100 4
+      parse_positive (0 - x)
+    )
   dbg ("negative: " <> debug c)
 
   # Pipe results through transformations
@@ -64,4 +63,3 @@ main () = {
     |> Result.map (fun x -> x * 10)
     |> Result.map_err (fun msg -> "FAILED: " <> msg)
   dbg ("piped err: " <> debug e)
-}

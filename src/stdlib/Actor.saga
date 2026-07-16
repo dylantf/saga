@@ -10,17 +10,15 @@ import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 pub type Pid msg = Pid Int deriving (Eq, Debug)
 
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
-pub effect Process {
+pub effect Process
   fun spawn : (f: Unit -> Unit needs {Actor msg, ..e}) -> Pid msg needs {..e}
   fun send : (pid: Pid msg) -> (msg: msg) -> Unit
   fun exit : (pid: Pid msg) -> ExitReason -> Unit
-}
 
 #@ Actor effect: parameterized by the current process's message type.
 #@ Only self and receive use this (scoped to this process's mailbox).
-pub effect Actor msg {
+pub effect Actor msg
   fun self : Unit -> Pid msg
-}
 
 #@ Exit reasons for monitored processes
 pub type ExitReason =
@@ -37,41 +35,36 @@ pub type SystemMsg =
   | Down (Pid a) ExitReason
   | Exit (Pid a) ExitReason
 
-impl Show for ExitReason {
-  show r = case r {
-    Normal -> "Normal"
-    Shutdown -> "Shutdown"
-    Killed -> "Killed"
-    Noproc -> "Noproc"
-    Error msg -> "Error(" <> msg <> ")"
-    Other msg -> "Other(" <> msg <> ")"
-  }
-}
+impl Show for ExitReason
+  show r =
+    case r of
+      Normal -> "Normal"
+      Shutdown -> "Shutdown"
+      Killed -> "Killed"
+      Noproc -> "Noproc"
+      Error msg -> "Error(" <> msg <> ")"
+      Other msg -> "Other(" <> msg <> ")"
 
 opaque type MonitorRef = MonitorRef
 
 #@ Monitor processes and get notified when they die
-pub effect Monitor {
+pub effect Monitor
   fun monitor : (pid: Pid msg) -> MonitorRef
   fun demonitor : (ref: MonitorRef) -> Unit
-}
 
 #@ Bidirectional crash propagation between processes
-pub effect Link {
+pub effect Link
   fun link : (pid: Pid msg) -> Unit
   fun unlink : (pid: Pid msg) -> Unit
-}
 
 #@ Timer effect: delays and scheduled messages
 opaque type TimerRef = TimerRef
 
-pub effect Timer {
+pub effect Timer
   fun sleep : (ms: Int) -> Unit
   fun send_after : (pid: Pid msg) -> (ms: Int) -> (msg: msg) -> TimerRef
   fun cancel_timer : (ref: TimerRef) -> Unit
-}
 
 #@ Native handler for BEAM effects
-pub handler beam_actor for Process, Actor msg, Monitor, Link, Timer {
+pub handler beam_actor for Process, Actor msg, Monitor, Link, Timer
   # LSP error expected: compiler builtin. Ops are lowered to direct BEAM calls.
-}

@@ -1,6 +1,6 @@
 module AdvancedTest
 
-import Std.BitString as BitString
+import Std.BitString
 import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
 # --- Types for deriving tests ---
@@ -16,45 +16,38 @@ type Scored a = Scored Int a deriving (Show, Eq, Ord)
 
 # --- Traits ---
 
-trait Describe a {
+trait Describe a
   fun describe_it : a -> String
-}
 
 record User {
   name: String,
   age: Int,
 }
 
-impl Describe for User {
+impl Describe for User
   describe_it user = $"{user.name} (age: {user.age})"
-}
 
 record Point { x: Int, y: Int }
 
-impl Describe for Point {
+impl Describe for Point
   describe_it p = $"({p.x}, {p.y})"
-}
 
 # Supertrait
-trait Verbose a where {a: Describe} {
+trait Verbose a where {a: Describe}
   fun verbose : a -> String
-}
 
-impl Verbose for User {
+impl Verbose for User
   verbose user = $"User: {describe_it user}"
-}
 
 # Multi-parameter trait whose impl carries a `where {k: Eq}` constraint. Eq is
 # operator/BIF-dispatched, so it contributes no dictionary parameter to the
 # impl's dict constructor — the call site must not pass an Eq sub-dict, or it
 # over-applies the dict tuple and crashes with badfun.
 record EqBox k { ev: k }
-trait Doer rel out {
+trait Doer rel out
   fun act : rel -> out
-}
-impl Doer (List k) for (EqBox k) where {k: Eq} {
+impl Doer (List k) for EqBox k where {k: Eq}
   act b = [b.ev]
-}
 
 # --- Phantom type / binop traits ---
 
@@ -62,9 +55,8 @@ type USD = USD deriving (Debug, Eq)
 type NOK = NOK deriving (Debug, Eq)
 type Currency c = Currency Float deriving (Debug, Eq)
 
-impl Show for Currency c {
+impl Show for Currency c
   show (Currency a) = show a
-}
 
 fun add_currency : Currency c -> Currency c -> Currency c
 add_currency (Currency a) (Currency b) = Currency (a + b)
@@ -98,325 +90,293 @@ fun erl_length : List a -> Int
 # --- Sorting algorithms ---
 
 fun insert_sorted : Int -> List Int -> List Int
-insert_sorted x xs = case xs {
-  [] -> [x]
-  h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
-}
+insert_sorted x xs =
+  case xs of
+    [] -> [x]
+    h :: t -> if x <= h then x :: xs else h :: insert_sorted x t
 
 fun insertion_sort : List Int -> List Int
 insertion_sort xs = List.foldl (fun sorted x -> insert_sorted x sorted) [] xs
 
 fun quicksort : List Int -> List Int
-quicksort xs = case xs {
-  [] -> []
-  h :: t -> {
-    let smaller = List.filter (fun x -> x <= h) t
-    let larger = List.filter (fun x -> x > h) t
-    List.append (quicksort smaller) (h :: quicksort larger)
-  }
-}
+quicksort xs =
+  case xs of
+    [] -> []
+    h :: t ->
+      let smaller = List.filter (fun x -> x <= h) t
+      let larger = List.filter (fun x -> x > h) t
+      List.append (quicksort smaller) (h :: quicksort larger)
 
 # Regression: a `case` whose only arms are `<<>>` and `<<_:8, rest/binary>>`
 # used to crash erlc with `bs_start_match3` consistency check failure
 # because lowering omitted a wildcard fallthrough on the optimized path.
 fun count_bytes : BitString -> Int
-count_bytes bs = case bs {
-  <<>> -> 0
-  <<_:8, rest/binary>> -> 1 + count_bytes rest
-}
+count_bytes bs =
+  case bs of
+    <<>> -> 0
+    <<_:8, rest/binary>> -> 1 + count_bytes rest
 
 # --- Tests ---
 
-
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "deriving" (fun () -> {
+tests () =
+  describe "deriving" (fun () ->
 
-    describe "Show" (fun () -> {
-      test "ADT with field" (fun () -> {
-        assert_eq (show (Dog 5)) "Dog(5)"
-      })
+    describe "Show" (fun () ->
+      test "ADT with field" (fun () -> assert_eq (show (Dog 5)) "Dog(5)")
 
-      test "ADT nullary constructor" (fun () -> {
-        assert_eq (show Cat) "Cat"
-      })
+      test "ADT nullary constructor" (fun () -> assert_eq (show Cat) "Cat")
 
-      test "enum constructors" (fun () -> {
+      test "enum constructors" (fun () ->
         assert_eq (show Red) "Red"
         assert_eq (show Green) "Green"
         assert_eq (show Blue) "Blue"
-      })
-    })
+      )
+    )
 
-    describe "Eq" (fun () -> {
-      test "equal ADT values" (fun () -> {
-        assert_true (Dog 5 == Dog 5)
-      })
+    describe "Eq" (fun () ->
+      test "equal ADT values" (fun () -> assert_true (Dog 5 == Dog 5))
 
-      test "different ADT values" (fun () -> {
-        assert_false (Dog 5 == Dog 7)
-      })
+      test "different ADT values" (fun () -> assert_false (Dog 5 == Dog 7))
 
-      test "different constructors" (fun () -> {
-        assert_false (Dog 5 == Cat)
-      })
+      test "different constructors" (fun () -> assert_false (Dog 5 == Cat))
 
-      test "enum equality" (fun () -> {
+      test "enum equality" (fun () ->
         assert_true (Red == Red)
         assert_false (Red == Blue)
-      })
-    })
+      )
+    )
 
-    describe "Ord" (fun () -> {
-      test "constructor ordering" (fun () -> {
+    describe "Ord" (fun () ->
+      test "constructor ordering" (fun () ->
         assert_eq (compare Red Blue) Lt
         assert_eq (compare Green Green) Eq
         assert_eq (compare Blue Red) Gt
-      })
+      )
 
-      test "comparison operators" (fun () -> {
+      test "comparison operators" (fun () ->
         assert_true (Red < Blue)
         assert_true (Blue > Green)
         assert_true (Green <= Green)
         assert_true (Green >= Green)
-      })
+      )
 
-      test "Ord with fields - same constructor" (fun () -> {
+      test "Ord with fields - same constructor" (fun () ->
         let a = Scored 10 "first"
         let b = Scored 20 "second"
         assert_eq (compare a b) Lt
-      })
+      )
 
-      test "Ord with fields - same score" (fun () -> {
+      test "Ord with fields - same score" (fun () ->
         let a = Scored 10 "aaa"
         let b = Scored 10 "zzz"
         assert_eq (compare a b) Lt
-      })
-    })
+      )
+    )
 
-    describe "Enum" (fun () -> {
-      test "to_enum" (fun () -> {
+    describe "Enum" (fun () ->
+      test "to_enum" (fun () ->
         assert_eq (to_enum Red) 0
         assert_eq (to_enum Green) 1
         assert_eq (to_enum Blue) 2
-      })
+      )
 
-      test "from_enum" (fun () -> {
+      test "from_enum" (fun () ->
         assert_eq (from_enum 0 : Color) Red
         assert_eq (from_enum 1 : Color) Green
         assert_eq (from_enum 2 : Color) Blue
-      })
-    })
-  })
+      )
+    )
+  )
 
-  describe "traits" (fun () -> {
+  describe "traits" (fun () ->
 
-    describe "basic trait dispatch" (fun () -> {
-      test "User describe" (fun () -> {
+    describe "basic trait dispatch" (fun () ->
+      test "User describe" (fun () ->
         let alice = User { name: "Alice", age: 30 }
         assert_eq (describe_it alice) "Alice (age: 30)"
-      })
+      )
 
-      test "Point describe" (fun () -> {
+      test "Point describe" (fun () ->
         let p = Point { x: 3, y: 4 }
         assert_eq (describe_it p) "(3, 4)"
-      })
-    })
+      )
+    )
 
-    describe "supertraits" (fun () -> {
-      test "verbose uses describe" (fun () -> {
-        let alice = User { name: "Alice", age: 30 }
-        assert_eq (verbose alice) "User: Alice (age: 30)"
-      })
-    })
+    describe "supertraits" (fun () -> test "verbose uses describe" (fun () ->
+      let alice = User { name: "Alice", age: 30 }
+      assert_eq (verbose alice) "User: Alice (age: 30)"
+    ))
 
-    describe "where-constrained impl" (fun () -> {
-      test "Eq constraint excluded from impl dict" (fun () -> {
-        let xs : List Int = act (EqBox { ev: 5 })
-        assert_eq (List.length xs) 1
-      })
-    })
+    describe "where-constrained impl" (fun () -> test "Eq constraint excluded from impl dict" (fun () ->
+      let xs: List Int = act (EqBox { ev: 5 })
+      assert_eq (List.length xs) 1
+    ))
 
-    describe "phantom type constraints" (fun () -> {
-      test "add same currency" (fun () -> {
+    describe "phantom type constraints" (fun () ->
+      test "add same currency" (fun () ->
         let total = add_currency (usd 23.5) (usd 50.0)
         assert_eq total (usd 73.5)
-      })
+      )
 
-      test "currency equality" (fun () -> {
+      test "currency equality" (fun () ->
         assert_false (usd 23.5 == usd 50.0)
         assert_true (usd 23.5 == usd 23.5)
-      })
-    })
+      )
+    )
 
-    describe "field access on a record literal" (fun () -> {
+    describe "field access on a record literal" (fun () ->
       # `keep` keeps the field non-constant so the access isn't folded away
       # before lowering. The record-create node must carry its type so the
       # field index resolves; otherwise codegen panics with `record_name=None`.
-      test "nominal record literal" (fun () -> {
-        assert_eq (Point { x: keep 3, y: 4 }.x) 3
-      })
+      test
+        "nominal record literal"
+        (fun () -> assert_eq (Point { x: keep 3, y: 4 }).x 3)
 
-      test "anonymous record literal" (fun () -> {
-        assert_eq ({ a: keep 7, b: 8 }.a) 7
-      })
-    })
-  })
+      test
+        "anonymous record literal"
+        (fun () -> assert_eq ({ a: keep 7, b: 8 }).a 7)
+    )
+  )
 
-  describe "zero-arity bindings" (fun () -> {
+  describe "zero-arity bindings" (fun () ->
 
-    test "string binding" (fun () -> {
-      assert_eq greeting "hello world"
-    })
+    test "string binding" (fun () -> assert_eq greeting "hello world")
 
-    test "int binding" (fun () -> {
-      assert_eq max_retries 5
-    })
+    test "int binding" (fun () -> assert_eq max_retries 5)
 
-    test "list binding" (fun () -> {
-      assert_eq origins ["localhost", "example.com"]
-    })
-  })
+    test
+      "list binding"
+      (fun () -> assert_eq origins ["localhost", "example.com"])
+  )
 
-  describe "sorting algorithms" (fun () -> {
+  describe "sorting algorithms" (fun () ->
 
     let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
     let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-    test "insertion sort" (fun () -> {
-      assert_eq (insertion_sort nums) sorted
-    })
+    test "insertion sort" (fun () -> assert_eq (insertion_sort nums) sorted)
 
-    test "quicksort" (fun () -> {
-      assert_eq (quicksort nums) sorted
-    })
+    test "quicksort" (fun () -> assert_eq (quicksort nums) sorted)
 
-    test "sort empty list" (fun () -> {
+    test "sort empty list" (fun () ->
       assert_eq (insertion_sort []) ([] : List Int)
       assert_eq (quicksort []) ([] : List Int)
-    })
+    )
 
-    test "sort single element" (fun () -> {
+    test "sort single element" (fun () ->
       assert_eq (insertion_sort [1]) [1]
       assert_eq (quicksort [1]) [1]
-    })
-  })
+    )
+  )
 
-  describe "FFI" (fun () -> {
+  describe "FFI" (fun () ->
 
-    test "erlang lists:reverse" (fun () -> {
-      assert_eq (erl_reverse [1, 2, 3]) [3, 2, 1]
-    })
+    test
+      "erlang lists:reverse"
+      (fun () -> assert_eq (erl_reverse [1, 2, 3]) [3, 2, 1])
 
-    test "erlang length" (fun () -> {
-      assert_eq (erl_length [1, 2, 3, 4, 5]) 5
-    })
-  })
+    test "erlang length" (fun () -> assert_eq (erl_length [1, 2, 3, 4, 5]) 5)
+  )
 
-  describe "bitstrings" (fun () -> {
+  describe "bitstrings" (fun () ->
 
-    test "construction and size" (fun () -> {
+    test "construction and size" (fun () ->
       let bs = <<72, 101, 108, 108, 111>>
       assert_eq (BitString.size bs) 5
-    })
+    )
 
-    test "from_list roundtrip" (fun () -> {
+    test "from_list roundtrip" (fun () ->
       let bs = BitString.from_list [1, 2, 3]
       assert_eq (BitString.to_list bs) [1, 2, 3]
-    })
+    )
 
-    test "concatenation" (fun () -> {
+    test "concatenation" (fun () ->
       let a = <<1, 2>>
       let b = <<3, 4>>
       let combined = a <> b
       assert_eq (BitString.to_list combined) [1, 2, 3, 4]
-    })
+    )
 
-    test "empty bitstring" (fun () -> {
+    test "empty bitstring" (fun () ->
       let empty = <<>>
       assert_true (BitString.is_empty empty)
-    })
+    )
 
-    test "pattern matching on bitstring" (fun () -> {
+    test "pattern matching on bitstring" (fun () ->
       let packet = <<1:8, 256:16/big, "hello">>
-      case packet {
-        <<tag:8, len:16/big, _rest/binary>> -> {
+      case packet of
+        <<tag:8, len:16/big, _rest/binary>> ->
           assert_eq tag 1
           assert_eq len 256
-        }
         _ -> assert_true False
-      }
-    })
+    )
 
-    test "string literal in bitstring pattern splits on bytes" (fun () -> {
+    test "string literal in bitstring pattern splits on bytes" (fun () ->
       let line = <<"hello\r\nworld">>
-      case line {
-        <<head:5/binary, "\r\n", rest/binary>> -> {
+      case line of
+        <<head:5/binary, "\r\n", rest/binary>> ->
           assert_eq (BitString.to_list head) [104, 101, 108, 108, 111]
           assert_eq (BitString.to_list rest) [119, 111, 114, 108, 100]
-        }
         _ -> assert_true False
-      }
-    })
+    )
 
-    test "string literal pattern with variable preceding size" (fun () -> {
+    test "string literal pattern with variable preceding size" (fun () ->
       let bs = <<"AB::tail">>
       let i = 2
-      case bs {
-        <<head:i/binary, "::", rest/binary>> -> {
+      case bs of
+        <<head:i/binary, "::", rest/binary>> ->
           assert_eq (BitString.to_list head) [65, 66]
           assert_eq (BitString.to_list rest) [116, 97, 105, 108]
-        }
         _ -> assert_true False
-      }
-    })
+    )
 
-    test "string literal pattern that doesn't match falls through" (fun () -> {
+    test "string literal pattern that doesn't match falls through" (fun () ->
       let bs = <<"no separator here">>
-      let result = case bs {
-        <<_:2/binary, "::", _rest/binary>> -> "matched"
-        _ -> "fell through"
-      }
+      let result =
+        case bs of
+          <<_:2/binary, "::", _rest/binary>> -> "matched"
+          _ -> "fell through"
       assert_eq result "fell through"
-    })
+    )
 
     # Regression: a `case` whose only arms are `<<>>` and `<<_:8, rest/binary>>`
     # used to crash erlc with `bs_start_match3` consistency check failure
     # because lowering omitted a wildcard fallthrough on the optimized path.
-    test "exhaustive bitstring case with empty and cons arms compiles" (fun () -> {
+    test "exhaustive bitstring case with empty and cons arms compiles" (fun () ->
       assert_eq (count_bytes (BitString.from_string "abc")) 3
       assert_eq (count_bytes <<>>) 0
-    })
-  })
+    )
+  )
 
-  describe "partial application" (fun () -> {
+  describe "partial application" (fun () ->
 
     # Regression: under-applying a qualified imported function (e.g.
     # `String.replace "m" ""`) used to lower to a direct call at the
     # supplied arity (`std_string:replace/2`), which doesn't exist.
     # The codegen now wraps it in a closure that captures the supplied
     # args and takes the rest as fresh parameters.
-    describe "qualified imports inside HOFs" (fun () -> {
-      test "String.replace partial app inside List.map" (fun () -> {
+    describe "qualified imports inside HOFs" (fun () ->
+      test "String.replace partial app inside List.map" (fun () ->
         let cleaned = ["12m", "15m", "20m"] |> List.map (String.replace "m" "")
         assert_eq cleaned ["12", "15", "20"]
-      })
+      )
 
-      test "String.replace_all partial app inside List.map" (fun () -> {
-        let cleaned = ["a-b-c", "x-y-z"] |> List.map (String.replace_all "-" ".")
+      test "String.replace_all partial app inside List.map" (fun () ->
+        let cleaned =
+          ["a-b-c", "x-y-z"] |> List.map (String.replace_all "-" ".")
         assert_eq cleaned ["a.b.c", "x.y.z"]
-      })
+      )
 
-      test "two-arg curried qualified function partial app" (fun () -> {
+      test "two-arg curried qualified function partial app" (fun () ->
         # String.repeat takes (n, s); partially applying n and mapping over strings
         let tripled = ["hi", "yo"] |> List.map (String.repeat 3)
         assert_eq tripled ["hihihi", "yoyoyo"]
-      })
+      )
 
-      test "qualified partial app stored in let then mapped" (fun () -> {
+      test "qualified partial app stored in let then mapped" (fun () ->
         let strip_m = String.replace "m" ""
         assert_eq (["7m", "9m"] |> List.map strip_m) ["7", "9"]
-      })
-    })
-  })
-}
+      )
+    )
+  )

@@ -3,14 +3,14 @@ module Main
 import MathLib (Describe)
 
 pub record Person {
-  name: String
+  name: String,
 }
 
-impl Describe for Person {
+impl Describe for Person
   describe_it p = $"Name is: {p.name}"
-}
 
-main () = {
+main () =
   let dylan = Person { name: "Dylan" }
   dylan |> describe_it |> println
-} with {console}
+with
+  console

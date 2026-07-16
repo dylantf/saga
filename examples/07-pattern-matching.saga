@@ -8,78 +8,78 @@ type Shape =
   | Triangle Float Float Float
 
 fun area : Shape -> Float
-area shape = case shape {
-  Circle r -> 3.0 * r * r
-  Rect w h -> w * h
-  Triangle b h _ -> b * h / 2.0
-}
+area shape =
+  case shape of
+    Circle r -> 3.0 * r * r
+    Rect w h -> w * h
+    Triangle b h _ -> b * h / 2.0
 
-describe_shape shape = case shape {
-  Circle _ -> "circle"
-  Rect _ _ -> "rectangle"
-  Triangle _ _ _ -> "triangle"
-}
+describe_shape shape =
+  case shape of
+    Circle _ -> "circle"
+    Rect _ _ -> "rectangle"
+    Triangle _ _ _ -> "triangle"
 
 # --- Records ---
 
 record Point { x: Int, y: Int }
 
-quadrant p = case p {
-  Point { x, y } when x > 0 && y > 0 -> "Q1"
-  Point { x, y } when x < 0 && y > 0 -> "Q2"
-  Point { x, y } when x < 0 && y < 0 -> "Q3"
-  Point { x, y } when x > 0 && y < 0 -> "Q4"
-  _ -> "origin or axis"
-}
+quadrant p =
+  case p of
+    Point { x, y } when x > 0 && y > 0 -> "Q1"
+    Point { x, y } when x < 0 && y > 0 -> "Q2"
+    Point { x, y } when x < 0 && y < 0 -> "Q3"
+    Point { x, y } when x > 0 && y < 0 -> "Q4"
+    _ -> "origin or axis"
 
 # --- List patterns ---
 
 fun describe : (xs: List a) -> String
-describe items = case items {
-  [] -> "empty"
-  [_] -> "one element"
-  [_, _] -> "two elements"
-  _ :: _ -> "many elements"
-}
+describe items =
+  case items of
+    [] -> "empty"
+    [_] -> "one element"
+    [_, _] -> "two elements"
+    _ :: _ -> "many elements"
 
 fun sum_two : (xs: List Int) -> Int
-sum_two xs = case xs {
-  [a, b] -> a + b
-  _ -> 0
-}
+sum_two xs =
+  case xs of
+    [a, b] -> a + b
+    _ -> 0
 
 fun first_two : (xs: List Int) -> String
-first_two xs = case xs {
-  x :: y :: _ -> show x <> " and " <> show y
-  _ -> "fewer than two elements"
-}
+first_two xs =
+  case xs of
+    x :: y :: _ -> show x <> " and " <> show y
+    _ -> "fewer than two elements"
 
 # String patterns:
 # Note: Wildcard always required for strings for exhaustiveness
-classify_log msg = case msg {
-  "[ERROR]: " <> detail -> "Error: " <> detail
-  "[WARN]: " <> detail -> "Warning: " <> detail
-  "[INFO]: " <> detail -> "Info: " <> detail
-  "hello" -> "greeting!"
-  _ -> "unknown: " <> msg
-}
+classify_log msg =
+  case msg of
+    "[ERROR]: " <> detail -> "Error: " <> detail
+    "[WARN]: " <> detail -> "Warning: " <> detail
+    "[INFO]: " <> detail -> "Info: " <> detail
+    "hello" -> "greeting!"
+    _ -> "unknown: " <> msg
 
 # Disjunctive patterns/or-patterns (multiple cases in one arm)
-is_shape_fun shape = case shape {
-  Circle _ | Rect _ _ -> True
-  Triangle _ _ _ -> False
-}
+is_shape_fun shape =
+  case shape of
+    Circle _ | Rect _ _ -> True
+    Triangle _ _ _ -> False
 
 is_big_shape (Circle r) when r > 10.0 = True
 is_big_shape (Rect w h) when w > 10.0 || h > 10.0 = True
 is_big_shape _ = False
 
-is_big_fun_shape shape = case shape {
-  Circle _ | Rect _ _ when is_big_shape shape -> True
-  _ -> False
-}
+is_big_fun_shape shape =
+  case shape of
+    Circle _ | Rect _ _ when is_big_shape shape -> True
+    _ -> False
 
-main () = {
+main () =
   # Custom type patterns
   let c = Circle 5.0
   let r = Rect 3.0 4.0
@@ -112,4 +112,3 @@ main () = {
   classify_log "[WARN]: test warning" |> dbg
   classify_log "hello" |> dbg
   classify_log "something else" |> dbg
-}

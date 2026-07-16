@@ -6,20 +6,17 @@ import Std.Process (catch_panic)
 #   fun fail : e -> a
 # }
 
-handler abort for Std.Fail.Fail String {
+handler abort for Std.Fail.Fail String
   fail msg = panic $"Panicking: {msg}"
-}
 
 #@ Converts a failure to a Result of the given type
-handler to_result for Fail String {
+handler to_result for Fail String
   fail x = Err x
   return v = Ok v
-}
 
 #@ Continues a failed call with a default value of 0
-handler int_fallback for Fail String {
+handler int_fallback for Fail String
   fail _ = resume 0
-}
 
 fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail String}
 safe_div _ 0 = fail! "division by zero"
@@ -29,16 +26,15 @@ fun safe_str : String -> String needs {Fail String}
 safe_str "" = fail! "String was too short, here's a default one"
 safe_str str = str
 
-main () = {
+main () =
   let a = safe_div 10 2 with to_result
   dbg $"a: {debug a}"
 
   let b = safe_div 10 0 with int_fallback
   dbg $"b: {debug b}"
 
-  let c = safe_div 10 0 with {
+  let c = safe_div 10 0 with
     fail _ = resume 0
-  }
   dbg $"c: {debug c}"
 
   let str_a = safe_str "Hello" with to_result
@@ -48,8 +44,6 @@ main () = {
   dbg $"String should have been aborted: {debug str_b}"
 
   dbg "About to panic..."
-  case catch_panic (fun () -> safe_div 2 0 with abort) {
+  case catch_panic (fun () -> safe_div 2 0 with abort) of
     Ok v -> dbg $"You shouldn't see this: {debug v}"
     Err msg -> dbg msg
-  }
-}

@@ -10,7 +10,7 @@ import Std.Dynamic (
   bool
 )
 
-main () = {
+main () =
   # Test classify
   dbg (classify (from_erlang 42))
   dbg (classify (from_erlang "hello"))
@@ -18,44 +18,40 @@ main () = {
 
   # Successful decoding — chain field reads with do...else
   let data =
-    from_erlang (Dict.from_list [
-      ("name", from_erlang "Alice"),
-      ("age", from_erlang 30),
-    ])
+    from_erlang
+      (Dict.from_list [("name", from_erlang "Alice"), ("age", from_erlang 30)])
 
-  let result = do {
-    Ok(name) <- decode_field "name" string data
-    Ok(age) <- decode_field "age" int data
-    Ok((name, age))
-  } else {
-    Err(e) -> Err(e)
-  }
+  let result =
+    do
+      Ok name <- decode_field "name" string data
+      Ok age <- decode_field "age" int data
+      Ok (name, age)
+    else
+      Err e -> Err e
   dbg result
 
   # Fail-fast — first wrong-type field aborts the chain
   let bad_data =
-    from_erlang (Dict.from_list [
-      ("name", from_erlang 42),
-      ("age", from_erlang "not a number"),
-    ])
+    from_erlang
+      (Dict.from_list
+        [("name", from_erlang 42), ("age", from_erlang "not a number")])
 
-  let result2 = do {
-    Ok(name) <- decode_field "name" string bad_data
-    Ok(age) <- decode_field "age" int bad_data
-    Ok((name, age))
-  } else {
-    Err(e) -> Err(e)
-  }
+  let result2 =
+    do
+      Ok name <- decode_field "name" string bad_data
+      Ok age <- decode_field "age" int bad_data
+      Ok (name, age)
+    else
+      Err e -> Err e
   dbg result2
 
   # Tuple element decoding (positional)
   let tuple_data = from_erlang ("Bob", 25)
-  let result3 = do {
-    Ok(name) <- decode_element 0 string tuple_data
-    Ok(age) <- decode_element 1 int tuple_data
-    Ok((name, age))
-  } else {
-    Err(e) -> Err(e)
-  }
+  let result3 =
+    do
+      Ok name <- decode_element 0 string tuple_data
+      Ok age <- decode_element 1 int tuple_data
+      Ok (name, age)
+    else
+      Err e -> Err e
   dbg result3
-}

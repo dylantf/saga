@@ -9,20 +9,15 @@ module EffectOpConstraintLibTest
 
 import Std.Test (Testing, describe, test, assert_eq)
 
-pub effect Describe {
+pub effect Describe
   fun describe : a -> String where {a: Show}
-}
 
-pub handler show_it for Describe {
-  describe x = resume (show x)
-}
+pub handler show_it for Describe
+  describe x = resume show x
 
 pub fun tests : Unit -> Unit needs {Testing}
-tests () = {
-  describe "effect op constraint (in-module)" (fun () -> {
-    test "handles a constrained op in its defining module" (fun () -> {
-      let s = { describe! 7 } with show_it
-      assert_eq s "7"
-    })
-  })
-}
+tests () =
+  describe "effect op constraint (in-module)" (fun () -> test "handles a constrained op in its defining module" (fun () ->
+    let s = describe! 7 with show_it
+    assert_eq s "7"
+  ))

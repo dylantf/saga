@@ -1,11 +1,9 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
 fun read_value : Bool -> Int needs {ReadInt}
 read_value True = read! ()
 read_value False = 0
 
-main () = read_value True with {
+main () = read_value True with
   read () = resume 42
-}

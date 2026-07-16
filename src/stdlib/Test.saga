@@ -11,18 +11,19 @@ import Std.String
 import Std.Time (monotonic_ms)
 
 #@ Effect for assertions inside a single test body.
-pub effect Test {
+pub effect Test
   fun assert : (ok: Bool) -> (msg: String) -> Unit
-}
 
 pub type TestMode = Normal | OnlyMode | SkipMode
 
 #@ Effect for defining tests and groups during collection.
-pub effect Testing {
-  fun register_test : (name: String) -> (mode: TestMode) -> (body: Unit -> Unit needs {Test}) -> Unit
+pub effect Testing
+  fun register_test : (name: String)
+    -> (mode: TestMode)
+    -> (body: Unit -> Unit needs {Test})
+    -> Unit
   fun enter_group : (name: String) -> Unit
   fun leave_group : Unit -> Unit
-}
 
 record TestCaseData {
   name: String,
@@ -55,46 +56,34 @@ pub fun skip : (name: String) -> (body: Unit -> Unit needs {Test}) -> Unit
   needs {Testing}
 skip name _body = register_test! name SkipMode (fun () -> ())
 
-pub fun describe : (name: String) -> (body: Unit -> Unit needs {Testing, ..e}) -> Unit
+pub fun describe :
+  (name: String) -> (body: Unit -> Unit needs {Testing, ..e}) -> Unit
   needs {Testing, ..e}
-describe name body = {
+describe name body =
   enter_group! name
   body ()
   leave_group! ()
-}
 
-handler collect for Testing {
-  register_test name mode body = {
+handler collect for Testing
+  register_test name mode body =
     let k = resume ()
     fun entries ->
-      k (
-        TestCase (TestCaseData {
-          name: name,
-          mode: mode,
-          body: body,
-        }) :: entries
-      )
-  }
-  enter_group name = {
+      k
+        (TestCase
+          (TestCaseData { name: name, mode: mode, body: body }) :: entries)
+  enter_group name =
     let k = resume ()
     fun entries -> k (GroupStart name :: entries)
-  }
-  leave_group () = {
+  leave_group () =
     let k = resume ()
     fun entries -> k (GroupEnd :: entries)
-  }
   return _ = fun entries -> entries
-}
 
-empty_result = TestResult {
-  passed: 0,
-  failed: 0,
-  skipped: 0,
-}
+empty_result = TestResult { passed: 0, failed: 0, skipped: 0 }
 
-green_check = "\x1b[32m✓\x1b[0m"
-red_cross = "\x1b[31m✗\x1b[0m"
-yellow_skip = "\x1b[33m○\x1b[0m"
+green_check = "[32m✓[0m"
+red_cross = "[31m✗[0m"
+yellow_skip = "[33m○[0m"
 
 fun merge_results : TestResult -> TestResult -> TestResult
 merge_results left right = TestResult {
@@ -112,7 +101,7 @@ format_timing ms =
   else $"({show ms}ms)"
 
 fun format_summary : TestResult -> Int -> String
-format_summary totals total_ms = {
+format_summary totals total_ms =
   let passed = totals.passed
   let failed = totals.failed
   let skipped = totals.skipped
@@ -121,140 +110,152 @@ format_summary totals total_ms = {
     if skipped > 0 then summary <> ", " <> show skipped <> " skipped"
     else summary
   summary <> " " <> format_timing total_ms
-}
 
 fun print_result : Int -> String -> TestStatus -> Int -> Unit needs {Stdio}
-print_result depth name status elapsed_ms = case status {
-  Passed -> println (indent depth (green_check <> " " <> name <> " " <> format_timing elapsed_ms))
-  Failed msg -> {
-    println (indent depth (red_cross <> " " <> name <> " " <> format_timing elapsed_ms))
-    println (indent depth ("  " <> msg))
-  }
-  Skipped -> println (indent depth (yellow_skip <> " " <> name <> " (skipped)"))
-}
+print_result depth name status elapsed_ms =
+  case status of
+    Passed ->
+      println
+        (indent
+          depth
+          (green_check
+            <> " "
+            <> name
+            <> " "
+            <> format_timing elapsed_ms))
+    Failed msg ->
+      println
+        (indent
+          depth
+          (red_cross
+            <> " "
+            <> name
+            <> " "
+            <> format_timing elapsed_ms))
+      println (indent depth ("  " <> msg))
+    Skipped ->
+      println (indent depth (yellow_skip <> " " <> name <> " (skipped)"))
 
 fun run_single : TestMode -> (Unit -> Unit needs {Test}) -> TestStatus
-run_single mode body = case mode {
-  SkipMode -> Skipped
-  _ -> case Process.catch_panic (fun () -> {
-    body () with {
-      assert ok msg =
-        if ok then resume ()
-        else Failed msg
-      return _ = Passed
-    }
-  }) {
-    Ok status -> status
-    Err msg -> Failed $"PANIC: {msg}"
-  }
-}
+run_single mode body =
+  case mode of
+    SkipMode -> Skipped
+    _ ->
+      case Process.catch_panic (fun () -> body () with
+        assert ok msg =
+          if ok then resume ()
+          else Failed msg
+        return _ = Passed) of
+        Ok status -> status
+        Err msg -> Failed $"PANIC: {msg}"
 
 fun run_entries : List TestEntry -> Int -> TestResult -> TestResult
   needs {Stdio}
-run_entries entries depth acc = case entries {
-  [] -> acc
-  GroupStart name :: rest -> {
-    println (indent depth name)
-    run_entries rest (depth + 1) acc
-  }
-  GroupEnd :: rest -> run_entries rest (depth - 1) acc
-  TestCase tc :: rest -> {
-    let t0 = monotonic_ms ()
-    let status = run_single tc.mode tc.body
-    let elapsed_ms = monotonic_ms () - t0
-    print_result depth tc.name status elapsed_ms
-    let next = case status {
-      Passed -> { acc | passed: acc.passed + 1 }
-      Failed _ -> { acc | failed: acc.failed + 1 }
-      Skipped -> { acc | skipped: acc.skipped + 1 }
-    }
-    run_entries rest depth next
-  }
-}
+run_entries entries depth acc =
+  case entries of
+    [] -> acc
+    GroupStart name :: rest ->
+      println (indent depth name)
+      run_entries rest (depth + 1) acc
+    GroupEnd :: rest -> run_entries rest (depth - 1) acc
+    TestCase tc :: rest ->
+      let t0 = monotonic_ms ()
+      let status = run_single tc.mode tc.body
+      let elapsed_ms = monotonic_ms () - t0
+      print_result depth tc.name status elapsed_ms
+      let next =
+        case status of
+          Passed -> { acc | passed: acc.passed + 1 }
+          Failed _ -> { acc | failed: acc.failed + 1 }
+          Skipped -> { acc | skipped: acc.skipped + 1 }
+      run_entries rest depth next
 
 fun has_any_only_entries : List TestEntry -> Bool
-has_any_only_entries entries = case entries {
-  [] -> False
-  TestCase tc :: rest -> case tc.mode {
-    OnlyMode -> True
-    _ -> has_any_only_entries rest
-  }
-  _ :: rest -> has_any_only_entries rest
-}
+has_any_only_entries entries =
+  case entries of
+    [] -> False
+    TestCase tc :: rest ->
+      case tc.mode of
+        OnlyMode -> True
+        _ -> has_any_only_entries rest
+    _ :: rest -> has_any_only_entries rest
 
 fun has_any_only_modules : List (String, List TestEntry) -> Bool
-has_any_only_modules suites = case suites {
-  [] -> False
-  (_module_name, entries) :: rest ->
-    if has_any_only_entries entries then True else has_any_only_modules rest
-}
+has_any_only_modules suites =
+  case suites of
+    [] -> False
+    (_module_name, entries) :: rest ->
+      if has_any_only_entries entries then True
+      else has_any_only_modules rest
 
 fun mark_skip_entry : TestEntry -> TestEntry
-mark_skip_entry entry = case entry {
-  TestCase tc -> case tc.mode {
-    Normal -> TestCase ({ tc | mode: SkipMode })
+mark_skip_entry entry =
+  case entry of
+    TestCase tc ->
+      case tc.mode of
+        Normal -> TestCase ({ tc | mode: SkipMode })
+        _ -> entry
     _ -> entry
-  }
-  _ -> entry
-}
 
 fun mark_skip_non_only : List TestEntry -> List TestEntry
 mark_skip_non_only entries = List.map mark_skip_entry entries
 
 fun reverse_entries : List TestEntry -> List TestEntry -> List TestEntry
-reverse_entries acc entries = case entries {
-  [] -> acc
-  entry :: rest -> reverse_entries (entry :: acc) rest
-}
+reverse_entries acc entries =
+  case entries of
+    [] -> acc
+    entry :: rest -> reverse_entries (entry :: acc) rest
 
 fun normalize_suite : (String, List TestEntry) -> (String, List TestEntry)
-normalize_suite (module_name, entries) = (module_name, mark_skip_non_only entries)
+normalize_suite (module_name, entries) = (
+  module_name,
+  mark_skip_non_only entries,
+)
 
-fun collect_module : String -> (Unit -> Unit needs {Testing}) -> (String, List TestEntry)
-collect_module module_name test_fn = {
-  let entries_fn = {
-    test_fn ()
-  } with collect
+fun collect_module :
+  String -> (Unit -> Unit needs {Testing}) -> (String, List TestEntry)
+collect_module module_name test_fn =
+  let entries_fn = test_fn () with collect
   (module_name, reverse_entries [] (entries_fn []))
-}
 
-fun collect_modules : List (String, Unit -> Unit needs {Testing}) -> List (String, List TestEntry)
-collect_modules modules = case modules {
-  [] -> []
-  (module_name, test_fn) :: rest ->
-    collect_module module_name test_fn :: collect_modules rest
-}
+fun collect_modules :
+  List (String, Unit -> Unit needs {Testing}) -> List (String, List TestEntry)
+collect_modules modules =
+  case modules of
+    [] -> []
+    (module_name, test_fn) :: rest ->
+      collect_module module_name test_fn :: collect_modules rest
 
-fun normalize_modules : List (String, List TestEntry) -> List (String, List TestEntry)
+fun normalize_modules :
+  List (String, List TestEntry) -> List (String, List TestEntry)
 normalize_modules suites =
-  if has_any_only_modules suites then List.map normalize_suite suites else suites
+  if has_any_only_modules suites then List.map normalize_suite suites
+  else suites
 
 fun run_module : (String, List TestEntry) -> TestResult needs {Stdio}
-run_module (module_name, entries) = {
+run_module (module_name, entries) =
   let t0 = monotonic_ms ()
   println module_name
   let totals = run_entries entries 1 empty_result
   let total_ms = monotonic_ms () - t0
   println (indent 1 (format_summary totals total_ms))
   totals
-}
 
-fun run_all_modules : List (String, List TestEntry) -> TestResult -> TestResult needs {Stdio}
-run_all_modules suites acc = case suites {
-  [] -> acc
-  suite :: rest -> {
-    let result = run_module suite
-    let merged = merge_results acc result
-    case rest {
-      [] -> ()
-      _ -> println ""
-    }
-    run_all_modules rest merged
-  }
-}
+fun run_all_modules : List (String, List TestEntry) -> TestResult -> TestResult
+  needs {Stdio}
+run_all_modules suites acc =
+  case suites of
+    [] -> acc
+    suite :: rest ->
+      let result = run_module suite
+      let merged = merge_results acc result
+      case rest of
+        [] -> ()
+        _ -> println ""
+      run_all_modules rest merged
 
 pub fun run_modules : List (String, Unit -> Unit needs {Testing}) -> Unit
-run_modules module_tests = {
+run_modules module_tests =
   let t0 = monotonic_ms ()
   let collected = collect_modules module_tests
   let suites = normalize_modules collected
@@ -263,7 +264,7 @@ run_modules module_tests = {
   println ""
   println (format_summary totals total_ms)
   if totals.failed > 0 then Process.exit 1 else ()
-} with console
+with console
 
 pub fun assert_eq : (a: x) -> (b: x) -> Unit needs {Test} where {x: Debug + Eq}
 assert_eq a b =
@@ -288,31 +289,31 @@ pub fun assert_false : Bool -> Unit needs {Test}
 assert_false v = assert! (v == False) "Expected False, got True"
 
 pub fun assert_just : Maybe a -> Unit needs {Test} where {a: Debug}
-assert_just m = case m {
-  Just _ -> assert! True ""
-  Nothing -> assert! False "Expected Just(_), got Nothing"
-}
+assert_just m =
+  case m of
+    Just _ -> assert! True ""
+    Nothing -> assert! False "Expected Just(_), got Nothing"
 
 pub fun assert_nothing : Maybe a -> Unit needs {Test}
-assert_nothing m = case m {
-  Nothing -> assert! True ""
-  Just _ -> assert! False "Expected Nothing, got Just(_)"
-}
+assert_nothing m =
+  case m of
+    Nothing -> assert! True ""
+    Just _ -> assert! False "Expected Nothing, got Just(_)"
 
 pub fun assert_ok : Result a b -> Unit needs {Test} where {b: Debug}
-assert_ok r = case r {
-  Ok _ -> assert! True ""
-  Err e -> assert! False $"Expected Ok(_), got Err({debug e})"
-}
+assert_ok r =
+  case r of
+    Ok _ -> assert! True ""
+    Err e -> assert! False $"Expected Ok(_), got Err({debug e})"
 
 pub fun assert_err : Result a b -> Unit needs {Test} where {a: Debug}
-assert_err r = case r {
-  Ok v -> assert! False $"Expected Err(_), got Ok({debug v})"
-  Err _ -> assert! True ""
-}
+assert_err r =
+  case r of
+    Ok v -> assert! False $"Expected Err(_), got Ok({debug v})"
+    Err _ -> assert! True ""
 
 pub fun assert_panics : (f: Unit -> a) -> Unit needs {Test}
-assert_panics f = case Process.catch_panic f {
-  Err _ -> assert! True ""
-  Ok _ -> assert! False "Expected a panic, but none occurred"
-}
+assert_panics f =
+  case Process.catch_panic f of
+    Err _ -> assert! True ""
+    Ok _ -> assert! False "Expected a panic, but none occurred"

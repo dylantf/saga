@@ -1,6 +1,5 @@
-effect ReadInt {
+effect ReadInt
   fun read : Unit -> Int
-}
 
 fun pure_value : Unit -> Int
 pure_value () = 41
@@ -8,9 +7,8 @@ pure_value () = 41
 fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
 apply_eff f = f ()
 
-handler forty_one for ReadInt {
+handler forty_one for ReadInt
   read () = resume 41
-}
 
 fun main : Unit -> Int
 main () = apply_eff pure_value with forty_one

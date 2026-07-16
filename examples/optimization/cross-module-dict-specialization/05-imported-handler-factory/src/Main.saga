@@ -2,8 +2,7 @@ module Main
 
 import Lib (Options, Encodable)
 
-main () = {
+main () =
   let options = Lib.make_options 10
   let result = Lib.serialize 5 with options
   dbg (show result)
-}
