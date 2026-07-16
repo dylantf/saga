@@ -44,6 +44,9 @@ pub struct Parser {
     /// next block statement from being consumed as an argument when the first
     /// statement appeared on the same line as `{`.
     pub(super) legacy_statement_indent: Option<usize>,
+    /// While parsing a case scrutinee, a bare `of` terminates the expression.
+    /// The lexer deliberately leaves it as an identifier everywhere else.
+    pub(super) stop_at_case_of: bool,
 }
 
 #[derive(Debug)]
@@ -61,6 +64,7 @@ impl Parser {
             pos: 0,
             no_brace_app: false,
             legacy_statement_indent: None,
+            stop_at_case_of: false,
         }
     }
 
@@ -257,6 +261,9 @@ impl Parser {
     // Determines whether the next token can start a primary expression.
     // Used by parse_application to know when to keep consuming arguments.
     pub(super) fn can_start_primary(&self) -> bool {
+        if self.stop_at_case_of && matches!(self.peek(), Token::Ident(name) if name == "of") {
+            return false;
+        }
         matches!(
             self.peek(),
             Token::Int(..)

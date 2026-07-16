@@ -1298,6 +1298,7 @@ impl Parser {
                 // misparsed as a bare constructor leaving `{` for the outer
                 // case arms. Restored after this branch completes.
                 let saved_nba = std::mem::replace(&mut self.no_brace_app, false);
+                let saved_case_stop = std::mem::replace(&mut self.stop_at_case_of, false);
                 let result: Result<Expr, ParseError> = (|| {
                     if matches!(self.peek(), Token::RParen) {
                         self.advance(); // consume ')'
@@ -1332,6 +1333,7 @@ impl Parser {
                     }
                 })();
                 self.no_brace_app = saved_nba;
+                self.stop_at_case_of = saved_case_stop;
                 result
             }
 
@@ -1348,6 +1350,7 @@ impl Parser {
                 // See LParen branch: reset `no_brace_app` inside the delimited
                 // sub-expression so record literals can be parsed normally.
                 let saved_nba = std::mem::replace(&mut self.no_brace_app, false);
+                let saved_case_stop = std::mem::replace(&mut self.stop_at_case_of, false);
                 let result: Result<Expr, ParseError> = (|| {
                     // Empty list
                     if matches!(self.peek(), Token::RBracket) {
@@ -1425,6 +1428,7 @@ impl Parser {
                     })
                 })();
                 self.no_brace_app = saved_nba;
+                self.stop_at_case_of = saved_case_stop;
                 result
             }
 
@@ -1555,11 +1559,21 @@ impl Parser {
             }
 
             Token::Case => {
+                let outer_case_stop = std::mem::replace(&mut self.stop_at_case_of, true);
                 self.no_brace_app = true;
-                let scrutinee = self.parse_expr(0)?;
+                let scrutinee_result = self.parse_expr(0);
                 self.no_brace_app = false;
+                self.stop_at_case_of = false;
+                let scrutinee = match scrutinee_result {
+                    Ok(scrutinee) => scrutinee,
+                    Err(error) => {
+                        self.stop_at_case_of = outer_case_stop;
+                        return Err(error);
+                    }
+                };
                 let mut branches = Vec::new();
-                let (end, dangling_trivia) = if matches!(self.peek(), Token::Of) {
+                let (end, dangling_trivia) = if matches!(self.peek(), Token::Ident(name) if name == "of")
+                {
                     self.advance();
                     let arm_indent = self.begin_layout(owner_indent, "case")?;
                     while self.layout_has_item(arm_indent) {
@@ -1589,7 +1603,7 @@ impl Parser {
                     (end, dangling)
                 };
 
-                Ok(Expr {
+                let expr = Expr {
                     id: self.next_id(),
                     span: span.to(end),
                     kind: ExprKind::Case {
@@ -1597,7 +1611,9 @@ impl Parser {
                         arms: branches,
                         dangling_trivia,
                     },
-                })
+                };
+                self.stop_at_case_of = outer_case_stop;
+                Ok(expr)
             }
 
             Token::Receive => {

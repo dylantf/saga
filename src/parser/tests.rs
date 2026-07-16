@@ -3742,6 +3742,29 @@ fn layout_case_uses_of_and_indented_arms() {
 }
 
 #[test]
+fn of_is_contextual_and_remains_an_identifier_elsewhere() {
+    let decls = parse("of value = value\nmain () = of 42");
+    assert!(matches!(&decls[0], Decl::FunBinding { name, .. } if name == "of"));
+    assert!(matches!(
+        &decls[1],
+        Decl::FunBinding {
+            body: Expr {
+                kind: ExprKind::App { func, .. },
+                ..
+            },
+            ..
+        } if matches!(&func.kind, ExprKind::Var { name } if name == "of")
+    ));
+
+    let case = parse_expr("case (of 1) of\n  value -> value");
+    assert!(matches!(
+        case.kind,
+        ExprKind::Case { scrutinee, .. }
+            if matches!(scrutinee.kind, ExprKind::App { .. })
+    ));
+}
+
+#[test]
 fn layout_declaration_member_bodies_need_no_braces() {
     let source = r#"effect Log
   fun log : String -> Unit

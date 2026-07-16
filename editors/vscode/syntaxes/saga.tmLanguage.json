@@ -104,7 +104,7 @@
         },
         {
           "name": "keyword.control.saga",
-          "match": "\\b(if|then|else|case|when|with|return)\\b"
+          "match": "\\b(if|then|else|case|of|when|with|return)\\b"
         },
         {
           "name": "keyword.declaration.saga",

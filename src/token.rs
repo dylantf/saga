@@ -17,7 +17,6 @@ pub enum Token {
     Let,
     Type,
     Case,
-    Of,
     If,
     Then,
     Else,

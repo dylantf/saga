@@ -316,7 +316,6 @@ impl Lexer {
             "assert" => Token::Ident("assert".into()),
             "type" => Token::Type,
             "case" => Token::Case,
-            "of" => Token::Of,
             "if" => Token::If,
             "then" => Token::Then,
             "else" => Token::Else,
