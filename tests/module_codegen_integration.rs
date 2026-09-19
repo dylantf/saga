@@ -294,6 +294,64 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+#[test]
+fn imported_open_row_hof_adapts_lambda_tail_by_tag_e2e() {
+    let hof_src = r#"
+module OpenHof
+
+pub fun forward : (Int -> Int needs {..e}) -> Int -> Int needs {..e}
+forward f n = f n
+"#;
+    let effects_src = r#"
+module Effects
+
+pub effect ARepo { fun load : Unit -> Int }
+pub effect ZFail e { fun fail : e -> Int }
+
+pub fun parse_one : Int -> Int needs {ZFail String}
+parse_one _ = fail! "nope"
+
+pub fun consume : Int -> Int needs {ARepo}
+consume value = {
+  let _ = load! ()
+  value
+}
+"#;
+    let main_src = r#"
+module Main
+
+import OpenHof (forward)
+import Effects (ARepo, ZFail, consume, parse_one)
+
+pub fun run : Unit -> Int
+run () = {
+  consume (forward (fun n -> parse_one n) 1)
+} with {
+  load () = resume 7
+  fail _ = resume 42
+}
+"#;
+
+    with_temp_project_files(
+        &[("OpenHof.saga", hof_src), ("Effects.saga", effects_src)],
+        main_src,
+        |checker, main_program| {
+            let hof_core = emit_project_module(hof_src, "openhof", checker);
+            let effects_core = emit_project_module(effects_src, "effects", checker);
+            let main_core = emit_from_program(main_program, "main", checker);
+            assert_project_modules_run(
+                &[
+                    ("openhof", &hof_core),
+                    ("effects", &effects_core),
+                    ("main", &main_core),
+                ],
+                "io:format(\"~p~n\", [main:run(unit)]), init:stop().",
+                &["42"],
+            );
+        },
+    );
+}
+
 fn emitted_function(out: &str, name: &str, arity: usize) -> String {
     let marker = format!("'{}'/{} =", name, arity);
     let start = out

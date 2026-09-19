@@ -218,17 +218,13 @@ impl EffectAbiPlanner<'_, '_> {
         let literal = matches!(expr.kind, ExprKind::Lambda { .. })
             || Lowerer::is_eta_reduced_effect_expr(expr);
         let implementation = if literal {
-            let evidence = match (
-                expected.evidence.as_ref(),
-                inferred.as_ref().and_then(|abi| abi.evidence.as_ref()),
-            ) {
-                (None, None) => None,
-                (Some(evidence), None) | (None, Some(evidence)) => Some(evidence.clone()),
-                (Some(expected), Some(inferred)) => {
-                    Some(EvidenceAbi::for_lambda_boundary(expected, inferred))
-                }
-            };
-            CallableAbi::from_parts(expected.user_arity, evidence)
+            // A literal still has two distinct runtime views. Its inferred
+            // ABI describes the closure body; the expected ABI describes how
+            // the consuming HOF invokes it. In particular, effects inferred
+            // for a lambda passed to an open-only callback belong to the
+            // callback's tagged tail, not to a positional prefix. Preserve
+            // that distinction so lowering emits the normal boundary adapter.
+            inferred.unwrap_or_else(|| CallableAbi::pure(expected.user_arity))
         } else {
             self.callable_abi_from_partial_app(expr)
                 .or_else(|| self.callable_abi_from_named_function_value(expr))
@@ -951,43 +947,11 @@ impl<'a> Lowerer<'a> {
         CExpr::Let(fun_var, Box::new(actual_fun), Box::new(adapter))
     }
 
-    fn lower_cps_function_value_with_expected_shape(
+    fn lower_cps_function_value_for_expected_type(
         &mut self,
         expr: &Expr,
         expected_ty: &crate::typechecker::Type,
-        expected_shape: EvidenceAbi,
     ) -> CExpr {
-        if matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr) {
-            let implementation = self
-                .planned_function_value_implementation(expr.id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "internal ABI planning error: missing contextual callable ABI for {:?}",
-                        expr.id
-                    )
-                });
-            assert_eq!(
-                implementation.user_arity,
-                CallableAbi::from_type(expected_ty, |effects| self.canonicalize_effects(effects))
-                    .user_arity,
-                "internal ABI planning error: contextual callable arity disagrees with its boundary"
-            );
-            assert!(
-                implementation.evidence.is_some(),
-                "internal ABI planning error: CPS callback has a pure implementation ABI"
-            );
-            assert_eq!(
-                self.planned_function_value_boundary(expr.id)
-                    .and_then(|abi| abi.evidence.as_ref()),
-                Some(&expected_shape),
-                "internal ABI planning error: CPS callback boundary disagrees with lowering"
-            );
-            let ce = self
-                .lower_eta_reduced_effect_expr(expr)
-                .unwrap_or_else(|| self.lower_expr_value(expr));
-            return ce;
-        }
-
         // Determine the actual runtime shape. Partial applications must use
         // the compiled head's ABI even when their resolved occurrence type has
         // narrowed or closed its row; other values use the resolved type, with
@@ -1033,6 +997,16 @@ impl<'a> Lowerer<'a> {
             computed_actual_abi, actual_abi,
             "internal ABI planning error: lowering implementation ABI disagrees with the plan"
         );
+
+        // Literals can avoid an adapter only when planning proved that their
+        // implementation and boundary ABIs are identical.
+        if (matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr))
+            && actual_abi == expected_abi
+        {
+            return self
+                .lower_eta_reduced_effect_expr(expr)
+                .unwrap_or_else(|| self.lower_expr_value(expr));
+        }
 
         if let Some(actual_shape) = actual_abi.evidence {
             self.adapt_cps_function_value_to_expected_shape(expr, expected_ty, actual_shape)
@@ -1178,8 +1152,8 @@ impl<'a> Lowerer<'a> {
                 );
             }
 
-            if let Some(shape) = self.cps_function_shape_from_type(expected_ty) {
-                return self.lower_cps_function_value_with_expected_shape(expr, expected_ty, shape);
+            if self.cps_function_shape_from_type(expected_ty).is_some() {
+                return self.lower_cps_function_value_for_expected_type(expr, expected_ty);
             }
 
             // Expected is a pure function type, but the actual expression

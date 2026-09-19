@@ -188,12 +188,15 @@ impl EvidenceAbi {
         }
     }
 
-    /// Derive the runtime shape of a lambda placed into an expected callback
-    /// slot. The expected type defines the positional ABI; the inferred type
-    /// contributes effects absorbed by an open tail.
-    pub fn for_lambda_boundary(expected: &Self, inferred: &Self) -> Self {
-        let mut static_effects = expected.static_effects.clone();
-        for inferred_effect in &inferred.static_effects {
+    /// Merge effect requirements observed within one implementation body.
+    ///
+    /// This is deliberately not callback-boundary adaptation. A callback's
+    /// boundary ABI and implementation ABI must remain separate so an adapter
+    /// can translate an open tagged tail into the implementation's positional
+    /// prefix.
+    pub fn merge_requirements(left: &Self, right: &Self) -> Self {
+        let mut static_effects = left.static_effects.clone();
+        for inferred_effect in &right.static_effects {
             if static_effects
                 .iter()
                 .any(|effect| effect == inferred_effect)
@@ -230,7 +233,7 @@ impl EvidenceAbi {
         static_effects.dedup();
         Self {
             static_effects,
-            is_open_row: expected.is_open_row || inferred.is_open_row,
+            is_open_row: left.is_open_row || right.is_open_row,
         }
     }
 }
@@ -727,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn lambda_boundary_keeps_unused_expected_slots() {
+    fn merged_requirements_keep_all_static_slots() {
         let expected = EvidenceAbi {
             static_effects: vec![
                 "Main.Repo".into(),
@@ -741,13 +744,13 @@ mod tests {
         };
 
         assert_eq!(
-            EvidenceAbi::for_lambda_boundary(&expected, &inferred),
+            EvidenceAbi::merge_requirements(&expected, &inferred),
             expected
         );
     }
 
     #[test]
-    fn lambda_boundary_keeps_distinct_concrete_family_slots() {
+    fn merged_requirements_keep_distinct_concrete_family_slots() {
         let expected = EvidenceAbi {
             static_effects: vec!["Main.Fail<Std.Int.Int>".into()],
             is_open_row: true,
@@ -758,13 +761,13 @@ mod tests {
         };
 
         assert_eq!(
-            EvidenceAbi::for_lambda_boundary(&expected, &inferred).static_effects,
+            EvidenceAbi::merge_requirements(&expected, &inferred).static_effects,
             vec!["Main.Fail<Std.Int.Int>", "Main.Fail<Std.String.String>"]
         );
     }
 
     #[test]
-    fn lambda_boundary_collapses_generic_and_concrete_family_slot() {
+    fn merged_requirements_collapse_generic_and_concrete_family_slot() {
         let expected = EvidenceAbi {
             static_effects: vec!["Main.Rollback<$1>".into()],
             is_open_row: false,
@@ -775,7 +778,7 @@ mod tests {
         };
 
         assert_eq!(
-            EvidenceAbi::for_lambda_boundary(&expected, &inferred).static_effects,
+            EvidenceAbi::merge_requirements(&expected, &inferred).static_effects,
             vec!["Main.Rollback<Std.String.String>"]
         );
     }

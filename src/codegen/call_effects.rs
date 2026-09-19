@@ -835,7 +835,7 @@ impl<'a> Populator<'a> {
             if let Some(evidence) = info.cps_call_abi().and_then(|abi| abi.evidence.clone())
                 && let Some(lambda_evidence) = self.lambda_body_evidence.last_mut()
             {
-                *lambda_evidence = EvidenceAbi::for_lambda_boundary(lambda_evidence, &evidence);
+                *lambda_evidence = EvidenceAbi::merge_requirements(lambda_evidence, &evidence);
             }
             self.plan.record_call(expr.id, info);
             self.plan_app_function_value_boundaries(expr);
