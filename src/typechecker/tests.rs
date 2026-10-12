@@ -8622,3 +8622,172 @@ main () = {
     )
     .expect("nested Handler effect should canonicalize to the re-export origin");
 }
+
+// --- Effect row placement on lambdas ---
+//
+// A lambda's effects sit on the arrow of its last parameter, as for a
+// declared `fun f : A -> B -> C needs {E}` (docs/effect-implementation.md,
+// "Where Effects Live on Curried Functions").
+
+const LAMBDA_ROW_PRELUDE: &str = "effect Skip {\n  fun skip : Unit -> Int\n}\n";
+
+/// Effect names on each arrow of the curried type of top-level
+/// `let f = <lambda>`, outermost arrow first.
+fn lambda_arrow_rows(lambda: &str) -> Vec<Vec<String>> {
+    let checker = check(&format!("{LAMBDA_ROW_PRELUDE}let f = {lambda}")).unwrap();
+    let mut ty = checker.sub.apply(&checker.env.get("f").unwrap().ty);
+    let mut rows = Vec::new();
+    while let Type::Fun(_, ret, row) = ty {
+        assert!(row.tails.is_empty(), "unexpected open row");
+        rows.push(row.effects.iter().map(|e| e.name.clone()).collect());
+        ty = *ret;
+    }
+    rows
+}
+
+fn row(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+#[test]
+fn multi_param_lambda_row_is_on_the_innermost_arrow() {
+    assert_eq!(
+        lambda_arrow_rows("fun a b -> a + b + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+    assert_eq!(
+        lambda_arrow_rows("fun a b c -> a + b + c + skip! ()"),
+        vec![row(&[]), row(&[]), row(&["Skip"])]
+    );
+    // Pure lambdas are unaffected.
+    assert_eq!(
+        lambda_arrow_rows("fun a b -> a + b + 1"),
+        vec![row(&[]), row(&[])]
+    );
+}
+
+#[test]
+fn explicitly_nested_lambda_row_is_on_the_inner_lambda() {
+    assert_eq!(
+        lambda_arrow_rows("fun a -> fun b -> a + b + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+}
+
+#[test]
+fn lambda_effect_before_returning_a_lambda_stays_on_the_outer_arrow() {
+    // The effect is performed when `a` is supplied, before the inner lambda
+    // exists, so it belongs to the first arrow.
+    assert_eq!(
+        lambda_arrow_rows("fun a -> {\n  let n = skip! ()\n  fun b -> a + b + n\n}"),
+        vec![row(&["Skip"]), row(&[])]
+    );
+    // With two parameters of its own, it is performed when the second one is
+    // supplied; the returned lambda's arrow is not touched.
+    assert_eq!(
+        lambda_arrow_rows("fun a b -> {\n  let n = skip! ()\n  fun c -> a + b + c + n\n}"),
+        vec![row(&[]), row(&["Skip"]), row(&[])]
+    );
+    // Both at once.
+    assert_eq!(
+        lambda_arrow_rows("fun a -> {\n  let n = skip! ()\n  fun b -> a + b + n + skip! ()\n}"),
+        vec![row(&["Skip"]), row(&["Skip"])]
+    );
+}
+
+#[test]
+fn unit_param_lambda_rows() {
+    assert_eq!(
+        lambda_arrow_rows("fun () -> skip! ()"),
+        vec![row(&["Skip"])]
+    );
+    assert_eq!(
+        lambda_arrow_rows("fun () b -> b + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+    assert_eq!(
+        lambda_arrow_rows("fun a () -> a + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+}
+
+#[test]
+fn multi_param_effectful_lambda_passed_to_open_row_callback() {
+    // `foldl : (b -> a -> b needs {..e}) -> b -> List a -> b needs {..e}`.
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         import Std.List as List\n\
+         fun sum_skip : List Int -> Int needs {{Skip}}\n\
+         sum_skip xs = List.foldl (fun acc x -> acc + x + skip! ()) 0 xs\n"
+    ))
+    .unwrap();
+    // The effect reaches the caller: it cannot be dropped.
+    let err = check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         import Std.List as List\n\
+         fun sum_skip : List Int -> Int\n\
+         sum_skip xs = List.foldl (fun acc x -> acc + x + skip! ()) 0 xs\n"
+    ))
+    .err()
+    .expect("effect must reach sum_skip");
+    assert!(err.message.contains("Skip"), "{}", err.message);
+}
+
+#[test]
+fn calling_a_let_bound_multi_param_effectful_lambda_performs_its_effects() {
+    let body = "t6 () = {\n  let f = fun a b -> a + b + skip! ()\n  f 1 2\n}\n";
+    let err = check(&format!(
+        "{LAMBDA_ROW_PRELUDE}fun t6 : Unit -> Int\n{body}"
+    ))
+    .err()
+    .expect("t6 performs Skip");
+    assert!(
+        err.message
+            .contains("uses effects {Skip} but has no 'needs' declaration"),
+        "{}",
+        err.message
+    );
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}fun t6 : Unit -> Int needs {{Skip}}\n{body}"
+    ))
+    .unwrap();
+    // Partial application performs nothing.
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}fun t7 : Unit -> (Int -> Int needs {{Skip}})\n\
+         t7 () = {{\n  let f = fun a b -> a + b + skip! ()\n  f 1\n}}\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn multi_param_effectful_lambda_matches_its_annotation() {
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         fun mk : Unit -> (Int -> Int -> Int needs {{Skip}})\n\
+         mk () = fun a b -> a + b + skip! ()\n\
+         fun run : (Int -> Int -> Int needs {{Skip}}) -> Int needs {{Skip}}\n\
+         run f = f 1 2\n\
+         fun go : Unit -> Int needs {{Skip}}\n\
+         go () = {{\n  \
+           let g : Int -> Int -> Int needs {{Skip}} = fun a b -> a + b + skip! ()\n  \
+           run (fun a b -> a + b + skip! ()) + run g + run (mk ())\n\
+         }}\n"
+    ))
+    .unwrap();
+    // Against a pure two-argument callback it is still rejected.
+    let err = check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         fun run_pure : (Int -> Int -> Int) -> Int\n\
+         run_pure f = f 1 2\n\
+         fun go : Unit -> Int\n\
+         go () = run_pure (fun a b -> a + b + skip! ())\n"
+    ))
+    .err()
+    .expect("effectful lambda as a pure callback");
+    assert!(
+        err.message
+            .contains("passed where a pure callback is expected"),
+        "{}",
+        err.message
+    );
+}

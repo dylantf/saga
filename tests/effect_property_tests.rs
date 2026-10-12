@@ -3882,3 +3882,88 @@ result () = {
     // a = 103, b = 103, c = 1321
     check_result_int("arity_effectful_field_access", &src, 1_321_103_103);
 }
+
+// --- Multi-parameter effectful lambdas ---
+//
+// A lambda's effect row sits on the arrow of its last parameter, like a
+// declared function's, so `fun acc x -> .. skip! ()` fits a callback
+// parameter typed `b -> a -> b needs {..e}`.
+
+#[test]
+fn multi_param_effectful_lambda_as_foldl_callback() {
+    let src = r#"module Main
+
+effect Skip { fun skip : Unit -> Int }
+
+fun sum_skip : List Int -> Int needs {Skip}
+sum_skip xs = List.foldl (fun acc x -> acc + x + skip! ()) 0 xs
+
+pub fun result : Unit -> Int
+result () = sum_skip [1, 2, 3] with { skip () = resume 10 }
+"#;
+    // 1 + 2 + 3 + three skips
+    check_result_int("multi_param_lambda_foldl", src, 36);
+}
+
+#[test]
+fn multi_param_effectful_lambda_let_bound_and_returned() {
+    let src = r#"module Main
+
+effect Skip { fun skip : Unit -> Int }
+
+fun mk : Unit -> (Int -> Int -> Int needs {Skip})
+mk () = fun a b -> a + b + skip! ()
+
+fun nested : Unit -> (Int -> Int -> Int needs {Skip})
+nested () = fun a -> fun b -> a + b + skip! ()
+
+fun local : Unit -> Int needs {Skip}
+local () = {
+  let f = fun a b -> a + b + skip! ()
+  let u = fun () b -> b + skip! ()
+  f 1 2 + u () 4
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let a = (mk ()) 1 2 with { skip () = resume 10 }
+  let b = (nested ()) 1 2 with { skip () = resume 10 }
+  let c = local () with { skip () = resume 100 }
+  a + b * 100 + c * 10000
+}
+"#;
+    // a = 13, b = 13, c = 103 + 104
+    check_result_int("multi_param_lambda_shapes", src, 2_071_313);
+}
+
+#[test]
+fn local_multi_clause_function_with_an_effect_in_a_later_clause() {
+    let src = r#"module Main
+
+effect Skip { fun skip : Unit -> Int }
+
+fun later : Int -> Int needs {Skip}
+later n = {
+  let go 0 = 0
+  let go m = m + skip! ()
+  go n
+}
+
+fun looped : Int -> Int needs {Skip}
+looped n = {
+  let go 0 acc = acc
+  let go m acc = go (m - 1) (acc + skip! ())
+  go n 0
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let a = later 3 with { skip () = resume 10 }
+  let b = later 0 with { skip () = resume 10 }
+  let c = looped 3 with { skip () = resume 10 }
+  a + b * 100 + c * 10000
+}
+"#;
+    // a = 13, b = 0, c = 30
+    check_result_int("local_multi_clause_effect", src, 300_013);
+}
