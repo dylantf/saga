@@ -86,6 +86,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 front_resolution: Default::default(),
                 effect_at_node: Default::default(),
                 type_at_node: Default::default(),
+                expr_types: Default::default(),
                 type_at_span: Default::default(),
                 effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
                 effect_abi_plan_ready: false,

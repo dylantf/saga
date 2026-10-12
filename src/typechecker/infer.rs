@@ -109,7 +109,18 @@ impl Checker {
     // Effects accumulate on self.effect_row automatically. Isolation scopes
     // (handlers, lambdas, local funs) use save_effects/restore_effects.
 
+    /// Infer an expression's type. Every expression goes through here (or
+    /// through `infer_expr_against` / `infer_arg_against`, which record the
+    /// same way), so on success the node's type is written to the codegen
+    /// type table. The write is last-wins: a node that is inferred again
+    /// replaces its earlier entry.
     pub(crate) fn infer_expr(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
+        let ty = self.infer_expr_inner(expr)?;
+        self.record_expr_type(expr.id, &ty);
+        Ok(ty)
+    }
+
+    fn infer_expr_inner(&mut self, expr: &Expr) -> Result<Type, Diagnostic> {
         let span = expr.span;
         let node_id = expr.id;
         match &expr.kind {
@@ -826,6 +837,7 @@ impl Checker {
                     param_ty: param_ty.clone(),
                 });
                 self.record_type(app_expr.id, &ret_ty);
+                self.record_expr_type(app_expr.id, &ret_ty);
                 current_ty = ret_ty;
                 if saturates {
                     saturation_callee = Some(callee_ty);
@@ -838,6 +850,7 @@ impl Checker {
             self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
             self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
             self.record_type(app_expr.id, &ret_ty);
+            self.record_expr_type(app_expr.id, &ret_ty);
             current_ty = ret_ty.clone();
 
             if saturates {
@@ -879,6 +892,10 @@ impl Checker {
             // `Abort e` to the concrete `Abort String` supplied here.
             let resolved_arg_ty = self.sub.apply(&arg_ty);
             self.record_type(deferred_lambda.arg_expr.id, &resolved_arg_ty);
+            // `infer_lambda_against` does not go through `infer_expr`, so the
+            // lambda node itself is recorded here. (When it fell back to
+            // `infer_expr` this rewrites the same type.)
+            self.record_expr_type(deferred_lambda.arg_expr.id, &arg_ty);
         }
 
         // Now that deferred lambdas have bound any open effect rows, emit the
@@ -962,6 +979,8 @@ impl Checker {
             self.unify_at(&cons_ty, &cons_full_ty, inner.span)?;
             self.record_type(outer.id, &cons_partial_ty);
             self.record_type(current.id, &list_ty);
+            self.record_expr_type(outer.id, &cons_partial_ty);
+            self.record_expr_type(current.id, &list_ty);
 
             match &tail.kind {
                 ExprKind::Constructor { .. } => {
@@ -989,6 +1008,16 @@ impl Checker {
         expr: &Expr,
         expected: &Type,
     ) -> Result<Type, Diagnostic> {
+        let ty = self.infer_expr_against_inner(expr, expected)?;
+        self.record_expr_type(expr.id, &ty);
+        Ok(ty)
+    }
+
+    fn infer_expr_against_inner(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+    ) -> Result<Type, Diagnostic> {
         match &expr.kind {
             ExprKind::App { .. } => self.infer_app_chain_with_expected(expr, Some(expected)),
             ExprKind::Lambda { params, body } => {
@@ -1012,6 +1041,16 @@ impl Checker {
     }
 
     fn infer_arg_against(&mut self, arg: &Expr, expected_param: &Type) -> Result<Type, Diagnostic> {
+        let ty = self.infer_arg_against_inner(arg, expected_param)?;
+        self.record_expr_type(arg.id, &ty);
+        Ok(ty)
+    }
+
+    fn infer_arg_against_inner(
+        &mut self,
+        arg: &Expr,
+        expected_param: &Type,
+    ) -> Result<Type, Diagnostic> {
         match &arg.kind {
             ExprKind::Lambda { params, body } => {
                 let resolved_param = self.sub.apply(expected_param);
