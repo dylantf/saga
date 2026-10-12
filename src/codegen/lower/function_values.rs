@@ -998,258 +998,12 @@ impl<'a> Lowerer<'a> {
     pub(super) fn lower_expr_value_with_expected_type(
         &mut self,
         expr: &Expr,
-        expected_ty: Option<&crate::typechecker::Type>,
+        _expected_ty: Option<&crate::typechecker::Type>,
     ) -> CExpr {
-        if self.tagged {
-            // A function value is shaped by its own type, never by the type
-            // its context expects: no adapters.
-            return self
-                .lower_eta_reduced_effect_expr(expr)
-                .unwrap_or_else(|| self.lower_expr_value(expr));
-        }
-        if let Some(expected_ty) = expected_ty {
-            if let ExprKind::Constructor { name, .. } = &expr.kind
-                && matches!(expected_ty, crate::typechecker::Type::Fun(_, _, _))
-                && let Some(ctor_fun) = {
-                    let ctor_name = self.resolved_constructor_name_for(expr.id, name);
-                    self.lower_constructor_function_value(&ctor_name, expected_ty)
-                }
-            {
-                return ctor_fun;
-            }
-
-            if let Some(curried_lambda) =
-                self.lower_curried_lambda_for_expected_arity(expr, expected_ty)
-            {
-                return curried_lambda;
-            }
-
-            if let Some((head, ctor_name, args)) = collect_ctor_call_with_head(expr) {
-                let resolved_ctor = self.resolved_constructor_name_for(head.id, ctor_name);
-                let bare = crate::typechecker::bare_type_name(match expected_ty {
-                    crate::typechecker::Type::Con(name, _) => name,
-                    _ => "",
-                });
-                if bare == "List"
-                    && let crate::typechecker::Type::Con(_, type_args) = expected_ty
-                    && let Some(elem_ty) = type_args.first()
-                {
-                    match (
-                        resolved_ctor.rsplit('.').next().unwrap_or(&resolved_ctor),
-                        args.as_slice(),
-                    ) {
-                        ("Nil", []) => return CExpr::Nil,
-                        ("Cons", [head, tail]) => {
-                            let head_var = self.fresh();
-                            let tail_var = self.fresh();
-                            let head_ce =
-                                self.lower_expr_value_with_expected_type(head, Some(elem_ty));
-                            let tail_ce =
-                                self.lower_expr_value_with_expected_type(tail, Some(expected_ty));
-                            return CExpr::Let(
-                                head_var.clone(),
-                                Box::new(head_ce),
-                                Box::new(CExpr::Let(
-                                    tail_var.clone(),
-                                    Box::new(tail_ce),
-                                    Box::new(CExpr::Cons(
-                                        Box::new(CExpr::Var(head_var)),
-                                        Box::new(CExpr::Var(tail_var)),
-                                    )),
-                                )),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-
-                if bare != "List"
-                    && let Some(arg_tys) =
-                        self.constructor_arg_types_from_expected(&resolved_ctor, expected_ty)
-                {
-                    let mut vars = Vec::new();
-                    let mut bindings = Vec::new();
-                    for (idx, arg) in args.iter().enumerate() {
-                        let var = self.fresh();
-                        let child_expected = arg_tys.get(idx);
-                        let val = self.lower_expr_value_with_expected_type(arg, child_expected);
-                        vars.push(var.clone());
-                        bindings.push((var, val));
-                    }
-                    let atom = util::mangle_ctor_atom(
-                        &resolved_ctor,
-                        &self.constructor_atoms,
-                        self.handler_origin_module(),
-                    );
-                    let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-                    elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                    let tuple = CExpr::Tuple(elems);
-                    return self.wrap_let_bindings(bindings, tuple);
-                }
-            }
-
-            if let ExprKind::Tuple { elements, .. } = &expr.kind
-                && let crate::typechecker::Type::Con(name, elem_tys) = expected_ty
-                && crate::typechecker::bare_type_name(name) == "Tuple"
-                && elem_tys.len() == elements.len()
-            {
-                let mut vars = Vec::new();
-                let mut bindings = Vec::new();
-                for (elem, elem_ty) in elements.iter().zip(elem_tys.iter()) {
-                    let var = self.fresh();
-                    let val = self.lower_expr_value_with_expected_type(elem, Some(elem_ty));
-                    vars.push(var.clone());
-                    bindings.push((var, val));
-                }
-                let tuple = CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect());
-                return self.wrap_let_bindings(bindings, tuple);
-            }
-
-            if let ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } = &expr.kind
-            {
-                let cond_var = self.fresh();
-                let cond_ce = self.lower_expr_value(cond);
-                let then_ce =
-                    self.lower_expr_value_with_expected_type(then_branch, Some(expected_ty));
-                let else_ce =
-                    self.lower_expr_value_with_expected_type(else_branch, Some(expected_ty));
-                return CExpr::Let(
-                    cond_var.clone(),
-                    Box::new(cond_ce),
-                    Box::new(CExpr::Case(
-                        Box::new(CExpr::Var(cond_var)),
-                        vec![
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("true".to_string())),
-                                guard: None,
-                                body: then_ce,
-                            },
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("false".to_string())),
-                                guard: None,
-                                body: else_ce,
-                            },
-                        ],
-                    )),
-                );
-            }
-
-            if self.cps_function_shape_from_type(expected_ty).is_some() {
-                return self.lower_cps_function_value_for_expected_type(expr, expected_ty);
-            }
-
-            // Expected is a pure function type, but the actual expression
-            // is a partial application of a CPS-shaped function. The
-            // static narrowing (row variable resolved to closed empty)
-            // doesn't change the runtime BEAM arity of the partial-app
-            // closure — `wrap pure_fn` is still a 3-arg closure even
-            // though its inferred type is `Unit -> Unit`. Wrap it so the
-            // call site sees the expected pure shape.
-            if matches!(expected_ty, crate::typechecker::Type::Fun(_, _, _))
-                && let Some(actual_abi) = self.callable_abi_from_partial_app(expr)
-            {
-                let boundary = CallableAbi::from_type(expected_ty, |effects| {
-                    self.canonicalize_effects(effects)
-                });
-                let planned = self.planned_function_value(expr.id).unwrap_or_else(|| {
-                    panic!(
-                        "internal ABI planning error: missing pure-boundary adapter ABI for {:?}",
-                        expr.id
-                    )
-                });
-                let contextual = planned.contextual().expect("contextual adapter ABI");
-                assert_eq!(contextual.implementation(), &actual_abi);
-                assert_eq!(contextual.boundary(), &boundary);
-                return self.wrap_cps_function_value_as_pure_adapter(expr, expected_ty);
-            }
-
-            match &expr.kind {
-                ExprKind::RecordCreate {
-                    name,
-                    fields,
-                    record_name,
-                } => {
-                    let Some(field_tys) = self.record_field_types_from_expected(expected_ty) else {
-                        return self.lower_expr_value(expr);
-                    };
-                    let order = self
-                        .record_create_field_order(record_name.as_deref(), expr.id, name)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "codegen: cannot resolve field layout for record `{name}` \
-                                 (node {:?}, module `{}`). The record's type could not be \
-                                 determined here, so its tuple layout is unknown.",
-                                expr.id,
-                                self.current_semantic_module_name(),
-                            )
-                        });
-                    let field_map: HashMap<&str, &Expr> =
-                        fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-                    let mut vars = Vec::new();
-                    let mut bindings = Vec::new();
-                    for field_name in &order {
-                        let var = self.fresh();
-                        let field_expr = field_map
-                            .get(field_name.as_str())
-                            .expect("field missing in RecordCreate");
-                        let child_expected = field_tys.get(field_name.as_str());
-                        let val =
-                            self.lower_expr_value_with_expected_type(field_expr, child_expected);
-                        vars.push(var.clone());
-                        bindings.push((var, val));
-                    }
-                    let ctor_name = self
-                        .current_record_type_name(expr.id)
-                        .and_then(|name| self.canonical_constructor_key_for(name))
-                        .unwrap_or_else(|| self.resolved_constructor_name_for(expr.id, name));
-                    let atom = util::mangle_ctor_atom(
-                        &ctor_name,
-                        &self.constructor_atoms,
-                        self.handler_origin_module(),
-                    );
-                    let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-                    elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                    return self.wrap_let_bindings(bindings, CExpr::Tuple(elems));
-                }
-                ExprKind::AnonRecordCreate { fields, .. } => {
-                    let Some(field_tys) = self.record_field_types_from_expected(expected_ty) else {
-                        return self.lower_expr_value(expr);
-                    };
-                    let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                    let tag = crate::ast::anon_record_tag(&names);
-                    let mut sorted_names: Vec<String> =
-                        names.iter().map(|n| n.to_string()).collect();
-                    sorted_names.sort();
-                    let field_map: HashMap<&str, &Expr> =
-                        fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-                    let mut vars = Vec::new();
-                    let mut bindings = Vec::new();
-                    for field_name in &sorted_names {
-                        let var = self.fresh();
-                        let field_expr = field_map
-                            .get(field_name.as_str())
-                            .expect("field missing in AnonRecordCreate");
-                        let child_expected = field_tys.get(field_name.as_str());
-                        let val =
-                            self.lower_expr_value_with_expected_type(field_expr, child_expected);
-                        vars.push(var.clone());
-                        bindings.push((var, val));
-                    }
-                    let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-                    elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                    return self.wrap_let_bindings(bindings, CExpr::Tuple(elems));
-                }
-                _ => {}
-            }
-        }
-
-        self.lower_expr_value(expr)
+        // A function value is shaped by its own type, never by the type
+        // its context expects: no adapters.
+        self.lower_eta_reduced_effect_expr(expr)
+            .unwrap_or_else(|| self.lower_expr_value(expr))
     }
 
     pub(super) fn lower_call_args_with_expected_types(
@@ -1326,72 +1080,32 @@ impl<'a> Lowerer<'a> {
             params.push(param);
         }
 
-        if self.tagged {
-            // The typechecker attributes the operation's effect to the place
-            // the reference is written, and gives the reference the
-            // operation's own function type. So the closure captures the
-            // handler in scope here. If that type is effectful (the
-            // operation has its own `needs`), the value is a tagged closure
-            // and the handler resumes into the caller's continuation;
-            // otherwise it is a bare fun.
-            let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
-            if self.value_repr_of(node_id)
-                == Some(crate::codegen::runtime_shape::ValueRepr::Tagged)
-            {
-                let return_k = "_ReturnK".to_string();
-                params.push(self.fresh());
-                params.push(return_k.clone());
-                runtime_args.push(CExpr::Var(return_k));
-                return Some(super::tagged::tag_cps(CExpr::Fun(
-                    params,
-                    Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
-                )));
-            }
-            let return_value = self.fresh();
-            runtime_args.push(CExpr::Fun(
-                vec![return_value.clone()],
-                Box::new(CExpr::Var(return_value)),
-            ));
-            return Some(CExpr::Fun(
-                params,
-                Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
-            ));
-        }
-        if let Some(shape) = self.planned_function_value_evidence(node_id) {
-            // Raw CPS shape: the resulting closure is passed to a slot that
-            // expects an effectful function value, so it takes `_Evidence`
-            // and `_ReturnK` and reads the per-op handler out of the
-            // evidence vector at call time.
-            let evidence = "_Evidence".to_string();
+        // The typechecker attributes the operation's effect to the place the
+        // reference is written, and gives the reference the operation's own
+        // function type. So the closure captures the handler in scope here.
+        // If that type is effectful (the operation has its own `needs`), the
+        // value is a tagged closure and the handler resumes into the
+        // caller's continuation; otherwise it is a bare fun.
+        let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
+        if self.value_repr_of(node_id) == Some(crate::codegen::runtime_shape::ValueRepr::Tagged) {
             let return_k = "_ReturnK".to_string();
-            runtime_args.push(CExpr::Var(return_k.clone()));
-            params.push(evidence.clone());
-            params.push(return_k);
-            // Build the op lookup against the lambda's evidence parameter.
-            let saved_evidence = self.current_evidence.clone();
-            self.current_evidence = Some(EvidenceFrame::new(evidence, shape));
-            let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
-            self.current_evidence = saved_evidence;
-            Some(CExpr::Fun(
+            params.push(self.fresh());
+            params.push(return_k.clone());
+            runtime_args.push(CExpr::Var(return_k));
+            return Some(super::tagged::tag_cps(CExpr::Fun(
                 params,
                 Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
-            ))
-        } else {
-            // Value-closure shape: the resulting lambda is bound locally or
-            // passed to a pure-shaped callback slot. Capture the in-scope
-            // op closure (read out of current evidence) and provide an
-            // identity return continuation.
-            let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
-            let return_value = self.fresh();
-            runtime_args.push(CExpr::Fun(
-                vec![return_value.clone()],
-                Box::new(CExpr::Var(return_value)),
-            ));
-            Some(CExpr::Fun(
-                params,
-                Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
-            ))
+            )));
         }
+        let return_value = self.fresh();
+        runtime_args.push(CExpr::Fun(
+            vec![return_value.clone()],
+            Box::new(CExpr::Var(return_value)),
+        ));
+        Some(CExpr::Fun(
+            params,
+            Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
+        ))
     }
 
     pub(super) fn lower_eta_reduced_effect_expr(&mut self, expr: &Expr) -> Option<CExpr> {

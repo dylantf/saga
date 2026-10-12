@@ -162,19 +162,15 @@ impl Lowerer<'_> {
     pub(super) fn lower_catch_panic(&mut self, thunk_expr: &crate::ast::Expr) -> CExpr {
         let thunk = self.lower_expr_value(thunk_expr);
 
-        let applied = if self.tagged {
-            // The thunk's type is effectful, so it may be a tagged closure:
-            // call it with the current evidence and an identity continuation.
-            let (ev_var, ev_ce) = self.current_frame_binding();
-            let call = self.tagged_cps_apply_value(
-                thunk,
-                vec![CExpr::Lit(CLit::Atom("unit".into()))],
-                CExpr::Var(ev_var.clone()),
-            );
-            CExpr::Let(ev_var, Box::new(ev_ce), Box::new(call))
-        } else {
-            CExpr::Apply(Box::new(thunk), vec![CExpr::Lit(CLit::Atom("unit".into()))])
-        };
+        // The thunk's type is effectful, so it may be a tagged closure:
+        // call it with the current evidence and an identity continuation.
+        let (ev_var, ev_ce) = self.current_frame_binding();
+        let call = self.tagged_cps_apply_value(
+            thunk,
+            vec![CExpr::Lit(CLit::Atom("unit".into()))],
+            CExpr::Var(ev_var.clone()),
+        );
+        let applied = CExpr::Let(ev_var, Box::new(ev_ce), Box::new(call));
         let ok_var = self.fresh();
         let class_var = self.fresh();
         let reason_var = self.fresh();

@@ -255,10 +255,7 @@ pub(super) struct LowererResolution {
 
 pub struct Lowerer<'a> {
     counter: usize,
-    /// Tagged-closure representation for function values
-    /// (`SAGA_TAGGED_CLOSURES`). See `tagged.rs`.
-    tagged: bool,
-    /// Tagged closures: the lambda with this id is lowered as a raw fun with
+    /// The lambda with this id is lowered as a raw fun with
     /// the given convention (CPS or direct) instead of deciding from its own
     /// type. Set by dictionary-method lowering, which owns the slot's
     /// representation.
@@ -429,7 +426,6 @@ impl<'a> Lowerer<'a> {
     ) -> Self {
         Lowerer {
             counter: 0,
-            tagged: super::tagged_closures_enabled(),
             forced_lambda_cps: None,
             ctx,
             source_info,
@@ -978,7 +974,6 @@ impl<'a> Lowerer<'a> {
             impl_effects_by_dict: &self.impl_effects_by_dict,
             impl_method_effects_by_dict: &self.impl_method_effects_by_dict,
             trait_method_effects_by_key: &trait_method_effects_by_key,
-            tagged: self.tagged,
         })
         .populate_with_trace(program)
     }

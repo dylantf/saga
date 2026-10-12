@@ -54,17 +54,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Fixture pair for the function-value representation under test. With
-/// `SAGA_TAGGED_CLOSURES` set the compiler emits tagged closures, which has
-/// its own set of failures, so that mode reads and blesses a separate pair
-/// and leaves the default-mode files alone.
 fn fixture_file(stem: &str) -> String {
-    let mode = if saga::codegen::tagged_closures_enabled() {
-        ".tagged"
-    } else {
-        ""
-    };
-    format!("tests/fixtures/function_shape_matrix_{stem}{mode}.txt")
+    format!("tests/fixtures/function_shape_matrix_{stem}.txt")
 }
 
 fn expected_failures_file() -> String {

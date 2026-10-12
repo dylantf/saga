@@ -107,7 +107,6 @@ impl<'a> Lowerer<'a> {
                 .and_then(|pae| pae.get(&source_idx));
             let has_open_row = op_param_open_rows.contains(&source_idx);
             if absorbed_effects.is_some() || has_open_row {
-                let mut uncapturable: Vec<String> = Vec::new();
                 let mut uses_native_callback_context = false;
                 for eff in absorbed_effects.into_iter().flatten() {
                     let ops = self.effect_handler_ops(std::slice::from_ref(eff));
@@ -127,55 +126,20 @@ impl<'a> Lowerer<'a> {
                             self.direct_ops
                                 .insert(format!("{}.{}", e, op), handler_canonical.clone());
                         }
-                        continue;
                     }
-                    uncapturable.push(eff.clone());
                 }
-                uncapturable.sort();
-                uncapturable.dedup();
-                let cps_open_row = has_open_row && !uses_native_callback_context;
-                if self.tagged {
-                    // The callback is shaped by its own type. What survives
-                    // from the contextual plan is the language rule: a
-                    // callback with an open row tail runs with the handler's
-                    // call-time frame for its named effects and the
-                    // perform-site frame for the tail.
-                    // A callback run in a native context (`spawn`) likewise
-                    // keeps the perform-site frame for everything that
-                    // context does not provide.
-                    if (has_open_row || uses_native_callback_context)
-                        && let Some(frame) = self.current_evidence.clone()
-                    {
-                        tagged_callback_capture = Some(frame.var.clone());
-                        captured_evidence_scope =
-                            Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
-                    }
-                } else if !uncapturable.is_empty() || cps_open_row {
-                    let planned = self
-                        .planned_function_value_implementation(arg.id)
-                        .and_then(|abi| abi.evidence.as_ref())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "internal ABI planning error: missing effect callback ABI for {:?}",
-                                arg.id
-                            )
-                        });
-                    assert_eq!(
-                        planned,
-                        &EvidenceAbi::new(uncapturable, cps_open_row),
-                        "internal ABI planning error: effect callback ABI disagrees with lowering"
-                    );
-                    if cps_open_row {
-                        // Named callback effects are supplied by the handler
-                        // at invocation time. Capture the perform-site frame
-                        // only as a source for the callback's `..r` entries;
-                        // lambda lowering overlays the call-time static frame
-                        // and removes exact duplicates.
-                        if let Some(frame) = self.current_evidence.clone() {
-                            captured_evidence_scope =
-                                Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
-                        }
-                    }
+                // The callback is shaped by its own type. The language rule
+                // applied here: a callback with an open row tail runs with
+                // the handler's call-time frame for its named effects and
+                // the perform-site frame for the tail. A callback run in a
+                // native context (`spawn`) likewise keeps the perform-site
+                // frame for everything that context does not provide.
+                if (has_open_row || uses_native_callback_context)
+                    && let Some(frame) = self.current_evidence.clone()
+                {
+                    tagged_callback_capture = Some(frame.var.clone());
+                    captured_evidence_scope =
+                        Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
                 }
             }
             let ce = self
@@ -415,9 +379,9 @@ impl<'a> Lowerer<'a> {
     /// callback it runs (`spawn`). The callback is called in a fresh native
     /// context, so the effects that context provides natively (Actor) are
     /// installed as entries of native op closures over the current frame.
-    /// `None` without tagged closures or for an op that runs no callback.
+    /// `None` for an op that runs no callback.
     pub(crate) fn native_callback_evidence(&mut self, op_name: &str) -> Option<CExpr> {
-        if !self.tagged || !crate::codegen::lower::beam_interop::native_op_runs_callback(op_name) {
+        if !crate::codegen::lower::beam_interop::native_op_runs_callback(op_name) {
             return None;
         }
         let mut native_effects: Vec<String> = self

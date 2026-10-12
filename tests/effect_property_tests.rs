@@ -3326,9 +3326,9 @@ result () = first [a, b, c]
 // ---------------------------------------------------------------------------
 // Function representation repros
 //
-// Known failures from docs/planning/sound-function-representation.md,
-// Appendix A. Each is ignored until the step that fixes it lands; run them
-// with `cargo test --test effect_property_tests -- --ignored repro_`.
+// The reproductions from docs/planning/sound-function-representation.md,
+// Appendix A. They failed under the old bare-fun representation and are
+// regression tests now that function values are tagged closures.
 // ---------------------------------------------------------------------------
 
 /// Typecheck a single-module source and assert it is rejected.
@@ -3383,7 +3383,6 @@ fn repro_src(body: &str) -> String {
 }
 
 #[test]
-#[ignore = "known failure A1: case arms with different conventions"]
 fn repro_a1_case_arms_with_different_conventions() {
     let src = repro_src(
         r#"fun choose : Int -> (Unit -> Int needs {Skip})
@@ -3442,7 +3441,6 @@ result () = {
 }
 
 #[test]
-#[ignore = "known failure A5: effectful lambda in a polymorphic position"]
 fn repro_a5_effectful_lambda_in_polymorphic_position() {
     let src = repro_src(
         r#"pub fun result : Unit -> Int
@@ -3493,7 +3491,6 @@ result () = run_all (pures ()) with { skip () = resume 100 }
 }
 
 #[test]
-#[ignore = "known failure A8: row variable instantiated to empty in a list"]
 fn repro_a8_row_variable_instantiated_to_empty_in_list() {
     let src = repro_src(
         r#"fun run_each : List (Unit -> Int needs {..e}) -> Int needs {..e}
@@ -3510,7 +3507,6 @@ result () = run_each (pures ())
 }
 
 #[test]
-#[ignore = "known failure A9: partially applied open-row trait method"]
 fn repro_a9_partially_applied_open_row_trait_method() {
     let src = repro_src(
         r#"trait Runner a {
@@ -3537,7 +3533,6 @@ result () = use_it Q with { skip () = resume 100 }
 }
 
 #[test]
-#[ignore = "known failure A10: invalid generated code for a returned effectful lambda"]
 fn repro_a10_returned_effectful_lambda_compiles() {
     let src = repro_src(
         r#"fun mk : Unit -> (Unit -> Int needs {Skip})

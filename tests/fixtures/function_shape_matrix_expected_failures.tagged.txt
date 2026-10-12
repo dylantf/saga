@@ -1,3 +1,0 @@
-# Cases of tests/function_shape_matrix.rs that fail today: `<case id> <failure class>`.
-# Case id is `<producer>.<position>.<variant>`, or `param.<installer>.<route>.<instance>`.
-# Generated. Regenerate with `SAGA_MATRIX_BLESS=1 cargo test --test function_shape_matrix`.

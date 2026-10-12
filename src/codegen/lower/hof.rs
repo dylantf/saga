@@ -236,47 +236,16 @@ impl<'a> Lowerer<'a> {
     }
 
     fn hof_direct_callback_arg_supported(&self, arg: &Expr, expected_arity: usize) -> bool {
-        if self.tagged {
-            // The direct variant calls its callback as a bare fun, so the
-            // argument's own type must be pure at every arrow. A dictionary
-            // slot is excluded: an open-row method instantiated at the empty
-            // row has a pure type here but a tagged closure in the slot.
-            return !matches!(arg.kind, ExprKind::DictMethodAccess { .. })
-                && self.value_type(arg.id).is_some_and(|ty| {
-                    crate::codegen::runtime_shape::value_repr(&ty)
-                        == crate::codegen::runtime_shape::ValueRepr::Bare
-                        && super::util::arity_and_effects_from_type(&ty).0 == expected_arity
-                });
-        }
-        if self.expr_cps_function_shape(arg).is_some() {
-            return false;
-        }
-        if let Some(ty) = self.check_result.resolved_type_for_node(arg.id) {
-            let ty = self.check_result.sub.apply(&ty);
-            let (arity, effects) = super::util::arity_and_effects_from_type(&ty);
-            return arity == expected_arity
-                && effects.is_empty()
-                && matches!(ty, crate::typechecker::Type::Fun(_, _, _));
-        }
-        match &arg.kind {
-            ExprKind::Var { name, .. } => {
-                self.resolved_fun_info(arg.id, name).is_some_and(|info| {
-                    info.arity() == expected_arity
-                        && info.effects().is_empty()
-                        && !info.is_open_row()
-                })
-            }
-            ExprKind::QualifiedName { module, name, .. } => {
-                let qualified = format!("{}.{}", module, name);
-                self.resolved_fun_info(arg.id, &qualified)
-                    .is_some_and(|info| {
-                        info.arity() == expected_arity
-                            && info.effects().is_empty()
-                            && !info.is_open_row()
-                    })
-            }
-            _ => false,
-        }
+        // The direct variant calls its callback as a bare fun, so the
+        // argument's own type must be pure at every arrow. A dictionary
+        // slot is excluded: an open-row method instantiated at the empty
+        // row has a pure type here but a tagged closure in the slot.
+        !matches!(arg.kind, ExprKind::DictMethodAccess { .. })
+            && self.value_type(arg.id).is_some_and(|ty| {
+                crate::codegen::runtime_shape::value_repr(&ty)
+                    == crate::codegen::runtime_shape::ValueRepr::Bare
+                    && super::util::arity_and_effects_from_type(&ty).0 == expected_arity
+            })
     }
 
     pub(super) fn direct_hof_callback_arity(&self, name: &str) -> Option<usize> {

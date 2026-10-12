@@ -16,20 +16,6 @@ use crate::typechecker::ModuleCodegenInfo;
 use std::collections::HashMap;
 use std::time::Instant;
 
-/// Whether function values use the tagged-closure representation (decision
-/// D2b in `docs/planning/sound-function-representation.md`): a function value
-/// whose own type is effectful is `{'$saga_cps', Fun}`, a pure one is a bare
-/// fun, and calls through a function value are decided from the callee's type.
-///
-/// Controlled by `SAGA_TAGGED_CLOSURES` (any non-empty value). The variable is
-/// read once per process: it changes the ABI of every module, the stdlib
-/// included, so it must not vary within one build.
-pub fn tagged_closures_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var_os("SAGA_TAGGED_CLOSURES").is_some_and(|v| !v.is_empty()))
-}
-
 fn build_trace_enabled() -> bool {
     std::env::var_os("SAGA_BUILD_TRACE").is_some()
 }

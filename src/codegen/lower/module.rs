@@ -169,11 +169,10 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(0);
         // Elaborated `where` dictionaries are leading parameters that the
         // declared type does not count. Importers derive the arity from the
-        // scheme (`CallableAbi::from_scheme`), dictionaries included; with
-        // tagged closures the definition does too, so a binding with fewer
-        // source parameters than its type eta-expands up to the arrow that
-        // carries its effects.
-        let declared_arity = if self.tagged && declared_arity > 0 {
+        // scheme (`CallableAbi::from_scheme`), dictionaries included; the
+        // definition does too, so a binding with fewer source parameters
+        // than its type eta-expands up to the arrow that carries its effects.
+        let declared_arity = if declared_arity > 0 {
             declared_arity
                 + scheme
                     .map(|scheme| util::dict_param_count(&scheme.constraints))
@@ -612,7 +611,7 @@ impl<'a> Lowerer<'a> {
                         // Unit and wildcard parameters are named by their
                         // position in their own list, so an absorbed one can
                         // collide with an outer one (`mk () = fun () -> ...`).
-                        let lam_param = if self.tagged && params_ce.contains(&lam_param) {
+                        let lam_param = if params_ce.contains(&lam_param) {
                             format!("_Arg{}", params_ce.len())
                         } else {
                             lam_param
@@ -631,13 +630,10 @@ impl<'a> Lowerer<'a> {
                 // callers derive arity from the type and call /1.
                 // Leading `where` dictionaries are not arrows of the declared
                 // type (see `fun_binding_runtime_info`).
-                let dict_params = if self.tagged {
-                    self.fun_info
-                        .get(&name)
-                        .map_or(0, |info| info.dict_param_count)
-                } else {
-                    0
-                };
+                let dict_params = self
+                    .fun_info
+                    .get(&name)
+                    .map_or(0, |info| info.dict_param_count);
                 let body_expected_ty = self.function_tail_type_after_params(
                     &name,
                     params_ce.len().saturating_sub(dict_params),
@@ -657,8 +653,7 @@ impl<'a> Lowerer<'a> {
                         let body_fun =
                             self.lower_expr_value_with_expected_type(body, Some(&body_ty));
                         let body_is_cps = self.cps_function_shape_from_type(&body_ty).is_some();
-                        let mut call_args = eta_args;
-                        if body_is_cps && self.tagged {
+                        if body_is_cps {
                             // The body's value is a function value of effectful
                             // type: dispatch on its representation.
                             let body_var = self.fresh();
@@ -669,10 +664,6 @@ impl<'a> Lowerer<'a> {
                                 "_ReturnK",
                             );
                             CExpr::Let(body_var, Box::new(body_fun), Box::new(call))
-                        } else if body_is_cps {
-                            call_args.push(CExpr::Var("_Evidence".to_string()));
-                            call_args.push(CExpr::Var("_ReturnK".to_string()));
-                            CExpr::Apply(Box::new(body_fun), call_args)
                         } else {
                             // The body's value is a pure function of unknown
                             // arity (`f = ident g`, or a body that returns a
@@ -829,12 +820,11 @@ impl<'a> Lowerer<'a> {
                 method_exprs.push(self.lower_expr_value(super_dict));
             }
             for (idx, m) in methods.iter().enumerate() {
-                // Tagged closures: a slot holds a bare fun or a tagged one
-                // according to the method's own convention. The method is
-                // lowered as a raw fun (so it can be hoisted) and the tag is
-                // applied to the slot below.
-                let slot_is_cps = self.tagged
-                    && matches!(&m.kind, ExprKind::Lambda { params, .. } if !params.is_empty())
+                // A slot holds a bare fun or a tagged one according to the
+                // method's own convention. The method is lowered as a raw fun
+                // (so it can be hoisted) and the tag is applied to the slot
+                // below.
+                let slot_is_cps = matches!(&m.kind, ExprKind::Lambda { params, .. } if !params.is_empty())
                     && {
                         let (is_cps, _, _) = self.method_cps_shape(
                             m,

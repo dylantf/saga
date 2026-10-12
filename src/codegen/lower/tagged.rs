@@ -1,5 +1,4 @@
-//! Tagged-closure representation for function values, enabled by
-//! `SAGA_TAGGED_CLOSURES` (decision D2b in
+//! Tagged-closure representation for function values (decision D2b in
 //! `docs/planning/sound-function-representation.md`).
 //!
 //! A function value whose own type is effectful is `{'$saga_cps', Fun}`,
@@ -9,8 +8,6 @@
 //! with no static prefix), so a caller passes its own frame unchanged. Named
 //! functions keep their direct entry points and positional layout; using one
 //! as a value wraps it in a closure that reframes into that layout.
-//!
-//! Everything here is reached only when `Lowerer::tagged` is set.
 
 use crate::ast::{Expr, ExprKind, NodeId};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
@@ -98,13 +95,15 @@ impl<'a> Lowerer<'a> {
                 .or_else(|| self.check_result.type_at_node.get(&node_id))
                 .cloned()
         } else {
-            self.ctx.module_semantics(module_name).and_then(|semantics| {
-                semantics
-                    .expr_types
-                    .get(&node_id)
-                    .or_else(|| semantics.type_at_node.get(&node_id))
-                    .cloned()
-            })
+            self.ctx
+                .module_semantics(module_name)
+                .and_then(|semantics| {
+                    semantics
+                        .expr_types
+                        .get(&node_id)
+                        .or_else(|| semantics.type_at_node.get(&node_id))
+                        .cloned()
+                })
         }
     }
 

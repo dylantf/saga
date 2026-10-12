@@ -465,9 +465,6 @@ pub struct PopulatorInputs<'a> {
     /// (canonical trait name, method index) -> trait-declared effect signature.
     /// This is the contract for polymorphic/where-bound dictionary dispatch.
     pub trait_method_effects_by_key: &'a HashMap<(String, usize), TraitMethodEffectSig>,
-    /// Tagged-closure representation: calls whose head is not a known
-    /// function are classified from the head's own type.
-    pub tagged: bool,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -1196,10 +1193,10 @@ impl<'a> Populator<'a> {
         )
     }
 
-    /// Tagged closures: classification of every call shape. Calls to known
-    /// functions are classified as before; everything else is a call through
+    /// Classification of every call shape. Calls to known functions are
+    /// classified from their declared ABI; everything else is a call through
     /// a function value and is classified from the callee's type.
-    fn classify_app_tagged(&self, expr: &Expr) -> CallEffectInfo {
+    fn classify_app(&self, expr: &Expr) -> CallEffectInfo {
         let (head, args) = peel_app(expr);
         let supplied = args.len();
         match &head.kind {
@@ -1276,35 +1273,6 @@ impl<'a> Populator<'a> {
                     }
                     _ => CallEffectInfo::pure(),
                 }),
-        }
-    }
-
-    fn classify_app(&self, expr: &Expr) -> CallEffectInfo {
-        if self.inputs.tagged {
-            return self.classify_app_tagged(expr);
-        }
-        let (head, args) = peel_app(expr);
-        let arg_count = args.len();
-        match &head.kind {
-            ExprKind::Var { name } => self.classify_named_call(head.id, name, arg_count),
-            ExprKind::QualifiedName { name, .. } => {
-                self.classify_named_call(head.id, name, arg_count)
-            }
-            ExprKind::DictMethodAccess {
-                dict,
-                trait_name,
-                method_index,
-            } => self.classify_dict_method_call(dict, trait_name, *method_index, arg_count),
-            ExprKind::Lambda { .. } => self.classify_typed_head_call(head.id, arg_count),
-            // A field access yielding a function value (e.g. `s.run` where
-            // `run: Int -> Int needs {Logger}` is a record field). The callee's
-            // effect row lives on the field-access node's resolved type, so it
-            // classifies exactly like a lambda head.
-            ExprKind::FieldAccess { .. } => self.classify_typed_head_call(head.id, arg_count),
-            // Other head shapes have no callee identity that resolves to an
-            // effect row, so they classify as Pure. Add a branch here when a
-            // new effectful head shape is introduced.
-            _ => CallEffectInfo::pure(),
         }
     }
 
@@ -1421,8 +1389,7 @@ impl<'a> Populator<'a> {
         // Mirror `resolved_effects`: prefer ResolutionMap.effects, fall back
         // to fun_sigs (which holds CPS-expanded info for local funs).
         let resolved = self.inputs.resolved.get(&head_id);
-        let resolved_shape =
-            resolved.map(CallableAbi::from_resolved_symbol);
+        let resolved_shape = resolved.map(CallableAbi::from_resolved_symbol);
         if resolved
             .is_some_and(|resolved| matches!(resolved.kind, ResolvedCodegenKind::Intrinsic { .. }))
         {
@@ -1760,14 +1727,9 @@ mod tests {
     fn function_value_plan_keeps_inferred_implementation_and_boundary_distinct() {
         let node = NodeId(42);
         let inferred = CallableAbi::pure(1);
-        let implementation = CallableAbi::cps(
-            1,
-            EvidenceAbi::new(["Main.Repo", "Main.Rollback"], true),
-        );
-        let boundary = CallableAbi::cps(
-            1,
-            EvidenceAbi::new(["Main.Rollback"], false),
-        );
+        let implementation =
+            CallableAbi::cps(1, EvidenceAbi::new(["Main.Repo", "Main.Rollback"], true));
+        let boundary = CallableAbi::cps(1, EvidenceAbi::new(["Main.Rollback"], false));
 
         let mut plan = EffectAbiPlan::default();
         plan.record_inferred_function_value(node, inferred.clone());
