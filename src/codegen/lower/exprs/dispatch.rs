@@ -185,6 +185,21 @@ impl<'a> Lowerer<'a> {
                     self.function_value_captured_evidence.get(&expr.id).cloned();
                 let saved_evidence = self.current_evidence.clone();
                 let mut callback_tail_binding = None;
+                // An effectful lambda resolves its operations against the
+                // evidence it is *called* with, so per-handler fast-path facts
+                // recorded by a lexically enclosing `with` (inline the arm's
+                // tail-resume value, pass `no_resume` instead of a
+                // continuation) must not leak into its body: the lambda may
+                // escape and run under a different handler. `direct_ops` is
+                // deliberately left alone — it is only populated for
+                // BEAM-native callback contexts (e.g. `spawn`), where the
+                // native binding inside the callback is the intended ABI.
+                let saved_fast_path_ops = shape.as_ref().map(|_| {
+                    (
+                        std::mem::take(&mut self.static_tail_resume_ops),
+                        std::mem::take(&mut self.no_resume_ops),
+                    )
+                });
                 if let Some(shape) = shape {
                     // Effectful lambdas take `_Evidence` and `_ReturnK`; the
                     // body reads per-op handlers out of the evidence vector.
@@ -239,6 +254,10 @@ impl<'a> Lowerer<'a> {
                 };
                 self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 self.current_evidence = saved_evidence;
+                if let Some((static_tail_resume_ops, no_resume_ops)) = saved_fast_path_ops {
+                    self.static_tail_resume_ops = static_tail_resume_ops;
+                    self.no_resume_ops = no_resume_ops;
+                }
                 // If lambda has complex params (tuples, constructors), wrap
                 // the body in a case expression for destructuring. The
                 // scrutinee covers user params only — `_Evidence`/`_ReturnK`

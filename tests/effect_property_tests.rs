@@ -3967,3 +3967,74 @@ result () = {
     // a = 13, b = 0, c = 30
     check_result_int("local_multi_clause_effect", src, 300_013);
 }
+
+// A lambda performs its operations against the handler in scope where it is
+// *called*. Fast-path facts recorded by a `with` that merely encloses the
+// lambda lexically (inlined tail-resume value, `no_resume` continuation) must
+// not be baked into the lambda body.
+
+#[test]
+fn lambda_under_with_uses_call_site_handler_inline_tail_resume() {
+    let src = r#"module Main
+
+effect Ask { fun ask : Unit -> Int }
+
+fun run2 : (Unit -> Int needs {Ask}) -> Int
+run2 f = f () with { ask () = resume 2 }
+
+pub fun result : Unit -> Int
+result () = {
+  let outer = ask! ()
+  outer * 10 + run2 (fun () -> ask! ())
+} with { ask () = resume 1 }
+"#;
+    check_result_int("lambda_call_site_handler_inline", src, 12);
+}
+
+#[test]
+fn lambda_under_with_uses_call_site_handler_named_tail_resume() {
+    let src = r#"module Main
+
+effect Ask { fun ask : Unit -> Int }
+
+handler one for Ask {
+  ask () = resume 1
+}
+
+handler two for Ask {
+  ask () = resume 2
+}
+
+fun run2 : (Unit -> Int needs {Ask}) -> Int
+run2 f = f () with two
+
+pub fun result : Unit -> Int
+result () = {
+  let outer = ask! ()
+  let f = fun () -> ask! ()
+  outer * 10 + run2 f
+} with one
+"#;
+    check_result_int("lambda_call_site_handler_named", src, 12);
+}
+
+#[test]
+fn lambda_under_aborting_with_uses_call_site_handler() {
+    let src = r#"module Main
+
+effect Ask { fun ask : Unit -> Int }
+
+fun run2 : (Unit -> Int needs {Ask}) -> Int
+run2 f = f () with { ask () = resume 2 }
+
+fun guarded : Bool -> Int
+guarded abort = {
+  if abort then ask! () else run2 (fun () -> ask! () + 5)
+} with { ask () = 100 }
+
+pub fun result : Unit -> Int
+result () = guarded False + guarded True
+"#;
+    // a = 2 + 5 (resumed by run2's handler), b = 100 (aborted by the outer one)
+    check_result_int("lambda_call_site_handler_abort", src, 107);
+}
