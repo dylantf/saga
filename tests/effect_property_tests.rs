@@ -3734,3 +3734,268 @@ result () = first [a, b, c]
 "#;
     check_result_string("pure_only_list_runs_without_adapter_wrapping", src, "a");
 }
+
+// ---------------------------------------------------------------------------
+// Function representation repros
+//
+// Known failures from docs/planning/sound-function-representation.md,
+// Appendix A. Each is ignored until the step that fixes it lands; run them
+// with `cargo test --test effect_property_tests -- --ignored repro_`.
+// ---------------------------------------------------------------------------
+
+/// Typecheck a single-module source and assert it is rejected.
+fn check_type_error(fixture: &str, src: &str) {
+    let root = fixtures_root_for_main_only();
+    let mut checker = make_checker(root.clone());
+    let tokens = lexer::Lexer::new(src)
+        .lex()
+        .unwrap_or_else(|e| panic!("[{fixture}] lex error: {e:?}"));
+    let mut program = parser::Parser::new(tokens)
+        .parse_program()
+        .unwrap_or_else(|e| panic!("[{fixture}] parse error: {e:?}"));
+    let imported = saga::derive::collect_imported_decls(&program, checker.module_map());
+    let derive_errors = saga::derive::expand_derives(&mut program, &imported);
+    assert!(
+        derive_errors.is_empty(),
+        "[{fixture}] derive error: {:?}",
+        derive_errors
+    );
+    saga::desugar::desugar_program(&mut program);
+    checker.set_current_module("Main".to_string());
+    let result = checker.check_program(&mut program);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        result.has_errors(),
+        "[{fixture}] expected a type error, but the program typechecked"
+    );
+}
+
+const REPRO_PRELUDE: &str = r#"module Main
+
+effect Skip { fun skip : Unit -> Int }
+
+fun add : Int -> Int -> Int
+add a b = a + b
+
+fun ident : a -> a
+ident x = x
+
+fun apply_gen : (a -> b) -> a -> b
+apply_gen f x = f x
+
+fun eff : Unit -> Int needs {Skip}
+eff () = skip! ()
+
+fun pures : Unit -> List (Unit -> Int)
+pures () = [fun () -> 1, fun () -> 2]
+"#;
+
+fn repro_src(body: &str) -> String {
+    format!("{REPRO_PRELUDE}\n{body}")
+}
+
+#[test]
+#[ignore = "known failure A1: case arms with different conventions"]
+fn repro_a1_case_arms_with_different_conventions() {
+    let src = repro_src(
+        r#"fun choose : Int -> (Unit -> Int needs {Skip})
+choose n = case n {
+  0 -> fun () -> 1
+  _ -> fun () -> skip! ()
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let f = choose 1
+  f () with { skip () = resume 10 }
+}
+"#,
+    );
+    check_result_int("repro_a1", &src, 10);
+}
+
+#[test]
+#[ignore = "known failure A2: function through a polymorphic function"]
+fn repro_a2_function_through_polymorphic_function() {
+    let src = repro_src(
+        r#"pub fun result : Unit -> Int
+result () = (apply_gen add 1) 2
+"#,
+    );
+    check_result_int("repro_a2", &src, 3);
+}
+
+#[test]
+#[ignore = "known failure A3: partial application of a call result"]
+fn repro_a3_partial_application_of_call_result() {
+    let src = repro_src(
+        r#"pub fun result : Unit -> Int
+result () = {
+  let h = (ident add) 3
+  h 4
+}
+"#,
+    );
+    check_result_int("repro_a3", &src, 7);
+}
+
+#[test]
+#[ignore = "known failure A4: effectful function through a polymorphic function"]
+fn repro_a4_effectful_function_through_polymorphic_function() {
+    let src = repro_src(
+        r#"fun eadd : Int -> Int -> Int needs {Skip}
+eadd a b = a + b + skip! ()
+
+pub fun result : Unit -> Int
+result () = {
+  let e = apply_gen eadd 1
+  e 2 with { skip () = resume 100 }
+}
+"#,
+    );
+    check_result_int("repro_a4", &src, 103);
+}
+
+#[test]
+#[ignore = "known failure A5: effectful lambda in a polymorphic position"]
+fn repro_a5_effectful_lambda_in_polymorphic_position() {
+    let src = repro_src(
+        r#"pub fun result : Unit -> Int
+result () = {
+  let e = ident (fun x -> x + skip! ())
+  e 5 with { skip () = resume 100 }
+}
+"#,
+    );
+    check_result_int("repro_a5", &src, 105);
+}
+
+#[test]
+#[ignore = "known failure A6: effectful functions accepted as pure in a list"]
+fn repro_a6_effectful_list_rejected_as_pure_list() {
+    let src = repro_src(
+        r#"fun sum_pure : List (Unit -> Int) -> Int
+sum_pure fs = case fs {
+  [] -> 0
+  f :: rest -> f () + sum_pure rest
+}
+
+fun effs : Unit -> List (Unit -> Int needs {Skip})
+effs () = [fun () -> skip! (), fun () -> 2]
+
+pub fun result : Unit -> Int
+result () = sum_pure (effs ())
+"#,
+    );
+    check_type_error("repro_a6", &src);
+}
+
+// A7 runs correctly once closures are tagged, then becomes a type error when
+// the row rule is enforced. This pins the final state.
+#[test]
+#[ignore = "known failure A7: pure functions accepted as effectful in a list"]
+fn repro_a7_pure_list_rejected_as_effectful_list() {
+    let src = repro_src(
+        r#"fun run_all : List (Unit -> Int needs {Skip}) -> Int needs {Skip}
+run_all fs = case fs {
+  [] -> 0
+  f :: rest -> f () + run_all rest
+}
+
+pub fun result : Unit -> Int
+result () = run_all (pures ()) with { skip () = resume 100 }
+"#,
+    );
+    check_type_error("repro_a7", &src);
+}
+
+#[test]
+#[ignore = "known failure A8: row variable instantiated to empty in a list"]
+fn repro_a8_row_variable_instantiated_to_empty_in_list() {
+    let src = repro_src(
+        r#"fun run_each : List (Unit -> Int needs {..e}) -> Int needs {..e}
+run_each fs = case fs {
+  [] -> 0
+  f :: rest -> f () + run_each rest
+}
+
+pub fun result : Unit -> Int
+result () = run_each (pures ())
+"#,
+    );
+    check_result_int("repro_a8", &src, 3);
+}
+
+#[test]
+#[ignore = "known failure A9: partially applied open-row trait method"]
+fn repro_a9_partially_applied_open_row_trait_method() {
+    let src = repro_src(
+        r#"trait Runner a {
+  fun go : a -> Int -> Int needs {..e}
+}
+
+type Q = Q
+
+impl Runner for Q needs {Skip} {
+  go _ n = n + skip! ()
+}
+
+fun use_it : a -> Int needs {..a} where {a: Runner}
+use_it x = {
+  let f = go x
+  f 10
+}
+
+pub fun result : Unit -> Int
+result () = use_it Q with { skip () = resume 100 }
+"#,
+    );
+    check_result_int("repro_a9", &src, 110);
+}
+
+#[test]
+#[ignore = "known failure A10: invalid generated code for a returned effectful lambda"]
+fn repro_a10_returned_effectful_lambda_compiles() {
+    let src = repro_src(
+        r#"fun mk : Unit -> (Unit -> Int needs {Skip})
+mk () = fun () -> skip! ()
+
+pub fun result : Unit -> Int
+result () = {
+  let f = mk ()
+  f () with { skip () = resume 1 }
+}
+"#,
+    );
+    check_result_int("repro_a10", &src, 1);
+}
+
+#[test]
+#[ignore = "known failure A11: effectful function accepted as pure in an if branch"]
+fn repro_a11_effectful_branch_rejected_as_pure() {
+    let src = repro_src(
+        r#"fun get : Bool -> (Unit -> Int)
+get b = if b then eff else (fun () -> 1)
+
+pub fun result : Unit -> Int
+result () = (get True) ()
+"#,
+    );
+    check_type_error("repro_a11", &src);
+}
+
+#[test]
+#[ignore = "known failure A12: effectful function accepted as pure in a record field"]
+fn repro_a12_effectful_record_field_rejected_as_pure() {
+    let src = repro_src(
+        r#"record Box { run : Unit -> Int }
+
+pub fun result : Unit -> Int
+result () = {
+  let b = Box { run: eff }
+  b.run ()
+}
+"#,
+    );
+    check_type_error("repro_a12", &src);
+}
