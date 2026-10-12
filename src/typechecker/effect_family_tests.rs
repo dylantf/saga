@@ -1095,3 +1095,39 @@ pure_loop n = {
 ",
     );
 }
+
+#[test]
+fn one_handlers_arm_does_not_fix_an_operations_row_for_other_handlers() {
+    // Regression (kraken's `Repo`). `closing` hands the operation's callback
+    // to something that accepts only `{Plain}`, which closes the callback's
+    // `..r` for that arm. `forwarding`, a second handler of the same effect,
+    // forwards `..r`; it must not find it already bound to `{Plain}` and be
+    // told it "uses effects {Plain}". Each arm gets its own copy of the
+    // operation's row variables.
+    accepted(
+        "
+effect Scope {
+  fun scoped : (Unit -> Int needs {..r}) -> Int needs {..r}
+}
+
+fun run_closed : (Unit -> Int needs {Plain}) -> Int needs {Plain}
+run_closed f = f ()
+
+fun forward : (Unit -> Int needs {..r}) -> Int needs {..r}
+forward f = f ()
+
+handler closing for Scope {
+  scoped body = resume (run_closed (fun () -> body ()) with { plain () = resume 1 })
+}
+
+handler forwarding for Scope {
+  scoped body = resume (forward body)
+}
+
+fun also_forwarding : Unit -> Handler Scope
+also_forwarding () = handler for Scope {
+  scoped body = resume (forward body)
+}
+",
+    );
+}

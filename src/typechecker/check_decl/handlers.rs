@@ -479,7 +479,38 @@ impl Checker {
                 ));
             }
 
-            let op_sig = matched_op.unwrap();
+            let mut op_sig = matched_op.unwrap();
+
+            // The operation's row variables (`..r` on a callback) are stored
+            // once, with the effect. Give this arm its own copies: an arm may
+            // close one (see `check_rigid_row_vars_abstract`), and that must
+            // not reach the other handlers of the effect, where the same
+            // variable would then stand for this arm's effects.
+            {
+                let mut row_vars = std::collections::HashMap::new();
+                for (_, param_ty) in &op_sig.params {
+                    Self::collect_rigid_row_vars(param_ty, &[], &mut row_vars);
+                }
+                Self::collect_rigid_row_vars(&op_sig.return_type, &[], &mut row_vars);
+                Self::collect_rigid_row_vars_in_row(&op_sig.needs, &[], &mut row_vars);
+                let mut ids: Vec<u32> = row_vars.into_keys().collect();
+                ids.sort_unstable();
+                // A tail that is also a constrained type variable (`..a` for
+                // `a: Trait`) keeps its identity: dictionaries are named
+                // after it.
+                ids.retain(|id| !op_sig.constraints.iter().any(|(_, var, _)| var == id));
+                if !ids.is_empty() {
+                    let fresh: std::collections::HashMap<u32, Type> =
+                        ids.into_iter().map(|id| (id, self.fresh_var())).collect();
+                    op_sig.params = op_sig
+                        .params
+                        .iter()
+                        .map(|(label, t)| (label.clone(), Self::replace_vars(t, &fresh)))
+                        .collect();
+                    op_sig.return_type = Self::replace_vars(&op_sig.return_type, &fresh);
+                    op_sig.needs = self.replace_vars_in_effect_row(&op_sig.needs, &fresh);
+                }
+            }
 
             // The operation's signature is a declared type the arm must
             // implement as written: its row variables are chosen by whoever
