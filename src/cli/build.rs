@@ -76,6 +76,12 @@ fn stdlib_fingerprint() -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     BUILD_HASH.hash(&mut hasher);
     stdlib_content_hash().hash(&mut hasher);
+    // Tagged closures change the ABI of every compiled module, the stdlib
+    // included. Hash the flag only when set so the default fingerprint is
+    // unchanged.
+    if codegen::tagged_closures_enabled() {
+        "tagged-closures".hash(&mut hasher);
+    }
     format!("{:016x}", hasher.finish())
 }
 

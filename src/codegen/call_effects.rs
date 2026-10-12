@@ -465,6 +465,9 @@ pub struct PopulatorInputs<'a> {
     /// (canonical trait name, method index) -> trait-declared effect signature.
     /// This is the contract for polymorphic/where-bound dictionary dispatch.
     pub trait_method_effects_by_key: &'a HashMap<(String, usize), TraitMethodEffectSig>,
+    /// Tagged-closure representation: calls whose head is not a known
+    /// function are classified from the head's own type.
+    pub tagged: bool,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -1160,7 +1163,123 @@ impl<'a> Populator<'a> {
         }
     }
 
+    /// Tagged closures: the CPS call shape of a call through a function
+    /// value. The callee finds its handlers by tag, so the caller's frame is
+    /// passed unchanged.
+    fn tagged_value_call(supplied: usize) -> CallEffectInfo {
+        CallEffectInfo::Cps(CallableAbi::cps(
+            supplied,
+            EvidenceAbi::new(Vec::<String>::new(), true),
+        ))
+    }
+
+    /// Tagged closures: classify a call through a function value from the
+    /// callee's own type. The call is effectful when any arrow consumed by
+    /// the supplied arguments carries effects or an open row.
+    fn classify_value_call_from_type(
+        &self,
+        callee_id: NodeId,
+        supplied: usize,
+    ) -> Option<CallEffectInfo> {
+        let ty = self
+            .inputs
+            .check_result
+            .expr_types
+            .get(&callee_id)
+            .or_else(|| self.inputs.check_result.type_at_node.get(&callee_id))?;
+        Some(
+            if crate::codegen::lower::tagged_consumed_arrows_effectful(ty, supplied) {
+                Self::tagged_value_call(supplied)
+            } else {
+                CallEffectInfo::pure()
+            },
+        )
+    }
+
+    /// Tagged closures: classification of every call shape. Calls to known
+    /// functions are classified as before; everything else is a call through
+    /// a function value and is classified from the callee's type.
+    fn classify_app_tagged(&self, expr: &Expr) -> CallEffectInfo {
+        let (head, args) = peel_app(expr);
+        let supplied = args.len();
+        match &head.kind {
+            ExprKind::Var { name } | ExprKind::QualifiedName { name, .. } => {
+                let resolved = self.inputs.resolved.get(&head.id);
+                if resolved.is_some_and(|resolved| {
+                    matches!(resolved.kind, ResolvedCodegenKind::Intrinsic { .. })
+                }) {
+                    return CallEffectInfo::pure();
+                }
+                let canonical = resolved.map(|resolved| resolved.canonical_name.clone());
+                let is_local_fun = self
+                    .local_fun_sigs
+                    .iter()
+                    .any(|frame| frame.contains_key(name));
+                let known_arity = (resolved.is_some() || is_local_fun)
+                    .then(|| self.lookup_fun_sig(name, canonical.as_deref()))
+                    .flatten()
+                    .map(|sig| sig.abi.user_arity);
+                match known_arity {
+                    // A named function applied to more arguments than it
+                    // takes: the saturated call runs first and its result is
+                    // then called as a function value.
+                    Some(arity) if arity > 0 && arity < supplied => {
+                        let mut inner = expr;
+                        for _ in arity..supplied {
+                            let ExprKind::App { func, .. } = &inner.kind else {
+                                unreachable!("over-applied call is shorter than its arguments");
+                            };
+                            inner = func;
+                        }
+                        let inner_is_cps = self
+                            .plan
+                            .call(inner.id)
+                            .is_some_and(CallEffectInfo::is_cps_call);
+                        let rest_is_cps = self
+                            .classify_value_call_from_type(inner.id, supplied - arity)
+                            .is_some_and(|info| info.is_cps_call());
+                        if inner_is_cps || rest_is_cps {
+                            Self::tagged_value_call(supplied)
+                        } else {
+                            CallEffectInfo::pure()
+                        }
+                    }
+                    Some(arity) if arity > 0 => self.classify_named_call(head.id, name, supplied),
+                    // A constant holding a function, or anything that is not a
+                    // known function: a function value.
+                    _ => self
+                        .classify_value_call_from_type(head.id, supplied)
+                        .unwrap_or_else(|| self.classify_named_call(head.id, name, supplied)),
+                }
+            }
+            ExprKind::DictMethodAccess {
+                dict,
+                trait_name,
+                method_index,
+            } => {
+                let declared =
+                    self.classify_dict_method_call(dict, trait_name, *method_index, supplied);
+                if declared.is_cps_call() {
+                    return declared;
+                }
+                self.classify_value_call_from_type(head.id, supplied)
+                    .unwrap_or(declared)
+            }
+            _ => self
+                .classify_value_call_from_type(head.id, supplied)
+                .unwrap_or_else(|| match &head.kind {
+                    ExprKind::Lambda { .. } | ExprKind::FieldAccess { .. } => {
+                        self.classify_typed_head_call(head.id, supplied)
+                    }
+                    _ => CallEffectInfo::pure(),
+                }),
+        }
+    }
+
     fn classify_app(&self, expr: &Expr) -> CallEffectInfo {
+        if self.inputs.tagged {
+            return self.classify_app_tagged(expr);
+        }
         let (head, args) = peel_app(expr);
         let arg_count = args.len();
         match &head.kind {

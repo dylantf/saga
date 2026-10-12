@@ -236,6 +236,18 @@ impl<'a> Lowerer<'a> {
     }
 
     fn hof_direct_callback_arg_supported(&self, arg: &Expr, expected_arity: usize) -> bool {
+        if self.tagged {
+            // The direct variant calls its callback as a bare fun, so the
+            // argument's own type must be pure at every arrow. A dictionary
+            // slot is excluded: an open-row method instantiated at the empty
+            // row has a pure type here but a tagged closure in the slot.
+            return !matches!(arg.kind, ExprKind::DictMethodAccess { .. })
+                && self.value_type(arg.id).is_some_and(|ty| {
+                    crate::codegen::runtime_shape::value_repr(&ty)
+                        == crate::codegen::runtime_shape::ValueRepr::Bare
+                        && super::util::arity_and_effects_from_type(&ty).0 == expected_arity
+                });
+        }
         if self.expr_cps_function_shape(arg).is_some() {
             return false;
         }

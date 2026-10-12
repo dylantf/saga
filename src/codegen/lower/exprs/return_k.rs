@@ -93,11 +93,17 @@ impl<'a> Lowerer<'a> {
                 {
                     return call;
                 }
+                if self.tagged {
+                    return self.lower_tagged_value_app(expr, return_k);
+                }
                 if let Some(call) =
                     self.lower_effectful_var_call(expr.id, func_name, &args, return_k.clone())
                 {
                     return call;
                 }
+            }
+            if self.tagged {
+                return self.lower_tagged_value_app(expr, return_k);
             }
             if let Some((dict, trait_name, method_index, args)) =
                 crate::codegen::lower::util::collect_dict_method_call(expr)

@@ -133,7 +133,17 @@ impl<'a> Lowerer<'a> {
                 uncapturable.sort();
                 uncapturable.dedup();
                 let cps_open_row = has_open_row && !uses_native_callback_context;
-                if !uncapturable.is_empty() || cps_open_row {
+                if self.tagged {
+                    // The callback is shaped by its own type. What survives
+                    // from the contextual plan is the language rule: a
+                    // callback with an open row tail runs with the handler's
+                    // call-time frame for its named effects and the
+                    // perform-site frame for the tail.
+                    if cps_open_row && let Some(frame) = self.current_evidence.clone() {
+                        captured_evidence_scope =
+                            Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
+                    }
+                } else if !uncapturable.is_empty() || cps_open_row {
                     let planned = self
                         .planned_function_value_implementation(arg.id)
                         .and_then(|abi| abi.evidence.as_ref())
@@ -201,10 +211,12 @@ impl<'a> Lowerer<'a> {
                     )
                 } else {
                     let ctor_atoms = self.constructor_atoms.clone();
+                    let callback_evidence = self.native_callback_evidence(op_name);
                     crate::codegen::lower::beam_interop::build_native_call(
                         op_name,
                         &param_var_strs,
                         &ctor_atoms,
+                        callback_evidence.as_ref(),
                         &mut || self.fresh(),
                     )
                 };
@@ -332,6 +344,50 @@ impl<'a> Lowerer<'a> {
     ///
     /// `handler_canonical` identifies which handler is providing this op,
     /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
+    /// Tagged closures: the evidence a BEAM-native op hands to the Saga
+    /// callback it runs (`spawn`). The callback is called in a fresh native
+    /// context, so the effects that context provides natively (Actor) are
+    /// installed as entries of native op closures over the current frame.
+    /// `None` without tagged closures or for an op that runs no callback.
+    pub(crate) fn native_callback_evidence(&mut self, op_name: &str) -> Option<CExpr> {
+        if !self.tagged || !crate::codegen::lower::beam_interop::native_op_runs_callback(op_name) {
+            return None;
+        }
+        let mut native_effects: Vec<String> = self
+            .effect_defs
+            .values()
+            .filter_map(|effect| effect.ops.get(op_name))
+            .flat_map(|op| op.param_absorbed_effects.values().flatten().cloned())
+            .collect();
+        native_effects.sort();
+        native_effects.dedup();
+        let mut evidence = match &self.current_evidence {
+            Some(frame) => CExpr::Var(frame.var.clone()),
+            None => CExpr::Tuple(Vec::new()),
+        };
+        for effect in native_effects {
+            let Some(handler_canonical) = self.beam_native_handler_for_effect(&effect) else {
+                continue;
+            };
+            let ops = self.effect_handler_ops(std::slice::from_ref(&effect));
+            if ops.is_empty()
+                || ops.iter().any(|(_, op)| {
+                    crate::codegen::lower::beam_interop::lookup_native_op(op).is_none()
+                        || crate::codegen::lower::beam_interop::native_op_runs_callback(op)
+                })
+            {
+                continue;
+            }
+            let op_closures: Vec<CExpr> = ops
+                .iter()
+                .map(|(_, op)| self.build_beam_native_op_fun(op, &handler_canonical))
+                .collect();
+            let entry = evidence::build_evidence_entry(&effect, op_closures);
+            evidence = evidence::insert_static(evidence, 0, entry);
+        }
+        Some(evidence)
+    }
+
     pub(crate) fn build_beam_native_op_fun(
         &mut self,
         op_name: &str,
@@ -361,10 +417,12 @@ impl<'a> Lowerer<'a> {
             )
         } else {
             let ctor_atoms = self.constructor_atoms.clone();
+            let callback_evidence = self.native_callback_evidence(op_name);
             crate::codegen::lower::beam_interop::build_native_call(
                 op_name,
                 &param_vars,
                 &ctor_atoms,
+                callback_evidence.as_ref(),
                 &mut || self.fresh(),
             )
         };

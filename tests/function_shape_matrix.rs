@@ -54,8 +54,26 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const EXPECTED_FAILURES_FILE: &str = "tests/fixtures/function_shape_matrix_expected_failures.txt";
-const TYPECHECK_REJECTED_FILE: &str = "tests/fixtures/function_shape_matrix_typecheck_rejected.txt";
+/// Fixture pair for the function-value representation under test. With
+/// `SAGA_TAGGED_CLOSURES` set the compiler emits tagged closures, which has
+/// its own set of failures, so that mode reads and blesses a separate pair
+/// and leaves the default-mode files alone.
+fn fixture_file(stem: &str) -> String {
+    let mode = if saga::codegen::tagged_closures_enabled() {
+        ".tagged"
+    } else {
+        ""
+    };
+    format!("tests/fixtures/function_shape_matrix_{stem}{mode}.txt")
+}
+
+fn expected_failures_file() -> String {
+    fixture_file("expected_failures")
+}
+
+fn typecheck_rejected_file() -> String {
+    fixture_file("typecheck_rejected")
+}
 
 // ---------------------------------------------------------------------------
 // Axes
@@ -2115,8 +2133,8 @@ fn function_shape_matrix() {
     }
 
     if std::env::var("SAGA_MATRIX_BLESS").is_ok_and(|v| !v.is_empty() && v != "0") {
-        write_list(EXPECTED_FAILURES_FILE, FAILURES_HEADER, &failing);
-        write_list(TYPECHECK_REJECTED_FILE, REJECTED_HEADER, &rejected);
+        write_list(&expected_failures_file(), FAILURES_HEADER, &failing);
+        write_list(&typecheck_rejected_file(), REJECTED_HEADER, &rejected);
         let _ = writeln!(
             stdout,
             "blessed: {} expected failures, {} typecheck-rejected",
@@ -2128,14 +2146,14 @@ fn function_shape_matrix() {
 
     let mut problems = diff_lists(
         "expected failure",
-        &read_list(EXPECTED_FAILURES_FILE),
+        &read_list(&expected_failures_file()),
         &failing,
         "REGRESSION, case fails but is not an expected failure",
         "FIXED, case no longer fails; remove it from the expected-failures file",
     );
     problems.extend(diff_lists(
         "typecheck rejection",
-        &read_list(TYPECHECK_REJECTED_FILE),
+        &read_list(&typecheck_rejected_file()),
         &rejected,
         "case is now rejected by the typechecker",
         "case is no longer rejected by the typechecker",

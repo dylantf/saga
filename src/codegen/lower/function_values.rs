@@ -1000,6 +1000,13 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
         expected_ty: Option<&crate::typechecker::Type>,
     ) -> CExpr {
+        if self.tagged {
+            // A function value is shaped by its own type, never by the type
+            // its context expects: no adapters.
+            return self
+                .lower_eta_reduced_effect_expr(expr)
+                .unwrap_or_else(|| self.lower_expr_value(expr));
+        }
         if let Some(expected_ty) = expected_ty {
             if let ExprKind::Constructor { name, .. } = &expr.kind
                 && matches!(expected_ty, crate::typechecker::Type::Fun(_, _, _))
@@ -1319,7 +1326,14 @@ impl<'a> Lowerer<'a> {
             params.push(param);
         }
 
-        if let Some(shape) = self.planned_function_value_evidence(node_id) {
+        let shape = if self.tagged {
+            // Always a tagged closure that finds the handler by tag at call
+            // time; the creation-time handler is never captured.
+            Some(super::tagged::tag_only_abi())
+        } else {
+            self.planned_function_value_evidence(node_id)
+        };
+        if let Some(shape) = shape {
             // Raw CPS shape: the resulting closure is passed to a slot that
             // expects an effectful function value, so it takes `_Evidence`
             // and `_ReturnK` and reads the per-op handler out of the
@@ -1334,10 +1348,15 @@ impl<'a> Lowerer<'a> {
             self.current_evidence = Some(EvidenceFrame::new(evidence, shape));
             let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
             self.current_evidence = saved_evidence;
-            Some(CExpr::Fun(
+            let fun = CExpr::Fun(
                 params,
                 Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
-            ))
+            );
+            Some(if self.tagged {
+                super::tagged::tag_cps(fun)
+            } else {
+                fun
+            })
         } else {
             // Value-closure shape: the resulting lambda is bound locally or
             // passed to a pure-shaped callback slot. Capture the in-scope

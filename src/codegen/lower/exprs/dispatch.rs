@@ -95,6 +95,15 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Constructor { name, .. } => {
                 let ctor_name = self.resolved_constructor_name_for(expr.id, name);
+                if self.tagged
+                    && let Some(ty) = self.value_type(expr.id)
+                    && matches!(ty, crate::typechecker::Type::Fun(..))
+                {
+                    // A constructor used as a function value: one bare fun
+                    // taking every field.
+                    let arity = arity_and_effects_from_type(&ty).0;
+                    return self.constructor_function_value(&ctor_name, arity);
+                }
                 let origin = self
                     .constructor_origin_module_for(expr.id, &ctor_name)
                     .map(str::to_string);
@@ -180,7 +189,24 @@ impl<'a> Lowerer<'a> {
                 });
                 let mut param_vars = lower_params(&flattened_params);
                 let mut is_effectful_lambda = false;
-                let shape = self.planned_function_value_evidence(expr.id);
+                // Tagged closures: the lambda's own type decides whether it is
+                // a CPS closure, and its body finds handlers by tag. A
+                // dictionary method's convention is forced by its slot, which
+                // also applies the tag itself.
+                let forced_cps = match self.forced_lambda_cps {
+                    Some((id, cps)) if id == expr.id => {
+                        self.forced_lambda_cps = None;
+                        Some(cps)
+                    }
+                    _ => None,
+                };
+                let shape = if self.tagged {
+                    forced_cps
+                        .unwrap_or_else(|| self.lambda_is_tagged(expr))
+                        .then(crate::codegen::lower::tagged::tag_only_abi)
+                } else {
+                    self.planned_function_value_evidence(expr.id)
+                };
                 let captured_evidence =
                     self.function_value_captured_evidence.get(&expr.id).cloned();
                 let saved_evidence = self.current_evidence.clone();
@@ -305,7 +331,12 @@ impl<'a> Lowerer<'a> {
                 } else {
                     body_ce
                 };
-                CExpr::Fun(param_vars, Box::new(body_ce))
+                let fun = CExpr::Fun(param_vars, Box::new(body_ce));
+                if self.tagged && is_effectful_lambda && forced_cps.is_none() {
+                    crate::codegen::lower::tagged::tag_cps(fun)
+                } else {
+                    fun
+                }
             }
 
             ExprKind::Case {

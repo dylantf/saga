@@ -12,6 +12,7 @@ mod module;
 mod pats;
 mod semantic;
 mod static_helpers;
+mod tagged;
 mod trait_spec_stats;
 pub mod util;
 
@@ -24,6 +25,7 @@ use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
 pub(super) use evidence::EvidenceFrame;
+pub(crate) use tagged::consumed_arrows_effectful as tagged_consumed_arrows_effectful;
 use util::{cerl_call, collect_effect_call, core_var, lower_string_to_binary};
 
 pub(super) type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -253,6 +255,14 @@ pub(super) struct LowererResolution {
 
 pub struct Lowerer<'a> {
     counter: usize,
+    /// Tagged-closure representation for function values
+    /// (`SAGA_TAGGED_CLOSURES`). See `tagged.rs`.
+    tagged: bool,
+    /// Tagged closures: the lambda with this id is lowered as a raw fun with
+    /// the given convention (CPS or direct) instead of deciding from its own
+    /// type. Set by dictionary-method lowering, which owns the slot's
+    /// representation.
+    forced_lambda_cps: Option<(NodeId, bool)>,
     /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
     ctx: &'a super::CodegenContext,
     /// Source location info for error terms. None for stdlib modules (no user source).
@@ -419,6 +429,8 @@ impl<'a> Lowerer<'a> {
     ) -> Self {
         Lowerer {
             counter: 0,
+            tagged: super::tagged_closures_enabled(),
+            forced_lambda_cps: None,
             ctx,
             source_info,
             current_module: String::new(),
@@ -966,6 +978,7 @@ impl<'a> Lowerer<'a> {
             impl_effects_by_dict: &self.impl_effects_by_dict,
             impl_method_effects_by_dict: &self.impl_method_effects_by_dict,
             trait_method_effects_by_key: &trait_method_effects_by_key,
+            tagged: self.tagged,
         })
         .populate_with_trace(program)
     }

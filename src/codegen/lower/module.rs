@@ -594,7 +594,17 @@ impl<'a> Lowerer<'a> {
                     ..
                 } = &body.kind
                 {
-                    params_ce.extend(lower_params(lam_params));
+                    for lam_param in lower_params(lam_params) {
+                        // Unit and wildcard parameters are named by their
+                        // position in their own list, so an absorbed one can
+                        // collide with an outer one (`mk () = fun () -> ...`).
+                        let lam_param = if self.tagged && params_ce.contains(&lam_param) {
+                            format!("_Arg{}", params_ce.len())
+                        } else {
+                            lam_param
+                        };
+                        params_ce.push(lam_param);
+                    }
                     for param in lam_params {
                         saved_handler_vars
                             .extend(self.register_dynamic_handler_pattern_vars(param));
@@ -622,7 +632,18 @@ impl<'a> Lowerer<'a> {
                             self.lower_expr_value_with_expected_type(body, Some(&body_ty));
                         let body_is_cps = self.cps_function_shape_from_type(&body_ty).is_some();
                         let mut call_args = eta_args;
-                        if body_is_cps {
+                        if body_is_cps && self.tagged {
+                            // The body's value is a function value of effectful
+                            // type: dispatch on its representation.
+                            let body_var = self.fresh();
+                            let call = self.tagged_cps_apply(
+                                &body_var,
+                                &eta_params,
+                                "_Evidence",
+                                "_ReturnK",
+                            );
+                            CExpr::Let(body_var, Box::new(body_fun), Box::new(call))
+                        } else if body_is_cps {
                             call_args.push(CExpr::Var("_Evidence".to_string()));
                             call_args.push(CExpr::Var("_ReturnK".to_string()));
                             CExpr::Apply(Box::new(body_fun), call_args)
@@ -764,9 +785,9 @@ impl<'a> Lowerer<'a> {
             dict_params,
             super_dicts,
             methods,
-            _method_effects,
-            _method_open_rows,
-            _impl_effects,
+            method_effects,
+            method_open_rows,
+            impl_effects,
         ) in dict_constructors
         {
             let arity = dict_params.len();
@@ -782,6 +803,23 @@ impl<'a> Lowerer<'a> {
                 method_exprs.push(self.lower_expr_value(super_dict));
             }
             for (idx, m) in methods.iter().enumerate() {
+                // Tagged closures: a slot holds a bare fun or a tagged one
+                // according to the method's own convention. The method is
+                // lowered as a raw fun (so it can be hoisted) and the tag is
+                // applied to the slot below.
+                let slot_is_cps = self.tagged
+                    && matches!(&m.kind, ExprKind::Lambda { params, .. } if !params.is_empty())
+                    && {
+                        let (is_cps, _, _) = self.method_cps_shape(
+                            m,
+                            method_effects,
+                            method_open_rows,
+                            impl_effects,
+                            idx,
+                        );
+                        self.forced_lambda_cps = Some((m.id, is_cps));
+                        is_cps
+                    };
                 let ce = self.lower_expr(m);
                 // Phase 2: if this method is a planned specialization target,
                 // hoist the lowered closure into a top-level function and put a
@@ -809,6 +847,11 @@ impl<'a> Lowerer<'a> {
                     CExpr::FunRef(hoist.fn_name, hoisted_arity)
                 } else {
                     ce
+                };
+                let slot = if slot_is_cps {
+                    super::tagged::tag_cps(slot)
+                } else {
+                    slot
                 };
                 method_exprs.push(slot);
             }
