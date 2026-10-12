@@ -62,27 +62,11 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
-        let callback_indexes: HashSet<usize> = specialization
-            .callback_params
-            .iter()
-            .map(|param| param.index)
-            .collect();
-        let param_types = self
-            .resolved_fun_info(head.id, lookup_name)
-            .map(|f| f.expected_arg_types(args.len()));
-
         let mut arg_vars = Vec::with_capacity(args.len());
         let mut bindings = Vec::with_capacity(args.len());
-        for (idx, arg) in args.iter().enumerate() {
+        for arg in args {
             let var = self.fresh();
-            let ce = if callback_indexes.contains(&idx) {
-                self.lower_expr_value(arg)
-            } else {
-                self.lower_expr_value_with_expected_type(
-                    arg,
-                    param_types.as_ref().and_then(|tys| tys.get(idx)),
-                )
-            };
+            let ce = self.lower_expr_value(arg);
             arg_vars.push(var.clone());
             bindings.push((var, ce));
         }

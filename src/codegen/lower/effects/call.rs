@@ -2,7 +2,6 @@ use super::*;
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::lower::*;
-use crate::codegen::runtime_shape::EvidenceAbi;
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.

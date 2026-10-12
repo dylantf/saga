@@ -19,7 +19,7 @@ pub mod util;
 use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
 use crate::codegen::call_effects::CallEffectInfo;
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
+use crate::codegen::runtime_shape::CallableAbi;
 use crate::typechecker::TraitInfo;
 use std::collections::HashMap;
 
@@ -221,18 +221,6 @@ impl FunInfo {
             .evidence
             .as_ref()
             .is_some_and(crate::codegen::runtime_shape::EvidenceAbi::is_open)
-    }
-
-    fn expected_arg_types(&self, arg_count: usize) -> Vec<crate::typechecker::Type> {
-        let mut out = Vec::with_capacity(arg_count);
-        for idx in 0..arg_count {
-            if idx < self.dict_param_count {
-                out.push(crate::typechecker::Type::Error);
-            } else if let Some(ty) = self.param_types.get(idx - self.dict_param_count) {
-                out.push(ty.clone());
-            }
-        }
-        out
     }
 }
 
@@ -483,11 +471,6 @@ impl<'a> Lowerer<'a> {
         format!("_Cor{}", n)
     }
 
-    pub(super) fn planned_function_value_evidence(&self, node_id: NodeId) -> Option<EvidenceAbi> {
-        self.planned_function_value_implementation(node_id)
-            .and_then(|abi| abi.evidence.clone())
-    }
-
     fn semantic_effect_abi_plan(&self) -> Option<&super::call_effects::EffectAbiPlan> {
         let semantic_module = self.current_semantic_module_name();
         if let Some(plan) = self.fallback_effect_abi_plans.get(semantic_module) {
@@ -512,37 +495,6 @@ impl<'a> Lowerer<'a> {
             self.semantic_effect_abi_plan()
                 .and_then(|plan| plan.declaration(node_id))
         })
-    }
-
-    pub(super) fn planned_function_value(
-        &self,
-        node_id: NodeId,
-    ) -> Option<&super::call_effects::FunctionValueAbiPlan> {
-        self.effect_abi_plan.function_value(node_id).or_else(|| {
-            self.semantic_effect_abi_plan()
-                .and_then(|plan| plan.function_value(node_id))
-        })
-    }
-
-    pub(super) fn planned_function_value_implementation(
-        &self,
-        node_id: NodeId,
-    ) -> Option<&CallableAbi> {
-        self.effect_abi_plan
-            .function_value_implementation(node_id)
-            .or_else(|| {
-                self.semantic_effect_abi_plan()
-                    .and_then(|plan| plan.function_value_implementation(node_id))
-            })
-    }
-
-    pub(super) fn planned_function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        self.effect_abi_plan
-            .function_value_boundary(node_id)
-            .or_else(|| {
-                self.semantic_effect_abi_plan()
-                    .and_then(|plan| plan.function_value_boundary(node_id))
-            })
     }
 
     pub(super) fn capture_function_value_evidence(
@@ -895,22 +847,6 @@ impl<'a> Lowerer<'a> {
         (arity > 0).then_some((current, arity))
     }
 
-    pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
-        let shape = self
-            .planned_call(expr.id)
-            .map(|info| info.debug_label())
-            .unwrap_or_else(|| "missing-call-effect-info".to_string());
-        let head = head.unwrap_or(expr);
-        panic!(
-            "effectful App {:?} at span {:?} was classified by call_effects as {} but no lowerer dispatch path handled it (head {:?}: {})",
-            expr.id,
-            expr.span,
-            shape,
-            head.id,
-            module::lower_head_debug_label(head)
-        );
-    }
-
     /// Variant that uses an explicit `CheckResult` for type-at-span lookups.
     /// When the lowerer runs the pre-pass over a foreign module's elaborated
     /// AST (e.g. handler arm bodies imported from another module), the active
@@ -1031,70 +967,4 @@ pub(crate) fn precompute_call_effects(
         None,
     )
     .precompute_call_effects(module_name, program)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::codegen::CodegenContext;
-    use crate::token::Span;
-
-    #[test]
-    fn unhandled_effectful_app_panic_includes_classifier_shape_and_head_label() {
-        let ctx = CodegenContext::default();
-        let check_result = crate::typechecker::Checker::new().to_result();
-        let mut lowerer = Lowerer::new(
-            &ctx,
-            std::collections::HashMap::new(),
-            LowererResolution::default(),
-            &check_result,
-            super::super::optimize::OptimizationFacts::default(),
-            None,
-            None,
-        );
-        let head = Expr::synth(
-            Span { start: 10, end: 16 },
-            ExprKind::Tuple { elements: vec![] },
-        );
-        let app = Expr::synth(
-            Span { start: 10, end: 22 },
-            ExprKind::App {
-                func: Box::new(head.clone()),
-                arg: Box::new(Expr::synth(
-                    Span { start: 17, end: 22 },
-                    ExprKind::Lit {
-                        value: Lit::String("arg".to_string(), crate::token::StringKind::Normal),
-                    },
-                )),
-            },
-        );
-        lowerer.effect_abi_plan.record_call(
-            app.id,
-            super::super::call_effects::CallEffectInfo::test_cps_static("Main.Log", "log", 1),
-        );
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            lowerer.panic_unhandled_effectful_app(&app, Some(&head));
-        }));
-        let payload = result.expect_err("expected panic for unhandled effectful app");
-        let msg = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload should be a string");
-
-        assert!(
-            msg.contains(&format!("effectful App {:?}", app.id)),
-            "{msg}"
-        );
-        assert!(msg.contains("span Span { start: 10, end: 22 }"), "{msg}");
-        assert!(
-            msg.contains(r#"cps-static(1->3, effects=["Main.Log"])"#),
-            "{msg}"
-        );
-        assert!(
-            msg.contains(&format!("head {:?}: tuple/0", head.id)),
-            "{msg}"
-        );
-    }
 }

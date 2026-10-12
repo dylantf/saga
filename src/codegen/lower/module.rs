@@ -58,71 +58,6 @@ fn count_lambda_params(body: &Expr) -> usize {
     }
 }
 
-pub(super) fn lower_head_debug_label(head: &Expr) -> String {
-    match &head.kind {
-        ExprKind::Var { name } => format!("var({name})"),
-        ExprKind::QualifiedName { module, name, .. } => format!("qualified({module}.{name})"),
-        ExprKind::DictMethodAccess {
-            trait_name,
-            method_index,
-            ..
-        } => format!("dict-method({trait_name}#{method_index})"),
-        ExprKind::DictSuperAccess {
-            trait_name,
-            supertrait_index,
-            ..
-        } => format!("dict-super({trait_name}#{supertrait_index})"),
-        ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
-        ExprKind::Constructor { name } => format!("ctor({name})"),
-        ExprKind::DictRef { name } => format!("dict-ref({name})"),
-        ExprKind::ForeignCall { module, func, args } => {
-            format!("foreign({module}.{func}/{})", args.len())
-        }
-        ExprKind::EffectCall {
-            qualifier,
-            name,
-            args,
-        } => format!(
-            "effect-call({}{name}!/{})",
-            qualifier
-                .as_ref()
-                .map(|qualifier| format!("{qualifier}."))
-                .unwrap_or_default(),
-            args.len()
-        ),
-        ExprKind::Lit { value } => format!("lit({value:?})"),
-        ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
-        ExprKind::RecordCreate { name, fields, .. } => format!("record({name}/{})", fields.len()),
-        ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
-        ExprKind::RecordBuild { fields, .. } => format!("record-build/{}", fields.len()),
-        ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
-        ExprKind::App { .. } => "app-head".to_string(),
-        ExprKind::BinOp { .. } => "binop".to_string(),
-        ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),
-        ExprKind::If { .. } => "if".to_string(),
-        ExprKind::Case { .. } => "case".to_string(),
-        ExprKind::Block { .. } => "block".to_string(),
-        ExprKind::FieldAccess { field, .. } => format!("field-access(.{field})"),
-        ExprKind::RecordUpdate { .. } => "record-update".to_string(),
-        ExprKind::With { .. } => "with".to_string(),
-        ExprKind::Resume { .. } => "resume".to_string(),
-        ExprKind::Do { .. } => "do".to_string(),
-        ExprKind::Receive { .. } => "receive".to_string(),
-        ExprKind::BitString { segments } => format!("bitstring/{}", segments.len()),
-        ExprKind::Ascription { .. } => "ascription".to_string(),
-        ExprKind::Pipe { segments, .. } => format!("pipe/{}", segments.len()),
-        ExprKind::BinOpChain { segments, .. } => format!("binop-chain/{}", segments.len()),
-        ExprKind::PipeBack { segments } => format!("pipe-back/{}", segments.len()),
-        ExprKind::ComposeForward { segments } => format!("compose-forward/{}", segments.len()),
-        ExprKind::Cons { .. } => "cons".to_string(),
-        ExprKind::ListLit { elements, .. } => format!("list/{}", elements.len()),
-        ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
-        ExprKind::ListComprehension { qualifiers, .. } => {
-            format!("list-comprehension/{}", qualifiers.len())
-        }
-    }
-}
-
 fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
     match ty {
         ast::TypeExpr::Named { name, .. } => {
@@ -241,9 +176,6 @@ impl<'a> Lowerer<'a> {
                 .plan
         });
         self.effect_abi_plan = plan;
-        timed_lower_phase(module_name, "plan_contextual_effect_abis", || {
-            self.plan_contextual_function_value_abis(program)
-        });
         self.effect_abi_plan.freeze();
         std::mem::take(&mut self.effect_abi_plan)
     }
@@ -497,9 +429,6 @@ impl<'a> Lowerer<'a> {
             );
         }
         self.effect_abi_plan = call_effects.plan;
-        timed_lower_phase(module_name, "plan_contextual_effect_abis", || {
-            self.plan_contextual_function_value_abis(program)
-        });
         self.effect_abi_plan.freeze();
         timed_lower_phase(module_name, "precompute_missing_context_abis", || {
             self.precompute_missing_context_plans()
@@ -650,8 +579,7 @@ impl<'a> Lowerer<'a> {
                     let eta_args: Vec<CExpr> =
                         eta_params.iter().map(|p| CExpr::Var(p.clone())).collect();
                     if let Some(body_ty) = body_expected_ty {
-                        let body_fun =
-                            self.lower_expr_value_with_expected_type(body, Some(&body_ty));
+                        let body_fun = self.lower_expr_value(body);
                         let body_is_cps = self.cps_function_shape_from_type(&body_ty).is_some();
                         if body_is_cps {
                             // The body's value is a function value of effectful
@@ -668,7 +596,7 @@ impl<'a> Lowerer<'a> {
                             // The body's value is a pure function of unknown
                             // arity (`f = ident g`, or a body that returns a
                             // lambda after doing some work).
-                            let call = self.apply_function_value(body, body_fun, &eta_params);
+                            let call = self.apply_function_value(body_fun, &eta_params);
                             if has_effects {
                                 CExpr::Apply(
                                     Box::new(CExpr::Var("_ReturnK".to_string())),
@@ -694,7 +622,7 @@ impl<'a> Lowerer<'a> {
                         if has_effects {
                             CExpr::Apply(Box::new(body_ce), eta_args)
                         } else {
-                            self.apply_function_value(body, body_ce, &eta_params)
+                            self.apply_function_value(body_ce, &eta_params)
                         }
                     }
                 } else if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {

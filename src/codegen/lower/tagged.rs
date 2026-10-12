@@ -118,8 +118,8 @@ impl<'a> Lowerer<'a> {
     /// arrows is a bare fun even if it returns an effectful function
     /// (`fun n -> { let g = fun x -> op! x; g }`): calling it performs
     /// nothing, and a pure call site could not run a tagged closure. Nodes
-    /// synthesized after typechecking have no entry; those fall back to the
-    /// classifier's inferred view.
+    /// synthesized after typechecking have no entry; those are effectful
+    /// when the call they wrap is.
     pub(super) fn lambda_is_tagged(&self, expr: &Expr, param_count: usize) -> bool {
         match self.value_type(expr.id) {
             Some(ty) => consumed_arrows_effectful(&ty, param_count),
@@ -133,10 +133,6 @@ impl<'a> Lowerer<'a> {
                 }
                 self.expr_is_effectful_call(body)
                     || super::util::collect_effect_call(body).is_some()
-                    || self
-                        .planned_function_value(expr.id)
-                        .and_then(|plan| plan.inferred())
-                        .is_some_and(|abi| abi.evidence.is_some())
             }
         }
     }

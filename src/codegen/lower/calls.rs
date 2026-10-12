@@ -1,4 +1,4 @@
-use crate::ast::{Expr, ExprKind, NodeId, Pat};
+use crate::ast::{Expr, ExprKind, NodeId};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::errors::ErrorKind;
@@ -158,10 +158,6 @@ impl<'a> Lowerer<'a> {
                 return Some(variant_call);
             }
 
-            let param_types = self
-                .resolved_fun_info(head.id, lookup_name)
-                .map(|f| f.expected_arg_types(args.len()));
-
             let is_effectful_outer = is_effectful;
             let effectful_arg_idxs: Vec<usize> = if is_effectful_outer {
                 args.iter()
@@ -184,8 +180,7 @@ impl<'a> Lowerer<'a> {
                     let v = self.fresh();
                     arg_vars.push(v.clone());
                     if !effectful_arg_idxs.contains(&i) {
-                        let pty = param_types.as_ref().and_then(|t| t.get(i));
-                        let ce = self.lower_expr_value_with_expected_type(arg, pty);
+                        let ce = self.lower_expr_value(arg);
                         pure_bindings.push((v, ce));
                     }
                 }
@@ -224,8 +219,7 @@ impl<'a> Lowerer<'a> {
                 return Some(self.wrap_let_bindings(pure_bindings, body));
             }
 
-            let (mut arg_vars, mut bindings) =
-                self.lower_call_args_with_expected_types(args, param_types.as_deref());
+            let (mut arg_vars, mut bindings) = self.lower_call_args(args);
             if is_effectful {
                 // Effectful callee: thread evidence + _ReturnK.
                 let (ev_var, ev_ce) = self.build_call_evidence_with(
@@ -280,11 +274,7 @@ impl<'a> Lowerer<'a> {
             let user_slots = arity.saturating_sub(extras);
             if args.len() < user_slots {
                 let remaining_user = user_slots - args.len();
-                let param_types = self
-                    .resolved_fun_info(head.id, lookup_name)
-                    .map(|f| f.expected_arg_types(args.len()));
-                let (arg_vars, bindings) =
-                    self.lower_call_args_with_expected_types(args, param_types.as_deref());
+                let (arg_vars, bindings) = self.lower_call_args(args);
                 let mut params: Vec<String> = Vec::new();
                 for _ in 0..remaining_user {
                     params.push(self.fresh());
@@ -876,125 +866,18 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body)))
     }
 
-    /// Lower a saturated effectful call whose head is a `Lambda` literal —
-    /// `(fun x -> body) y`. Returns `None` when `call_effects[app_id]`
-    /// classifies the call as pure; the caller then falls through to the
-    /// regular path where the lambda lowers as a pure closure.
-    ///
-    /// When effectful, the lambda is compiled with the contextual
-    /// `CallableAbi` recorded by the ABI planner before lowering.
-    /// The call site threads evidence + return_k like any
-    /// other effectful call. This preserves §8: the body sees the *call-time*
-    /// evidence (passed as a param), not creation-time evidence.
-    pub(super) fn lower_lambda_head_call(
-        &mut self,
-        app_id: NodeId,
-        lambda: &Expr,
-        args: &[&Expr],
-        return_k: Option<CExpr>,
-    ) -> Option<CExpr> {
-        let plan = self
-            .planned_call(app_id)
-            .and_then(|info| info.cps_call_abi().cloned())?;
-
-        let implementation = self
-            .planned_function_value_implementation(lambda.id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "internal ABI planning error: missing immediate-lambda ABI for {:?}",
-                    lambda.id
-                )
-            });
-        assert_eq!(
-            implementation, &plan,
-            "internal ABI planning error: immediate-lambda ABI disagrees with its call ABI"
-        );
-        let func_ce = self.lower_expr(lambda);
-
-        let func_var = self.fresh();
-        let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            abi: plan,
-            mode: CpsApplyMode::TaggedValue,
-            callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
-            args,
-            return_k,
-            nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
-            flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
-        });
-        Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)))
-    }
-
-    /// Lower a saturated effectful call whose head is a field access yielding a
-    /// function value — `s.run n` where `run: Int -> Int needs {Logger}` is a
-    /// record field holding an effectful closure. The closure was already built
-    /// with the CPS evidence-passing convention at the `RecordCreate` site, so
-    /// here we just lower the field access to that closure value and apply it
-    /// with `_Evidence`/`_ReturnK` threaded — the body resumes against the
-    /// *call-time* evidence supplied here, not creation-time evidence.
-    ///
-    /// Returns `None` when the call isn't classified as effectful, so the caller
-    /// falls through to the regular pure-apply path.
-    pub(super) fn lower_field_access_head_call(
-        &mut self,
-        app_id: NodeId,
-        head: &Expr,
-        args: &[&Expr],
-        return_k: Option<CExpr>,
-    ) -> Option<CExpr> {
-        let plan = self
-            .planned_call(app_id)
-            .and_then(|info| info.cps_call_abi().cloned())?;
-        let func_ce = self.lower_expr_value(head);
-        let func_var = self.fresh();
-        let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            abi: plan,
-            mode: CpsApplyMode::TaggedValue,
-            callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
-            args,
-            return_k,
-            nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
-            flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
-        });
-        Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)))
-    }
-
-    /// The number of arguments the function value `callee` lowers to takes,
-    /// when the compiler knows it without looking at the value: a resolved
-    /// top-level function. Everything else (locals, parameters, fields, call
-    /// results, dictionary methods) is `None` and must be applied through
-    /// [`Self::arity_checked_apply`].
-    ///
-    /// Dictionary methods are deliberately not treated as known. The trait
-    /// signature gives the number of declared parameters, but an impl method
-    /// whose body is a lambda (`mk b = fun n -> ...` for `mk : a -> (Int ->
-    /// Int)`) is stored in the dictionary with the lambda's parameters
-    /// flattened in, so the slot's arity can exceed the trait's.
-    fn static_callee_arity(&self, callee: &Expr) -> Option<usize> {
-        match &callee.kind {
-            ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => self
-                .resolved_fun_info(callee.id, name)
-                .map(|info| info.arity()),
-            _ => None,
-        }
-    }
-
     /// Apply the function value `callee` to already-evaluated arguments at a
     /// pure-typed call site: a plain `apply` when the callee's arity is
     /// statically known to equal the argument count, the arity-checked call
     /// otherwise.
     pub(super) fn lower_pure_apply_to_vars(&mut self, callee: &Expr, arg_vars: &[String]) -> CExpr {
         let func_ce = self.lower_expr(callee);
-        self.apply_function_value(callee, func_ce, arg_vars)
+        self.apply_function_value(func_ce, arg_vars)
     }
 
     /// Like [`Self::lower_pure_apply_to_vars`], for a caller that has already
-    /// lowered `callee` to `func_ce`.
-    pub(super) fn apply_function_value(
-        &mut self,
-        callee: &Expr,
-        func_ce: CExpr,
-        arg_vars: &[String],
-    ) -> CExpr {
+    /// lowered the callee to `func_ce`.
+    pub(super) fn apply_function_value(&mut self, func_ce: CExpr, arg_vars: &[String]) -> CExpr {
         if Self::callee_has_exact_arity(&func_ce, arg_vars.len()) {
             return CExpr::Apply(
                 Box::new(func_ce),
@@ -1004,25 +887,6 @@ impl<'a> Lowerer<'a> {
         let func_var = self.fresh();
         let call = Self::arity_checked_apply(&func_var, arg_vars);
         CExpr::Let(func_var, Box::new(func_ce), Box::new(call))
-    }
-
-    /// Like [`Self::apply_function_value`], for a caller that has already
-    /// bound the lowered callee `func_ce` to `func_var`.
-    pub(super) fn apply_bound_function_value(
-        &self,
-        callee: &Expr,
-        func_ce: &CExpr,
-        func_var: &str,
-        arg_vars: &[String],
-    ) -> CExpr {
-        if Self::callee_has_exact_arity(func_ce, arg_vars.len()) {
-            CExpr::Apply(
-                Box::new(CExpr::Var(func_var.to_string())),
-                arg_vars.iter().cloned().map(CExpr::Var).collect(),
-            )
-        } else {
-            Self::arity_checked_apply(func_var, arg_vars)
-        }
     }
 
     /// Whether `callee`, lowered to `func_ce`, is statically known to take
@@ -1548,25 +1412,6 @@ impl<'a> Lowerer<'a> {
         bindings.into_iter().rev().fold(body, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })
-    }
-
-    /// Look up the resolved type bound by a let pattern. Used when lowering
-    /// `let r = fun ... -> ...` so the lambda lowers with its full
-    /// effectful arity (`_Evidence`/`_ReturnK`) when its type carries effects.
-    /// `CheckResult` finalizes span types through the typechecker substitution,
-    /// so downstream lowering can read this map directly.
-    pub(super) fn let_pat_resolved_type(&self, pat: &Pat) -> Option<crate::typechecker::Type> {
-        let Pat::Var { span, .. } = pat else {
-            return None;
-        };
-        let module_name = self.current_semantic_module_name();
-        if module_name == self.current_source_module {
-            self.check_result.type_at_span.get(span).cloned()
-        } else {
-            self.ctx
-                .module_semantics(module_name)
-                .and_then(|semantics| semantics.type_at_span.get(span).cloned())
-        }
     }
 
     /// Build the evidence value for a planned callee ABI. Returns a fresh

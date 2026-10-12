@@ -112,19 +112,6 @@ impl CallEffectInfo {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_cps_static(effect: &str, op: &str, user_arity: usize) -> Self {
-        Self::cps(
-            CallEffectKind::StaticOps {
-                ops: vec![OpKey {
-                    effect: effect.to_string(),
-                    op: op.to_string(),
-                }],
-            },
-            user_arity,
-        )
-    }
-
     /// Invariant check for classifier-created entries.
     #[inline]
     fn debug_check(&self) {
@@ -157,49 +144,10 @@ pub struct OpKey {
 
 pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
 
-/// The implementation and contextual boundary of one function value.
-/// Keeping them in one value makes a one-sided adapter plan unrepresentable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionValueBoundary {
-    implementation: CallableAbi,
-    boundary: CallableAbi,
-}
-
-impl FunctionValueBoundary {
-    pub fn implementation(&self) -> &CallableAbi {
-        &self.implementation
-    }
-
-    pub fn boundary(&self) -> &CallableAbi {
-        &self.boundary
-    }
-}
-
-/// The callable views that can coexist for one function-value expression.
-/// They must not be collapsed: a row-polymorphic partial application can
-/// infer a pure occurrence type while still constructing a CPS closure, and
-/// a surrounding callback slot can expose yet another ABI.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FunctionValueAbiPlan {
-    inferred: Option<CallableAbi>,
-    contextual: Option<FunctionValueBoundary>,
-}
-
-impl FunctionValueAbiPlan {
-    pub fn inferred(&self) -> Option<&CallableAbi> {
-        self.inferred.as_ref()
-    }
-
-    pub fn contextual(&self) -> Option<&FunctionValueBoundary> {
-        self.contextual.as_ref()
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectAbiPlan {
     declarations: HashMap<NodeId, CallableAbi>,
     calls: CallEffectMap,
-    function_values: HashMap<NodeId, FunctionValueAbiPlan>,
     frozen: bool,
 }
 
@@ -247,61 +195,6 @@ impl EffectAbiPlan {
         }
     }
 
-    pub fn function_value(&self, node_id: NodeId) -> Option<&FunctionValueAbiPlan> {
-        self.function_values.get(&node_id)
-    }
-
-    pub fn record_inferred_function_value(&mut self, node_id: NodeId, abi: CallableAbi) {
-        self.assert_mutable();
-        let value = self.function_values.entry(node_id).or_default();
-        if let Some(previous) = value.inferred.replace(abi.clone()) {
-            assert_eq!(
-                previous, abi,
-                "internal ABI planning error: conflicting inferred ABI for {node_id:?}"
-            );
-        }
-    }
-
-    pub fn record_function_value_boundary(
-        &mut self,
-        node_id: NodeId,
-        implementation: CallableAbi,
-        boundary: CallableAbi,
-    ) {
-        self.assert_mutable();
-        let value = self.function_values.entry(node_id).or_default();
-        let contextual = FunctionValueBoundary {
-            implementation,
-            boundary,
-        };
-        if let Some(previous) = value.contextual.replace(contextual.clone()) {
-            assert_eq!(
-                previous, contextual,
-                "internal ABI planning error: conflicting contextual ABI for {node_id:?}"
-            );
-        }
-    }
-
-    pub fn function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        Some(
-            self.function_values
-                .get(&node_id)?
-                .contextual
-                .as_ref()?
-                .boundary(),
-        )
-    }
-
-    pub fn function_value_implementation(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        Some(
-            self.function_values
-                .get(&node_id)?
-                .contextual
-                .as_ref()?
-                .implementation(),
-        )
-    }
-
     /// Merge a separately planned module, rejecting conflicting facts rather
     /// than silently retaining whichever plan happened to be visited first.
     pub fn merge_checked(&mut self, other: &Self) {
@@ -311,18 +204,6 @@ impl EffectAbiPlan {
         }
         for (node_id, info) in &other.calls {
             self.record_call(*node_id, info.clone());
-        }
-        for (node_id, value) in &other.function_values {
-            if let Some(inferred) = value.inferred() {
-                self.record_inferred_function_value(*node_id, inferred.clone());
-            }
-            if let Some(contextual) = value.contextual() {
-                self.record_function_value_boundary(
-                    *node_id,
-                    contextual.implementation().clone(),
-                    contextual.boundary().clone(),
-                );
-            }
         }
     }
 }
@@ -488,14 +369,6 @@ pub struct Populator<'a> {
     local_fun_sigs: Vec<HashMap<String, FunSig>>,
     /// Resolved call head NodeId -> whether the callee's effect row is open.
     head_open_row: HashMap<NodeId, bool>,
-    /// Effects performed by calls in the currently walked lambda body. This
-    /// recovers open callback forwarding when the type-at-node view omits the
-    /// absorbed row variable.
-    lambda_body_evidence: Vec<EvidenceAbi>,
-    /// Completed body-call evidence used only when the lambda itself is an
-    /// immediate call head. It must not replace the callable's inferred ABI:
-    /// enclosing `with` expressions may discharge some body-call evidence.
-    lambda_head_evidence: HashMap<NodeId, EvidenceAbi>,
 }
 
 impl<'a> Populator<'a> {
@@ -509,8 +382,6 @@ impl<'a> Populator<'a> {
             open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
             head_open_row,
-            lambda_body_evidence: Vec::new(),
-            lambda_head_evidence: HashMap::new(),
         }
     }
 
@@ -814,46 +685,33 @@ impl<'a> Populator<'a> {
     }
 
     fn walk_expr(&mut self, expr: &Expr) {
-        if let Some(ty) = self.inputs.check_result.resolved_type_for_node(expr.id)
-            && matches!(ty, crate::typechecker::Type::Fun(..))
-        {
-            let inferred =
-                CallableAbi::from_type(&ty, |effects| self.canonicalize_effects(effects));
-            self.plan.record_inferred_function_value(expr.id, inferred);
-        }
-        // Classify after children. Immediately-invoked lambda heads need the
-        // completed body plan so an absorbed open callback row contributes to
-        // the lambda's runtime ABI even when its type-at-node view is pure.
+        // Classify after children: an over-applied named call and a lambda
+        // head without a type of its own read their inner calls' entries.
         self.walk_children(expr);
         if matches!(expr.kind, ExprKind::App { .. }) {
             let info = self.classify_app(expr);
             info.debug_check();
             self.trace.push(self.trace_entry(expr, &info));
-            if let Some(evidence) = info.cps_call_abi().and_then(|abi| abi.evidence.clone())
-                && let Some(lambda_evidence) = self.lambda_body_evidence.last_mut()
-            {
-                *lambda_evidence = EvidenceAbi::merge_requirements(lambda_evidence, &evidence);
-            }
             self.plan.record_call(expr.id, info);
-            self.plan_app_function_value_boundaries(expr);
         }
     }
 
-    fn plan_app_function_value_boundaries(&mut self, expr: &Expr) {
-        let (head, _) = peel_app(expr);
+    /// A lambda head that has no entry in the type table (a node made after
+    /// typechecking). It is a tagged closure when the call its body wraps is
+    /// effectful; this mirrors `Lowerer::lambda_is_tagged`, which decides how
+    /// the lambda itself is lowered.
+    fn untyped_lambda_head_is_effectful(&self, head: &Expr) -> bool {
         if !matches!(head.kind, ExprKind::Lambda { .. }) {
-            return;
+            return false;
         }
-
-        if let Some(call_abi) = self
-            .plan
-            .call(expr.id)
-            .and_then(CallEffectInfo::cps_call_abi)
-            .cloned()
-        {
-            self.plan
-                .record_function_value_boundary(head.id, call_abi.clone(), call_abi);
+        let mut body = head;
+        while let ExprKind::Lambda { body: inner, .. } = &body.kind {
+            body = inner.as_ref();
         }
+        self.plan
+            .call(body.id)
+            .is_some_and(CallEffectInfo::is_cps_call)
+            || util::collect_effect_call(body).is_some()
     }
 
     fn trace_entry(&self, expr: &Expr, info: &CallEffectInfo) -> CallEffectTraceEntry {
@@ -920,15 +778,7 @@ impl<'a> Populator<'a> {
                 for param in params {
                     self.record_pattern_effectful_vars(param);
                 }
-                self.lambda_body_evidence.push(EvidenceAbi::default());
                 self.walk_expr(body);
-                let body_evidence = self
-                    .lambda_body_evidence
-                    .pop()
-                    .expect("lambda evidence stack underflow");
-                if !body_evidence.static_slots().is_empty() || body_evidence.is_open() {
-                    self.lambda_head_evidence.insert(expr.id, body_evidence);
-                }
                 self.pop_scope();
             }
             ExprKind::FieldAccess { expr, .. } => self.walk_expr(expr),
@@ -1267,33 +1117,14 @@ impl<'a> Populator<'a> {
             }
             _ => self
                 .classify_value_call_from_type(head.id, supplied)
-                .unwrap_or_else(|| match &head.kind {
-                    ExprKind::Lambda { .. } | ExprKind::FieldAccess { .. } => {
-                        self.classify_typed_head_call(head.id, supplied)
+                .unwrap_or_else(|| {
+                    if self.untyped_lambda_head_is_effectful(head) {
+                        Self::tagged_value_call(supplied)
+                    } else {
+                        CallEffectInfo::pure()
                     }
-                    _ => CallEffectInfo::pure(),
                 }),
         }
-    }
-
-    /// Classify a call whose head is a typed value node (a `Lambda` literal or
-    /// a `FieldAccess` yielding a function value). The effect row is derived
-    /// from the typechecker's resolved type at that node. Pure heads yield
-    /// `Pure`; effectful heads yield `StaticOps` (closed) or `RowForwarded`
-    /// (open). Saturation isn't strictly required here — Saga's function values
-    /// always match arrow arity at call sites; if `supplied == 0` we
-    /// early-return Pure for safety.
-    fn classify_typed_head_call(&self, head_id: NodeId, supplied: usize) -> CallEffectInfo {
-        if supplied == 0 {
-            return CallEffectInfo::pure();
-        }
-        let Some(shape) = self.lambda_head_shape(head_id) else {
-            return CallEffectInfo::pure();
-        };
-        let Some(kind) = self.call_kind_from_cps_shape(&shape) else {
-            return CallEffectInfo::pure();
-        };
-        CallEffectInfo::cps(kind, supplied)
     }
 
     /// Classify a call whose head is a `DictMethodAccess` node.
@@ -1525,22 +1356,6 @@ impl<'a> Populator<'a> {
         None
     }
 
-    fn lambda_head_shape(&self, lambda_id: NodeId) -> Option<EvidenceAbi> {
-        if let Some(evidence) = self.lambda_head_evidence.get(&lambda_id) {
-            return Some(evidence.clone());
-        }
-        if let Some(evidence) = self
-            .plan
-            .function_value(lambda_id)
-            .and_then(FunctionValueAbiPlan::inferred)
-            .and_then(|abi| abi.evidence.clone())
-        {
-            return Some(evidence);
-        }
-        let ty = self.inputs.check_result.resolved_type_for_node(lambda_id)?;
-        self.callable_abi_from_type(&ty).cps_evidence()
-    }
-
     fn let_fun_sig(&self, id: NodeId, name: &str) -> Option<FunSig> {
         if let Some(ty) = self.inputs.check_result.resolved_type_for_node(id) {
             let abi = self.callable_abi_from_type(&ty);
@@ -1615,17 +1430,6 @@ impl<'a> Populator<'a> {
         })?;
 
         Some(self.callable_abi_from_type(&ty))
-    }
-
-    fn call_kind_from_cps_shape(&self, shape: &EvidenceAbi) -> Option<CallEffectKind> {
-        let ops = self.collect_op_keys(shape.static_slots());
-        if ops.is_empty() && !shape.is_open() {
-            None
-        } else if shape.is_open() {
-            Some(CallEffectKind::RowForwarded { static_ops: ops })
-        } else {
-            Some(CallEffectKind::StaticOps { ops })
-        }
     }
 }
 
@@ -1721,26 +1525,6 @@ mod tests {
             effect: effect.to_string(),
             op: op.to_string(),
         }
-    }
-
-    #[test]
-    fn function_value_plan_keeps_inferred_implementation_and_boundary_distinct() {
-        let node = NodeId(42);
-        let inferred = CallableAbi::pure(1);
-        let implementation =
-            CallableAbi::cps(1, EvidenceAbi::new(["Main.Repo", "Main.Rollback"], true));
-        let boundary = CallableAbi::cps(1, EvidenceAbi::new(["Main.Rollback"], false));
-
-        let mut plan = EffectAbiPlan::default();
-        plan.record_inferred_function_value(node, inferred.clone());
-        plan.record_function_value_boundary(node, implementation.clone(), boundary.clone());
-
-        let value = plan.function_value(node).expect("function-value plan");
-        assert_eq!(value.inferred(), Some(&inferred));
-        let contextual = value.contextual().expect("contextual boundary");
-        assert_eq!(contextual.implementation(), &implementation);
-        assert_eq!(contextual.boundary(), &boundary);
-        assert_eq!(plan.function_value_boundary(node), Some(&boundary));
     }
 
     #[test]
