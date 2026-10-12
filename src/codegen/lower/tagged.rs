@@ -300,6 +300,66 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// A dictionary method with an open-row-only trait signature (so its slot
+    /// holds a tagged closure) taken from a statically known impl whose
+    /// method has no effects of its own. The row variable is instantiated to
+    /// that impl's effects, so the occurrence's type is pure and the value
+    /// must be a bare fun. Returns the number of arguments it takes.
+    ///
+    /// Elaboration gives `DictMethodAccess` nodes fresh ids, so the
+    /// occurrence has no entry in the type table; the impl's recorded method
+    /// effects stand in for it.
+    pub(super) fn pure_view_of_effectful_method(
+        &self,
+        dict: &Expr,
+        trait_name: &str,
+        method_index: usize,
+    ) -> Option<usize> {
+        let method = self.trait_info(trait_name)?.methods.get(method_index)?;
+        if !method.effect_sig.effects.is_empty() || !method.effect_sig.is_open_row {
+            return None;
+        }
+        let mut head = dict;
+        while let ExprKind::App { func, .. } = &head.kind {
+            head = func;
+        }
+        let ExprKind::DictRef { name, .. } = &head.kind else {
+            return None;
+        };
+        let impl_effects = self
+            .impl_method_effects_by_dict
+            .get(&(name.clone(), method_index))?;
+        impl_effects
+            .is_empty()
+            .then_some(method.param_types.len())
+            .filter(|arity| *arity > 0)
+    }
+
+    /// A bare fun of `arity` arguments over a function value that may be a
+    /// tagged closure but is used at a pure type. It performs nothing at
+    /// that type, so it runs with empty evidence and an identity
+    /// continuation.
+    pub(super) fn bare_view_of_function_value(&mut self, value: CExpr, arity: usize) -> CExpr {
+        let func_var = self.fresh();
+        let params: Vec<String> = (0..arity).map(|_| self.fresh()).collect();
+        let k_param = self.fresh();
+        let call = cerl_call(
+            RUNTIME_MODULE,
+            "apply_cps",
+            vec![
+                CExpr::Var(func_var.clone()),
+                list_of_vars(&params),
+                CExpr::Tuple(Vec::new()),
+                identity_fun(k_param),
+            ],
+        );
+        CExpr::Let(
+            func_var,
+            Box::new(value),
+            Box::new(CExpr::Fun(params, Box::new(call))),
+        )
+    }
+
     /// A constructor used as a function value: one bare fun taking every
     /// field. Constructors are always pure.
     pub(super) fn constructor_function_value(&mut self, name: &str, arity: usize) -> CExpr {

@@ -681,6 +681,11 @@ impl<'a> Lowerer<'a> {
                 // yields the value, not the closure.
                 let body = if self.trait_method_is_nullary(trait_name, *method_index) {
                     CExpr::Apply(Box::new(extract_method), vec![])
+                } else if self.tagged
+                    && let Some(arity) =
+                        self.pure_view_of_effectful_method(dict, trait_name, *method_index)
+                {
+                    self.bare_view_of_function_value(extract_method, arity)
                 } else {
                     extract_method
                 };
