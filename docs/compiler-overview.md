@@ -157,6 +157,11 @@ node. This is the single place that decides the runtime call shape:
 - `StaticOps` -- closed-row CPS call with a known static effect set
 - `RowForwarded` -- open-row CPS call that forwards caller evidence
 
+A call to a known function is classified from the callee's declared ABI. Any
+other call goes through a function value and is classified from the head's
+own type: it is a CPS call when an arrow consumed by the supplied arguments
+carries effects or an open row.
+
 The rest of lowering consumes this map. It should not rediscover call effect
 shape from raw syntax.
 
@@ -169,6 +174,9 @@ This phase is responsible for:
 - consuming `CallEffectInfo` and optimizer facts
 - CPS transformation for algebraic effects when the classified shape requires it
 - handler lowering and inlining
+- representing function values from their own type: a bare fun when pure, a
+  tagged CPS closure `{'$saga_cps', Fun}` when effectful (`lower/tagged.rs`);
+  there is no planning pass or adapter between the two
 - saturated vs partial application detection
 - handler parameter / return continuation threading
 - direct fast paths proven by optimizer facts

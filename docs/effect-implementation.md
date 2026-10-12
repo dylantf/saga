@@ -511,28 +511,56 @@ of a callable:
   `_Evidence` and `_ReturnK`.
 - `EvidenceFrame` identifies the Core variable currently carrying a particular
   `EvidenceAbi`.
-- `EffectAbiPlan` records declaration ABIs, instantiated call ABIs, and
-  contextual function-value ABIs by `NodeId`.
+- `EffectAbiPlan` records declaration ABIs and one `CallEffectInfo` per call,
+  by `NodeId`.
 - `EvidenceReframePlan` is the single source-to-target slot mapping used by
-  calls and CPS adapters.
+  calls to named functions.
 
-A callable body indexes evidence using its `CallableAbi`, never the narrower
-set of effects that happened to be performed in that body. Handler insertion
-updates the runtime tuple and the compile-time `EvidenceFrame` together.
-Exported `CallableAbi` metadata is preserved through imports and re-exports
-and is used as declared at every occurrence.
+A named function's body indexes evidence using its declared `CallableAbi`,
+never the narrower set of effects that happened to be performed in that body.
+Handler insertion updates the runtime tuple and the compile-time
+`EvidenceFrame` together. Exported `CallableAbi` metadata is preserved through
+imports and re-exports and is used as declared at every occurrence.
 
-The plan is completed in two pre-lowering stages. Call classification records
-declarations, inferred callable views, and instantiated call targets. A
-contextual pass then propagates the consuming declaration's expected type
-through calls and containers and records each function value's implementation
-ABI separately from its exposed boundary ABI. Closed callback declarations
-stay closed; an open declaration such as `{Skip, ..e}` keeps its pinned static
-prefix and open tail even when the stored expression has inferred a concrete
-closed set such as `{Foo, Skip}`. Core lowering only reads and asserts this
-completed metadata. Imported named-handler bodies are included under their
-defining module's semantic context; compiler intrinsics retain their explicitly
-registered native callback convention.
+The plan is completed by one pre-lowering pass, call classification, which
+records declarations and the shape of every call. Core lowering only reads
+it. Imported named-handler bodies are included under their defining module's
+semantic context; compiler intrinsics retain their explicitly registered
+native callback convention.
+
+### Function Values
+
+A function *value* is represented from its own type, never from the type its
+context expects (`codegen/lower/tagged.rs`):
+
+| Value | Representation |
+|-------|----------------|
+| Own type is pure | bare Erlang fun of the user arity |
+| Own type is effectful or open-row | `{'$saga_cps', Fun}`, where `Fun` takes `(args..., Evidence, K)` |
+| Named function, called directly | unchanged: `f/N` if pure, `f/(N+2)` if effectful |
+
+A lambda is tagged when an arrow consumed by its own (flattened) parameters
+carries effects or an open row. A named effectful function used as a value,
+or partially applied, becomes a tagged closure that reframes the evidence it
+is called with into the function's declared layout. A dictionary slot holds a
+bare fun or a tagged one according to the method's convention.
+
+The body of a tagged closure uses an open `EvidenceAbi` with no static prefix:
+every operation finds its handler by tag, so a caller passes its own frame
+unchanged and needs no knowledge of the layout the closure was compiled
+against. Positional layout exists only for named functions, whose callers
+know the declared row.
+
+A call through a function value is classified from the callee's type:
+
+- **Pure:** `apply F(Args)` when `F` visibly lowers to a fun of that arity;
+  otherwise a guard `is_function(F, N)` selects the direct apply and
+  `saga_runtime:apply_n/2` handles partial and over-application.
+- **Effectful or open-row:** a `case` on the value. `{'$saga_cps', G}` with
+  `is_function(G, N + 2)` is applied to the arguments, the caller's frame and
+  the continuation. Anything else (a bare fun, which a pure function used at
+  an effectful type remains, or an arity mismatch) goes to
+  `saga_runtime:apply_cps/4`.
 
 ### Evidence Vector Representation
 
@@ -605,31 +633,19 @@ static positions instantiate the target row variable: a closed caller's extra
 slots can become that tail, while an already-open caller forwards its tagged
 tail without leaking handled or omitted declaration-prefix slots into it.
 Closed projection uses the same selector language as open-row reframing.
-When a closed CPS function value is passed through an open callback slot,
-`select_evidence` uses the selector language above but drops every
-unselected entry. The open tail belongs to the adapter ABI and must not enter
-the closed function: its local handler insertion and positional lookups assume
-a canonical closed vector.
 A handler installed inside code generic in an effect argument carries the same
 tag (`Abort`) as one installed by concrete code, so generic and concrete code
 agree on the frame without any runtime type witness. Reframing costs one tuple
 allocation at a cross-row call boundary.
 
-A partial application's runtime evidence shape comes from its compiled head,
-not solely from its instantiated result type. For example, partially applying
-`route : ... needs {Skip, ..e}` produces a closure whose static prefix remains
-`Skip` with an open tail, even when inference resolves `..e` to a concrete
-closed set at that occurrence. Treating the closure as the canonical union of
-that set would move `Skip` away from the slot used by the compiled `route`
-body.
-
-A lambda placed into a callback slot likewise uses the **expected callback
-row** as its positional ABI, even when the lambda body performs only a subset
-of those effects. Its inferred row contributes additional effects absorbed by
-an expected open tail, but it cannot remove an unused expected slot. Otherwise
-the caller and lambda can assign different meanings to the same index (for
-example, a `{Repo, Rollback e}` callback that performs only `Rollback` must
-still read it from slot 2).
+Reframing applies only to calls whose callee is a named function. A call
+through a function value passes the caller's frame unchanged, because a
+closure body looks everything up by tag (see "Function Values"). A partial
+application of a named effectful function is a tagged closure over the
+supplied arguments; when it is finally called it reframes the frame it is
+given into the head's declared layout, so partially applying
+`route : ... needs {Skip, ..e}` still calls `route` with `Skip` in its
+declared slot whatever the instantiation of `..e`.
 
 #### Effect-Operation Callbacks With Open Tails
 
@@ -650,7 +666,10 @@ therefore retains the perform-site evidence, but does not use it directly:
 entries whose tags it does not already contain. This lets a transaction-scoped `Repo` shadow the outer
 repository while unrelated effects in `..r` continue to the callback.
 Capturing the whole perform-site frame as the callback's active frame would
-incorrectly discard both nested handlers.
+incorrectly discard both nested handlers. A lambda argument applies the
+overlay at the top of its own body; any other callback value (a variable, a
+named function) is wrapped in a tagged closure that applies it and then calls
+the value.
 
 #### What Saga Doesn't Use From Koka
 
@@ -755,13 +774,14 @@ their own surrounding handled expression completes.
 ### Lowering Structure
 
 Effect ABI metadata is computed once by a pre-pass and stored in
-`EffectAbiPlan` (keyed by AST `NodeId`). It contains declaration ABIs,
-`CallEffectInfo` entries, and the inferred/implementation/boundary ABIs of
-function values. The lowerer consumes those facts and maps its current
-`EvidenceFrame` to each planned target through `EvidenceReframePlan`. There is
-no inline call-shape recognition at lowering time -- adding a new call shape
-(e.g. `DictMethodAccess`, lambda-headed call) means teaching the planner one
-new branch, not auditing every dispatcher.
+`EffectAbiPlan` (keyed by AST `NodeId`). It contains declaration ABIs and
+one `CallEffectInfo` per `App` node. A call to a known function (top-level,
+imported, block-local, or a dictionary method) is classified from the
+callee's declared ABI; every other call is a call through a function value
+and is classified from the head's entry in the type table. For a known
+callee the lowerer maps its current `EvidenceFrame` to the planned target
+through `EvidenceReframePlan`; for a function value it passes the frame
+unchanged.
 
 `CallEffectInfo` has three runtime shapes:
 
@@ -769,7 +789,8 @@ new branch, not auditing every dispatcher.
 - `StaticOps` -- closed-row CPS call; evidence can be projected to the static
   effect set
 - `RowForwarded` -- open-row CPS call; caller evidence is reframed into the
-  callee's positional static prefix plus its unselected tagged tail
+  callee's positional static prefix plus its unselected tagged tail. A call
+  through a function value is this shape with an empty prefix
 
 `src/codegen/optimize.rs` records optional optimizer facts before lowering.
 Those facts are independent metadata that the lowerer may consume for direct
@@ -802,11 +823,13 @@ nested `with` semantics; the native interop happens inside the handler body.
 ### Key Files
 
 - `codegen/runtime_shape.rs` -- `EvidenceAbi`, `CallableAbi`, handler-installation and reframe plans, selector compatibility, and slot resolution.
-- `codegen/call_effects.rs` -- `EffectAbiPlan`, `CallEffectInfo`, and the planner for declaration, call, and function-value ABIs.
+- `codegen/call_effects.rs` -- `EffectAbiPlan`, `CallEffectInfo`, and the classifier for declaration and call ABIs.
+- `codegen/lower/tagged.rs` -- the tagged-closure representation of function values: tagging, the tag-dispatching call, named functions as values.
+- `stdlib/runtime.erl` -- `saga_runtime:apply_n/2` and `apply_cps/4`, the slow path of calls through function values.
 - `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
 - `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
 - `codegen/lower/evidence.rs` -- `EvidenceFrame` and thin Core emitters for the six runtime bridge operations.
-- `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values and executes `EvidenceReframePlan` for every effectful head shape.
+- `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values, executes `EvidenceReframePlan` for calls to known functions, and lowers calls through function values.
 - `codegen/lower/effects/ops.rs` -- resolves static or dynamic operation slots through `EvidenceAbi`.
 - `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
