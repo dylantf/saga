@@ -273,6 +273,12 @@ pub struct Checker {
     /// Keyed by (name, pat_node_id) to avoid collisions between same-named
     /// bindings in different scopes (e.g. multiple test bodies).
     pub(crate) let_dict_params: HashMap<(String, NodeId), result::LetDictInfo>,
+    /// Steps taken so far by the unification in progress (see
+    /// `unify::UnifyStep`). Empty outside `unify`.
+    pub(crate) unify_path: Vec<super::unify::UnifyStep>,
+    /// Unequal closed effect rows accepted by the unification in progress,
+    /// drained by the top-level unification entry point.
+    pub(crate) row_subsumptions: Vec<super::unify::RowSubsumption>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -281,6 +287,14 @@ pub struct Checker {
     pub(crate) internal_handler_normalization_warnings: HashSet<String>,
     /// LSP/IDE state: type info, references, definitions, go-to-def targets.
     pub(crate) lsp: LspState,
+    /// Codegen type table: the type of every expression node whose inference
+    /// completed, keyed by `NodeId`. Unlike `lsp.type_at_node` (first write
+    /// wins, hover-oriented coverage) this is written for every expression
+    /// and the last write wins, so a node that is inferred more than once
+    /// holds the type from the attempt that was kept. Stored unresolved and
+    /// zonked at the `CheckResult` boundary. Not populated when
+    /// `modules.skip_expr_types` is set (the language server).
+    pub(crate) expr_types: HashMap<crate::ast::NodeId, Type>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
@@ -604,6 +618,10 @@ pub struct ModuleContext {
     /// Kept out of the global map so private module names don't collide with
     /// other packages or the consumer's own modules.
     pub private_modules: Option<HashMap<String, check_module::ModuleMap>>,
+    /// When true, checkers do not populate the codegen expression type table
+    /// (`Checker::expr_types`). Set by the language server, which never runs
+    /// codegen; inherited by the module checkers spawned for imports.
+    pub(crate) skip_expr_types: bool,
     /// Cache of already-typechecked modules: module name -> all public exports.
     ///
     /// All module-cache products are write-once snapshots shared via `Arc`.

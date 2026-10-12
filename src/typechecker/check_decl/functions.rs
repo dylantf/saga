@@ -164,7 +164,8 @@ impl Checker {
             if returned_handler_info.is_none() {
                 returned_handler_info = self.extract_handler_info(body);
             }
-            self.unify_at(&result_ty, &body_ty, body.span)?;
+            // Function return position.
+            self.coerce_expected_first_at(&result_ty, &body_ty, body.span, Some(body))?;
 
             self.env = saved_env;
             self.handlers = saved_handlers;

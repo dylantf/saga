@@ -31,6 +31,10 @@ pub use result::{
 pub use state::*;
 
 #[cfg(test)]
+mod effect_row_rule_tests;
+#[cfg(test)]
+mod expr_types_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
@@ -95,10 +99,13 @@ impl Checker {
             resolution: ResolutionResult::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
+            unify_path: Vec::new(),
+            row_subsumptions: Vec::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
             internal_handler_normalization_warnings: HashSet::new(),
             lsp: LspState::default(),
+            expr_types: HashMap::new(),
             allow_bodyless_annotations: false,
             current_module: None,
             prelude_imports: Vec::new(),
@@ -210,6 +217,22 @@ impl Checker {
             .type_at_node
             .entry(node_id)
             .or_insert_with(|| ty.clone());
+    }
+
+    /// Record an expression's type in the codegen type table. Last write
+    /// wins: see `Checker::expr_types`.
+    pub(crate) fn record_expr_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
+        if !self.modules.skip_expr_types {
+            self.expr_types.insert(node_id, ty.clone());
+        }
+    }
+
+    /// Stop populating the codegen expression type table. For drivers that
+    /// never run codegen (the language server). Applies to this checker and
+    /// to the module checkers it spawns for imports.
+    pub fn disable_expr_types(&mut self) {
+        self.modules.skip_expr_types = true;
+        self.expr_types.clear();
     }
 
     /// Record the type of a pattern binding (by Span).

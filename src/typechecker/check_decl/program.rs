@@ -767,7 +767,7 @@ impl Checker {
                 let ty = self.infer_expr(value)?;
                 if let Some(ann) = annotation {
                     let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);
-                    self.unify_at(&ty, &ann_ty, *span)?;
+                    self.coerce_at(&ty, &ann_ty, *span, Some(value))?;
                 }
                 let scheme = self.generalize(&ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);

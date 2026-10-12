@@ -188,6 +188,14 @@ pub struct CheckResult {
     /// Finalized through the current substitution at the `CheckResult`
     /// boundary; display helpers still prettify remaining free variables.
     pub type_at_node: HashMap<crate::ast::NodeId, super::Type>,
+    /// Codegen type table: the final type of every expression node, keyed by
+    /// `NodeId` and finalized through the substitution at the `CheckResult`
+    /// boundary. Complete for a program that checked without errors (every
+    /// `Expr` in the checked AST has an entry), unlike `type_at_node`, whose
+    /// coverage is whatever LSP hover needs. Empty when the checker was told
+    /// to skip it (`Checker::disable_expr_types`, used by the language
+    /// server).
+    pub expr_types: HashMap<crate::ast::NodeId, super::Type>,
     /// Exact applied effect performed by each effect-call expression.
     pub effect_at_node: HashMap<crate::ast::NodeId, super::EffectEntry>,
     /// Per-span type information for Pat bindings (LSP hover).
@@ -565,6 +573,7 @@ impl ModuleContext {
             module_graph: self.module_graph.clone(),
             visibility: self.visibility.clone(),
             private_modules: self.private_modules.clone(),
+            skip_expr_types: self.skip_expr_types,
             exports: self.exports.clone(),
             codegen_info: self.codegen_info.clone(),
             programs: self.programs.clone(),
@@ -622,6 +631,7 @@ impl CheckResult {
             let_binding_handlers: self.let_binding_handlers.clone(),
             fun_effects: self.fun_effects.clone(),
             type_at_node: self.type_at_node.clone(),
+            expr_types: self.expr_types.clone(),
             effect_at_node: self.effect_at_node.clone(),
             type_at_span: self.type_at_span.clone(),
             handler_arm_targets: self.handler_arm_targets.clone(),
@@ -666,6 +676,11 @@ impl Checker {
         let type_at_node = self
             .lsp
             .type_at_node
+            .iter()
+            .map(|(id, ty)| (*id, self.sub.apply(ty)))
+            .collect();
+        let expr_types = self
+            .expr_types
             .iter()
             .map(|(id, ty)| (*id, self.sub.apply(ty)))
             .collect();
@@ -734,6 +749,7 @@ impl Checker {
                 fun_effects
             },
             type_at_node,
+            expr_types,
             effect_at_node: self
                 .lsp
                 .effect_at_node

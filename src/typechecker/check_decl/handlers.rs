@@ -491,8 +491,10 @@ impl Checker {
             self.add_op_constraint_where_bounds(&op_sig.constraints);
 
             let body_ty = self.infer_expr(&arm.body)?;
-            if let Err(e) = self.unify(&answer_ty, &body_ty) {
-                self.collected_diagnostics.push(e.with_span(arm.span));
+            if let Err(e) =
+                self.coerce_expected_first_at(&answer_ty, &body_ty, arm.span, Some(&arm.body))
+            {
+                self.collected_diagnostics.push(e);
             }
 
             // Typecheck optional `finally` block: may use the handler's `needs` effects
@@ -530,8 +532,10 @@ impl Checker {
             }
             let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type
-            if let Err(e) = self.unify(&answer_ty, &ret_ty) {
-                self.collected_diagnostics.push(e.with_span(rc.body.span));
+            if let Err(e) =
+                self.coerce_expected_first_at(&answer_ty, &ret_ty, rc.body.span, Some(&rc.body))
+            {
+                self.collected_diagnostics.push(e);
             }
             self.resume_type = saved_resume;
             self.env = saved_env;
