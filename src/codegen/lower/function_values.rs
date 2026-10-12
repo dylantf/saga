@@ -1326,14 +1326,38 @@ impl<'a> Lowerer<'a> {
             params.push(param);
         }
 
-        let shape = if self.tagged {
-            // Always a tagged closure that finds the handler by tag at call
-            // time; the creation-time handler is never captured.
-            Some(super::tagged::tag_only_abi())
-        } else {
-            self.planned_function_value_evidence(node_id)
-        };
-        if let Some(shape) = shape {
+        if self.tagged {
+            // The typechecker attributes the operation's effect to the place
+            // the reference is written, and gives the reference the
+            // operation's own function type. So the closure captures the
+            // handler in scope here. If that type is effectful (the
+            // operation has its own `needs`), the value is a tagged closure
+            // and the handler resumes into the caller's continuation;
+            // otherwise it is a bare fun.
+            let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
+            if self.value_repr_of(node_id)
+                == Some(crate::codegen::runtime_shape::ValueRepr::Tagged)
+            {
+                let return_k = "_ReturnK".to_string();
+                params.push(self.fresh());
+                params.push(return_k.clone());
+                runtime_args.push(CExpr::Var(return_k));
+                return Some(super::tagged::tag_cps(CExpr::Fun(
+                    params,
+                    Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
+                )));
+            }
+            let return_value = self.fresh();
+            runtime_args.push(CExpr::Fun(
+                vec![return_value.clone()],
+                Box::new(CExpr::Var(return_value)),
+            ));
+            return Some(CExpr::Fun(
+                params,
+                Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
+            ));
+        }
+        if let Some(shape) = self.planned_function_value_evidence(node_id) {
             // Raw CPS shape: the resulting closure is passed to a slot that
             // expects an effectful function value, so it takes `_Evidence`
             // and `_ReturnK` and reads the per-op handler out of the
@@ -1348,15 +1372,10 @@ impl<'a> Lowerer<'a> {
             self.current_evidence = Some(EvidenceFrame::new(evidence, shape));
             let handler_expr = self.evidence_op_lookup(&applied_effect, op_name);
             self.current_evidence = saved_evidence;
-            let fun = CExpr::Fun(
+            Some(CExpr::Fun(
                 params,
                 Box::new(CExpr::Apply(Box::new(handler_expr), runtime_args)),
-            );
-            Some(if self.tagged {
-                super::tagged::tag_cps(fun)
-            } else {
-                fun
-            })
+            ))
         } else {
             // Value-closure shape: the resulting lambda is bound locally or
             // passed to a pure-shaped callback slot. Capture the in-scope

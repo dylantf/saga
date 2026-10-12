@@ -101,6 +101,7 @@ impl<'a> Lowerer<'a> {
             // calls, not handler params.
             let saved_direct_ops = self.direct_ops.clone();
             let mut captured_evidence_scope = None;
+            let mut tagged_callback_capture: Option<String> = None;
             let absorbed_effects = op_param_absorbed
                 .as_ref()
                 .and_then(|pae| pae.get(&source_idx));
@@ -139,7 +140,13 @@ impl<'a> Lowerer<'a> {
                     // callback with an open row tail runs with the handler's
                     // call-time frame for its named effects and the
                     // perform-site frame for the tail.
-                    if cps_open_row && let Some(frame) = self.current_evidence.clone() {
+                    // A callback run in a native context (`spawn`) likewise
+                    // keeps the perform-site frame for everything that
+                    // context does not provide.
+                    if (has_open_row || uses_native_callback_context)
+                        && let Some(frame) = self.current_evidence.clone()
+                    {
+                        tagged_callback_capture = Some(frame.var.clone());
                         captured_evidence_scope =
                             Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
                     }
@@ -174,6 +181,15 @@ impl<'a> Lowerer<'a> {
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));
+            // A lambda overlays the captured frame itself. Any other
+            // callback value (a named function, a variable) is wrapped in a
+            // tagged closure that does the same before calling it.
+            let ce = match tagged_callback_capture {
+                Some(captured) if !matches!(arg.kind, ExprKind::Lambda { .. }) => {
+                    self.overlay_callback_value(arg, ce, &captured)
+                }
+                _ => ce,
+            };
             if let Some((node_id, previous)) = captured_evidence_scope {
                 self.restore_function_value_captured_evidence(node_id, previous);
             }
@@ -344,6 +360,57 @@ impl<'a> Lowerer<'a> {
     ///
     /// `handler_canonical` identifies which handler is providing this op,
     /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
+    /// Tagged closures: wrap a callback value passed to an effect operation
+    /// so that it runs with the frame it is called with, extended by the
+    /// perform-site frame `captured` for every effect that frame lacks. See
+    /// "Effect-Operation Callbacks With Open Tails" in
+    /// `docs/effect-implementation.md`. A value that is not of effectful
+    /// function type needs no evidence and is returned as is.
+    fn overlay_callback_value(&mut self, arg: &Expr, value: CExpr, captured: &str) -> CExpr {
+        let Some(ty) = self.value_type(arg.id) else {
+            return value;
+        };
+        if crate::codegen::runtime_shape::value_repr(&ty)
+            != crate::codegen::runtime_shape::ValueRepr::Tagged
+        {
+            return value;
+        }
+        // One call consumes the arguments up to the first effectful arrow.
+        let mut arity = 0;
+        let mut current = &ty;
+        while let crate::typechecker::Type::Fun(_, ret, row) = current {
+            arity += 1;
+            if !row.effects.is_empty() || !row.tails.is_empty() {
+                break;
+            }
+            current = ret;
+        }
+        let func_var = self.fresh();
+        let ev_param = self.fresh();
+        let merged = self.fresh();
+        let mut params: Vec<String> = (0..arity).map(|_| self.fresh()).collect();
+        let user_params = params.clone();
+        params.push(ev_param.clone());
+        params.push("_ReturnK".to_string());
+        let call = self.tagged_cps_apply(&func_var, &user_params, &merged, "_ReturnK");
+        let body = CExpr::Let(
+            merged,
+            Box::new(evidence::append_tail(
+                CExpr::Var(ev_param),
+                CExpr::Var(captured.to_string()),
+            )),
+            Box::new(call),
+        );
+        CExpr::Let(
+            func_var,
+            Box::new(value),
+            Box::new(crate::codegen::lower::tagged::tag_cps(CExpr::Fun(
+                params,
+                Box::new(body),
+            ))),
+        )
+    }
+
     /// Tagged closures: the evidence a BEAM-native op hands to the Saga
     /// callback it runs (`spawn`). The callback is called in a fresh native
     /// context, so the effects that context provides natively (Actor) are

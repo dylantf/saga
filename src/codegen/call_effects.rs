@@ -1203,6 +1203,9 @@ impl<'a> Populator<'a> {
         let (head, args) = peel_app(expr);
         let supplied = args.len();
         match &head.kind {
+            // An effect operation applied to arguments is a perform, lowered
+            // by the effect-call path, not a call through a function value.
+            ExprKind::EffectCall { .. } => CallEffectInfo::pure(),
             ExprKind::Var { name } | ExprKind::QualifiedName { name, .. } => {
                 let resolved = self.inputs.resolved.get(&head.id);
                 if resolved.is_some_and(|resolved| {
