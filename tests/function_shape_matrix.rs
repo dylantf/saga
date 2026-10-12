@@ -8,6 +8,10 @@
 //! `pub fun result : Unit -> Int` whose value the generator knows in advance,
 //! so a case passes only if it compiles, runs and returns that integer.
 //!
+//! A second family, with ids starting `param.`, covers effects that take a
+//! type parameter (`Fail String` next to `Fail Int`). See the section
+//! "Parameterised-effect family" below.
+//!
 //! Many cases fail today. The checked-in lists under `tests/fixtures/` pin
 //! the current state:
 //!
@@ -696,6 +700,8 @@ struct Program {
 
 struct Case {
     id: String,
+    /// `SHAPE` or `PARAM`. The next three fields are that family's axes.
+    family: &'static str,
     producer: &'static str,
     position: &'static str,
     variant: &'static str,
@@ -795,6 +801,369 @@ fn build_program(producer: &str, position: &str, v: Variant) -> Result<Program, 
     })
 }
 
+// ---------------------------------------------------------------------------
+// Parameterised-effect family
+// ---------------------------------------------------------------------------
+//
+// `effect Fail e { fun fail : e -> Int }` makes `Fail String` and `Fail Int`
+// distinct effects that can sit in one row. A handler installed by code that
+// is generic in `e` cannot know the argument at runtime, so it goes in under
+// a placeholder tag and the compiler lines it up with the performing code by
+// position. These cases pin which such programs work, ahead of closures
+// looking handlers up by tag.
+//
+// Case id is `param.<installer>.<route>.<instance>`:
+//
+// - *instance*: which `Fail` the function value under test performs. Called
+//   `T` below; `O` is the other one.
+// - *installer*: who handles `T`, and what else is installed around it.
+// - *route*: how the function value reaches its call.
+//
+// Every handler resumes with its own number, so the result says which
+// handler each `fail!` reached:
+//
+// | handler                                   | resumes with |
+// |-------------------------------------------|--------------|
+// | `text_fail`, concrete, for `Fail String`  | 100          |
+// | `int_fail`, concrete, for `Fail Int`      | 2000         |
+// | generic, the one that handles `T`         | 30000        |
+// | generic, a second one that handles `O`    | 400000       |
+//
+// The function value itself contributes 1, and `catch_abort` returns 7
+// without resuming.
+
+const SHAPE: &str = "shape";
+const PARAM: &str = "param";
+
+/// Which `Fail` the function value performs.
+///
+/// | name      | function under test                             |
+/// |-----------|-------------------------------------------------|
+/// | `str`     | `String -> Int needs {Fail String}`             |
+/// | `int`     | `Int -> Int needs {Fail Int}`                   |
+/// | `gen_str` | `e -> Int needs {Fail e}`, used at `e = String` |
+/// | `gen_int` | `e -> Int needs {Fail e}`, used at `e = Int`    |
+///
+/// For the generic instances every function on the route is generic in `e`
+/// as well, so the argument stays unknown until `body`.
+#[derive(Clone, Copy)]
+struct Instance {
+    name: &'static str,
+    int: bool,
+    generic: bool,
+}
+
+const fn instance(name: &'static str, int: bool, generic: bool) -> Instance {
+    Instance { name, int, generic }
+}
+
+const PARAM_INSTANCES: &[Instance] = &[
+    instance("str", false, false),
+    instance("int", true, false),
+    instance("gen_str", false, true),
+    instance("gen_int", true, true),
+];
+
+/// Who installs the handlers. `body` makes the call under test; where its
+/// row has both instantiations it also calls a helper that performs `O`.
+///
+/// | name                    | `result ()`                                               |
+/// |-------------------------|-----------------------------------------------------------|
+/// | `concrete`              | `body () with t`                                          |
+/// | `both_t_first`          | `body () with {t, o}`                                     |
+/// | `both_o_first`          | `body () with {o, t}`                                     |
+/// | `nested_t_inner`        | `(body () with t) with o`                                 |
+/// | `nested_t_outer`        | `(body () with o) with t`                                 |
+/// | `generic`               | `catch_it body`                                           |
+/// | `generic_abort`         | `catch_abort body`                                        |
+/// | `generic_other_in_row`  | `catch_as T body with o`, `body` performs both            |
+/// | `generic_other_outside` | `(catch_it body + other ()) with o`                       |
+/// | `generic_same_outside`  | `(catch_it body + same ()) with t`                        |
+/// | `generic_nested_in_row` | `catch_as O mid`, `mid = catch_as T body`, both in `body` |
+/// | `generic_in_generic`    | `catch_as O mid`, `mid = catch_as T body + other ()`      |
+/// | `concrete_in_generic`   | `catch_it mid`, `mid = body () with o`                    |
+///
+/// `catch_it : (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}`.
+/// `catch_as` takes a value of type `e` first, to say which `Fail` it handles
+/// when the row has both, and then the number to resume with.
+const PARAM_INSTALLERS: &[&str] = &[
+    "concrete",
+    "both_t_first",
+    "both_o_first",
+    "nested_t_inner",
+    "nested_t_outer",
+    "generic",
+    "generic_abort",
+    "generic_other_in_row",
+    "generic_other_outside",
+    "generic_same_outside",
+    "generic_nested_in_row",
+    "generic_in_generic",
+    "concrete_in_generic",
+];
+
+/// How the function value reaches its call inside `body`.
+const PARAM_ROUTES: &[&str] = &[
+    "direct",
+    "lambda_arg",
+    "named_arg",
+    "let_named",
+    "let_lambda",
+    "open_fwd",
+    "open_thunk",
+    "list",
+    "returned",
+];
+
+const CATCH_IT: &str = "fun catch_it : (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}\n\
+                        catch_it f = f () with { fail _ = resume 30000 }";
+const CATCH_ABORT: &str = "fun catch_abort : (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}\n\
+                           catch_abort f = f () with { fail _ = 7 }";
+const CATCH_AS: &str = "fun catch_as : e -> Int -> (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}\n\
+                        catch_as _ v f = f () with { fail _ = resume v }";
+
+/// The handler arrangement of one installer.
+struct Install {
+    /// `body` also performs `O`, so its row has both instantiations.
+    body_has_other: bool,
+    /// Type arguments of the concrete named handlers the program declares.
+    handlers: Vec<&'static str>,
+    decls: Vec<String>,
+    result: String,
+    expected: i64,
+}
+
+fn param_program(installer: &str, route: &str, inst: Instance) -> Program {
+    let (t, o) = if inst.int {
+        ("Int", "String")
+    } else {
+        ("String", "Int")
+    };
+    let lit = |ty: &str| if ty == "Int" { "3" } else { "\"s\"" };
+    let handler = |ty: &str| if ty == "Int" { "int_fail" } else { "text_fail" };
+    let resumed = |ty: &str| if ty == "Int" { 2000 } else { 100 };
+    let (t_lit, o_lit) = (lit(t), lit(o));
+    let (t_h, o_h) = (handler(t), handler(o));
+    let (t_val, o_val) = (resumed(t), resumed(o));
+
+    // The function value under test, and its type as the route spells it.
+    let x = if inst.generic { "e" } else { t };
+    let ty = format!("{x} -> Int needs {{Fail {x}}}");
+    let lam = if inst.generic {
+        "(fun x -> tgt x)"
+    } else {
+        "(fun x -> 1 + fail! x)"
+    };
+    let tgt = format!("fun tgt : {ty}\ntgt x = 1 + fail! x");
+
+    let (route_decls, stmts, call): (Vec<String>, Vec<String>, String) = match route {
+        "direct" => (vec![], vec![], format!("tgt {t_lit}")),
+        "lambda_arg" | "named_arg" => {
+            let f = if route == "lambda_arg" { lam } else { "tgt" };
+            (
+                vec![format!(
+                    "fun apply_fn : ({ty}) -> {x} -> Int needs {{Fail {x}}}\napply_fn f x = f x"
+                )],
+                vec![],
+                format!("apply_fn {f} {t_lit}"),
+            )
+        }
+        "let_named" => (
+            vec![],
+            vec!["let f = tgt".to_string()],
+            format!("f {t_lit}"),
+        ),
+        "let_lambda" => (vec![], vec![format!("let f = {lam}")], format!("f {t_lit}")),
+        "open_fwd" => (
+            vec![format!(
+                "fun through : ({x} -> Int needs {{..r}}) -> {x} -> Int needs {{..r}}\n\
+                 through f x = f x"
+            )],
+            vec![],
+            format!("through tgt {t_lit}"),
+        ),
+        "open_thunk" => (
+            vec![
+                "fun through : (Unit -> Int needs {..r}) -> Int needs {..r}\nthrough f = f ()"
+                    .to_string(),
+            ],
+            vec![],
+            format!("through (fun () -> tgt {t_lit})"),
+        ),
+        "list" => (
+            vec![format!(
+                "fun run_list : List ({ty}) -> {x} -> Int needs {{Fail {x}}}\n\
+                 run_list fs x = case fs {{\n  [] -> 0\n  f :: rest -> f x + run_list rest x\n}}"
+            )],
+            vec![],
+            format!("run_list [tgt] {t_lit}"),
+        ),
+        "returned" => (
+            vec![format!("fun make : Unit -> ({ty})\nmake () = tgt")],
+            vec![],
+            format!("(make ()) {t_lit}"),
+        ),
+        other => panic!("unknown route {other}"),
+    };
+
+    let other = format!("fun other : Unit -> Int needs {{Fail {o}}}\nother () = fail! {o_lit}");
+    let same = format!("fun same : Unit -> Int needs {{Fail {t}}}\nsame () = fail! {t_lit}");
+    let mid = |handled_outside: &str, expr: &str| {
+        format!("fun mid : Unit -> Int needs {{Fail {handled_outside}}}\nmid () = {expr}")
+    };
+    let install = |body_has_other: bool,
+                   handlers: &[&'static str],
+                   decls: Vec<String>,
+                   result: String,
+                   expected: i64| Install {
+        body_has_other,
+        handlers: handlers.to_vec(),
+        decls,
+        result,
+        expected,
+    };
+    let i = match installer {
+        "concrete" => install(
+            false,
+            &[t],
+            vec![],
+            format!("(body ()) with {t_h}"),
+            1 + t_val,
+        ),
+        "both_t_first" => install(
+            true,
+            &[t, o],
+            vec![],
+            format!("(body ()) with {{{t_h}, {o_h}}}"),
+            1 + t_val + o_val,
+        ),
+        "both_o_first" => install(
+            true,
+            &[t, o],
+            vec![],
+            format!("(body ()) with {{{o_h}, {t_h}}}"),
+            1 + t_val + o_val,
+        ),
+        "nested_t_inner" => install(
+            true,
+            &[t, o],
+            vec![],
+            format!("((body ()) with {t_h}) with {o_h}"),
+            1 + t_val + o_val,
+        ),
+        "nested_t_outer" => install(
+            true,
+            &[t, o],
+            vec![],
+            format!("((body ()) with {o_h}) with {t_h}"),
+            1 + t_val + o_val,
+        ),
+        "generic" => install(
+            false,
+            &[],
+            vec![CATCH_IT.to_string()],
+            "catch_it body".to_string(),
+            1 + 30000,
+        ),
+        "generic_abort" => install(
+            false,
+            &[],
+            vec![CATCH_ABORT.to_string()],
+            "catch_abort body".to_string(),
+            7,
+        ),
+        "generic_other_in_row" => install(
+            true,
+            &[o],
+            vec![CATCH_AS.to_string()],
+            format!("(catch_as {t_lit} 30000 body) with {o_h}"),
+            1 + 30000 + o_val,
+        ),
+        "generic_other_outside" => install(
+            false,
+            &[o],
+            vec![CATCH_IT.to_string(), other.clone()],
+            format!("(catch_it body + other ()) with {o_h}"),
+            1 + 30000 + o_val,
+        ),
+        "generic_same_outside" => install(
+            false,
+            &[t],
+            vec![CATCH_IT.to_string(), same],
+            format!("(catch_it body + same ()) with {t_h}"),
+            1 + 30000 + t_val,
+        ),
+        "generic_nested_in_row" => install(
+            true,
+            &[],
+            vec![
+                CATCH_AS.to_string(),
+                mid(o, &format!("catch_as {t_lit} 30000 body")),
+            ],
+            format!("catch_as {o_lit} 400000 mid"),
+            1 + 30000 + 400000,
+        ),
+        "generic_in_generic" => install(
+            false,
+            &[],
+            vec![
+                CATCH_AS.to_string(),
+                other.clone(),
+                mid(o, &format!("catch_as {t_lit} 30000 body + other ()")),
+            ],
+            format!("catch_as {o_lit} 400000 mid"),
+            1 + 30000 + 400000,
+        ),
+        "concrete_in_generic" => install(
+            true,
+            &[o],
+            vec![
+                CATCH_IT.to_string(),
+                mid(t, &format!("(body ()) with {o_h}")),
+            ],
+            "catch_it mid".to_string(),
+            1 + 30000 + o_val,
+        ),
+        other => panic!("unknown installer {other}"),
+    };
+
+    let mut decls = vec!["effect Fail e { fun fail : e -> Int }".to_string()];
+    for ty in ["String", "Int"] {
+        if i.handlers.contains(&ty) {
+            decls.push(format!(
+                "handler {} for Fail {ty} {{ fail _ = resume {} }}",
+                handler(ty),
+                resumed(ty)
+            ));
+        }
+    }
+    decls.push(tgt);
+    decls.extend(route_decls);
+    let (row, tail) = if i.body_has_other {
+        decls.push(other);
+        ("Fail String, Fail Int".to_string(), " + other ()")
+    } else {
+        (format!("Fail {t}"), "")
+    };
+    let mut body = format!("fun body : Unit -> Int needs {{{row}}}\nbody () = {{\n");
+    for stmt in &stmts {
+        body.push_str(&format!("  {stmt}\n"));
+    }
+    body.push_str(&format!("  {call}{tail}\n}}"));
+    decls.push(body);
+    decls.extend(i.decls);
+
+    Program {
+        main: format!(
+            "module Main\n\n{}pub fun result : Unit -> Int\nresult () = {}\n",
+            join_decls(&decls),
+            i.result
+        ),
+        lib: None,
+        expected: i.expected,
+    }
+}
+
 fn generate() -> Vec<Case> {
     let mut cases = Vec::new();
     for producer in PRODUCERS {
@@ -802,10 +1171,25 @@ fn generate() -> Vec<Case> {
             for v in VARIANTS {
                 cases.push(Case {
                     id: format!("{producer}.{position}.{}", v.name),
+                    family: SHAPE,
                     producer,
                     position,
                     variant: v.name,
                     program: build_program(producer, position, *v),
+                });
+            }
+        }
+    }
+    for installer in PARAM_INSTALLERS {
+        for route in PARAM_ROUTES {
+            for inst in PARAM_INSTANCES {
+                cases.push(Case {
+                    id: format!("param.{installer}.{route}.{}", inst.name),
+                    family: PARAM,
+                    producer: installer,
+                    position: route,
+                    variant: inst.name,
+                    program: Ok(param_program(installer, route, *inst)),
                 });
             }
         }
@@ -1327,6 +1711,7 @@ impl Tally {
 
 fn tally_table(
     title: &str,
+    family: &str,
     order: &[&str],
     key: impl Fn(&Case) -> &'static str,
     cases: &[Case],
@@ -1334,7 +1719,10 @@ fn tally_table(
 ) -> String {
     let mut tallies: BTreeMap<&str, Tally> = BTreeMap::new();
     for (index, outcome) in outcomes {
-        tallies.entry(key(&cases[*index])).or_default().add(outcome);
+        let case = &cases[*index];
+        if case.family == family {
+            tallies.entry(key(case)).or_default().add(outcome);
+        }
     }
     let mut out = format!(
         "{title:<28} {:>5} {:>5} {:>5} {:>9} {:>5}\n",
@@ -1354,10 +1742,14 @@ fn tally_table(
     out
 }
 
-fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
+/// Totals and failure classes for one family.
+fn family_totals(family: &str, cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
     let mut all = Tally::default();
     let mut classes: BTreeMap<&str, usize> = BTreeMap::new();
-    for outcome in outcomes.values() {
+    for (index, outcome) in outcomes {
+        if cases[*index].family != family {
+            continue;
+        }
         all.add(outcome);
         match outcome {
             Outcome::Fail(class, _) => *classes.entry(class.as_str()).or_default() += 1,
@@ -1365,15 +1757,7 @@ fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
             _ => {}
         }
     }
-    let mut out = String::new();
-    out.push_str(&format!(
-        "function shape matrix: {} producers x {} positions x {} variants = {} combinations\n",
-        PRODUCERS.len(),
-        POSITIONS.len(),
-        VARIANTS.len(),
-        PRODUCERS.len() * POSITIONS.len() * VARIANTS.len()
-    ));
-    out.push_str(&format!(
+    let mut out = format!(
         "  considered {}: ran {} (passed {}, failed {}), skipped {} (typecheck-rejected {}, not applicable {})\n",
         all.total,
         all.pass + all.fail,
@@ -1382,7 +1766,7 @@ fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
         all.rejected + all.not_applicable,
         all.rejected,
         all.not_applicable
-    ));
+    );
     out.push_str("  failures by class:");
     if classes.is_empty() {
         out.push_str(" none");
@@ -1391,8 +1775,22 @@ fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
         out.push_str(&format!(" {class}={n}"));
     }
     out.push_str("\n\n");
+    out
+}
+
+fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "function shape matrix: {} producers x {} positions x {} variants = {} combinations\n",
+        PRODUCERS.len(),
+        POSITIONS.len(),
+        VARIANTS.len(),
+        PRODUCERS.len() * POSITIONS.len() * VARIANTS.len()
+    ));
+    out.push_str(&family_totals(SHAPE, cases, outcomes));
     out.push_str(&tally_table(
         "by producer",
+        SHAPE,
         PRODUCERS,
         |c| c.producer,
         cases,
@@ -1401,6 +1799,7 @@ fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
     out.push('\n');
     out.push_str(&tally_table(
         "by position",
+        SHAPE,
         POSITIONS,
         |c| c.position,
         cases,
@@ -1410,7 +1809,44 @@ fn summary(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
     let variant_names: Vec<&str> = VARIANTS.iter().map(|v| v.name).collect();
     out.push_str(&tally_table(
         "by variant",
+        SHAPE,
         &variant_names,
+        |c| c.variant,
+        cases,
+        outcomes,
+    ));
+
+    out.push_str(&format!(
+        "\nparameterised effects: {} installers x {} routes x {} instances = {} combinations\n",
+        PARAM_INSTALLERS.len(),
+        PARAM_ROUTES.len(),
+        PARAM_INSTANCES.len(),
+        PARAM_INSTALLERS.len() * PARAM_ROUTES.len() * PARAM_INSTANCES.len()
+    ));
+    out.push_str(&family_totals(PARAM, cases, outcomes));
+    out.push_str(&tally_table(
+        "by installer",
+        PARAM,
+        PARAM_INSTALLERS,
+        |c| c.producer,
+        cases,
+        outcomes,
+    ));
+    out.push('\n');
+    out.push_str(&tally_table(
+        "by route",
+        PARAM,
+        PARAM_ROUTES,
+        |c| c.position,
+        cases,
+        outcomes,
+    ));
+    out.push('\n');
+    let instance_names: Vec<&str> = PARAM_INSTANCES.iter().map(|i| i.name).collect();
+    out.push_str(&tally_table(
+        "by instance",
+        PARAM,
+        &instance_names,
         |c| c.variant,
         cases,
         outcomes,
@@ -1424,6 +1860,9 @@ fn grid(cases: &[Case], outcomes: &BTreeMap<usize, Outcome>) -> String {
     let mut cells: BTreeMap<(&str, &str, &str), char> = BTreeMap::new();
     for (index, outcome) in outcomes {
         let case = &cases[*index];
+        if case.family != SHAPE {
+            continue;
+        }
         let mark = match outcome {
             Outcome::Pass => '.',
             Outcome::NotApplicable(_) => ' ',
@@ -1556,7 +1995,7 @@ fn write_list(rel: &str, header: &str, entries: &BTreeMap<String, String>) {
 }
 
 const FAILURES_HEADER: &str = "Cases of tests/function_shape_matrix.rs that fail today: `<case id> <failure class>`.\n\
-Case id is `<producer>.<position>.<variant>`.\n\
+Case id is `<producer>.<position>.<variant>`, or `param.<installer>.<route>.<instance>`.\n\
 Generated. Regenerate with `SAGA_MATRIX_BLESS=1 cargo test --test function_shape_matrix`.";
 
 const REJECTED_HEADER: &str = "Cases of tests/function_shape_matrix.rs that the typechecker rejects. They are skipped.\n\
@@ -1725,6 +2164,7 @@ fn nonterminating_program_is_reported_as_timeout() {
     };
     let case = |id: &str, body: &str| Case {
         id: id.to_string(),
+        family: SHAPE,
         producer: "self_test",
         position: "self_test",
         variant: "p1",
