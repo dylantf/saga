@@ -6654,7 +6654,7 @@ fn trait_method_needs_survives_in_scheme() {
     let resolved = checker.sub.apply(&method.scheme.ty);
     let effects = super::effects_from_type(&resolved);
     assert!(
-        effects.iter().any(|effect| effect.starts_with("Fail<")),
+        effects.iter().any(|effect| effect == "Fail"),
         "effects were {:?}",
         effects
     );

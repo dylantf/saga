@@ -266,10 +266,6 @@ impl EffectAbiPlanner<'_, '_> {
             if absorbed.is_none() && !has_open_row {
                 continue;
             }
-            let actual_callback_effects = self
-                .expr_cps_function_shape(arg)
-                .map(|shape| shape.static_slots().to_vec())
-                .unwrap_or_default();
             let mut static_effects = Vec::new();
             let mut uses_native_callback_context = false;
             for effect in absorbed.into_iter().flatten() {
@@ -283,23 +279,7 @@ impl EffectAbiPlanner<'_, '_> {
                     uses_native_callback_context = true;
                     continue;
                 }
-                let concrete = if actual_callback_effects.contains(effect) {
-                    effect.clone()
-                } else {
-                    let family = crate::typechecker::applied_effect_family(effect);
-                    let matches: Vec<&String> = actual_callback_effects
-                        .iter()
-                        .filter(|actual| {
-                            crate::typechecker::applied_effect_family(actual) == family
-                        })
-                        .collect();
-                    if matches.len() == 1 {
-                        matches[0].clone()
-                    } else {
-                        effect.clone()
-                    }
-                };
-                static_effects.push(concrete);
+                static_effects.push(effect.clone());
             }
             static_effects.sort();
             static_effects.dedup();

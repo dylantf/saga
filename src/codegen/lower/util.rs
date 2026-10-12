@@ -353,7 +353,7 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     (arity, effects.into_iter().collect())
 }
 
-/// Extract fully-applied effect keys from `Handler E` / `Handler E1 E2`.
+/// Extract the handled effects' runtime keys from `Handler E` / `Handler E1 E2`.
 pub fn handler_effects_from_type(ty: &Type) -> Vec<String> {
     let Type::Con(name, handled) = ty else {
         return Vec::new();

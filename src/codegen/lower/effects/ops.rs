@@ -491,10 +491,9 @@ impl<'a> Lowerer<'a> {
     /// alphabetically by op name (matches `effect_handler_ops` ordering for a
     /// single effect and the canonical shape produced by handler emission).
     pub(crate) fn evidence_op_index(&self, effect_name: &str, op_name: &str) -> usize {
-        let effect_family = crate::typechecker::applied_effect_family(effect_name);
         let info = self
             .effect_defs
-            .get(effect_family)
+            .get(effect_name)
             .unwrap_or_else(|| panic!("unknown effect '{}'", effect_name));
         let mut ops: Vec<&String> = info.ops.keys().collect();
         ops.sort();

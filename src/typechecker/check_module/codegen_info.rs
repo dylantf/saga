@@ -510,9 +510,10 @@ pub(super) fn collect_codegen_info(
         effects
             .into_iter()
             .map(|effect| {
-                let family = super::super::applied_effect_family(&effect);
-                let canonical = scope_map.resolve_effect(family).unwrap_or(family);
-                format!("{}{}", canonical, &effect[family.len()..])
+                scope_map
+                    .resolve_effect(&effect)
+                    .map(str::to_string)
+                    .unwrap_or(effect)
             })
             .collect()
     };

@@ -810,10 +810,9 @@ fn build_program(producer: &str, position: &str, v: Variant) -> Result<Program, 
 // identified by its family alone and a row holds one application of it (see
 // "Family-only effect identity" in the plan), so every case whose `body` has
 // both in its row is rejected by the typechecker and listed as such. The
-// cases are kept: the rest pin which single-application programs work. A
-// handler installed by code that is generic in `e` cannot know the argument
-// at runtime, so today it goes in under a placeholder tag and the compiler
-// lines it up with the performing code by position.
+// cases are kept: the rest pin which single-application programs work. The
+// runtime tag of an effect is its family name, so a handler installed by code
+// that is generic in `e` goes in under the same tag as a concrete one.
 //
 // Case id is `param.<installer>.<route>.<instance>`:
 //

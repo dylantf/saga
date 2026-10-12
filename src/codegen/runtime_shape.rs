@@ -2,27 +2,6 @@ use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 use crate::typechecker::{Scheme, Type};
 
-#[derive(Clone, Copy)]
-struct EffectSlotIdentity<'a> {
-    family: &'a str,
-    placeholder: bool,
-}
-
-impl<'a> EffectSlotIdentity<'a> {
-    fn new(tag: &'a str) -> Self {
-        Self {
-            family: crate::typechecker::applied_effect_family(tag),
-            // Bare family names and applications containing a compiler type
-            // variable are the two generalized runtime spellings.
-            placeholder: !tag.contains('<') || tag.contains('$'),
-        }
-    }
-
-    fn same_family(self, other: Self) -> bool {
-        self.family == other.family
-    }
-}
-
 /// Authoritative evidence convention for a Saga CPS callable or in-scope
 /// evidence frame.
 ///
@@ -66,82 +45,13 @@ impl EvidenceAbi {
         self.is_open_row
     }
 
-    /// Specialize the statically declared slots at one use site without
-    /// folding effects supplied by an open row variable into that prefix.
-    ///
-    /// A callee compiled as `{A, B, ..e}` always addresses A and B as its
-    /// first two slots. If an occurrence instantiates `..e` with Z, the call
-    /// frame must remain `{A, B | Z}`, even when the fully instantiated set
-    /// would sort as `{Z, A, B}` by canonical module name.
-    fn specialize_declared_slots(&self, occurrence: &Self) -> Self {
-        let static_effects = self
-            .static_effects
-            .iter()
-            .map(|declared| {
-                if occurrence.static_effects.contains(declared) {
-                    return declared.clone();
-                }
-                let declared_identity = EffectSlotIdentity::new(declared);
-                let family_matches = occurrence
-                    .static_effects
-                    .iter()
-                    .filter(|candidate| {
-                        declared_identity.same_family(EffectSlotIdentity::new(candidate))
-                    })
-                    .collect::<Vec<_>>();
-                if let [candidate] = family_matches.as_slice()
-                    && (declared_identity.placeholder
-                        || EffectSlotIdentity::new(candidate).placeholder)
-                {
-                    (*candidate).clone()
-                } else {
-                    declared.clone()
-                }
-            })
-            .collect();
-        Self {
-            static_effects,
-            is_open_row: self.is_open_row,
-        }
-    }
-
-    /// Record a handler installed into this frame's ABI.
-    ///
-    /// An open frame may carry one bare/generalized family placeholder for a
-    /// caller-specialized applied effect. Installing the concrete application
-    /// specializes that unique placeholder. Closed frames describe actual
-    /// runtime entries, so only exact identities replace.
+    /// Record a handler installed into this frame's ABI: the installed effect
+    /// joins the static prefix unless it is already there.
     fn install(&mut self, installed: String) {
-        if self.static_effects.contains(&installed) {
-            return;
-        }
-
-        if self.is_open_row {
-            let installed_identity = EffectSlotIdentity::new(&installed);
-            let same_family = self
-                .static_effects
-                .iter()
-                .enumerate()
-                .filter(|(_, effect)| {
-                    installed_identity.same_family(EffectSlotIdentity::new(effect))
-                })
-                .map(|(idx, _)| idx)
-                .collect::<Vec<_>>();
-
-            if same_family.len() == 1
-                && EffectSlotIdentity::new(&self.static_effects[same_family[0]]).placeholder
-                && !installed_identity.placeholder
-            {
-                self.static_effects[same_family[0]] = installed;
-            } else {
-                self.static_effects.push(installed);
-            }
-        } else {
+        if !self.static_effects.contains(&installed) {
             self.static_effects.push(installed);
+            self.static_effects.sort();
         }
-
-        self.static_effects.sort();
-        self.static_effects.dedup();
     }
 
     /// Plan one handler installation and the ABI of the resulting frame.
@@ -163,28 +73,13 @@ impl EvidenceAbi {
         EvidenceInstallPlan { target, kind }
     }
 
-    /// Resolve an operation's effect identity against this frame's static
-    /// prefix. Exact identities are positional. A unique generic family slot
-    /// is also positional, but a distinct concrete sibling must be found by
-    /// its runtime tag (normally in an open tail).
+    /// Resolve an operation's effect against this frame's static prefix. An
+    /// effect named there is positional; any other must be found by its
+    /// runtime tag in the open tail.
     pub fn resolve_slot(&self, effect: &str) -> EvidenceSlotResolution {
-        if let Some(index) = self.static_slots().iter().position(|tag| tag == effect) {
-            return EvidenceSlotResolution::Static(index + 1);
-        }
-
-        let requested = EffectSlotIdentity::new(effect);
-        let family_matches = self
-            .static_slots()
-            .iter()
-            .enumerate()
-            .filter(|(_, tag)| requested.same_family(EffectSlotIdentity::new(tag)))
-            .collect::<Vec<_>>();
-        if let [(index, tag)] = family_matches.as_slice()
-            && (EffectSlotIdentity::new(tag).placeholder || requested.placeholder)
-        {
-            EvidenceSlotResolution::Static(*index + 1)
-        } else {
-            EvidenceSlotResolution::DynamicTag
+        match self.static_slots().iter().position(|tag| tag == effect) {
+            Some(index) => EvidenceSlotResolution::Static(index + 1),
+            None => EvidenceSlotResolution::DynamicTag,
         }
     }
 
@@ -195,46 +90,13 @@ impl EvidenceAbi {
     /// can translate an open tagged tail into the implementation's positional
     /// prefix.
     pub fn merge_requirements(left: &Self, right: &Self) -> Self {
-        let mut static_effects = left.static_effects.clone();
-        for inferred_effect in &right.static_effects {
-            if static_effects
+        Self::new(
+            left.static_effects
                 .iter()
-                .any(|effect| effect == inferred_effect)
-            {
-                continue;
-            }
-            let inferred_identity = EffectSlotIdentity::new(inferred_effect);
-            let same_family = static_effects
-                .iter()
-                .enumerate()
-                .filter(|(_, effect)| {
-                    inferred_identity.same_family(EffectSlotIdentity::new(effect))
-                })
-                .map(|(idx, _)| idx)
-                .collect::<Vec<_>>();
-            if same_family.len() == 1
-                && (EffectSlotIdentity::new(&static_effects[same_family[0]]).placeholder
-                    || inferred_identity.placeholder)
-            {
-                // A generic and concrete spelling of the same applied effect
-                // describe one positional slot. Prefer the concrete spelling
-                // when available, but never mint a second slot for the type
-                // variable spelling.
-                if !inferred_identity.placeholder {
-                    static_effects[same_family[0]] = inferred_effect.clone();
-                }
-            } else {
-                // Distinct concrete applications of one effect family are
-                // independent slots and must coexist.
-                static_effects.push(inferred_effect.clone());
-            }
-        }
-        static_effects.sort();
-        static_effects.dedup();
-        Self {
-            static_effects,
-            is_open_row: left.is_open_row || right.is_open_row,
-        }
+                .chain(&right.static_effects)
+                .cloned(),
+            left.is_open_row || right.is_open_row,
+        )
     }
 }
 
@@ -259,7 +121,6 @@ pub enum EvidenceSlotResolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceSelector {
     Position(usize),
-    Relabel { position: usize, target: String },
     DynamicTag(String),
 }
 
@@ -291,7 +152,7 @@ impl EvidenceReframePlan {
             let selectors = target
                 .static_slots()
                 .iter()
-                .map(|effect| Self::selector_for(source, target, effect))
+                .map(|effect| Self::selector_for(source, effect))
                 .collect();
             if target.is_open_row {
                 EvidenceReframeKind::ReframeOpen {
@@ -373,8 +234,7 @@ impl EvidenceReframePlan {
         let mut selected_static_positions = std::collections::BTreeSet::new();
         for selector in selectors {
             let position = match selector {
-                EvidenceSelector::Position(position)
-                | EvidenceSelector::Relabel { position, .. } => Some(*position),
+                EvidenceSelector::Position(position) => Some(*position),
                 EvidenceSelector::DynamicTag(_) => None,
             };
             if let Some(position) = position {
@@ -390,39 +250,16 @@ impl EvidenceReframePlan {
         }
     }
 
-    fn selector_for(
-        source: &EvidenceAbi,
-        target_abi: &EvidenceAbi,
-        target: &str,
-    ) -> EvidenceSelector {
+    fn selector_for(source: &EvidenceAbi, target: &str) -> EvidenceSelector {
         if let Some(index) = source.static_slots().iter().position(|tag| tag == target) {
             return EvidenceSelector::Position(index + 1);
         }
-        let target_identity = EffectSlotIdentity::new(target);
-        let family_matches = source
-            .static_slots()
-            .iter()
-            .enumerate()
-            .filter(|(_, tag)| target_identity.same_family(EffectSlotIdentity::new(tag)))
-            .map(|(index, _)| index + 1)
-            .collect::<Vec<_>>();
-        if (!source.is_open_row || target_abi.is_open_row)
-            && let [position] = family_matches.as_slice()
-            && (EffectSlotIdentity::new(&source.static_slots()[*position - 1]).placeholder
-                || target_identity.placeholder)
-        {
-            EvidenceSelector::Relabel {
-                position: *position,
-                target: target.to_string(),
-            }
-        } else {
-            assert!(
-                source.is_open_row,
-                "internal ABI planning error: closed evidence source {:?} cannot satisfy target slot {target}",
-                source.static_slots()
-            );
-            EvidenceSelector::DynamicTag(target.to_string())
-        }
+        assert!(
+            source.is_open_row,
+            "internal ABI planning error: closed evidence source {:?} cannot satisfy target slot {target}",
+            source.static_slots()
+        );
+        EvidenceSelector::DynamicTag(target.to_string())
     }
 }
 
@@ -503,30 +340,14 @@ impl CallableAbi {
         self.evidence.clone()
     }
 
-    pub fn from_resolved_symbol(
-        resolved: &ResolvedSymbol,
-        fallback_ty: Option<&Type>,
-        mut canonicalize_effects: impl FnMut(Vec<String>) -> Vec<String>,
-    ) -> Self {
+    /// The declared ABI of a resolved callee. Effects an occurrence adds
+    /// through the callee's open row stay in the forwarded tail, so the
+    /// declaration's static prefix is used as is.
+    pub fn from_resolved_symbol(resolved: &ResolvedSymbol) -> Self {
         match &resolved.kind {
             ResolvedCodegenKind::Intrinsic { arity, .. } => CallableAbi::pure(*arity),
             ResolvedCodegenKind::BeamFunction { abi, .. }
-            | ResolvedCodegenKind::ExternalFunction { abi, .. } => {
-                let fallback =
-                    fallback_ty.map(|ty| CallableAbi::from_type(ty, &mut canonicalize_effects));
-                let occurrence_evidence = fallback.and_then(|abi| abi.evidence);
-                // The occurrence type carries call-site specialization, while
-                // the exported ABI defines the callee's positional prefix.
-                // Specialize declaration slots in place; effects absorbed by
-                // an open row remain in the forwarded tail.
-                let mut instantiated = abi.clone();
-                if let (Some(declared), Some(occurrence)) =
-                    (abi.evidence.as_ref(), occurrence_evidence.as_ref())
-                {
-                    instantiated.evidence = Some(declared.specialize_declared_slots(occurrence));
-                }
-                instantiated
-            }
+            | ResolvedCodegenKind::ExternalFunction { abi, .. } => abi.clone(),
         }
     }
 }
@@ -693,18 +514,8 @@ mod tests {
     }
 
     #[test]
-    fn open_declaration_specialization_keeps_row_effects_out_of_static_prefix() {
-        let declared = EvidenceAbi::new(["OpenAdapter.A", "OpenAdapter.B"], true);
-        let occurrence = EvidenceAbi::new(["Main.Z", "OpenAdapter.A", "OpenAdapter.B"], true);
-        assert_eq!(
-            declared.specialize_declared_slots(&occurrence),
-            EvidenceAbi::new(["OpenAdapter.A", "OpenAdapter.B"], true)
-        );
-    }
-
-    #[test]
     fn reframe_plan_reuses_identical_abi() {
-        let abi = EvidenceAbi::new(["Main.Fail<Std.Int.Int>"], true);
+        let abi = EvidenceAbi::new(["Main.Fail"], true);
         assert_eq!(
             EvidenceReframePlan::between(&abi, &abi).kind,
             EvidenceReframeKind::Identity
@@ -736,43 +547,17 @@ mod tests {
     }
 
     #[test]
-    fn reframe_plan_relabels_a_unique_generic_family_slot() {
-        let source = EvidenceAbi::new(["Main.Rollback<$1>"], true);
-        let target = EvidenceAbi::new(["Main.Rollback<Std.String.String>"], true);
+    fn reframe_plan_uses_dynamic_tag_for_a_slot_missing_from_an_open_source() {
+        let source = EvidenceAbi::new(["Main.Repo"], true);
+        let target = EvidenceAbi::new(["Main.Fail"], true);
         assert_eq!(
             EvidenceReframePlan::between(&source, &target).kind,
             EvidenceReframeKind::ReframeOpen {
                 source_static_count: 1,
                 forward_static_positions: vec![],
-                selectors: vec![EvidenceSelector::Relabel {
-                    position: 1,
-                    target: "Main.Rollback<Std.String.String>".into(),
-                }],
+                selectors: vec![EvidenceSelector::DynamicTag("Main.Fail".into())],
             }
         );
-    }
-
-    #[test]
-    fn reframe_plan_uses_dynamic_tag_for_missing_or_ambiguous_static_family() {
-        let missing = EvidenceAbi::new(["Main.Repo"], true);
-        let concrete_sibling = EvidenceAbi::new(["Main.Fail<Std.String.String>"], true);
-        let ambiguous = EvidenceAbi::new(
-            ["Main.Fail<Std.Int.Int>", "Main.Fail<Std.String.String>"],
-            true,
-        );
-        let target = EvidenceAbi::new(["Main.Fail<Std.Bool.Bool>"], true);
-        for source in [&missing, &concrete_sibling, &ambiguous] {
-            assert_eq!(
-                EvidenceReframePlan::between(source, &target).kind,
-                EvidenceReframeKind::ReframeOpen {
-                    source_static_count: source.static_slots().len(),
-                    forward_static_positions: vec![],
-                    selectors: vec![EvidenceSelector::DynamicTag(
-                        "Main.Fail<Std.Bool.Bool>".into()
-                    )],
-                }
-            );
-        }
     }
 
     #[test]
@@ -813,23 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn reframe_plan_searches_open_tail_before_relabeling_a_placeholder() {
-        let source = EvidenceAbi::new(["Main.Fail"], true);
-        let target = EvidenceAbi::closed(["Main.Fail<Std.Int.Int>"]);
-        assert_eq!(
-            EvidenceReframePlan::between(&source, &target).kind,
-            EvidenceReframeKind::SelectClosed {
-                selectors: vec![EvidenceSelector::DynamicTag(
-                    "Main.Fail<Std.Int.Int>".into()
-                )]
-            }
-        );
-    }
-
-    #[test]
     fn installation_plan_couples_runtime_strategy_and_target_abi() {
         let open = EvidenceAbi::new(["Main.Fail"], true);
-        let open_plan = open.plan_install("Main.Fail<Std.String.String>");
+        let open_plan = open.plan_install("Main.Repo");
         assert_eq!(
             open_plan.kind,
             EvidenceInstallKind::StaticPrefix {
@@ -838,88 +609,44 @@ mod tests {
         );
         assert_eq!(
             open_plan.target,
-            EvidenceAbi::new(["Main.Fail<Std.String.String>"], true)
+            EvidenceAbi::new(["Main.Fail", "Main.Repo"], true)
         );
 
         let closed = EvidenceAbi::closed(["Main.Repo"]);
-        let closed_plan = closed.plan_install("Main.Fail<Std.String.String>");
+        let closed_plan = closed.plan_install("Main.Fail");
         assert_eq!(closed_plan.kind, EvidenceInstallKind::Canonical);
         assert_eq!(
             closed_plan.target,
-            EvidenceAbi::closed(["Main.Fail<Std.String.String>", "Main.Repo"])
+            EvidenceAbi::closed(["Main.Fail", "Main.Repo"])
         );
     }
 
     #[test]
-    fn slot_resolution_does_not_steal_a_concrete_sibling() {
-        let abi = EvidenceAbi::new(["Main.Fail<Std.String.String>"], true);
+    fn slot_resolution_is_positional_only_for_a_named_static_slot() {
+        let abi = EvidenceAbi::new(["Main.Fail", "Main.Repo"], true);
         assert_eq!(
-            abi.resolve_slot("Main.Fail<Std.String.String>"),
-            EvidenceSlotResolution::Static(1)
+            abi.resolve_slot("Main.Repo"),
+            EvidenceSlotResolution::Static(2)
         );
         assert_eq!(
-            abi.resolve_slot("Main.Fail<Std.Int.Int>"),
+            abi.resolve_slot("Main.Log"),
             EvidenceSlotResolution::DynamicTag
         );
-
-        let generic = EvidenceAbi::new(["Main.Fail<$1>"], true);
-        assert_eq!(
-            generic.resolve_slot("Main.Fail<Std.Int.Int>"),
-            EvidenceSlotResolution::Static(1)
-        );
     }
 
     #[test]
-    fn merged_requirements_keep_all_static_slots() {
-        let expected = EvidenceAbi {
-            static_effects: vec![
-                "Main.Repo".into(),
-                "Main.Rollback<Std.String.String>".into(),
-            ],
-            is_open_row: true,
-        };
-        let inferred = EvidenceAbi {
-            static_effects: vec!["Main.Rollback<Std.String.String>".into()],
-            is_open_row: false,
-        };
-
+    fn merged_requirements_union_static_slots() {
+        let expected = EvidenceAbi::new(["Main.Repo", "Main.Rollback"], true);
+        let inferred = EvidenceAbi::closed(["Main.Rollback"]);
         assert_eq!(
             EvidenceAbi::merge_requirements(&expected, &inferred),
             expected
         );
-    }
 
-    #[test]
-    fn merged_requirements_keep_distinct_concrete_family_slots() {
-        let expected = EvidenceAbi {
-            static_effects: vec!["Main.Fail<Std.Int.Int>".into()],
-            is_open_row: true,
-        };
-        let inferred = EvidenceAbi {
-            static_effects: vec!["Main.Fail<Std.String.String>".into()],
-            is_open_row: false,
-        };
-
+        let other = EvidenceAbi::closed(["Main.Log"]);
         assert_eq!(
-            EvidenceAbi::merge_requirements(&expected, &inferred).static_effects,
-            vec!["Main.Fail<Std.Int.Int>", "Main.Fail<Std.String.String>"]
-        );
-    }
-
-    #[test]
-    fn merged_requirements_collapse_generic_and_concrete_family_slot() {
-        let expected = EvidenceAbi {
-            static_effects: vec!["Main.Rollback<$1>".into()],
-            is_open_row: false,
-        };
-        let inferred = EvidenceAbi {
-            static_effects: vec!["Main.Rollback<Std.String.String>".into()],
-            is_open_row: false,
-        };
-
-        assert_eq!(
-            EvidenceAbi::merge_requirements(&expected, &inferred).static_effects,
-            vec!["Main.Rollback<Std.String.String>"]
+            EvidenceAbi::merge_requirements(&expected, &other),
+            EvidenceAbi::new(["Main.Log", "Main.Repo", "Main.Rollback"], true)
         );
     }
 }

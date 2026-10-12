@@ -106,11 +106,6 @@ impl<'a> Lowerer<'a> {
                 .and_then(|pae| pae.get(&source_idx));
             let has_open_row = op_param_open_rows.contains(&source_idx);
             if absorbed_effects.is_some() || has_open_row {
-                let actual_callback_effects = self
-                    .semantic_type_at_node(arg.id)
-                    .and_then(|ty| self.cps_function_shape_from_type(ty))
-                    .map(|shape| shape.static_slots().to_vec())
-                    .unwrap_or_default();
                 let mut uncapturable: Vec<String> = Vec::new();
                 let mut uses_native_callback_context = false;
                 for eff in absorbed_effects.into_iter().flatten() {
@@ -133,23 +128,7 @@ impl<'a> Lowerer<'a> {
                         }
                         continue;
                     }
-                    let concrete = if actual_callback_effects.contains(eff) {
-                        eff.clone()
-                    } else {
-                        let family = crate::typechecker::applied_effect_family(eff);
-                        let matches = actual_callback_effects
-                            .iter()
-                            .filter(|actual| {
-                                crate::typechecker::applied_effect_family(actual) == family
-                            })
-                            .collect::<Vec<_>>();
-                        if matches.len() == 1 {
-                            matches[0].to_string()
-                        } else {
-                            eff.clone()
-                        }
-                    };
-                    uncapturable.push(concrete);
+                    uncapturable.push(eff.clone());
                 }
                 uncapturable.sort();
                 uncapturable.dedup();

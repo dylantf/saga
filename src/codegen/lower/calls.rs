@@ -1431,7 +1431,7 @@ impl<'a> Lowerer<'a> {
     /// let-binding that produces the evidence
     /// (`(var_name, value_expr)`).
     ///
-    /// The authoritative `EvidenceReframePlan` selects/relabels the callee's
+    /// The authoritative `EvidenceReframePlan` selects the callee's
     /// prefix and forwards only the row tail described by the target ABI.
     /// When no evidence is in scope, emit an empty tuple placeholder so the
     /// CPS arity remains valid for handler-bound paths.

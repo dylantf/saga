@@ -223,7 +223,6 @@ impl<'a> Lowerer<'a> {
                                 evidence::append_tail(
                                     CExpr::Var(evidence_param.clone()),
                                     CExpr::Var(captured.var.clone()),
-                                    &shape,
                                 ),
                             ));
                             merged

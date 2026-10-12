@@ -612,13 +612,10 @@ impl<'a> Lowerer<'a> {
 
     /// Resolve a bare effect name to its canonical form.
     fn canonicalize_effect(&self, bare: &str) -> String {
-        let family = crate::typechecker::applied_effect_family(bare);
-        let canonical = self
-            .effect_canonical
-            .get(family)
+        self.effect_canonical
+            .get(bare)
             .cloned()
-            .unwrap_or_else(|| family.to_string());
-        format!("{}{}", canonical, &bare[family.len()..])
+            .unwrap_or_else(|| bare.to_string())
     }
 
     /// Canonicalize a list of effect names from the type system (which uses bare names).
@@ -643,8 +640,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn effect_handler_ops(&self, effects: &[String]) -> Vec<(String, String)> {
         let mut ops = Vec::new();
         for eff_name in effects {
-            let family = crate::typechecker::applied_effect_family(eff_name);
-            if let Some(info) = self.effect_defs.get(family) {
+            if let Some(info) = self.effect_defs.get(eff_name) {
                 // Sort op names for deterministic ordering
                 let mut op_names: Vec<&String> = info.ops.keys().collect();
                 op_names.sort();

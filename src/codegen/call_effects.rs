@@ -515,14 +515,11 @@ impl<'a> Populator<'a> {
     }
 
     fn canonicalize(&self, bare: &str) -> String {
-        let family = crate::typechecker::applied_effect_family(bare);
-        let canonical = self
-            .inputs
+        self.inputs
             .effect_canonical
-            .get(family)
+            .get(bare)
             .cloned()
-            .unwrap_or_else(|| family.to_string());
-        format!("{}{}", canonical, &bare[family.len()..])
+            .unwrap_or_else(|| bare.to_string())
     }
 
     fn canonicalize_effects(&self, effects: Vec<String>) -> Vec<String> {
@@ -1303,7 +1300,7 @@ impl<'a> Populator<'a> {
         // to fun_sigs (which holds CPS-expanded info for local funs).
         let resolved = self.inputs.resolved.get(&head_id);
         let resolved_shape =
-            resolved.map(|resolved| self.runtime_shape_from_resolved_head(head_id, resolved));
+            resolved.map(CallableAbi::from_resolved_symbol);
         if resolved
             .is_some_and(|resolved| matches!(resolved.kind, ResolvedCodegenKind::Intrinsic { .. }))
         {
@@ -1480,8 +1477,7 @@ impl<'a> Populator<'a> {
             // through bare; `effect_ops` is keyed canonically. Canonicalize
             // before lookup so the two stores agree.
             let canonical = self.canonicalize(eff);
-            let family = crate::typechecker::applied_effect_family(&canonical);
-            if let Some(op_names) = self.inputs.effect_ops.get(family) {
+            if let Some(op_names) = self.inputs.effect_ops.get(&canonical) {
                 for op in op_names {
                     out.push(OpKey {
                         effect: canonical.clone(),
@@ -1496,17 +1492,6 @@ impl<'a> Populator<'a> {
 
     fn callable_abi_from_type(&self, ty: &crate::typechecker::Type) -> CallableAbi {
         CallableAbi::from_type(ty, |effects| self.canonicalize_effects(effects))
-    }
-
-    fn runtime_shape_from_resolved_head(
-        &self,
-        head_id: NodeId,
-        resolved: &crate::codegen::resolve::ResolvedSymbol,
-    ) -> CallableAbi {
-        let fallback_ty = self.inputs.check_result.resolved_type_for_node(head_id);
-        CallableAbi::from_resolved_symbol(resolved, fallback_ty.as_ref(), |effects| {
-            self.canonicalize_effects(effects)
-        })
     }
 
     fn runtime_shape_from_resolved_env(
@@ -1655,11 +1640,11 @@ mod tests {
         let inferred = CallableAbi::pure(1);
         let implementation = CallableAbi::cps(
             1,
-            EvidenceAbi::new(["Main.Repo", "Main.Rollback<Std.String.String>"], true),
+            EvidenceAbi::new(["Main.Repo", "Main.Rollback"], true),
         );
         let boundary = CallableAbi::cps(
             1,
-            EvidenceAbi::new(["Main.Rollback<Std.String.String>"], false),
+            EvidenceAbi::new(["Main.Rollback"], false),
         );
 
         let mut plan = EffectAbiPlan::default();

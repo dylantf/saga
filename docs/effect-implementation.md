@@ -427,8 +427,8 @@ of a callable:
 A callable body indexes evidence using its `CallableAbi`, never the narrower
 set of effects that happened to be performed in that body. Handler insertion
 updates the runtime tuple and the compile-time `EvidenceFrame` together.
-Exported `CallableAbi` metadata is preserved through imports and re-exports;
-the caller's occurrence type supplies concrete applied-effect instantiations.
+Exported `CallableAbi` metadata is preserved through imports and re-exports
+and is used as declared at every occurrence.
 
 The plan is completed in two pre-lowering stages. Call classification records
 declarations, inferred callable views, and instantiated call targets. A
@@ -444,15 +444,18 @@ registered native callback convention.
 
 ### Evidence Vector Representation
 
-The evidence vector is a BEAM tuple of per-effect entries. Effect arguments
-are part of an entry's identity, so two applications of one family occupy
-independent slots:
+The evidence vector is a BEAM tuple of per-effect entries. An entry's tag is
+the effect's canonical family name; type arguments are not part of it, so
+`Fail String` and `Fail e` are both tagged `'Std.Fail.Fail'`. This is sound
+because a row holds one application of a family (see "One Application Per
+Effect Family"). A `neweffect` instance is a separate nominal effect and is
+tagged with its own name:
 
 ```erlang
 {
-  {'Std.Fail.Fail<Std.String.String>', {StringFailHandler}},
-  {'Std.Fail.Fail<Std.Int.Int>',       {IntFailHandler}},
-  {'Std.IO.Stdio',                     {EprintHandler, PrintHandler, ReadHandler}}
+  {'Main.UserRepo', {UserLoadHandler}},   %% neweffect UserRepo = Repo UserDb
+  {'Std.Fail.Fail', {FailHandler}},
+  {'Std.IO.Stdio',  {EprintHandler, PrintHandler, ReadHandler}}
 }
 ```
 
@@ -467,16 +470,14 @@ meaning of the vector is:
 ```
 
 This flat representation was chosen over a nested `{StaticSlots, OpenTail}`
-frame. It keeps the CPS function ABI unchanged while allowing a caller to
-select `Repo UsersDb` for a generic `Repo db` callee and forward
-`Repo DataDb` in the same vector.
+frame because it keeps the CPS function ABI unchanged.
 
 The vector is always tagged. Closed-row op calls technically don't need the tag (the static indices suffice), but tagging keeps cross-module ABI uniform and makes runtime panics self-describing.
 
 #### Op Call Lookup
 
 - **Closed row (statically known indices):** `element(OpIdx, element(2, element(EffectIdx, Evidence)))`. Three constant-time element loads.
-- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison. Exact applied tags win. If a handler was installed by code polymorphic in its effect argument, a unique same-family entry may satisfy the lookup; zero matches or multiple matches error. O(n) where n is the number of effects in scope, typically ≤5.
+- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison and raises `{evidence_tag_not_found, Tag}` when no entry has that tag. O(n) where n is the number of effects in scope, typically ≤5.
 
 #### Extending Evidence at `with`
 
@@ -505,29 +506,22 @@ CallEvidence = call 'std_evidence_bridge':'reframe_evidence'(
 apply Callee(Args, CallEvidence, ReturnK)
 ```
 
-Selectors are one-based positions in the caller's static prefix, concrete
-applied-effect atoms found in its tagged remainder, or `{Position, Tag}` pairs
-when a known static family slot must be relabeled. Selected entries are ordered
-as the callee expects. The reframe plan also names which unselected source
+Selectors are one-based positions in the caller's static prefix, or effect
+tags (atoms) looked up in its tagged remainder. Selection never changes an
+entry's tag. Selected entries are ordered as the callee expects. The reframe plan also names which unselected source
 static positions instantiate the target row variable: a closed caller's extra
 slots can become that tail, while an already-open caller forwards its tagged
-tail without leaking handled or omitted declaration-prefix slots into it. An
-atom selector relabels a unique polymorphic-family entry to the concrete
-applied identity requested by the callee; a position/tag pair does the same
-without searching a forwarded tail that may contain a sibling application.
-Closed-row
-Closed projection and relabeling use the same selector language as open-row
-reframing.
+tail without leaking handled or omitted declaration-prefix slots into it.
+Closed projection uses the same selector language as open-row reframing.
 When a closed CPS function value is passed through an open callback slot,
-`select_evidence` uses the position/tag selector language above but drops every
+`select_evidence` uses the selector language above but drops every
 unselected entry. The open tail belongs to the adapter ABI and must not enter
 the closed function: its local handler insertion and positional lookups assume
 a canonical closed vector.
-Thus a handler installed inside generic code may initially carry a tag such as
-`Abort<$e>`, while the evidence frame delivered to a concrete callback carries
-`Abort<String>`. Ambiguous same-family frames still error. A generic callee
-uses ordinary positional lookup and does not receive a separate runtime type
-witness. Reframing costs one tuple allocation at a cross-row call boundary.
+A handler installed inside code generic in an effect argument carries the same
+tag (`Abort`) as one installed by concrete code, so generic and concrete code
+agree on the frame without any runtime type witness. Reframing costs one tuple
+allocation at a cross-row call boundary.
 
 A partial application's runtime evidence shape comes from its compiled head,
 not solely from its instantiated result type. For example, partially applying
@@ -560,9 +554,8 @@ fun transaction :
 The handler invoking that callback supplies the named static frame (`Repo` and
 `Rollback e`). The original perform site supplies `..r`. The callback closure
 therefore retains the perform-site evidence, but does not use it directly:
-`append_tail/3` relabels the handler's call-time static prefix to the callback's
-concrete applied tags, overlays that frame, and appends only captured entries
-not replaced there. This lets a transaction-scoped `Repo` shadow the outer
+`append_tail/2` keeps the handler's call-time frame and appends only captured
+entries whose tags it does not already contain. This lets a transaction-scoped `Repo` shadow the outer
 repository while unrelated effects in `..r` continue to the callback.
 Capturing the whole perform-site frame as the callback's active frame would
 incorrectly discard both nested handlers.

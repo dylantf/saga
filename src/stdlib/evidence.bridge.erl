@@ -1,7 +1,7 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
          select_evidence/2, reframe_evidence/3,
-         append_tail/3]).
+         append_tail/2]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -14,7 +14,7 @@
 find_evidence(Evidence, Tag) ->
     case find_evidence_at(Evidence, Tag, 1, tuple_size(Evidence)) of
         {ok, OpTuple} -> OpTuple;
-        not_found -> find_unique_family_evidence(Evidence, Tag)
+        not_found -> erlang:error({evidence_tag_not_found, Tag})
     end.
 
 find_evidence_at(_Evidence, _Tag, I, N) when I > N -> not_found;
@@ -22,22 +22,6 @@ find_evidence_at(Evidence, Tag, I, N) ->
     case element(I, Evidence) of
         {Tag, OpTuple} -> {ok, OpTuple};
         _ -> find_evidence_at(Evidence, Tag, I + 1, N)
-    end.
-
-%% A handler installed inside code polymorphic in an effect argument cannot
-%% mint the caller's concrete applied tag: there is deliberately no runtime
-%% type witness.  Such slots are still safe to use when their effect family is
-%% unique in the frame.  Exact applied tags always win; multiple family
-%% matches remain an error rather than choosing by order.
-find_unique_family_evidence(Evidence, Tag) ->
-    Family = effect_family(Tag),
-    Matches = [Ops || I <- lists:seq(1, tuple_size(Evidence)),
-                       {EntryTag, Ops} <- [element(I, Evidence)],
-                       effect_family(EntryTag) =:= Family],
-    case Matches of
-        [OpTuple] -> OpTuple;
-        [] -> erlang:error({evidence_tag_not_found, Tag});
-        _ -> erlang:error({ambiguous_evidence_family, Family})
     end.
 
 %% Insert a new {Tag, OpTuple} entry at its canonical position. If an entry
@@ -73,23 +57,20 @@ insert_static(Evidence, StaticCount, {NewTag, _} = NewEntry) ->
 %% the surrounding HOF's tail belongs to the adapter ABI, not to the closed
 %% function it invokes.
 select_evidence(Evidence, Selectors) ->
-    list_to_tuple([selected_entry(Evidence, Selector,
-                                 selector_position(Evidence, Selector))
+    list_to_tuple([element(selector_position(Evidence, Selector), Evidence)
                    || Selector <- Selectors]).
 
 %% Build a callee-shaped open-row vector. Selectors identify the callee's
 %% positional static prefix: integers address the caller's own static prefix,
-%% while atoms select a concrete applied tag from the forwarded remainder.
+%% while atoms select an entry by its tag from the forwarded remainder.
 %% FramePlan names the source prefix length and the source-static positions
 %% that instantiate the target row variable. The already-tagged source tail is
 %% always forwarded; omitted declaration-prefix slots are not implicitly
 %% leaked into it.
 reframe_evidence(Evidence, {StaticCount, ForwardStaticPositions}, Selectors) ->
-    SelectedPositions = unique_positions(
-        [selector_position(Evidence, S) || S <- Selectors]),
-    Selected = [selected_entry(Evidence, Selector,
-                               selector_position(Evidence, Selector))
-                || Selector <- Selectors],
+    Positions = [selector_position(Evidence, S) || S <- Selectors],
+    SelectedPositions = unique_positions(Positions),
+    Selected = [element(I, Evidence) || I <- Positions],
     ForwardPositions = unique_positions(
         ForwardStaticPositions ++ lists:seq(StaticCount + 1, tuple_size(Evidence))),
     Remaining = [element(I, Evidence)
@@ -99,22 +80,16 @@ reframe_evidence(Evidence, {StaticCount, ForwardStaticPositions}, Selectors) ->
 
 %% An effect-operation callback with an open row receives its named effects
 %% from the handler that invokes it, while the unknown row tail comes from the
-%% original perform site. Keep the call-time frame as the static prefix and
-%% append captured entries it does not already replace. Exact duplicates are
-%% removed with call-time evidence winning; distinct applications of one family
-%% remain independent. The callback's concrete named effects therefore come
-%% from the nested handler while its `..r` effects survive from the perform site.
-append_tail(CallEvidence, CapturedEvidence, StaticTags) ->
+%% original perform site. Keep the call-time frame, whose static prefix is
+%% already in the callback's order, and append the captured entries it does not
+%% replace. The callback's named effects therefore come from the nested handler
+%% while its `..r` effects survive from the perform site.
+append_tail(CallEvidence, CapturedEvidence) ->
     CallEntries = tuple_to_list(CallEvidence),
-    {StaticPrefix, CallTail} = lists:split(length(StaticTags), CallEntries),
-    SpecializedPrefix = [{Tag, Ops}
-                         || {Tag, {_OldTag, Ops}}
-                                <- lists:zip(StaticTags, StaticPrefix)],
-    SpecializedCall = SpecializedPrefix ++ CallTail,
-    CallTags = [Tag || {Tag, _} <- SpecializedCall],
+    CallTags = [Tag || {Tag, _} <- CallEntries],
     ExtraTail = [Entry || {Tag, _} = Entry <- tuple_to_list(CapturedEvidence),
                           not lists:member(Tag, CallTags)],
-    list_to_tuple(SpecializedCall ++ ExtraTail).
+    list_to_tuple(CallEntries ++ ExtraTail).
 
 unique_positions(Positions) -> unique_positions(Positions, []).
 
@@ -127,24 +102,11 @@ unique_positions([Position | Rest], Acc) ->
 
 selector_position(Evidence, I) when is_integer(I), I >= 1,
                                       I =< tuple_size(Evidence) -> I;
-selector_position(Evidence, {I, _Tag}) when is_integer(I), I >= 1,
-                                               I =< tuple_size(Evidence) -> I;
 selector_position(Evidence, Tag) when is_atom(Tag) ->
     case entry_position(Evidence, Tag, 1, tuple_size(Evidence)) of
         {ok, Position} -> Position;
-        not_found -> unique_family_position(Evidence, Tag)
+        not_found -> erlang:error({evidence_tag_not_found, Tag})
     end.
-
-%% Atom selectors carry the callee's requested identity, so selecting a
-%% unique polymorphic family also specializes the entry's runtime tag.
-selected_entry(Evidence, {_Position, Tag}, Position) when is_atom(Tag) ->
-    {_OldTag, Ops} = element(Position, Evidence),
-    {Tag, Ops};
-selected_entry(Evidence, Selector, Position) when is_atom(Selector) ->
-    {_OldTag, Ops} = element(Position, Evidence),
-    {Selector, Ops};
-selected_entry(Evidence, _Selector, Position) ->
-    element(Position, Evidence).
 
 entry_position(_Evidence, _Tag, I, N) when I > N -> not_found;
 entry_position(Evidence, Tag, I, N) ->
@@ -152,18 +114,3 @@ entry_position(Evidence, Tag, I, N) ->
         {Tag, _} -> {ok, I};
         _ -> entry_position(Evidence, Tag, I + 1, N)
     end.
-
-unique_family_position(Evidence, Tag) ->
-    Family = effect_family(Tag),
-    Matches = [I || I <- lists:seq(1, tuple_size(Evidence)),
-                    {EntryTag, _} <- [element(I, Evidence)],
-                    effect_family(EntryTag) =:= Family],
-    case Matches of
-        [Position] -> Position;
-        [] -> erlang:error({evidence_tag_not_found, Tag});
-        _ -> erlang:error({ambiguous_evidence_family, Family})
-    end.
-
-effect_family(Tag) ->
-    [Family | _] = binary:split(atom_to_binary(Tag, utf8), <<"<">>),
-    Family.

@@ -280,9 +280,7 @@ impl<'a> Lowerer<'a> {
             .as_deref()
             .unwrap_or_else(|| self.current_semantic_module_name());
         if let Some(resolved) = self.effect_for_handler_arm(arm, Some(module_name)) {
-            return resolved == eff
-                || crate::typechecker::applied_effect_family(&resolved)
-                    == crate::typechecker::applied_effect_family(eff);
+            return resolved == eff;
         }
 
         self.handler_arm_fallback_matches_effect_op(info, arm, eff)

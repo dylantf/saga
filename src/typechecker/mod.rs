@@ -762,77 +762,14 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     effects
 }
 
-/// Stable codegen identity for one applied effect entry.
+/// Runtime identity of an effect entry: its family name.
 ///
-/// Effect families without arguments retain their existing key. Applied
-/// effects include canonical structural type arguments so distinct runtime
-/// handler slots cannot collapse to the same family tag.
+/// Type arguments are not part of the identity. The typechecker guarantees a
+/// row holds at most one application of a family, so the family name alone
+/// selects the handler. `neweffect` instances are separate nominal effects
+/// and carry their own names.
 pub fn applied_effect_key(entry: &EffectEntry) -> String {
-    if entry.args.is_empty()
-        || matches!(
-            entry.name.rsplit('.').next().unwrap_or(&entry.name),
-            "Actor" | "Process" | "Monitor" | "Link" | "Timer"
-        )
-    {
-        return entry.name.clone();
-    }
-    let args = entry
-        .args
-        .iter()
-        .map(runtime_type_key)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{}<{}>", entry.name, args)
-}
-
-/// Return the canonical family portion of an applied-effect codegen key.
-pub fn applied_effect_family(key: &str) -> &str {
-    key.split_once('<').map_or(key, |(family, _)| family)
-}
-
-fn runtime_type_key(ty: &Type) -> String {
-    match ty {
-        Type::Var(id) => format!("${id}"),
-        Type::Con(name, args) if args.is_empty() => name.clone(),
-        Type::Con(name, args) => format!(
-            "{}<{}>",
-            name,
-            args.iter()
-                .map(runtime_type_key)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Type::Fun(param, ret, row) => {
-            let effects = row
-                .effects
-                .iter()
-                .map(applied_effect_key)
-                .collect::<Vec<_>>()
-                .join(",");
-            let tails = row
-                .tails
-                .iter()
-                .map(runtime_type_key)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "fn({})->{}!{{{}|{}}}",
-                runtime_type_key(param),
-                runtime_type_key(ret),
-                effects,
-                tails
-            )
-        }
-        Type::Record(fields) => format!(
-            "{{{}}}",
-            fields
-                .iter()
-                .map(|(name, ty)| format!("{name}:{}", runtime_type_key(ty)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Type::Error => "?".to_string(),
-    }
+    entry.name.clone()
 }
 
 /// Collect exact effect entries from a callback parameter type's effect rows.
