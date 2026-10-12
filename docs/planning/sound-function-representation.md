@@ -81,15 +81,15 @@ tried to classify harder.
 - The representation of a function value depends on its own type and is
   checkable at runtime, so no call site depends on provenance.
 - No language feature is removed, except the unsound cases of effect
-  subtyping.
+  subtyping and distinct applications of one effect family in a row (D6).
 
 ## Non-goals
 
 - A uniform calling convention.
 - An optimizer that is required for baseline performance.
 - Replacing the lowerer as a precondition for fixing the crashes.
-- Deciding whether type arguments belong in effect identity. Today's
-  behaviour (`Fail String` and `Fail Int` distinct) is preserved.
+- Keeping distinct applications of one effect family in a single row. That
+  feature is removed (D6); see "Family-only effect identity".
 
 ## Decisions
 
@@ -101,7 +101,7 @@ tried to classify harder.
 | D3 | Emit Erlang source text instead of Core Erlang | agreed; moved to Stage C |
 | D4 | Codegen gets its own complete type table; `type_at_node` stays LSP-only | agreed |
 | D5 | Representation changes are whole-program behind one flag | agreed |
-| D6 | Evidence keeps applied-effect identity; representation becomes a map | agreed |
+| D6 | Effect identity is the family alone; type arguments are checked but not part of the runtime tag. Two instances coexist only through `neweffect` | agreed 2026-10-12, replacing "keep applied-effect identity" |
 | D9 | Benchmark gates are deferred for now | agreed |
 | D7 | D2a lands as a warning first, then becomes an error | agreed |
 | D8 | Breaking changes are acceptable; version goes to 0.5.0 when Stage A becomes the default | agreed |
@@ -443,8 +443,51 @@ the integration tests that run on the BEAM, the 24 `.saga` files under
 ## Open questions
 
 - When to pick the benchmark gate back up.
-- How applied-effect tags resolve under tag-only lookup (see A4 implementation
-  notes).
+- A bridging feature for generic code over `neweffect` instances.
+
+## Family-only effect identity
+
+Decided 2026-10-12, to be done before the tagged-closure flip.
+
+### Why
+
+468 generated programs using a parameterised effect (`Fail e`) were run on
+`main` and on this branch with identical results: of 391 that typecheck, 188
+fail. Code that is all concrete works. Once generic code is involved:
+
+- 36 programs silently reach the wrong handler. Generic code installs its
+  handler under a placeholder tag; a caller looking up the concrete tag finds
+  an outer exact match first.
+- 82 fail at runtime with `ambiguous_evidence_family`.
+- 70 panic the compiler (as `examples/25-state-effect.saga` does).
+- 72 more are rejected by the typechecker because row unification pairs
+  entries by family name.
+
+Fixing this while keeping type-indexed identity needs either call-site
+relabelling (defeated by functions stored in data, and requiring permanent
+adapters) or runtime type witnesses. Both are medium-sized projects. The
+feature can return later on top of witnesses without breaking family-only
+programs.
+
+### The rule
+
+- The runtime tag of an effect is its family name. `neweffect` instances keep
+  their own nominal names.
+- A row holds at most one application of a family. Where two meet (merging,
+  joining branches, a declared `needs` row, binding a row variable), their
+  arguments are unified; a mismatch is a type error that suggests `neweffect`.
+- A handler for family `F` around a computation whose row has an open tail
+  that does not name `F` must be rejected when that tail is not free to be
+  refined: otherwise a caller could instantiate the tail with a different
+  application of `F`, and its operations would reach this handler at the wrong
+  type. This is the soundness obligation of the design.
+
+### Known cost
+
+A function written once against `Repo db` can no longer be used against two
+databases in one scope, and `neweffect` instances are nominal, so generic code
+written against `Repo db` does not serve them. A bridging feature (rebranding
+a handler, or functions generic over a nominal effect) is not designed.
 
 ## A4 implementation notes
 
@@ -476,15 +519,10 @@ re-verified line by line; nothing was built or run.
 | Hoisted dictionary methods | One body with a tag-only frame; direct calls pass the caller's frame unchanged |
 | Frame passed to a closure | Unchanged. Treat a reframe whose target has an empty static prefix as identity |
 
-### Unresolved: applied-effect tags under tag-only lookup
+### Applied-effect tags under tag-only lookup: resolved
 
-Today positional reframing and `append_tail` relabel entries by position, which
-is how a handler installed generically as `Fail<$e>` reaches code that performs
-`Fail<String>`. By tag alone, `find_evidence` can report an ambiguous family or
-pick an outer exact match. This is the same question as the on-hold identity
-decision (D6). Before the flip, add matrix cases with parameterised effects.
-Interim approach: the caller relabels the callee type's named slots before
-passing the frame.
+Resolved by D6: tags are family names, so lookup by tag is exact and needs no
+relabelling or family fallback.
 
 ### What must survive the deletion of the planner
 
