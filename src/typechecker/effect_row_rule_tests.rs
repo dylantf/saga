@@ -1,9 +1,9 @@
-//! Tests for the effect-row rule warning (decisions D2a and D7 of
+//! Tests for the effect-row rule (decisions D2a and D7 of
 //! `docs/planning/sound-function-representation.md`): closed effect rows
 //! unify only when equal, except that at a coercion position the actual row
-//! may be a subset of the expected row. Violations are warnings for now.
+//! may be a subset of the expected row. Violations are type errors.
 
-use super::unify::ROW_RULE_NOTE;
+use super::unify::ROW_RULE_MARKER;
 use super::*;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -19,35 +19,26 @@ fun pure_fn : Unit -> Int
 pure_fn () = 1
 "#;
 
-/// Type-check `PRELUDE + src`, require that it has no errors, and return the
-/// effect-row rule warnings (message text only).
-fn row_warnings(src: &str) -> Vec<String> {
+/// Type-check `PRELUDE + src` and return the effect-row rule errors (message
+/// text only). Any other type error fails the test, so an empty result means
+/// the program type-checks.
+fn row_errors(src: &str) -> Vec<String> {
     let src = format!("{PRELUDE}\n{src}");
     let tokens = Lexer::new(&src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
     crate::desugar::desugar_program(&mut program);
     let mut checker = Checker::with_prelude(None).expect("prelude");
     let result = checker.check_program(&mut program);
-    assert!(
-        !result.has_errors(),
-        "unexpected type errors: {:?}",
-        result
-            .errors()
-            .iter()
-            .map(|d| &d.message)
-            .collect::<Vec<_>>()
-    );
-    for warning in result.warnings() {
-        if warning.message.ends_with(ROW_RULE_NOTE) {
-            assert!(warning.span.is_some(), "row warning without a span");
-        }
+    let errors = result.errors();
+    for error in &errors {
+        assert!(
+            error.message.starts_with(ROW_RULE_MARKER),
+            "unexpected type error: {}",
+            error.message
+        );
+        assert!(error.span.is_some(), "row error without a span");
     }
-    result
-        .warnings()
-        .iter()
-        .filter(|d| d.message.ends_with(ROW_RULE_NOTE))
-        .map(|d| d.message.clone())
-        .collect()
+    errors.iter().map(|d| d.message.clone()).collect()
 }
 
 /// Type-check `PRELUDE + src` and return the messages of its type errors.
@@ -77,29 +68,29 @@ fn unused_needs_warnings(src: &str) -> Vec<String> {
         .collect()
 }
 
-const AT_DEPTH: &str = "are treated as the same type inside a larger type";
+const AT_DEPTH: &str = "cannot be used as the same type inside a larger type";
 const WRONG_DIRECTION: &str = "is used where a function with no effects is expected";
 
 #[track_caller]
-fn assert_one(warnings: &[String], needle: &str) {
-    assert_eq!(warnings.len(), 1, "expected one warning, got {warnings:#?}");
+fn assert_one(errors: &[String], needle: &str) {
+    assert_eq!(errors.len(), 1, "expected one error, got {errors:#?}");
     assert!(
-        warnings[0].contains(needle),
-        "expected a warning containing `{needle}`, got: {}",
-        warnings[0]
+        errors[0].contains(needle),
+        "expected an error containing `{needle}`, got: {}",
+        errors[0]
     );
 }
 
 #[track_caller]
-fn assert_none(warnings: &[String]) {
-    assert!(warnings.is_empty(), "expected no warnings: {warnings:#?}");
+fn assert_none(errors: &[String]) {
+    assert!(errors.is_empty(), "expected no errors: {errors:#?}");
 }
 
 // --- Appendix A programs that the rule is meant to reject ---
 
 #[test]
-fn a6_effectful_functions_as_pure_in_a_list_warns_at_depth() {
-    let warnings = row_warnings(
+fn a6_effectful_functions_as_pure_in_a_list_is_an_error_at_depth() {
+    let errors = row_errors(
         r#"
 fun sum_pure : List (Unit -> Int) -> Int
 sum_pure fs = case fs {
@@ -113,13 +104,13 @@ effs () = [fun () -> skip! (), fun () -> 2]
 main () = dbg (sum_pure (effs ()))
 "#,
     );
-    assert_one(&warnings, AT_DEPTH);
-    assert!(warnings[0].contains("({Skip} and no effects)"));
+    assert_one(&errors, AT_DEPTH);
+    assert!(errors[0].contains("({Skip} and no effects)"));
 }
 
 #[test]
-fn a7_pure_functions_as_effectful_in_a_list_warns_at_depth() {
-    let warnings = row_warnings(
+fn a7_pure_functions_as_effectful_in_a_list_is_an_error_at_depth() {
+    let errors = row_errors(
         r#"
 fun run_all : List (Unit -> Int needs {Skip}) -> Int needs {Skip}
 run_all fs = case fs {
@@ -133,12 +124,12 @@ pures () = [fun () -> 1, fun () -> 2]
 main () = dbg (run_all (pures ()) with { skip () = resume 100 })
 "#,
     );
-    assert_one(&warnings, AT_DEPTH);
+    assert_one(&errors, AT_DEPTH);
 }
 
 #[test]
-fn a11_effectful_function_as_pure_in_an_if_branch_warns() {
-    let warnings = row_warnings(
+fn a11_effectful_function_as_pure_in_an_if_branch_is_an_error() {
+    let errors = row_errors(
         r#"
 fun get : Bool -> (Unit -> Int)
 get b = if b then eff else (fun () -> 1)
@@ -146,14 +137,14 @@ get b = if b then eff else (fun () -> 1)
 main () = dbg ((get True) ())
 "#,
     );
-    assert_one(&warnings, WRONG_DIRECTION);
-    assert!(warnings[0].contains("a function that uses {Skip}"));
-    assert!(warnings[0].contains("add `needs {Skip}`"));
+    assert_one(&errors, WRONG_DIRECTION);
+    assert!(errors[0].contains("a function that uses {Skip}"));
+    assert!(errors[0].contains("add `needs {Skip}`"));
 }
 
 #[test]
-fn a12_effectful_function_as_pure_in_a_record_field_warns() {
-    let warnings = row_warnings(
+fn a12_effectful_function_as_pure_in_a_record_field_is_an_error() {
+    let errors = row_errors(
         r#"
 record Box { run : Unit -> Int }
 
@@ -163,48 +154,46 @@ main () = {
 }
 "#,
     );
-    assert_one(&warnings, WRONG_DIRECTION);
+    assert_one(&errors, WRONG_DIRECTION);
 }
 
 // --- Wrong direction at the other coercion positions ---
 
 #[test]
-fn effectful_function_as_pure_warns_at_every_coercion_position() {
+fn effectful_function_as_pure_is_an_error_at_every_coercion_position() {
     // Annotated `let`.
     assert_one(
-        &row_warnings("fun f : Unit -> Int\nf () = {\n  let _g : Unit -> Int = eff\n  1\n}"),
+        &row_errors("fun f : Unit -> Int\nf () = {\n  let _g : Unit -> Int = eff\n  1\n}"),
         WRONG_DIRECTION,
     );
     // Type ascription.
     assert_one(
-        &row_warnings("fun f : Unit -> Int\nf () = (eff : Unit -> Int) ()"),
+        &row_errors("fun f : Unit -> Int\nf () = (eff : Unit -> Int) ()"),
         WRONG_DIRECTION,
     );
     // Function return position.
     assert_one(
-        &row_warnings("fun f : Unit -> (Unit -> Int)\nf () = eff"),
+        &row_errors("fun f : Unit -> (Unit -> Int)\nf () = eff"),
         WRONG_DIRECTION,
     );
     // `case` branch against the declared return type.
     assert_one(
-        &row_warnings(
-            "fun f : Int -> (Unit -> Int)\nf n = case n {\n  0 -> pure_fn\n  _ -> eff\n}",
-        ),
+        &row_errors("fun f : Int -> (Unit -> Int)\nf n = case n {\n  0 -> pure_fn\n  _ -> eff\n}"),
         WRONG_DIRECTION,
     );
     // Tuple literal element.
     assert_one(
-        &row_warnings("fun f : Unit -> (Unit -> Int, Unit -> Int)\nf () = (eff, pure_fn)"),
+        &row_errors("fun f : Unit -> (Unit -> Int, Unit -> Int)\nf () = (eff, pure_fn)"),
         WRONG_DIRECTION,
     );
     // List literal element.
     assert_one(
-        &row_warnings("fun f : Unit -> List (Unit -> Int)\nf () = [pure_fn, eff]"),
+        &row_errors("fun f : Unit -> List (Unit -> Int)\nf () = [pure_fn, eff]"),
         WRONG_DIRECTION,
     );
     // Record update field.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "record Box { run : Unit -> Int }\n\
              fun f : Box -> Box\nf b = { b | run: eff }",
         ),
@@ -212,7 +201,7 @@ fn effectful_function_as_pure_warns_at_every_coercion_position() {
     );
     // Return position of a lambda that is not a call argument.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "fun f : Unit -> Int\nf () = {\n  \
              let _mk : Int -> (Unit -> Int) = fun _ -> eff\n  1\n}",
         ),
@@ -224,7 +213,7 @@ fn effectful_function_as_pure_warns_at_every_coercion_position() {
 fn call_argument_check_covers_every_arrow_of_the_callback() {
     // `Int -> (Unit -> Int)` is `Int -> Unit -> Int`: the call-argument check
     // compares the callback with its parameter type arrow by arrow, so an
-    // effect on a later arrow is a hard error like one on the first.
+    // effect on a later arrow is an error like one on the first.
     let call = "fun call : (Int -> Unit -> Int) -> Int\ncall mk = mk 1 ()\n";
     for arg in [
         "(fun _ -> eff)",
@@ -238,9 +227,7 @@ fn call_argument_check_covers_every_arrow_of_the_callback() {
              fun f : Unit -> Int needs {{Skip}}\nf () = call {arg}"
         ));
         assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("passed where a pure callback is expected")),
+            errors.iter().any(|e| e.contains(WRONG_DIRECTION)),
             "{arg}: {errors:#?}"
         );
     }
@@ -248,7 +235,7 @@ fn call_argument_check_covers_every_arrow_of_the_callback() {
 
 #[test]
 fn partially_allowed_effects_name_the_expected_row() {
-    let warnings = row_warnings(
+    let errors = row_errors(
         r#"
 effect Log { fun log : String -> Unit }
 
@@ -262,22 +249,22 @@ fun f : Unit -> (Unit -> Int needs {Log})
 f () = both
 "#,
     );
-    assert_eq!(warnings.len(), 1, "{warnings:#?}");
-    assert!(warnings[0].contains("a function that uses {Log, Skip}"));
-    assert!(warnings[0].contains("a function that only allows {Log} is expected"));
-    assert!(warnings[0].contains("Handle {Skip} first"));
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors[0].contains("a function that uses {Log, Skip}"));
+    assert!(errors[0].contains("a function that only allows {Log} is expected"));
+    assert!(errors[0].contains("Handle {Skip} first"));
 }
 
 // --- At depth, away from a literal ---
 
 #[test]
-fn rows_at_depth_warn_in_either_direction() {
+fn rows_at_depth_are_errors_in_either_direction() {
     let take_pair = "fun take_pair : (Unit -> Int needs {Skip}, Unit -> Int needs {Skip}) -> Int needs {Skip}\n\
                      take_pair p = {\n  let (a, b) = p\n  a () + b ()\n}\n";
     // A tuple held in a variable is not a literal: its element rows are
     // nested in the tuple type.
     assert_one(
-        &row_warnings(&format!(
+        &row_errors(&format!(
             "{take_pair}\
              fun f : Unit -> Int needs {{Skip}}\n\
              f () = {{\n  let pair = (pure_fn, pure_fn)\n  take_pair pair\n}}"
@@ -286,7 +273,7 @@ fn rows_at_depth_warn_in_either_direction() {
     );
     // Inside another function's parameter type.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "fun apply_pure : ((Unit -> Int) -> Int) -> Int\napply_pure k = k pure_fn\n\
              fun wants_eff : (Unit -> Int needs {Skip}) -> Int\nwants_eff g = g () with { skip () = resume 1 }\n\
              fun f : Unit -> Int\nf () = apply_pure wants_eff",
@@ -295,7 +282,7 @@ fn rows_at_depth_warn_in_either_direction() {
     );
     // Inside a named record's type argument.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "record Holder a { item : a }\n\
              fun unwrap : Holder (Unit -> Int) -> Int\nunwrap h = h.item ()\n\
              fun mk : Unit -> Holder (Unit -> Int needs {Skip})\nmk () = Holder { item: eff }\n\
@@ -306,12 +293,12 @@ fn rows_at_depth_warn_in_either_direction() {
 }
 
 #[test]
-fn branches_holding_literals_with_different_nested_rows_warn() {
+fn branches_holding_literals_with_different_nested_rows_are_errors() {
     // `if`/`case` branches are joined before any expected type is consulted,
     // and the join only widens rows of function-typed branches. Tuples are
     // joined by plain unification, so their element rows must agree.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "fun f : Bool -> (Unit -> Int needs {Skip}, Int)
 \
              f b = if b then (eff, 1) else (pure_fn, 2)",
@@ -321,7 +308,7 @@ fn branches_holding_literals_with_different_nested_rows_warn() {
     // A constructor applied to a function is not a literal position either:
     // `Just pure_fn` is a `Maybe (Unit -> Int)`.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "fun take : Maybe (Unit -> Int needs {Skip}) -> Int needs {Skip}
 \
              take m = case m {\n  Just g -> g ()\n  Nothing -> 0\n}\n\
@@ -337,14 +324,14 @@ fn local_function_clauses_share_one_effect_row() {
     // clauses perform, not the row of its first clause.
     let go = "  let go 0 = 0\n  let go m = m + skip! ()\n  go n\n}";
     let src = format!("fun f : Int -> Int needs {{Skip}}\nf n = {{\n{go}");
-    assert_none(&row_warnings(&src));
+    assert_none(&row_errors(&src));
     assert!(unused_needs_warnings(&src).is_empty());
     // A recursive one, and the effectful clause first.
-    assert_none(&row_warnings(
+    assert_none(&row_errors(
         "fun f : Int -> Int needs {Skip}\nf n = {\n  \
          let go 0 acc = acc\n  let go m acc = go (m - 1) (acc + skip! ())\n  go n 0\n}",
     ));
-    assert_none(&row_warnings(
+    assert_none(&row_errors(
         "fun f : Int -> Int needs {Skip}\nf n = {\n  \
          let go 1 = skip! ()\n  let go _ = 0\n  go n\n}",
     ));
@@ -357,16 +344,16 @@ fn local_function_clauses_share_one_effect_row() {
         "{errors:#?}"
     );
     // A pure local function stays pure.
-    assert_none(&row_warnings(
+    assert_none(&row_errors(
         "fun f : Int -> Int\nf n = {\n  let go 0 = 0\n  let go m = m + 1\n  go n\n}",
     ));
 }
 
-// --- Legal subsumption: no warning ---
+// --- Legal subsumption: accepted ---
 
 #[test]
-fn pure_function_passed_where_effectful_callback_is_expected_is_silent() {
-    assert_none(&row_warnings(
+fn pure_function_passed_where_effectful_callback_is_expected_is_accepted() {
+    assert_none(&row_errors(
         r#"
 fun run : (Unit -> Int needs {Skip}) -> Int needs {Skip}
 run f = f ()
@@ -384,9 +371,9 @@ b () = run_open pure_fn + run_open (fun () -> 2)
 }
 
 #[test]
-fn tuple_and_list_literal_widening_is_silent() {
+fn tuple_and_list_literal_widening_is_accepted() {
     // `tuple_widens_shared_row_var_at_expected_type` from tests.rs.
-    assert_none(&row_warnings(
+    assert_none(&row_errors(
         "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
          effect Bar {\n  fun bar : Unit -> Unit\n}\n\
          fun do_foo : Unit -> Unit needs {Foo}\n\
@@ -405,8 +392,8 @@ fn tuple_and_list_literal_widening_is_silent() {
 }
 
 #[test]
-fn pure_function_at_each_coercion_position_is_silent() {
-    assert_none(&row_warnings(
+fn pure_function_at_each_coercion_position_is_accepted() {
+    assert_none(&row_errors(
         r#"
 record Box { run : Unit -> Int needs {Skip} }
 
@@ -474,7 +461,7 @@ rest r = {
 fn multi_parameter_effectful_lambda_matches_a_declared_curried_type() {
     // `fun a b -> ..` and a declared `A -> B -> C needs {E}` both carry the
     // row on the last arrow.
-    assert_none(&row_warnings(
+    assert_none(&row_errors(
         r#"
 record Ops { combine : Int -> Int -> Int needs {Skip} }
 
@@ -490,7 +477,7 @@ use_ops () = {
     ));
     // The effects still have to be declared on the expected type.
     assert_one(
-        &row_warnings(
+        &row_errors(
             "record Ops { combine : Int -> Int -> Int }\n\
              fun f : Unit -> Ops\nf () = Ops { combine: fun a b -> a + b + skip! () }",
         ),
@@ -499,36 +486,36 @@ use_ops () = {
 }
 
 #[test]
-fn effect_on_a_different_arrow_than_expected_warns() {
+fn effect_on_a_different_arrow_than_expected_is_an_error() {
     // The lambda performs `Skip` when given its first argument; the expected
     // type performs it when given the second. Rows are compared per arrow.
     let early = "fun a -> {\n  let n = skip! ()\n  fun b -> a + b + n\n}";
-    let warnings = row_warnings(&format!(
+    let errors = row_errors(&format!(
         "fun mk : Unit -> (Int -> Int -> Int needs {{Skip}})\nmk () = {early}"
     ));
-    assert_one(&warnings, WRONG_DIRECTION);
-    assert!(warnings[0].contains("a function that uses {Skip}"));
+    assert_one(&errors, WRONG_DIRECTION);
+    assert!(errors[0].contains("a function that uses {Skip}"));
     assert_one(
-        &row_warnings(&format!(
+        &row_errors(&format!(
             "record Ops {{ combine : Int -> Int -> Int needs {{Skip}} }}\n\
              fun f : Unit -> Ops\nf () = Ops {{ combine: {early} }}"
         )),
         WRONG_DIRECTION,
     );
-    // Against a type that puts the effect on the first arrow it is silent.
-    assert_none(&row_warnings(&format!(
+    // Against a type that puts the effect on the first arrow it is accepted.
+    assert_none(&row_errors(&format!(
         "fun mk : Unit -> (Int -> (Int -> Int) needs {{Skip}})\nmk () = {early}"
     )));
     // The explicitly nested lambda performs it on the last arrow.
-    assert_none(&row_warnings(
+    assert_none(&row_errors(
         "fun mk : Unit -> (Int -> Int -> Int needs {Skip})\n\
          mk () = fun a -> fun b -> a + b + skip! ()",
     ));
 }
 
 #[test]
-fn equal_rows_and_row_variables_are_silent() {
-    assert_none(&row_warnings(
+fn equal_rows_and_row_variables_are_accepted() {
+    assert_none(&row_errors(
         r#"
 fun run_each : List (Unit -> Int needs {..e}) -> Int needs {..e}
 run_each fs = case fs {
@@ -553,9 +540,7 @@ f () = run_each (effs ()) + run_each (pures ()) + run_each (same (effs ()))
 }
 
 #[test]
-fn warning_is_reported_for_imported_modules() {
-    // Module checkers do not run the deferred-warning pass, so the row
-    // warnings are pushed straight onto the module's diagnostics.
+fn error_is_reported_for_imported_modules() {
     let lib = r#"
 module Lib
 
@@ -568,44 +553,21 @@ pub fun get : Bool -> (Unit -> Int)
 get b = if b then eff else (fun () -> 1)
 "#;
     let main = "module Main\nimport Lib\n\nmain () = dbg ((Lib.get False) ())\n";
-    let checker = super::tests::check_with_project_files(&[("src/Lib.saga", lib)], main)
-        .expect("project should typecheck");
-    let lib_result = checker
-        .modules
-        .check_results
-        .get("Lib")
-        .expect("Lib check result");
-    let warnings: Vec<_> = lib_result
-        .warnings()
-        .into_iter()
-        .filter(|d| d.message.ends_with(ROW_RULE_NOTE))
-        .collect();
-    assert_eq!(warnings.len(), 1, "{:?}", lib_result.diagnostics);
-    assert!(warnings[0].message.contains(WRONG_DIRECTION));
-    assert!(warnings[0].span.is_some());
+    let error = match super::tests::check_with_project_files(&[("src/Lib.saga", lib)], main) {
+        Ok(_) => panic!("project should not typecheck"),
+        Err(e) => e,
+    };
+    assert!(error.message.contains(WRONG_DIRECTION), "{}", error.message);
 }
 
 #[test]
-fn call_argument_error_supersedes_the_warning() {
-    // Direct call arguments already have a hard error for this; the warning
-    // for the same expression is dropped rather than reported twice.
-    let src = format!(
-        "{PRELUDE}\nfun run_pure : (Unit -> Int) -> Int\nrun_pure f = f ()\n\
-         fun f : Unit -> Int needs {{Skip}}\nf () = run_pure eff\n"
+fn call_argument_reports_the_rule_error_once() {
+    // Direct call arguments used to have their own "pure callback" error;
+    // the rule's error replaced it.
+    let errors = row_errors(
+        "fun run_pure : (Unit -> Int) -> Int\nrun_pure f = f ()\n\
+         fun f : Unit -> Int needs {Skip}\nf () = run_pure eff\n",
     );
-    let tokens = Lexer::new(&src).lex().expect("lex error");
-    let mut program = Parser::new(tokens).parse_program().expect("parse error");
-    crate::desugar::desugar_program(&mut program);
-    let mut checker = Checker::with_prelude(None).expect("prelude");
-    let result = checker.check_program(&mut program);
-    assert!(result.errors().iter().any(|d| {
-        d.message
-            .contains("passed where a pure callback is expected")
-    }));
-    assert!(
-        result
-            .warnings()
-            .iter()
-            .all(|d| !d.message.ends_with(ROW_RULE_NOTE))
-    );
+    assert_one(&errors, WRONG_DIRECTION);
+    assert!(errors[0].contains("a function that uses {Skip}"));
 }

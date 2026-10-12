@@ -97,8 +97,8 @@ fun a -> { skip! (); fun b -> a + b }   => Fun(a, Fun(b, Int, {}), {Skip})
 
 The third one performs `Skip` when `a` is supplied, before the inner lambda
 exists, so it is not an `a -> b -> Int needs {Skip}`. Rows are compared arrow
-by arrow, both by the effect-row rule warning at coercion positions and by
-the call-argument check (`check_callback_effect_subtype`). A local
+by arrow by the effect-row rule at coercion positions (see "Effect
+Subtyping" below). A local
 multi-clause function (`let go 0 = ..` / `let go m = ..`) gets the union of
 its clauses' effects, like a top-level one.
 
@@ -128,12 +128,50 @@ How effects compose at each expression form:
 
 ### Effect Subtyping
 
-A function with fewer effects can be used where more are allowed. Effect row unification is symmetric (accepting either direction of subset), but at function application sites, a directional check enforces that a callback argument's effects are a subset of the parameter's expected effects. This means:
+Two closed effect rows are the same type only when they are equal. The one
+exception is a *coercion position*, where a value of one type is used where
+another is expected: there a function with fewer effects may be used where
+more are allowed.
 
-- A pure function can be passed where an effectful callback is expected (covariant).
-- An effectful function CANNOT be passed where a pure callback is expected (caught by `check_callback_effect_subtype` in `infer.rs`).
+- A pure function can be passed where an effectful callback is expected.
+- An effectful function CANNOT be used where a function with fewer effects is
+  expected, at any position.
+- Away from a coercion position the rows must be identical in both directions:
+  a `List (Unit -> Int)` is not a `List (Unit -> Int needs {Skip})`, nor the
+  reverse.
 
-The directional check runs after unification succeeds, comparing the resolved argument type's effect row against the resolved parameter type's effect row. Open rows (with `..e` tail) are exempt since they accept extra effects by design.
+Coercion positions are: a direct call argument, an annotated `let` and a type
+ascription, a function or lambda body against its return type, `if` / `case`
+/ `do ... else` branches and block results against the expected type, record
+field initialisers and updates, handler arm and `return` clause bodies, and
+the elements of tuple, list and anonymous-record literals written at one of
+those positions. Only the row on the value's own arrows is coerced (compared
+arrow by arrow along a curried type). A row nested in a type-constructor
+argument, a function parameter type, a record field type or an effect's type
+argument is "at depth" and must match exactly; there is no variance tracking.
+
+```saga
+fun run : (Unit -> Int needs {Skip}) -> Int needs {Skip}
+
+run pure_fn              # ok: fewer effects at a call argument
+take_list [pure_fn, eff] # ok: literal elements at a call argument
+let fs = [pure_fn]       # List (Unit -> Int)
+take_list fs             # error: rows differ inside `List`
+```
+
+Implementation (`src/typechecker/unify.rs`): `unify_effect_rows` still accepts
+two closed rows when either is a subset of the other, but records every such
+acceptance of unequal rows as a `RowSubsumption` with the path taken through
+the types. The entry points that carry a span (`unify_at`, `unify_nested_at`,
+`coerce_at`, `coerce_expected_first_at`) judge the recorded subsumptions
+against their `RowPosition` and return a type error, prefixed
+`effect row mismatch:`, for the first violation. Three messages exist: rows
+differing at depth, an effectful function where a less effectful one is
+expected at a coercion position, and rows differing directly at a position
+that is not a coercion position. The spanless `unify` does not judge rows.
+
+Open rows (with a `..e` tail) are unaffected: a row variable is instantiated
+by unification at any depth.
 
 ### Absorption
 

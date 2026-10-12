@@ -8861,7 +8861,7 @@ fn multi_param_effectful_lambda_matches_its_annotation() {
     .expect("effectful lambda as a pure callback");
     assert!(
         err.message
-            .contains("passed where a pure callback is expected"),
+            .contains("is used where a function with no effects is expected"),
         "{}",
         err.message
     );

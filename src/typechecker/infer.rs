@@ -885,7 +885,6 @@ impl Checker {
             let arg_ty = self.infer_arg_against(arg, &param_ty)?;
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(arg, &arg_ty, &arg_ty_pre, &param_ty)?;
-            self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
             self.record_type(app_expr.id, &ret_ty);
             self.record_expr_type(app_expr.id, &ret_ty);
             current_ty = ret_ty.clone();
@@ -915,11 +914,6 @@ impl Checker {
                 &arg_ty,
                 &arg_ty_pre,
                 &deferred_lambda.param_ty,
-            )?;
-            self.apply_callback_argument_effects(
-                &arg_ty_pre,
-                &deferred_lambda.param_ty,
-                deferred_lambda.arg_expr.span,
             )?;
             // Deferred lambdas are inferred only after the whole application
             // spine has constrained the HOF's row variables. Preserve their
@@ -963,7 +957,7 @@ impl Checker {
     ///
     /// Absorbs effects declared on the joined element type, mirroring the
     /// call-site half of HOF absorption that the pairwise Cons chain
-    /// performs via `apply_callback_argument_effects` at each element.
+    /// performs at each element.
     /// Without this, effects emitted by element-defining lambdas (which
     /// propagate to the enclosing scope on lambda inference) would leak
     /// into the enclosing function's body effect row.
@@ -1274,6 +1268,7 @@ impl Checker {
             // rather than collapsing them into a generic type mismatch.
             if orig.message.contains("ambiguous effect row")
                 || orig.message.contains(super::unify::FAMILY_CONFLICT_MARKER)
+                || orig.message.starts_with(super::unify::ROW_RULE_MARKER)
             {
                 return Err(orig);
             }
@@ -1281,29 +1276,6 @@ impl Checker {
                 arg_span,
                 self.format_type_mismatch(&self.sub.apply(param_ty), arg_ty_pre),
             ));
-        }
-        Ok(())
-    }
-
-    fn apply_callback_argument_effects(
-        &mut self,
-        actual_arg: &Type,
-        expected_param: &Type,
-        arg_span: Span,
-    ) -> Result<(), Diagnostic> {
-        let resolved_param = self.sub.apply(expected_param);
-        if let Type::Fun(_, _, _) = &resolved_param
-            && let Err(e) =
-                self.check_callback_effect_subtype(actual_arg, &resolved_param, arg_span)
-        {
-            // This hard error supersedes the effect-row rule warning that
-            // unifying the argument just reported for the same expression.
-            self.collected_diagnostics.retain(|d| {
-                !(matches!(d.severity, super::Severity::Warning)
-                    && d.span == Some(arg_span)
-                    && d.message.ends_with(super::unify::ROW_RULE_NOTE))
-            });
-            return Err(e);
         }
         Ok(())
     }
@@ -1966,59 +1938,5 @@ impl Checker {
         self.lsp
             .definitions
             .push((pat_id, name.to_string(), var_span));
-    }
-
-    /// Check that a function-typed argument's effect row is compatible with
-    /// the expected parameter's effect row.
-    fn check_callback_effect_subtype(
-        &self,
-        actual_arg: &Type,
-        expected_param: &Type,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
-        let actual = self.sub.apply(actual_arg);
-        let expected = self.sub.apply(expected_param);
-        // Walk both curried chains arrow by arrow: a row on a later arrow
-        // (`A -> B -> C needs {E}`, or `fun a b -> ..`) is checked against
-        // the row on the same arrow of the parameter type.
-        let (mut actual, mut expected) = (&actual, &expected);
-        while let (Type::Fun(_, actual_ret, actual_row), Type::Fun(_, expected_ret, expected_row)) =
-            (actual, expected)
-        {
-            (actual, expected) = (actual_ret.as_ref(), expected_ret.as_ref());
-            let actual_row = self.sub.apply_effect_row(actual_row);
-            let expected_row = self.sub.apply_effect_row(expected_row);
-            if actual_row.tails.is_empty() && expected_row.tails.is_empty() {
-                let mut extra_effects: Vec<&str> = actual_row
-                    .effects
-                    .iter()
-                    .filter(|e| !expected_row.effects.iter().any(|en| en.name == e.name))
-                    .map(|e| e.name.as_str())
-                    .collect();
-                if !extra_effects.is_empty() {
-                    extra_effects.sort();
-                    let msg = if expected_row.effects.is_empty() {
-                        format!(
-                            "effectful function (uses {{{}}}) passed where a pure callback is expected",
-                            extra_effects.join(", ")
-                        )
-                    } else {
-                        let mut expected_names: Vec<&str> = expected_row
-                            .effects
-                            .iter()
-                            .map(|e| e.name.as_str())
-                            .collect();
-                        expected_names.sort();
-                        format!(
-                            "function uses effects {{{}}} not allowed by callback parameter (allows {{{}}})",
-                            extra_effects.join(", "),
-                            expected_names.join(", ")
-                        )
-                    };
-                    return Err(Diagnostic::error_at(span, msg));
-                }
-            }
-        }
-        Ok(())
     }
 }

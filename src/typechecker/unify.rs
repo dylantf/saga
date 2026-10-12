@@ -65,9 +65,11 @@ pub(crate) enum RowPosition<'a> {
 /// callers that rewrite unification errors can let it through unchanged.
 pub(crate) const FAMILY_CONFLICT_MARKER: &str = "can hold only one";
 
-/// Closing sentence of every effect-row rule warning. Also how the warnings
-/// are recognised when a hard error for the same expression supersedes them.
-pub(crate) const ROW_RULE_NOTE: &str = "This is accepted for now and will become a type error.";
+/// Prefix of every effect-row rule error (unequal closed rows where they
+/// must be equal, or a function used where one with fewer effects is
+/// expected), so callers that rewrite unification errors can let it through
+/// unchanged.
+pub(crate) const ROW_RULE_MARKER: &str = "effect row mismatch: ";
 
 /// Does `path` lead to a position where subsumption is allowed, given the
 /// expression whose type is being coerced? True when the path consists of
@@ -374,8 +376,8 @@ impl Checker {
             // equal, except at coercion positions and only in the
             // actual-subset-of-expected direction), so every acceptance of
             // unequal rows is recorded here with its path and judged by the
-            // top-level entry point (`unify_in_position`), which currently
-            // reports violations as warnings.
+            // top-level entry point (`unify_in_position`), which reports
+            // violations as type errors.
             (true, true) => {
                 if extras1.is_empty() || extras2.is_empty() {
                     if !(extras1.is_empty() && extras2.is_empty()) {
@@ -1279,7 +1281,7 @@ impl Checker {
     /// Unify with span context: if unification fails, attach the span to the error.
     ///
     /// This is the entry point for positions that are *not* coercion
-    /// positions: unequal closed effect rows accepted here are reported.
+    /// positions: unequal closed effect rows are a type error here.
     pub(crate) fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), Diagnostic> {
         self.unify_in_position(a, b, span, RowPosition::Exact)
     }
@@ -1354,34 +1356,31 @@ impl Checker {
             return Ok(());
         }
 
-        let mut messages: Vec<String> = Vec::new();
+        // The rows were accepted by the symmetric subset check; judge each
+        // one against the position. The first violation is the error.
         for subsumption in &subsumptions {
-            match position {
+            let message = match position {
                 RowPosition::Coercion {
                     actual_is_left,
                     expr,
                 } if coercion_path_is_direct(expr, &subsumption.path) => {
-                    messages.extend(self.coercion_warning(subsumption, actual_is_left));
+                    self.coercion_error(subsumption, actual_is_left)
                 }
-                _ => messages.push(self.strict_row_warning(subsumption, position)),
+                _ => Some(self.strict_row_error(subsumption, position)),
+            };
+            if let Some(message) = message {
+                return Err(Diagnostic::error_at(span, message));
             }
-        }
-        for message in messages {
-            self.warn_once_at(span, message);
         }
         Ok(())
     }
 
-    /// Warning for unequal closed rows accepted where no subsumption is
+    /// Error for unequal closed rows where no subsumption is
     /// allowed at all: inside a type-constructor argument, a function
     /// parameter, an anonymous-record field or an effect's type argument
     /// ("at depth": no variance tracking, so either direction is wrong), or
     /// directly at a position that is not a coercion position.
-    fn strict_row_warning(
-        &self,
-        subsumption: &RowSubsumption,
-        position: RowPosition<'_>,
-    ) -> String {
+    fn strict_row_error(&self, subsumption: &RowSubsumption, position: RowPosition<'_>) -> String {
         let (larger, smaller) = if subsumption.left_is_larger {
             (&subsumption.left, &subsumption.right)
         } else {
@@ -1393,28 +1392,28 @@ impl Checker {
             .all(|step| *step == UnifyStep::FunRet);
         if matches!(position, RowPosition::Exact) && returns_only {
             format!(
-                "function types with different effect rows ({} and {}) are treated as the \
-                 same type here. Effects may only be added implicitly where a value is passed, \
-                 returned, annotated or placed in a literal; make both function types declare \
-                 the same `needs` row. {}",
+                "{}function types with different effect rows ({} and {}) cannot be used as \
+                 the same type here. Effects may only be added implicitly where a value is \
+                 passed, returned, annotated or placed in a literal; make both function types \
+                 declare the same `needs` row.",
+                ROW_RULE_MARKER,
                 self.describe_row(larger),
                 self.describe_row(smaller),
-                ROW_RULE_NOTE
             )
         } else {
             format!(
-                "function types with different effect rows ({} and {}) are treated as the \
-                 same type inside a larger type. Effect rows nested in a type argument, a \
+                "{}function types with different effect rows ({} and {}) cannot be used as \
+                 the same type inside a larger type. Effect rows nested in a type argument, a \
                  function parameter or a record field must be identical; make both function \
-                 types declare the same `needs` row. {}",
+                 types declare the same `needs` row.",
+                ROW_RULE_MARKER,
                 self.describe_row(larger),
                 self.describe_row(smaller),
-                ROW_RULE_NOTE
             )
         }
     }
 
-    /// Warning for one arrow of a function value at a coercion position.
+    /// Error for one arrow of a function value at a coercion position.
     ///
     /// The actual row may have fewer effects than the expected row
     /// (subsumption). The reverse is an effectful function used as a less
@@ -1422,11 +1421,7 @@ impl Checker {
     /// effect on a different arrow of a curried type is performed at a
     /// different application, so `fun a -> { e! (); fun b -> .. }` is not an
     /// `A -> B -> C needs {E}`.
-    fn coercion_warning(
-        &self,
-        subsumption: &RowSubsumption,
-        actual_is_left: bool,
-    ) -> Option<String> {
+    fn coercion_error(&self, subsumption: &RowSubsumption, actual_is_left: bool) -> Option<String> {
         if subsumption.left_is_larger != actual_is_left {
             return None;
         }
@@ -1451,14 +1446,14 @@ impl Checker {
             )
         };
         Some(format!(
-            "a function that uses {} is used where {}. Handle {} first \
+            "{}a function that uses {} is used where {}. Handle {} first \
              (for example `fun x -> f x with handler`), or add `needs {}` to the \
-             expected function type. {}",
+             expected function type.",
+            ROW_RULE_MARKER,
             self.describe_effects(&actual.effects),
             expected,
             unexpected,
             unexpected,
-            ROW_RULE_NOTE
         ))
     }
 
@@ -1476,27 +1471,6 @@ impl Checker {
             "no effects".to_string()
         } else {
             self.describe_effects(&row.effects)
-        }
-    }
-
-    /// Push a warning unless the same one was already reported for this
-    /// expression or one nested in it. The same rows are often unified more
-    /// than once on the way out: a function body against its result type by
-    /// both `infer_expr_against` and `check_fun_clauses`, or a lambda's body
-    /// against the expected return type and then the whole lambda against
-    /// the parameter it is passed to.
-    fn warn_once_at(&mut self, span: Span, message: String) {
-        let duplicate = self.collected_diagnostics.iter().any(|d| {
-            matches!(d.severity, Severity::Warning)
-                && d.message == message
-                && d.span.is_some_and(|seen| {
-                    (seen.start >= span.start && seen.end <= span.end)
-                        || (span.start >= seen.start && span.end <= seen.end)
-                })
-        });
-        if !duplicate {
-            self.collected_diagnostics
-                .push(Diagnostic::warning_at(span, message));
         }
     }
 

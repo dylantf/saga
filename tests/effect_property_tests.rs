@@ -3456,7 +3456,6 @@ result () = {
 }
 
 #[test]
-#[ignore = "known failure A6: effectful functions accepted as pure in a list"]
 fn repro_a6_effectful_list_rejected_as_pure_list() {
     let src = repro_src(
         r#"fun sum_pure : List (Unit -> Int) -> Int
@@ -3478,7 +3477,6 @@ result () = sum_pure (effs ())
 // A7 runs correctly once closures are tagged, then becomes a type error when
 // the row rule is enforced. This pins the final state.
 #[test]
-#[ignore = "known failure A7: pure functions accepted as effectful in a list"]
 fn repro_a7_pure_list_rejected_as_effectful_list() {
     let src = repro_src(
         r#"fun run_all : List (Unit -> Int needs {Skip}) -> Int needs {Skip}
@@ -3556,7 +3554,6 @@ result () = {
 }
 
 #[test]
-#[ignore = "known failure A11: effectful function accepted as pure in an if branch"]
 fn repro_a11_effectful_branch_rejected_as_pure() {
     let src = repro_src(
         r#"fun get : Bool -> (Unit -> Int)
@@ -3570,7 +3567,6 @@ result () = (get True) ()
 }
 
 #[test]
-#[ignore = "known failure A12: effectful function accepted as pure in a record field"]
 fn repro_a12_effectful_record_field_rejected_as_pure() {
     let src = repro_src(
         r#"record Box { run : Unit -> Int }
