@@ -805,7 +805,7 @@ impl Checker {
 
             // Infer body and check it matches the (possibly arrow-peeled) return.
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&body_ty, &remaining_return, body.span)
+            self.coerce_at(&body_ty, &remaining_return, body.span, Some(body))
                 .map_err(|e| {
                     Diagnostic::error_at(
                         span,

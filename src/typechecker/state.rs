@@ -273,6 +273,12 @@ pub struct Checker {
     /// Keyed by (name, pat_node_id) to avoid collisions between same-named
     /// bindings in different scopes (e.g. multiple test bodies).
     pub(crate) let_dict_params: HashMap<(String, NodeId), result::LetDictInfo>,
+    /// Steps taken so far by the unification in progress (see
+    /// `unify::UnifyStep`). Empty outside `unify`.
+    pub(crate) unify_path: Vec<super::unify::UnifyStep>,
+    /// Unequal closed effect rows accepted by the unification in progress,
+    /// drained by the top-level unification entry point.
+    pub(crate) row_subsumptions: Vec<super::unify::RowSubsumption>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.

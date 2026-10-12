@@ -499,7 +499,8 @@ impl Checker {
                     let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
                     self.emit_effects(&arm_effs);
 
-                    self.unify_at(&arm_ty, &answer_ty, arm.span)?;
+                    // Arm result against the handled expression's answer type.
+                    self.coerce_at(&arm_ty, &answer_ty, arm.span, Some(&arm.body))?;
 
                     // Typecheck optional `finally` block. Under nested handler
                     // semantics, its effects propagate outward just like the

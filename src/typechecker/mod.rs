@@ -31,6 +31,8 @@ pub use result::{
 pub use state::*;
 
 #[cfg(test)]
+mod effect_row_rule_tests;
+#[cfg(test)]
 mod expr_types_tests;
 #[cfg(test)]
 mod tests;
@@ -97,6 +99,8 @@ impl Checker {
             resolution: ResolutionResult::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
+            unify_path: Vec::new(),
+            row_subsumptions: Vec::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
             internal_handler_normalization_warnings: HashSet::new(),

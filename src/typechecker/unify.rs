@@ -1,8 +1,144 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::{Expr, ExprKind, Stmt};
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
+
+/// One step from the two types handed to a top-level unification down to the
+/// pair of function types whose effect rows are being compared.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum UnifyStep {
+    /// Into argument `i` of a type constructor (`List (...)`, a tuple slot).
+    ConArg(usize),
+    /// Into a function's parameter type.
+    FunParam,
+    /// Into a function's return type. Not "depth": functions are curried and
+    /// effects sit on an inner arrow, so `A -> B -> C needs {E}` reaches its
+    /// row through one return step.
+    FunRet,
+    /// Into the named field of an anonymous record type.
+    RecordField(String),
+    /// Into a type argument of an effect in a row (`Fail (..)`).
+    EffectArg,
+}
+
+/// Two closed effect rows that are not equal were accepted as unifiable
+/// because one is a subset of the other. Recorded by `unify_effect_rows` and
+/// judged by the top-level unification entry point, which knows the source
+/// position and which side (if any) is the expected type.
+#[derive(Clone, Debug)]
+pub(crate) struct RowSubsumption {
+    /// Where in the unified types the rows sit.
+    pub(crate) path: Vec<UnifyStep>,
+    /// The full rows, in the argument order of the top-level unification.
+    pub(crate) left: EffectRow,
+    pub(crate) right: EffectRow,
+    /// True when the left row is the larger one (the right row is a strict
+    /// subset of it); false when the right row is the larger one.
+    pub(crate) left_is_larger: bool,
+}
+
+/// What a top-level unification is being used for, as far as effect-row
+/// subsumption is concerned.
+#[derive(Clone, Copy)]
+pub(crate) enum RowPosition<'a> {
+    /// Not a coercion position: closed rows must be equal.
+    Exact,
+    /// The two types are already nested inside a larger type (e.g. the
+    /// parameter types of two functions being joined): closed rows must be
+    /// equal and a mismatch is reported as "at depth".
+    Nested,
+    /// A coercion position. A value of the *actual* type is used where the
+    /// *expected* type is wanted, so the actual row may be a subset of the
+    /// expected row, but not the other way round. `expr` is the expression
+    /// that produced the actual type, when there is one: tuple, list and
+    /// anonymous-record literals (and `if`/`case`/block results) extend the
+    /// coercion position to their elements.
+    Coercion {
+        actual_is_left: bool,
+        expr: Option<&'a Expr>,
+    },
+}
+
+/// Closing sentence of every effect-row rule warning. Also how the warnings
+/// are recognised when a hard error for the same expression supersedes them.
+pub(crate) const ROW_RULE_NOTE: &str = "This is accepted for now and will become a type error.";
+
+/// `path` without its trailing return steps: identifies the function value
+/// (the curried arrow chain) a row belongs to.
+fn arrow_chain_prefix(path: &[UnifyStep]) -> &[UnifyStep] {
+    let trailing = path
+        .iter()
+        .rev()
+        .take_while(|step| **step == UnifyStep::FunRet)
+        .count();
+    &path[..path.len() - trailing]
+}
+
+/// Add to `out` the effects of `row` that `other` lacks.
+fn push_missing(out: &mut Vec<super::EffectEntry>, row: &EffectRow, other: &EffectRow) {
+    for entry in &row.effects {
+        if !other.effects.iter().any(|o| o.matches(entry))
+            && !out.iter().any(|seen| seen.matches(entry))
+        {
+            out.push(entry.clone());
+        }
+    }
+}
+
+/// Does `path` lead to a position where subsumption is allowed, given the
+/// expression whose type is being coerced? True when the path consists of
+/// return steps only (the row sits on the value's own arrow), after walking
+/// through any literal structure of `expr` that mirrors leading type steps.
+fn coercion_path_is_direct(expr: Option<&Expr>, path: &[UnifyStep]) -> bool {
+    let Some(first) = path.first() else {
+        return true;
+    };
+    if *first == UnifyStep::FunRet {
+        return path.iter().all(|step| *step == UnifyStep::FunRet);
+    }
+    let Some(expr) = expr else {
+        return false;
+    };
+    match (&expr.kind, first) {
+        (ExprKind::Tuple { elements }, UnifyStep::ConArg(i)) => elements
+            .get(*i)
+            .is_some_and(|elem| coercion_path_is_direct(Some(elem), &path[1..])),
+        (ExprKind::AnonRecordCreate { fields }, UnifyStep::RecordField(name)) => fields
+            .iter()
+            .find(|(fname, _, _)| fname == name)
+            .is_some_and(|(_, _, fexpr)| coercion_path_is_direct(Some(fexpr), &path[1..])),
+        // A desugared list literal: the single type argument is the joined
+        // element type.
+        (ExprKind::App { .. }, UnifyStep::ConArg(0)) => {
+            super::infer::collect_list_literal_elements(expr).is_some_and(|elements| {
+                elements
+                    .iter()
+                    .all(|elem| coercion_path_is_direct(Some(elem), &path[1..]))
+            })
+        }
+        (
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            },
+            _,
+        ) => {
+            coercion_path_is_direct(Some(then_branch), path)
+                && coercion_path_is_direct(Some(else_branch), path)
+        }
+        (ExprKind::Case { arms, .. }, _) => arms
+            .iter()
+            .all(|arm| coercion_path_is_direct(Some(&arm.node.body), path)),
+        (ExprKind::Block { stmts, .. }, _) => match stmts.last().map(|s| &s.node) {
+            Some(Stmt::Expr(last)) => coercion_path_is_direct(Some(last), path),
+            _ => false,
+        },
+        _ => false,
+    }
+}
 
 /// Substitute every `Type::Var(id)` whose id is a key in `subst` with the
 /// corresponding type, recursively. Used to instantiate a type alias body
@@ -142,7 +278,26 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
 impl Checker {
     // --- Unification ---
 
+    /// Unify two types with no position information. Unequal closed effect
+    /// rows accepted along the way are not reported: use `unify_at` or one of
+    /// the `coerce_*` entry points wherever a source span is available.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), Diagnostic> {
+        self.unify_path.clear();
+        let result = self.unify_rec(a, b);
+        self.row_subsumptions.clear();
+        result
+    }
+
+    /// Recurse into a component of the types being unified, tracking the step
+    /// taken so `unify_effect_rows` knows where it is.
+    fn unify_step(&mut self, step: UnifyStep, a: &Type, b: &Type) -> Result<(), Diagnostic> {
+        self.unify_path.push(step);
+        let result = self.unify_rec(a, b);
+        self.unify_path.pop();
+        result
+    }
+
+    fn unify_rec(&mut self, a: &Type, b: &Type) -> Result<(), Diagnostic> {
         let a = self.sub.apply(a);
         let b = self.sub.apply(b);
 
@@ -156,16 +311,16 @@ impl Checker {
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
 
             (Type::Fun(a1, b1, row1), Type::Fun(a2, b2, row2)) => {
-                self.unify(a1, a2)?;
-                self.unify(b1, b2)?;
+                self.unify_step(UnifyStep::FunParam, a1, a2)?;
+                self.unify_step(UnifyStep::FunRet, b1, b2)?;
                 self.unify_effect_rows(row1, row2)
             }
 
             (Type::Con(n1, args1), Type::Con(n2, args2))
                 if n1 == n2 && args1.len() == args2.len() =>
             {
-                for (a, b) in args1.iter().zip(args2.iter()) {
-                    self.unify(a, b)?;
+                for (i, (a, b)) in args1.iter().zip(args2.iter()).enumerate() {
+                    self.unify_step(UnifyStep::ConArg(i), a, b)?;
                 }
                 Ok(())
             }
@@ -181,8 +336,8 @@ impl Checker {
                         a_display, b_display
                     )));
                 }
-                for ((_, t1), (_, t2)) in f1.iter().zip(f2.iter()) {
-                    self.unify(t1, t2)?;
+                for ((name, t1), (_, t2)) in f1.iter().zip(f2.iter()) {
+                    self.unify_step(UnifyStep::RecordField(name.clone()), t1, t2)?;
                 }
                 Ok(())
             }
@@ -202,7 +357,7 @@ impl Checker {
         for entry1 in &r1.effects {
             if let Some(entry2) = r2.effects.iter().find(|e| e.matches(entry1)) {
                 for (t1, t2) in entry1.args.iter().zip(entry2.args.iter()) {
-                    self.unify(t1, t2)?;
+                    self.unify_step(UnifyStep::EffectArg, t1, t2)?;
                 }
             }
         }
@@ -227,12 +382,23 @@ impl Checker {
         match (tails1.is_empty(), tails2.is_empty()) {
             // Both closed: accept if one side is a subset of the other.
             // This is symmetric (unification doesn't know direction), so it
-            // accepts both directions of effect subsumption. The directional
-            // check (effectful callback where pure expected = error) is
-            // enforced by check_callback_effect_subtype in infer.rs at
-            // function application sites.
+            // accepts both directions of effect subsumption, at any depth.
+            // The intended rule is stricter (closed rows unify only when
+            // equal, except at coercion positions and only in the
+            // actual-subset-of-expected direction), so every acceptance of
+            // unequal rows is recorded here with its path and judged by the
+            // top-level entry point (`unify_in_position`), which currently
+            // reports violations as warnings.
             (true, true) => {
                 if extras1.is_empty() || extras2.is_empty() {
+                    if !(extras1.is_empty() && extras2.is_empty()) {
+                        self.row_subsumptions.push(RowSubsumption {
+                            path: self.unify_path.clone(),
+                            left: r1.clone(),
+                            right: r2.clone(),
+                            left_is_larger: !extras1.is_empty(),
+                        });
+                    }
                     Ok(())
                 } else {
                     // Both have unmatched effects -- genuinely incompatible
@@ -405,8 +571,252 @@ impl Checker {
     }
 
     /// Unify with span context: if unification fails, attach the span to the error.
+    ///
+    /// This is the entry point for positions that are *not* coercion
+    /// positions: unequal closed effect rows accepted here are reported.
     pub(crate) fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), Diagnostic> {
-        self.unify(a, b).map_err(|e| e.with_span(span))
+        self.unify_in_position(a, b, span, RowPosition::Exact)
+    }
+
+    /// Unify two types that already sit inside a larger type (see
+    /// `RowPosition::Nested`).
+    pub(crate) fn unify_nested_at(
+        &mut self,
+        a: &Type,
+        b: &Type,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        self.unify_in_position(a, b, span, RowPosition::Nested)
+    }
+
+    /// Unify at a coercion position: a value of type `actual` (produced by
+    /// `expr`, when there is one) is used where `expected` is wanted. Same
+    /// unification as `unify_at(actual, expected, span)`; only the judgement
+    /// of unequal closed effect rows differs.
+    pub(crate) fn coerce_at(
+        &mut self,
+        actual: &Type,
+        expected: &Type,
+        span: Span,
+        expr: Option<&Expr>,
+    ) -> Result<(), Diagnostic> {
+        self.unify_in_position(
+            actual,
+            expected,
+            span,
+            RowPosition::Coercion {
+                actual_is_left: true,
+                expr,
+            },
+        )
+    }
+
+    /// `coerce_at` for call sites that unify as `(expected, actual)`. The
+    /// argument order is kept because it decides which side a type variable
+    /// is bound from and how mismatch errors read.
+    pub(crate) fn coerce_expected_first_at(
+        &mut self,
+        expected: &Type,
+        actual: &Type,
+        span: Span,
+        expr: Option<&Expr>,
+    ) -> Result<(), Diagnostic> {
+        self.unify_in_position(
+            expected,
+            actual,
+            span,
+            RowPosition::Coercion {
+                actual_is_left: false,
+                expr,
+            },
+        )
+    }
+
+    fn unify_in_position(
+        &mut self,
+        a: &Type,
+        b: &Type,
+        span: Span,
+        position: RowPosition<'_>,
+    ) -> Result<(), Diagnostic> {
+        self.unify_path.clear();
+        self.row_subsumptions.clear();
+        let result = self.unify_rec(a, b);
+        let subsumptions = std::mem::take(&mut self.row_subsumptions);
+        result.map_err(|e| e.with_span(span))?;
+        if subsumptions.is_empty() {
+            return Ok(());
+        }
+
+        // Rows at a coercion position are judged per function value, i.e.
+        // per curried arrow chain, not per arrow: see `coercion_warning`.
+        let mut chains: Vec<(&[UnifyStep], Vec<&RowSubsumption>)> = Vec::new();
+        let mut messages: Vec<String> = Vec::new();
+        for subsumption in &subsumptions {
+            let direct = match position {
+                RowPosition::Coercion { expr, .. } => {
+                    coercion_path_is_direct(expr, &subsumption.path)
+                }
+                RowPosition::Exact | RowPosition::Nested => false,
+            };
+            if !direct {
+                messages.push(self.strict_row_warning(subsumption, position));
+                continue;
+            }
+            let prefix = arrow_chain_prefix(&subsumption.path);
+            match chains.iter_mut().find(|(p, _)| *p == prefix) {
+                Some((_, members)) => members.push(subsumption),
+                None => chains.push((prefix, vec![subsumption])),
+            }
+        }
+        if let RowPosition::Coercion { actual_is_left, .. } = position {
+            for (_, members) in &chains {
+                messages.extend(self.coercion_warning(members, actual_is_left));
+            }
+        }
+        for message in messages {
+            self.warn_once_at(span, message);
+        }
+        Ok(())
+    }
+
+    /// Warning for unequal closed rows accepted where no subsumption is
+    /// allowed at all: inside a type-constructor argument, a function
+    /// parameter, an anonymous-record field or an effect's type argument
+    /// ("at depth": no variance tracking, so either direction is wrong), or
+    /// directly at a position that is not a coercion position.
+    fn strict_row_warning(
+        &self,
+        subsumption: &RowSubsumption,
+        position: RowPosition<'_>,
+    ) -> String {
+        let (larger, smaller) = if subsumption.left_is_larger {
+            (&subsumption.left, &subsumption.right)
+        } else {
+            (&subsumption.right, &subsumption.left)
+        };
+        let returns_only = subsumption
+            .path
+            .iter()
+            .all(|step| *step == UnifyStep::FunRet);
+        if matches!(position, RowPosition::Exact) && returns_only {
+            format!(
+                "function types with different effect rows ({} and {}) are treated as the \
+                 same type here. Effects may only be added implicitly where a value is passed, \
+                 returned, annotated or placed in a literal; make both function types declare \
+                 the same `needs` row. {}",
+                self.describe_row(larger),
+                self.describe_row(smaller),
+                ROW_RULE_NOTE
+            )
+        } else {
+            format!(
+                "function types with different effect rows ({} and {}) are treated as the \
+                 same type inside a larger type. Effect rows nested in a type argument, a \
+                 function parameter or a record field must be identical; make both function \
+                 types declare the same `needs` row. {}",
+                self.describe_row(larger),
+                self.describe_row(smaller),
+                ROW_RULE_NOTE
+            )
+        }
+    }
+
+    /// Warning for one function value at a coercion position, given every
+    /// unequal row pair along its curried arrow chain.
+    ///
+    /// The actual side may have fewer effects than the expected side
+    /// (subsumption). The reverse is an effectful function used as a less
+    /// effectful one, and is reported.
+    ///
+    /// The comparison is over the whole chain rather than arrow by arrow
+    /// because the two sides do not always put a row on the same arrow: a
+    /// declared `A -> B -> C needs {E}` carries `{E}` on its last arrow,
+    /// while `infer_lambda` types `fun a b -> ...` with `{E}` on its first.
+    /// Arrow by arrow that pair reads as "effectful where pure is expected"
+    /// on one arrow and the opposite on the other, though both describe a
+    /// two-argument function that performs `E`. Effects the expected side
+    /// declares anywhere on the chain are therefore not reported.
+    fn coercion_warning(&self, chain: &[&RowSubsumption], actual_is_left: bool) -> Option<String> {
+        let mut actual_extra: Vec<super::EffectEntry> = Vec::new();
+        let mut expected_extra: Vec<super::EffectEntry> = Vec::new();
+        let mut actual_all = EffectRow::empty();
+        let mut expected_all = EffectRow::empty();
+        for subsumption in chain {
+            let (actual, expected) = if actual_is_left {
+                (&subsumption.left, &subsumption.right)
+            } else {
+                (&subsumption.right, &subsumption.left)
+            };
+            push_missing(&mut actual_extra, actual, expected);
+            push_missing(&mut expected_extra, expected, actual);
+            push_missing(&mut actual_all.effects, actual, &EffectRow::empty());
+            push_missing(&mut expected_all.effects, expected, &EffectRow::empty());
+        }
+        let unexpected: Vec<super::EffectEntry> = actual_extra
+            .into_iter()
+            .filter(|e| !expected_extra.iter().any(|x| x.matches(e)))
+            .collect();
+        if unexpected.is_empty() {
+            return None;
+        }
+        let unexpected = self.describe_effects(&unexpected);
+        let expected = if expected_all.effects.is_empty() {
+            "a function with no effects is expected".to_string()
+        } else {
+            format!(
+                "a function that only allows {} is expected",
+                self.describe_effects(&expected_all.effects)
+            )
+        };
+        Some(format!(
+            "a function that uses {} is used where {}. Handle {} first \
+             (for example `fun x -> f x with handler`), or add `needs {}` to the \
+             expected function type. {}",
+            self.describe_effects(&actual_all.effects),
+            expected,
+            unexpected,
+            unexpected,
+            ROW_RULE_NOTE
+        ))
+    }
+
+    fn describe_effects(&self, effects: &[super::EffectEntry]) -> String {
+        let mut names: Vec<String> = effects
+            .iter()
+            .map(|e| self.prettify_effect_entry(e))
+            .collect();
+        names.sort();
+        format!("{{{}}}", names.join(", "))
+    }
+
+    fn describe_row(&self, row: &EffectRow) -> String {
+        if row.effects.is_empty() {
+            "no effects".to_string()
+        } else {
+            self.describe_effects(&row.effects)
+        }
+    }
+
+    /// Push a warning unless the same one was already reported for this
+    /// expression or one nested in it. The same rows are often unified more
+    /// than once on the way out: a function body against its result type by
+    /// both `infer_expr_against` and `check_fun_clauses`, or a lambda's body
+    /// against the expected return type and then the whole lambda against
+    /// the parameter it is passed to.
+    fn warn_once_at(&mut self, span: Span, message: String) {
+        let duplicate = self.collected_diagnostics.iter().any(|d| {
+            matches!(d.severity, Severity::Warning)
+                && d.message == message
+                && d.span.is_some_and(|seen| {
+                    (seen.start >= span.start && seen.end <= span.end)
+                        || (span.start >= seen.start && span.end <= seen.end)
+                })
+        });
+        if !duplicate {
+            self.collected_diagnostics
+                .push(Diagnostic::warning_at(span, message));
+        }
     }
 
     // --- Instantiation & Generalization ---

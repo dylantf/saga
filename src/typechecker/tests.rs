@@ -42,7 +42,10 @@ fn infer_expr_type(src: &str) -> Result<Type, Diagnostic> {
     Ok(checker.sub.apply(&scheme.ty))
 }
 
-fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Checker, Diagnostic> {
+pub(super) fn check_with_project_files(
+    files: &[(&str, &str)],
+    main_src: &str,
+) -> Result<Checker, Diagnostic> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")

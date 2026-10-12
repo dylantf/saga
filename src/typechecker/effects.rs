@@ -840,7 +840,8 @@ impl Checker {
 
         let joined_param = params[0].clone();
         for p in &params[1..] {
-            self.unify_at(&joined_param, p, span)?;
+            // Parameter types sit inside the function types being joined.
+            self.unify_nested_at(&joined_param, p, span)?;
         }
 
         let joined_return = self.join_branch_types(&returns, span)?;

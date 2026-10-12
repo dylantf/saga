@@ -29,7 +29,7 @@ fn collect_app_spine<'a>(
 /// never reaches the application chain. A hand-written `Cons x rest` where
 /// `rest` is not itself a literal spine returns `None` and is processed by
 /// the regular pairwise inference path.
-fn collect_list_literal_elements(expr: &Expr) -> Option<Vec<&Expr>> {
+pub(super) fn collect_list_literal_elements(expr: &Expr) -> Option<Vec<&Expr>> {
     let mut elements = Vec::new();
     let mut current = expr;
     loop {
@@ -466,7 +466,9 @@ impl Checker {
             ExprKind::Resume { value, .. } => {
                 let val_ty = self.infer_expr(value)?;
                 if let Some(expected) = &self.resume_type.clone() {
-                    self.unify_at(&val_ty, expected, span)?;
+                    // The resumed value is handed to the operation's call
+                    // site: an argument position.
+                    self.coerce_at(&val_ty, expected, span, Some(value))?;
                 }
                 if let Some(ret_ty) = &self.resume_return_type.clone() {
                     Ok(ret_ty.clone())
@@ -535,7 +537,12 @@ impl Checker {
                 }
 
                 let success_ty = self.infer_expr(success)?;
-                self.unify_at(&result_ty, &success_ty, success.span)?;
+                self.coerce_expected_first_at(
+                    &result_ty,
+                    &success_ty,
+                    success.span,
+                    Some(success),
+                )?;
 
                 self.env = saved_env.clone();
 
@@ -558,7 +565,14 @@ impl Checker {
                         self.sub = saved_sub;
                     }
                     let body_ty = self.infer_expr(&arm.body)?;
-                    self.unify_at(&result_ty, &body_ty, arm.body.span)?;
+                    // Branch result against the `do` expression's type (the
+                    // success type, there being no join here).
+                    self.coerce_expected_first_at(
+                        &result_ty,
+                        &body_ty,
+                        arm.body.span,
+                        Some(&arm.body),
+                    )?;
                     self.env = arm_saved;
                 }
 
@@ -582,7 +596,7 @@ impl Checker {
             } => {
                 let inferred = self.infer_expr(inner)?;
                 let ann_ty = self.convert_user_type_expr(type_expr, &mut vec![]);
-                self.unify_at(&inferred, &ann_ty, span)?;
+                self.coerce_at(&inferred, &ann_ty, span, Some(inner))?;
                 self.record_type(node_id, &ann_ty);
                 Ok(ann_ty)
             }
@@ -761,7 +775,8 @@ impl Checker {
         let saved_effs = self.save_effects();
         let body_ty = self.infer_expr(body)?;
         let body_effs = self.restore_effects(saved_effs);
-        self.unify_at(&body_ty, &expected_body_ty, body.span)?;
+        // Return position of the lambda.
+        self.coerce_at(&body_ty, &expected_body_ty, body.span, Some(body))?;
         self.env = saved_env;
         self.effect_meta.type_param_cache = saved_cache;
 
@@ -847,7 +862,7 @@ impl Checker {
 
             let arg_ty = self.infer_arg_against(arg, &param_ty)?;
             let arg_ty_pre = arg_ty.clone();
-            self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
+            self.unify_arg_with_param(arg, &arg_ty, &arg_ty_pre, &param_ty)?;
             self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
             self.record_type(app_expr.id, &ret_ty);
             self.record_expr_type(app_expr.id, &ret_ty);
@@ -859,7 +874,7 @@ impl Checker {
         }
 
         if let Some(expected_result) = expected_result {
-            self.unify_at(&current_ty, expected_result, expr.span)?;
+            self.coerce_at(&current_ty, expected_result, expr.span, Some(expr))?;
         }
 
         for deferred_lambda in deferred {
@@ -874,10 +889,10 @@ impl Checker {
             };
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(
+                deferred_lambda.arg_expr,
                 &arg_ty,
                 &arg_ty_pre,
                 &deferred_lambda.param_ty,
-                deferred_lambda.arg_expr.span,
             )?;
             self.apply_callback_argument_effects(
                 &arg_ty_pre,
@@ -997,7 +1012,7 @@ impl Checker {
         }
 
         if let Some(expected) = expected_result {
-            self.unify_at(&list_ty, expected, expr.span)?;
+            self.coerce_at(&list_ty, expected, expr.span, Some(expr))?;
         }
 
         Ok(list_ty)
@@ -1029,12 +1044,12 @@ impl Checker {
                     return Ok(ty);
                 }
                 let ty = self.infer_expr(expr)?;
-                self.unify_at(&ty, expected, expr.span)?;
+                self.coerce_at(&ty, expected, expr.span, Some(expr))?;
                 Ok(ty)
             }
             _ => {
                 let ty = self.infer_expr(expr)?;
-                self.unify_at(&ty, expected, expr.span)?;
+                self.coerce_at(&ty, expected, expr.span, Some(expr))?;
                 Ok(ty)
             }
         }
@@ -1215,14 +1230,18 @@ impl Checker {
         }
     }
 
+    /// Unify a direct call argument with the parameter it is passed to. A
+    /// coercion position: the argument's effect row may be a subset of the
+    /// parameter's.
     fn unify_arg_with_param(
         &mut self,
+        arg: &Expr,
         arg_ty: &Type,
         arg_ty_pre: &Type,
         param_ty: &Type,
-        arg_span: Span,
     ) -> Result<(), Diagnostic> {
-        if let Err(orig) = self.unify_at(arg_ty, param_ty, arg_span) {
+        let arg_span = arg.span;
+        if let Err(orig) = self.coerce_at(arg_ty, param_ty, arg_span, Some(arg)) {
             // Preserve specific, actionable row-ambiguity errors (e.g. an
             // argument forcing a named effect into one of several open tails)
             // rather than collapsing them into a generic type mismatch.
@@ -1244,8 +1263,18 @@ impl Checker {
         arg_span: Span,
     ) -> Result<(), Diagnostic> {
         let resolved_param = self.sub.apply(expected_param);
-        if let Type::Fun(_, _, _) = &resolved_param {
-            self.check_callback_effect_subtype(actual_arg, &resolved_param, arg_span)?;
+        if let Type::Fun(_, _, _) = &resolved_param
+            && let Err(e) =
+                self.check_callback_effect_subtype(actual_arg, &resolved_param, arg_span)
+        {
+            // This hard error supersedes the effect-row rule warning that
+            // unifying the argument just reported for the same expression.
+            self.collected_diagnostics.retain(|d| {
+                !(matches!(d.severity, super::Severity::Warning)
+                    && d.span == Some(arg_span)
+                    && d.message.ends_with(super::unify::ROW_RULE_NOTE))
+            });
+            return Err(e);
         }
         Ok(())
     }
@@ -1483,7 +1512,7 @@ impl Checker {
 
             // Arm body effects accumulate on self.effect_row automatically
             let body_ty = self.infer_expr(&arm.body)?;
-            self.unify_at(&result_ty, &body_ty, arm.body.span)?;
+            self.coerce_expected_first_at(&result_ty, &body_ty, arm.body.span, Some(&arm.body))?;
             self.env = saved_env;
         }
 
@@ -1491,7 +1520,7 @@ impl Checker {
             let timeout_ty = self.infer_expr(timeout)?;
             self.unify_at(&timeout_ty, &Type::int(), timeout.span)?;
             let body_ty = self.infer_expr(body)?;
-            self.unify_at(&result_ty, &body_ty, body.span)?;
+            self.coerce_expected_first_at(&result_ty, &body_ty, body.span, Some(body))?;
         }
 
         self.emit_effect("Std.Actor.Actor".to_string(), vec![self.sub.apply(&msg_ty)]);
@@ -1593,7 +1622,7 @@ impl Checker {
                         Ok(ty) => {
                             if let Some(ann) = annotation {
                                 let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);
-                                if let Err(e) = self.unify_at(&ty, &ann_ty, *span) {
+                                if let Err(e) = self.coerce_at(&ty, &ann_ty, *span, Some(value)) {
                                     errors.push(e);
                                     Type::Error
                                 } else {
