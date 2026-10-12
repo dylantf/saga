@@ -531,12 +531,152 @@ impl CallableAbi {
     }
 }
 
+/// How a value of a given type is represented at runtime, as far as calling
+/// it is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueRepr {
+    /// Not a function value at all.
+    NotAFunction,
+    /// A bare Erlang fun taking the user arguments.
+    Bare,
+    /// `{'$saga_cps', Fun}`, where `Fun` takes the user arguments followed by
+    /// evidence and a continuation.
+    Tagged,
+}
+
+/// Decide a function value's representation from its own type.
+///
+/// A function is `Tagged` if any arrow in its curried chain carries effects
+/// or an open row, and `Bare` only if every arrow is closed and empty. The
+/// chain is followed through return types and ends at the first return type
+/// that is not a function, including an unresolved type variable. Parameter
+/// types and type-constructor arguments are not inspected: a pure function
+/// that takes an effectful one is still `Bare`.
+pub fn value_repr(ty: &Type) -> ValueRepr {
+    if !matches!(ty, Type::Fun(..)) {
+        return ValueRepr::NotAFunction;
+    }
+    let mut current = ty;
+    while let Type::Fun(_param, ret, row) = current {
+        if !row.effects.is_empty() || !row.tails.is_empty() {
+            return ValueRepr::Tagged;
+        }
+        current = ret;
+    }
+    ValueRepr::Bare
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CallableAbi, EvidenceAbi, EvidenceInstallKind, EvidenceReframeKind, EvidenceReframePlan,
-        EvidenceSelector, EvidenceSlotResolution,
+        EvidenceSelector, EvidenceSlotResolution, ValueRepr, value_repr,
     };
+    use crate::typechecker::{EffectEntry, EffectRow, Type};
+
+    fn int() -> Type {
+        Type::Con("Int".to_string(), vec![])
+    }
+
+    fn fun(param: Type, ret: Type, row: EffectRow) -> Type {
+        Type::Fun(Box::new(param), Box::new(ret), row)
+    }
+
+    fn pure_fun(param: Type, ret: Type) -> Type {
+        fun(param, ret, EffectRow::empty())
+    }
+
+    fn skip_row() -> EffectRow {
+        EffectRow::closed(vec![EffectEntry::unnamed("Skip".to_string(), vec![])])
+    }
+
+    fn open_row() -> EffectRow {
+        EffectRow {
+            effects: vec![],
+            tails: vec![Type::Var(7)],
+        }
+    }
+
+    #[test]
+    fn value_repr_of_non_functions() {
+        assert_eq!(value_repr(&int()), ValueRepr::NotAFunction);
+        assert_eq!(value_repr(&Type::Var(0)), ValueRepr::NotAFunction);
+        assert_eq!(
+            value_repr(&Type::Record(vec![("f".to_string(), int())])),
+            ValueRepr::NotAFunction
+        );
+    }
+
+    #[test]
+    fn value_repr_of_pure_functions_is_bare() {
+        assert_eq!(value_repr(&pure_fun(int(), int())), ValueRepr::Bare);
+        assert_eq!(
+            value_repr(&pure_fun(int(), pure_fun(int(), int()))),
+            ValueRepr::Bare
+        );
+    }
+
+    #[test]
+    fn value_repr_with_effects_on_the_innermost_arrow_is_tagged() {
+        assert_eq!(
+            value_repr(&fun(int(), int(), skip_row())),
+            ValueRepr::Tagged
+        );
+        assert_eq!(
+            value_repr(&pure_fun(int(), fun(int(), int(), skip_row()))),
+            ValueRepr::Tagged
+        );
+    }
+
+    #[test]
+    fn value_repr_with_effects_on_an_outer_arrow_only_is_tagged() {
+        assert_eq!(
+            value_repr(&fun(int(), pure_fun(int(), int()), skip_row())),
+            ValueRepr::Tagged
+        );
+    }
+
+    #[test]
+    fn value_repr_of_an_open_row_only_function_is_tagged() {
+        assert_eq!(
+            value_repr(&fun(int(), int(), open_row())),
+            ValueRepr::Tagged
+        );
+        assert_eq!(
+            value_repr(&pure_fun(int(), fun(int(), int(), open_row()))),
+            ValueRepr::Tagged
+        );
+        assert_eq!(
+            value_repr(&fun(int(), pure_fun(int(), int()), open_row())),
+            ValueRepr::Tagged
+        );
+    }
+
+    #[test]
+    fn value_repr_ends_the_chain_at_a_type_variable() {
+        assert_eq!(
+            value_repr(&pure_fun(Type::Var(0), Type::Var(1))),
+            ValueRepr::Bare
+        );
+    }
+
+    #[test]
+    fn value_repr_does_not_look_inside_parameters_or_constructor_arguments() {
+        let effectful = fun(int(), int(), skip_row());
+        let open = fun(int(), int(), open_row());
+        // `(Int -> Int needs {Skip}) -> Int` is a pure function that takes an
+        // effectful one.
+        assert_eq!(
+            value_repr(&pure_fun(effectful.clone(), int())),
+            ValueRepr::Bare
+        );
+        assert_eq!(value_repr(&pure_fun(open, int())), ValueRepr::Bare);
+        // `List (Int -> Int needs {Skip})` is not a function, and a function
+        // returning one is pure.
+        let list = Type::Con("List".to_string(), vec![effectful]);
+        assert_eq!(value_repr(&list), ValueRepr::NotAFunction);
+        assert_eq!(value_repr(&pure_fun(int(), list)), ValueRepr::Bare);
+    }
 
     #[test]
     fn callable_abi_expands_only_cps_callables() {

@@ -5,6 +5,10 @@
 %% arity the compiler does not know statically.
 -export([apply_n/2]).
 
+%% Call of a function value at an effectful type, where the value may be
+%% either a bare fun or a tagged CPS closure. Not yet emitted by the compiler.
+-export([apply_cps/4]).
+
 %% gen_event callbacks for the per-await signal handler installed below.
 -export([init/1, handle_event/2, handle_call/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -46,6 +50,20 @@ await_signal(Kind) ->
 %% Anything that is not a fun raises the same `badfun' a direct call would.
 %% A zero-arity fun is never a Saga function value, so it is a `badarity'
 %% rather than something to call and re-apply.
+apply_n({'$saga_cps', G} = F, Args) when is_function(G) ->
+    %% A tagged CPS closure at a pure call site. That is legitimate only when
+    %% too few arguments are supplied (generic code partially applying an
+    %% effectful function): the result is a tagged closure awaiting the rest.
+    %% Saturating it here is impossible, as a pure call site has neither
+    %% evidence nor a continuation to pass.
+    UserArity = cps_user_arity(F, G),
+    N = length(Args),
+    if
+        UserArity > N ->
+            {'$saga_cps', cps_partial(G, Args, UserArity - N)};
+        true ->
+            erlang:error({saga_effectful_call_at_pure_site, G, Args})
+    end;
 apply_n(F, Args) when is_function(F) ->
     {arity, Arity} = erlang:fun_info(F, arity),
     N = length(Args),
@@ -98,6 +116,107 @@ partial(F, Args, 12) ->
 partial(F, Args, Remaining) ->
     {arity, Arity} = erlang:fun_info(F, arity),
     erlang:error({saga_partial_application_limit, Arity, length(Args), Remaining}).
+
+%% Apply a function value to `Args' at an effectful call site, with evidence
+%% `Ev' and continuation `K'.
+%%
+%% A function value whose own type is effectful is `{'$saga_cps', G}', where
+%% `G' takes `(UserArgs..., Evidence, K)'. A function value whose own type is
+%% pure is a bare fun taking `(UserArgs...)'. Either may arrive here, with any
+%% user arity:
+%%
+%%   - user arity = N: call it. A tagged closure is given `Ev' and `K'; a bare
+%%     fun is called directly and its result passed to `K'.
+%%   - user arity > N: pass a partial application to `K'. It has the same
+%%     representation as the value it was built from, so a tagged one takes its
+%%     evidence when it is finally saturated, not `Ev'.
+%%   - user arity < N: call with the arguments it takes, then apply the result
+%%     to the rest.
+%%
+%% Errors mirror `apply_n/2'.
+apply_cps({'$saga_cps', G} = F, Args, Ev, K) when is_function(G) ->
+    UserArity = cps_user_arity(F, G),
+    N = length(Args),
+    if
+        UserArity =:= N ->
+            erlang:apply(G, Args ++ [Ev, K]);
+        UserArity =:= 0 ->
+            erlang:error({badarity, {F, Args}});
+        UserArity < N ->
+            {Now, Later} = lists:split(UserArity, Args),
+            erlang:apply(G, Now ++ [Ev, fun(R) -> apply_cps(R, Later, Ev, K) end]);
+        true ->
+            K({'$saga_cps', cps_partial(G, Args, UserArity - N)})
+    end;
+apply_cps(F, Args, Ev, K) when is_function(F) ->
+    {arity, Arity} = erlang:fun_info(F, arity),
+    N = length(Args),
+    if
+        Arity =:= N ->
+            K(erlang:apply(F, Args));
+        Arity =:= 0 ->
+            erlang:error({badarity, {F, Args}});
+        Arity < N ->
+            {Now, Later} = lists:split(Arity, Args),
+            apply_cps(erlang:apply(F, Now), Later, Ev, K);
+        true ->
+            K(partial(F, Args, Arity - N))
+    end;
+apply_cps(F, _Args, _Ev, _K) ->
+    erlang:error({badfun, F}).
+
+%% User arity of the fun inside a tagged CPS closure: its arity less the
+%% trailing evidence and continuation. A fun too small to take those is not a
+%% CPS closure at all.
+cps_user_arity(Tagged, G) ->
+    {arity, Arity} = erlang:fun_info(G, arity),
+    if
+        Arity >= 2 -> Arity - 2;
+        true -> erlang:error({badfun, Tagged})
+    end.
+
+%% The fun inside a tagged partial application: it takes the `Remaining' user
+%% arguments `F' still needs, then the evidence and continuation of whoever
+%% saturates it. One clause per arity, as for `partial/3'.
+cps_partial(F, Args, 1) ->
+    fun(A, Ev, K) -> erlang:apply(F, Args ++ [A, Ev, K]) end;
+cps_partial(F, Args, 2) ->
+    fun(A, B, Ev, K) -> erlang:apply(F, Args ++ [A, B, Ev, K]) end;
+cps_partial(F, Args, 3) ->
+    fun(A, B, C, Ev, K) -> erlang:apply(F, Args ++ [A, B, C, Ev, K]) end;
+cps_partial(F, Args, 4) ->
+    fun(A, B, C, D, Ev, K) -> erlang:apply(F, Args ++ [A, B, C, D, Ev, K]) end;
+cps_partial(F, Args, 5) ->
+    fun(A, B, C, D, E, Ev, K) -> erlang:apply(F, Args ++ [A, B, C, D, E, Ev, K]) end;
+cps_partial(F, Args, 6) ->
+    fun(A, B, C, D, E, G, Ev, K) -> erlang:apply(F, Args ++ [A, B, C, D, E, G, Ev, K]) end;
+cps_partial(F, Args, 7) ->
+    fun(A, B, C, D, E, G, H, Ev, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, Ev, K])
+    end;
+cps_partial(F, Args, 8) ->
+    fun(A, B, C, D, E, G, H, I, Ev, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, Ev, K])
+    end;
+cps_partial(F, Args, 9) ->
+    fun(A, B, C, D, E, G, H, I, J, Ev, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, Ev, K])
+    end;
+cps_partial(F, Args, 10) ->
+    fun(A, B, C, D, E, G, H, I, J, L, Ev, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, L, Ev, K])
+    end;
+cps_partial(F, Args, 11) ->
+    fun(A, B, C, D, E, G, H, I, J, L, M, Ev, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, L, M, Ev, K])
+    end;
+cps_partial(F, Args, 12) ->
+    fun(A, B, C, D, E, G, H, I, J, L, M, N, Ev, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, L, M, N, Ev, K])
+    end;
+cps_partial(F, Args, Remaining) ->
+    {arity, Arity} = erlang:fun_info(F, arity),
+    erlang:error({saga_partial_application_limit, Arity - 2, length(Args), Remaining}).
 
 signal_atom({'std_process_SigHup'}) -> sighup;
 signal_atom({'std_process_SigQuit'}) -> sigquit;
@@ -194,6 +313,12 @@ format_reason(error, {badarg, _}) ->
     "bad argument";
 format_reason(error, badarg) ->
     "bad argument";
+format_reason(error, {badarity, {{'$saga_cps', Fun}, Args}}) when is_function(Fun) ->
+    {arity, Arity} = erlang:fun_info(Fun, arity),
+    io_lib:format(
+        "function called with ~B argument(s), but expects ~B",
+        [length(Args), max(Arity - 2, 0)]
+    );
 format_reason(error, {badarity, {Fun, Args}}) ->
     Arity = erlang:fun_info(Fun, arity),
     io_lib:format(
@@ -207,6 +332,13 @@ format_reason(error, {saga_partial_application_limit, Arity, Supplied, Remaining
         "cannot partially apply a function of ~B parameter(s) to ~B argument(s): "
         "~B would remain, and partial applications built at runtime support at most 12",
         [Arity, Supplied, Remaining]
+    );
+format_reason(error, {saga_effectful_call_at_pure_site, Fun, Args}) ->
+    {arity, Arity} = erlang:fun_info(Fun, arity),
+    io_lib:format(
+        "an effectful function of ~B parameter(s) was called with ~B argument(s) "
+        "where a pure function was expected, so there are no handlers to run it with",
+        [max(Arity - 2, 0), length(Args)]
     );
 format_reason(error, undef) ->
     "called a function that does not exist";
