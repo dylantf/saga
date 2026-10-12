@@ -443,8 +443,112 @@ the integration tests that run on the BEAM, the 24 `.saga` files under
 ## Open questions
 
 - When to pick the benchmark gate back up.
-- The exact tag format for effectful closures, and how the call helper behaves
-  at an effectful type when arity also mismatches.
+- How applied-effect tags resolve under tag-only lookup (see A4 implementation
+  notes).
+
+## A4 implementation notes
+
+From a read-only survey of the lowerer on 2026-10-12. Sections on fast paths,
+Erlang boundaries and cross-module metadata were surveyed at one remove and not
+re-verified line by line; nothing was built or run.
+
+### Corrections to earlier sections
+
+- **"At a pure static type only a bare fun can arrive" is false.** When the
+  result type is a variable or a later arrow is effectful (`apply_gen eadd 1`),
+  a tagged value reaches a call classified pure. Do not split statically: keep
+  the inline `is_function(F, N)` fast path and make the `apply_n` slow path
+  accept tagged values.
+- **Bridges that call Saga funs** are `Dict`, `Array`, `Set`, `List`
+  (`sort_with`, `sort_by`) and `Dynamic`, not `String`. All their callbacks are
+  declared pure, so they are unaffected once D2a is an error.
+- **Lambdas keep being flattened.** Nested lambdas and absorbed parameters stay
+  merged into one fun; with the call helpers either choice is sound and this
+  avoids nested tagging.
+
+### Design answers
+
+| Question | Answer |
+|----------|--------|
+| Tag format | `{'$saga_cps', F}`. A reserved atom cannot collide in well-typed code; `Dynamic`, `dbg` and `show` will see it |
+| Arity mismatch at an effectful type | `apply_cps(F, Args, Ev, K)`. Exact arity: call. Too few: pass a tagged partial application to `K`. Too many: call with what it takes, continue with the rest. A bare fun gets the same treatment with its result passed to `K` |
+| Named effectful function used as a value | An exported per-function wrapper that does the reframe, so the value is a constant tagged reference with no allocation per use |
+| Hoisted dictionary methods | One body with a tag-only frame; direct calls pass the caller's frame unchanged |
+| Frame passed to a closure | Unchanged. Treat a reframe whose target has an empty static prefix as identity |
+
+### Unresolved: applied-effect tags under tag-only lookup
+
+Today positional reframing and `append_tail` relabel entries by position, which
+is how a handler installed generically as `Fail<$e>` reaches code that performs
+`Fail<String>`. By tag alone, `find_evidence` can report an ambiguous family or
+pick an outer exact match. This is the same question as the on-hold identity
+decision (D6). Before the flip, add matrix cases with parameterised effects.
+Interim approach: the caller relabels the callee type's named slots before
+passing the frame.
+
+### What must survive the deletion of the planner
+
+- **Captured-evidence overlay.** A callback passed to an effect operation whose
+  parameter row is `{Named.., ..r}` runs with the handler's call-time frame for
+  the named effects and the perform-site frame for `..r`. This is a language
+  semantic, not an ABI patch (`effects/call.rs:102-190`).
+- **Native callback context.** For `spawn`, Actor operations are bound directly
+  and the callback is a bare fun today.
+
+### Sites that break and need the effectful call helper
+
+`spawn` (`beam_interop.rs:393`), `catch_panic` (`builtins.rs:162`), and
+`apply_n` / `partial` in `runtime.erl`.
+
+### A latent bug to fix first
+
+The lambda arm saves and restores only `current_evidence`. It leaves
+`static_tail_resume_ops`, `no_resume_ops` and `direct_ops` set, so an operation
+inside a lambda written under a `with` is bound statically to that handler even
+if the lambda escapes. Clear all three on entry to a closure body, except for
+the native callback case. Inferred from reading; not reproduced.
+
+### Fast paths
+
+Nothing needs disabling outright.
+
+- **Direct higher-order-function variants** are the riskiest. The gate that
+  decides a callback is direct (`hof.rs:239`) reads a planner fact. Replace it
+  with "the argument's own type is closed and empty at every arrow".
+- **Static helper inlining** needs its argument lowering swapped to the plain
+  path.
+- Tail-resume operations, handler analysis, known-impl dictionary dispatch and
+  generic folding are unaffected.
+
+### Call classification gap
+
+`classify_app` returns pure for any head that is not a variable, qualified
+name, dictionary method, lambda or field access, so `(f x) y` and `if`- or
+`case`-headed calls are never effectful today. Classify every head that is not
+a known function from its entry in the type table. Variable calls are
+currently classified by a lexical name scope, not by type; that goes too.
+
+### Order of work
+
+1. **No behaviour change:** one predicate from a type to bare or tagged; the
+   `apply_cps` helper and a tagged clause in `apply_n`, unused for now; the
+   empty-prefix identity reframe; the handler-state fix above.
+2. **Flag:** an environment variable hashed into the stdlib cache key; run the
+   matrix under both settings.
+3. **Flip behind the flag, all at once:** every creation site; one unknown-call
+   path replacing the value arm of `lower_runtime_cps_apply` and
+   `lower_generic_apply`; head classification from types; expected types
+   forced off so the adapters go inert; `spawn` and `catch_panic`; the
+   higher-order gate; the overlay rewrite.
+4. **Burn down** the matrix and the behavioural tests under the flag, then
+   update the textual assertions.
+5. **A5:** delete the planner, adapters, parameter ABI metadata and the
+   eta-reduced "value closure" branch.
+
+Riskiest spots: the effect-operation callback overlay and applied-tag
+relabelling; the higher-order gate disagreeing with closure creation;
+dictionary slots and hoisted entry points sharing one body; variable call
+classification being name-scoped.
 
 ## Appendix A: reproductions
 
