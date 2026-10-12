@@ -1,8 +1,3 @@
 # Cases of tests/function_shape_matrix.rs that fail today: `<case id> <failure class>`.
 # Case id is `<producer>.<position>.<variant>`, or `param.<installer>.<route>.<instance>`.
 # Generated. Regenerate with `SAGA_MATRIX_BLESS=1 cargo test --test function_shape_matrix`.
-dict_method.let_outside_handler.e1 evidence_tag_not_found
-dict_method.let_outside_handler.e2 evidence_tag_not_found
-dict_method.let_outside_handler.eu evidence_tag_not_found
-dict_method_generic.poly_apply.e2 saga_effectful_call_at_pure_site
-dict_method_partial_generic.poly_apply.e2 saga_effectful_call_at_pure_site

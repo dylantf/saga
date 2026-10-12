@@ -167,6 +167,20 @@ impl<'a> Lowerer<'a> {
             .as_ref()
             .map(|ty| util::arity_and_effects_from_type(ty).0)
             .unwrap_or(0);
+        // Elaborated `where` dictionaries are leading parameters that the
+        // declared type does not count. Importers derive the arity from the
+        // scheme (`CallableAbi::from_scheme`), dictionaries included; with
+        // tagged closures the definition does too, so a binding with fewer
+        // source parameters than its type eta-expands up to the arrow that
+        // carries its effects.
+        let declared_arity = if self.tagged && declared_arity > 0 {
+            declared_arity
+                + scheme
+                    .map(|scheme| util::dict_param_count(&scheme.constraints))
+                    .unwrap_or(0)
+        } else {
+            declared_arity
+        };
         let base_arity = source_arity.max(declared_arity);
         let mut abi = resolved_ty
             .as_ref()
@@ -615,7 +629,19 @@ impl<'a> Lowerer<'a> {
                 // declares (e.g. `pg_text = coerce_value` with type String -> Value).
                 // Without this, the function is emitted as /0 but cross-module
                 // callers derive arity from the type and call /1.
-                let body_expected_ty = self.function_tail_type_after_params(&name, params_ce.len());
+                // Leading `where` dictionaries are not arrows of the declared
+                // type (see `fun_binding_runtime_info`).
+                let dict_params = if self.tagged {
+                    self.fun_info
+                        .get(&name)
+                        .map_or(0, |info| info.dict_param_count)
+                } else {
+                    0
+                };
+                let body_expected_ty = self.function_tail_type_after_params(
+                    &name,
+                    params_ce.len().saturating_sub(dict_params),
+                );
                 let eta_count = base_arity.saturating_sub(params_ce.len());
                 let eta_params: Vec<String> =
                     (0..eta_count).map(|i| format!("_Eta{}", i)).collect();

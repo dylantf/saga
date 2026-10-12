@@ -202,7 +202,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let shape = if self.tagged {
                     forced_cps
-                        .unwrap_or_else(|| self.lambda_is_tagged(expr))
+                        .unwrap_or_else(|| self.lambda_is_tagged(expr, flattened_params.len()))
                         .then(crate::codegen::lower::tagged::tag_only_abi)
                 } else {
                     self.planned_function_value_evidence(expr.id)

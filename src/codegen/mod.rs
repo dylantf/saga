@@ -68,8 +68,8 @@ pub struct CompiledModule {
     pub effect_at_node: HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     /// Resolved expression types used when lowering imported handler bodies.
     pub type_at_node: HashMap<ast::NodeId, crate::typechecker::Type>,
-    /// Complete per-expression type table (`CheckResult::expr_types`). Carried
-    /// for the lowerer; nothing reads it yet.
+    /// Complete per-expression type table (`CheckResult::expr_types`). Read
+    /// by the lowerer under tagged closures (`lower/tagged.rs`).
     pub expr_types: HashMap<ast::NodeId, crate::typechecker::Type>,
     /// Resolved binding/pattern types used by contextual ABI planning inside
     /// imported handler bodies.

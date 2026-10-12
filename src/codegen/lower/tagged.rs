@@ -112,17 +112,33 @@ impl<'a> Lowerer<'a> {
         self.value_type(node_id).map(|ty| value_repr(&ty))
     }
 
-    /// Whether a lambda is a tagged CPS closure: decided by its own type,
-    /// never by the type its context expects. Nodes synthesized after
-    /// typechecking have no entry; those fall back to the classifier's
-    /// inferred view.
-    pub(super) fn lambda_is_tagged(&self, expr: &Expr) -> bool {
-        match self.value_repr_of(expr.id) {
-            Some(repr) => repr == ValueRepr::Tagged,
-            None => self
-                .planned_function_value(expr.id)
-                .and_then(|plan| plan.inferred())
-                .is_some_and(|abi| abi.evidence.is_some()),
+    /// Whether a lambda taking `param_count` parameters (after flattening)
+    /// is a tagged CPS closure: decided by its own type, never by the type
+    /// its context expects. It is tagged when an arrow its own parameters
+    /// consume carries effects. A lambda whose parameters only consume pure
+    /// arrows is a bare fun even if it returns an effectful function
+    /// (`fun n -> { let g = fun x -> op! x; g }`): calling it performs
+    /// nothing, and a pure call site could not run a tagged closure. Nodes
+    /// synthesized after typechecking have no entry; those fall back to the
+    /// classifier's inferred view.
+    pub(super) fn lambda_is_tagged(&self, expr: &Expr, param_count: usize) -> bool {
+        match self.value_type(expr.id) {
+            Some(ty) => consumed_arrows_effectful(&ty, param_count),
+            None => {
+                // An elaboration-made wrapper such as `fun dict x -> dict.m x`
+                // has no type of its own; it is effectful when the call it
+                // wraps is.
+                let mut body = expr;
+                while let ExprKind::Lambda { body: inner, .. } = &body.kind {
+                    body = inner.as_ref();
+                }
+                self.expr_is_effectful_call(body)
+                    || super::util::collect_effect_call(body).is_some()
+                    || self
+                        .planned_function_value(expr.id)
+                        .and_then(|plan| plan.inferred())
+                        .is_some_and(|abi| abi.evidence.is_some())
+            }
         }
     }
 
