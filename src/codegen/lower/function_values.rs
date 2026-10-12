@@ -814,17 +814,17 @@ impl<'a> Lowerer<'a> {
         let fun_var = self.fresh();
         let result_var = self.fresh();
         let mut params = Vec::with_capacity(user_arity + 2);
-        let mut apply_args = Vec::with_capacity(user_arity);
         for _ in 0..user_arity {
-            let param = self.fresh();
-            apply_args.push(CExpr::Var(param.clone()));
-            params.push(param);
+            params.push(self.fresh());
         }
+        let user_params = params.clone();
         params.push("_Evidence".to_string());
         params.push("_ReturnK".to_string());
 
         let pure_fun = self.lower_expr_value(expr);
-        let pure_call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
+        // The wrapped value is a pure function of whatever arity it was
+        // created with; `user_arity` comes from the boundary type.
+        let pure_call = self.apply_bound_function_value(expr, &pure_fun, &fun_var, &user_params);
         let return_call = CExpr::Apply(
             Box::new(CExpr::Var("_ReturnK".to_string())),
             vec![CExpr::Var(result_var.clone())],

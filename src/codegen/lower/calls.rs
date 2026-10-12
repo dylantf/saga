@@ -1,5 +1,5 @@
 use crate::ast::{Expr, ExprKind, NodeId, Pat};
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::errors::ErrorKind;
 use super::evidence;
@@ -8,6 +8,9 @@ use super::util::{
     collect_qualified_call, core_var, lower_string_to_binary,
 };
 use super::{Lowerer, QualifiedCallSite, ResolvedCallSite};
+
+/// Runtime module holding the slow path of [`Lowerer::arity_checked_apply`].
+const ARITY_RUNTIME_MODULE: &str = "saga_runtime";
 
 #[derive(Clone, Copy)]
 enum RuntimeCpsArgLowering {
@@ -21,6 +24,23 @@ enum RuntimeCpsArgLowering {
 enum CpsCallee {
     Value(CExpr),
     Remote { erlang_mod: String, name: String },
+}
+
+/// The arity of a lowered callee that is visibly a fun of fixed arity: a
+/// local function reference, a fun literal, or `erlang:make_fun/3` on a
+/// literal arity (how references to imported functions lower).
+fn lowered_fun_arity(callee: &CExpr) -> Option<usize> {
+    match callee {
+        CExpr::FunRef(_, arity) => Some(*arity),
+        CExpr::Fun(params, _) => Some(params.len()),
+        CExpr::Call(module, name, args) if module == "erlang" && name == "make_fun" => {
+            match args.as_slice() {
+                [_, _, CExpr::Lit(CLit::Int(arity))] => usize::try_from(*arity).ok(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 impl CpsCallee {
@@ -723,6 +743,80 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)))
     }
 
+    /// The number of arguments the function value `callee` lowers to takes,
+    /// when the compiler knows it without looking at the value: a resolved
+    /// top-level function. Everything else (locals, parameters, fields, call
+    /// results, dictionary methods) is `None` and must be applied through
+    /// [`Self::arity_checked_apply`].
+    ///
+    /// Dictionary methods are deliberately not treated as known. The trait
+    /// signature gives the number of declared parameters, but an impl method
+    /// whose body is a lambda (`mk b = fun n -> ...` for `mk : a -> (Int ->
+    /// Int)`) is stored in the dictionary with the lambda's parameters
+    /// flattened in, so the slot's arity can exceed the trait's.
+    fn static_callee_arity(&self, callee: &Expr) -> Option<usize> {
+        match &callee.kind {
+            ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => self
+                .resolved_fun_info(callee.id, name)
+                .map(|info| info.arity()),
+            _ => None,
+        }
+    }
+
+    /// Apply the function value `callee` to already-evaluated arguments at a
+    /// pure-typed call site: a plain `apply` when the callee's arity is
+    /// statically known to equal the argument count, the arity-checked call
+    /// otherwise.
+    pub(super) fn lower_pure_apply_to_vars(&mut self, callee: &Expr, arg_vars: &[String]) -> CExpr {
+        let func_ce = self.lower_expr(callee);
+        self.apply_function_value(callee, func_ce, arg_vars)
+    }
+
+    /// Like [`Self::lower_pure_apply_to_vars`], for a caller that has already
+    /// lowered `callee` to `func_ce`.
+    pub(super) fn apply_function_value(
+        &mut self,
+        callee: &Expr,
+        func_ce: CExpr,
+        arg_vars: &[String],
+    ) -> CExpr {
+        if self.callee_has_exact_arity(callee, &func_ce, arg_vars.len()) {
+            return CExpr::Apply(
+                Box::new(func_ce),
+                arg_vars.iter().cloned().map(CExpr::Var).collect(),
+            );
+        }
+        let func_var = self.fresh();
+        let call = Self::arity_checked_apply(&func_var, arg_vars);
+        CExpr::Let(func_var, Box::new(func_ce), Box::new(call))
+    }
+
+    /// Like [`Self::apply_function_value`], for a caller that has already
+    /// bound the lowered callee `func_ce` to `func_var`.
+    pub(super) fn apply_bound_function_value(
+        &self,
+        callee: &Expr,
+        func_ce: &CExpr,
+        func_var: &str,
+        arg_vars: &[String],
+    ) -> CExpr {
+        if self.callee_has_exact_arity(callee, func_ce, arg_vars.len()) {
+            CExpr::Apply(
+                Box::new(CExpr::Var(func_var.to_string())),
+                arg_vars.iter().cloned().map(CExpr::Var).collect(),
+            )
+        } else {
+            Self::arity_checked_apply(func_var, arg_vars)
+        }
+    }
+
+    /// Whether `callee`, lowered to `func_ce`, is statically known to take
+    /// exactly `supplied` arguments.
+    fn callee_has_exact_arity(&self, callee: &Expr, func_ce: &CExpr, supplied: usize) -> bool {
+        self.static_callee_arity(callee) == Some(supplied)
+            || lowered_fun_arity(func_ce) == Some(supplied)
+    }
+
     fn lower_generic_apply(&mut self, callee: &Expr, args: &[&Expr]) -> CExpr {
         fn direct_lambda_arity(expr: &Expr) -> Option<usize> {
             let ExprKind::Lambda { params, body } = &expr.kind else {
@@ -741,13 +835,9 @@ impl<'a> Lowerer<'a> {
             Some(arity)
         }
 
-        let callee_arity = match &callee.kind {
-            ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => self
-                .resolved_fun_info(callee.id, name)
-                .map(|info| info.arity()),
-            ExprKind::Lambda { .. } => direct_lambda_arity(callee),
-            _ => None,
-        };
+        let callee_arity = self
+            .static_callee_arity(callee)
+            .or_else(|| direct_lambda_arity(callee));
 
         if let Some(arity) = callee_arity {
             if arity < args.len() {
@@ -763,11 +853,9 @@ impl<'a> Lowerer<'a> {
                     CExpr::Apply(Box::new(func_ce), sat_args),
                 ));
 
-                let extra_args: Vec<CExpr> = arg_vars[arity..]
-                    .iter()
-                    .map(|v| CExpr::Var(v.clone()))
-                    .collect();
-                let call = CExpr::Apply(Box::new(CExpr::Var(result_var)), extra_args);
+                // The saturated call returned a function value of unknown
+                // arity; the leftover arguments go through the arity check.
+                let call = Self::arity_checked_apply(&result_var, &arg_vars[arity..]);
                 return self.wrap_let_bindings(bindings, call);
             }
 
@@ -793,12 +881,76 @@ impl<'a> Lowerer<'a> {
         let func_var = self.fresh();
         let func_ce = self.lower_expr(callee);
         let (arg_vars, mut bindings) = self.lower_call_args(args);
+        let exact_arity =
+            callee_arity.is_some() || lowered_fun_arity(&func_ce) == Some(arg_vars.len());
         bindings.insert(0, (func_var.clone(), func_ce));
-        let call = CExpr::Apply(
-            Box::new(CExpr::Var(func_var)),
-            arg_vars.into_iter().map(CExpr::Var).collect(),
-        );
+        let call = if exact_arity {
+            // Saturated call to a callee whose arity is statically known.
+            CExpr::Apply(
+                Box::new(CExpr::Var(func_var)),
+                arg_vars.into_iter().map(CExpr::Var).collect(),
+            )
+        } else {
+            Self::arity_checked_apply(&func_var, &arg_vars)
+        };
         self.wrap_let_bindings(bindings, call)
+    }
+
+    /// Apply a function value whose arity is not statically known (decision D1
+    /// in `docs/planning/sound-function-representation.md`).
+    ///
+    /// Functions are curried in the type system but compiled uncurried, so a
+    /// value of type `a -> b` reaching generic code may be a fun of any arity
+    /// (and `b` may itself be a function). The emitted shape is
+    ///
+    /// ```text
+    /// case call 'erlang':'is_function'(F, N) of
+    ///   <'true'> when 'true' -> apply F(A1, ..., AN)
+    ///   <_> when 'true' -> call 'saga_runtime':'apply_n'(F, [A1, ..., AN])
+    /// end
+    /// ```
+    ///
+    /// The exact-arity case costs one guard test and stays a direct `apply`
+    /// (so tail calls are preserved). On a mismatch the runtime helper builds
+    /// a partial application (too few arguments) or calls with what the fun
+    /// takes and applies the result to the rest (too many).
+    ///
+    /// Both the callee and the arguments must already be bound to variables:
+    /// they are referenced from both arms.
+    pub(super) fn arity_checked_apply(func_var: &str, arg_vars: &[String]) -> CExpr {
+        let args = || arg_vars.iter().cloned().map(CExpr::Var);
+        let direct = CExpr::Apply(Box::new(CExpr::Var(func_var.to_string())), args().collect());
+        let arg_list = args().rev().fold(CExpr::Nil, |tail, arg| {
+            CExpr::Cons(Box::new(arg), Box::new(tail))
+        });
+        let slow = cerl_call(
+            ARITY_RUNTIME_MODULE,
+            "apply_n",
+            vec![CExpr::Var(func_var.to_string()), arg_list],
+        );
+        let exact_arity = cerl_call(
+            "erlang",
+            "is_function",
+            vec![
+                CExpr::Var(func_var.to_string()),
+                CExpr::Lit(CLit::Int(arg_vars.len() as i64)),
+            ],
+        );
+        CExpr::Case(
+            Box::new(exact_arity),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("true".to_string())),
+                    guard: None,
+                    body: direct,
+                },
+                CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: slow,
+                },
+            ],
+        )
     }
 
     pub(super) fn lower_app_expr(&mut self, expr: &Expr) -> CExpr {

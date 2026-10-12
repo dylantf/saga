@@ -1,6 +1,10 @@
 -module(saga_runtime).
 -export([format_crash/3, format_caught_panic/2, await_signal/1]).
 
+%% Slow path of the arity-checked call emitted for function values whose
+%% arity the compiler does not know statically.
+-export([apply_n/2]).
+
 %% gen_event callbacks for the per-await signal handler installed below.
 -export([init/1, handle_event/2, handle_call/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -25,6 +29,75 @@ await_signal(Kind) ->
             _ = catch gen_event:delete_handler(erl_signal_server, HandlerId, []),
             unit
     end.
+
+%% Apply a function value to `Args' when its arity is not known to match.
+%%
+%% Saga functions are curried in the type system but compiled uncurried, so a
+%% value of type `a -> b' reaching generic code may be a fun of any arity. Call
+%% sites test `is_function(F, N)' inline and only come here on a mismatch:
+%%
+%%   - arity < N: call with the arguments the fun takes, then apply the
+%%     result to the rest
+%%   - arity > N: build a partial application closure for the remainder
+%%
+%% Effectful function values are bare funs with trailing `_Evidence' and
+%% `_ReturnK' parameters; a partial application simply leaves those in place.
+%%
+%% Anything that is not a fun raises the same `badfun' a direct call would.
+%% A zero-arity fun is never a Saga function value, so it is a `badarity'
+%% rather than something to call and re-apply.
+apply_n(F, Args) when is_function(F) ->
+    {arity, Arity} = erlang:fun_info(F, arity),
+    N = length(Args),
+    if
+        Arity =:= N ->
+            erlang:apply(F, Args);
+        Arity =:= 0 ->
+            erlang:error({badarity, {F, Args}});
+        Arity < N ->
+            {Now, Later} = lists:split(Arity, Args),
+            apply_n(erlang:apply(F, Now), Later);
+        true ->
+            partial(F, Args, Arity - N)
+    end;
+apply_n(F, _Args) ->
+    erlang:error({badfun, F}).
+
+%% A closure taking the `Remaining' arguments `F' still needs. Erlang cannot
+%% build a fun of computed arity, hence one clause per arity.
+partial(F, Args, 1) ->
+    fun(A) -> erlang:apply(F, Args ++ [A]) end;
+partial(F, Args, 2) ->
+    fun(A, B) -> erlang:apply(F, Args ++ [A, B]) end;
+partial(F, Args, 3) ->
+    fun(A, B, C) -> erlang:apply(F, Args ++ [A, B, C]) end;
+partial(F, Args, 4) ->
+    fun(A, B, C, D) -> erlang:apply(F, Args ++ [A, B, C, D]) end;
+partial(F, Args, 5) ->
+    fun(A, B, C, D, E) -> erlang:apply(F, Args ++ [A, B, C, D, E]) end;
+partial(F, Args, 6) ->
+    fun(A, B, C, D, E, G) -> erlang:apply(F, Args ++ [A, B, C, D, E, G]) end;
+partial(F, Args, 7) ->
+    fun(A, B, C, D, E, G, H) -> erlang:apply(F, Args ++ [A, B, C, D, E, G, H]) end;
+partial(F, Args, 8) ->
+    fun(A, B, C, D, E, G, H, I) -> erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I]) end;
+partial(F, Args, 9) ->
+    fun(A, B, C, D, E, G, H, I, J) -> erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J]) end;
+partial(F, Args, 10) ->
+    fun(A, B, C, D, E, G, H, I, J, K) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, K])
+    end;
+partial(F, Args, 11) ->
+    fun(A, B, C, D, E, G, H, I, J, K, L) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, K, L])
+    end;
+partial(F, Args, 12) ->
+    fun(A, B, C, D, E, G, H, I, J, K, L, M) ->
+        erlang:apply(F, Args ++ [A, B, C, D, E, G, H, I, J, K, L, M])
+    end;
+partial(F, Args, Remaining) ->
+    {arity, Arity} = erlang:fun_info(F, arity),
+    erlang:error({saga_partial_application_limit, Arity, length(Args), Remaining}).
 
 signal_atom({'std_process_SigHup'}) -> sighup;
 signal_atom({'std_process_SigQuit'}) -> sigquit;
@@ -126,6 +199,14 @@ format_reason(error, {badarity, {Fun, Args}}) ->
     io_lib:format(
         "function called with ~B argument(s), but expects ~B",
         [length(Args), element(2, Arity)]
+    );
+format_reason(error, {badfun, Val}) ->
+    io_lib:format("tried to call a value that is not a function: ~ts", [safe_inspect(Val)]);
+format_reason(error, {saga_partial_application_limit, Arity, Supplied, Remaining}) ->
+    io_lib:format(
+        "cannot partially apply a function of ~B parameter(s) to ~B argument(s): "
+        "~B would remain, and partial applications built at runtime support at most 12",
+        [Arity, Supplied, Remaining]
     );
 format_reason(error, undef) ->
     "called a function that does not exist";

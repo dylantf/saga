@@ -545,11 +545,7 @@ impl<'a> Lowerer<'a> {
                             {
                                 return ce;
                             }
-                            let callee_ce = this.lower_expr(callee);
-                            CExpr::Apply(
-                                Box::new(callee_ce),
-                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                            )
+                            this.lower_pure_apply_to_vars(callee, arg_vars)
                         });
                     }
                 }

@@ -627,7 +627,10 @@ impl<'a> Lowerer<'a> {
                             call_args.push(CExpr::Var("_ReturnK".to_string()));
                             CExpr::Apply(Box::new(body_fun), call_args)
                         } else {
-                            let call = CExpr::Apply(Box::new(body_fun), call_args);
+                            // The body's value is a pure function of unknown
+                            // arity (`f = ident g`, or a body that returns a
+                            // lambda after doing some work).
+                            let call = self.apply_function_value(body, body_fun, &eta_params);
                             if has_effects {
                                 CExpr::Apply(
                                     Box::new(CExpr::Var("_ReturnK".to_string())),
@@ -650,7 +653,11 @@ impl<'a> Lowerer<'a> {
                         } else {
                             self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                         };
-                        CExpr::Apply(Box::new(body_ce), eta_args)
+                        if has_effects {
+                            CExpr::Apply(Box::new(body_ce), eta_args)
+                        } else {
+                            self.apply_function_value(body, body_ce, &eta_params)
+                        }
                     }
                 } else if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
                     self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())

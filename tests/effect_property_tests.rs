@@ -3815,7 +3815,6 @@ result () = {
 }
 
 #[test]
-#[ignore = "known failure A2: function through a polymorphic function"]
 fn repro_a2_function_through_polymorphic_function() {
     let src = repro_src(
         r#"pub fun result : Unit -> Int
@@ -3826,7 +3825,6 @@ result () = (apply_gen add 1) 2
 }
 
 #[test]
-#[ignore = "known failure A3: partial application of a call result"]
 fn repro_a3_partial_application_of_call_result() {
     let src = repro_src(
         r#"pub fun result : Unit -> Int
@@ -3840,7 +3838,6 @@ result () = {
 }
 
 #[test]
-#[ignore = "known failure A4: effectful function through a polymorphic function"]
 fn repro_a4_effectful_function_through_polymorphic_function() {
     let src = repro_src(
         r#"fun eadd : Int -> Int -> Int needs {Skip}
@@ -3998,4 +3995,381 @@ result () = {
 "#,
     );
     check_type_error("repro_a12", &src);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime arity check (plan step A3, decision D1)
+//
+// Functions are curried in the type system and compiled uncurried, so a
+// function value reaching a call site through a type variable, a `let`, a
+// field or a list can have any arity. Calls whose callee arity is not known
+// statically test it at runtime: an exact match calls directly, too few
+// arguments build a partial application, too many call in stages.
+// ---------------------------------------------------------------------------
+
+const ARITY_PRELUDE: &str = r#"
+fun add3 : Int -> Int -> Int -> Int
+add3 a b c = a + b * 10 + c * 100
+
+fun inc : Int -> Int
+inc x = x + 1
+
+fun compose : (b -> c) -> (a -> b) -> a -> c
+compose f g x = f (g x)
+
+fun flip : (a -> b -> c) -> b -> a -> c
+flip f b a = f a b
+
+fun map_gen : (a -> b) -> List a -> List b
+map_gen f xs = case xs {
+  [] -> []
+  x :: rest -> f x :: map_gen f rest
+}
+
+fun sum : List Int -> Int
+sum xs = case xs {
+  [] -> 0
+  x :: rest -> x + sum rest
+}
+
+fun eadd : Int -> Int -> Int needs {Skip}
+eadd a b = a + b + skip! ()
+
+fun eadd3 : Int -> Int -> Int -> Int needs {Skip}
+eadd3 a b c = a + b * 10 + c * 100 + skip! ()
+"#;
+
+fn arity_src(body: &str) -> String {
+    format!("{REPRO_PRELUDE}{ARITY_PRELUDE}\n{body}")
+}
+
+#[test]
+fn arity_over_application_through_polymorphic_function() {
+    // `apply_gen add 1 2`: the saturated call returns a function value, and
+    // the leftover argument is applied to it.
+    let src = arity_src(
+        r#"pub fun result : Unit -> Int
+result () = {
+  let a = apply_gen add 1 2
+  let b = apply_gen (apply_gen add) 3 4
+  let c = ident add3 1 2 3
+  let d = apply_gen (ident add3) 1 2 3
+  let e = ident ident ident add 5 6
+  a + b * 10 + c * 100 + d * 100000 + e * 100000000
+}
+"#,
+    );
+    // a = 3, b = 7, c = 321, d = 321, e = 11
+    check_result_int("arity_over_application", &src, 1_132_132_173);
+}
+
+#[test]
+fn arity_under_application_builds_closure_called_later() {
+    // `apply_gen add3 1` calls a three-argument fun with one argument inside
+    // generic code. The closure it returns is then applied one argument at a
+    // time, two at once, and through generic code again.
+    let src = arity_src(
+        r#"pub fun result : Unit -> Int
+result () = {
+  let p = apply_gen add3 1
+  let q = p 2
+  let r = apply_gen p 3
+  q 4 + r 5 * 1000 + p 6 7 * 1000000
+}
+"#,
+    );
+    // q 4 = 421, r 5 = 531, p 6 7 = 761
+    check_result_int("arity_under_application", &src, 761_531_421);
+}
+
+#[test]
+fn arity_compose_and_flip_over_multi_argument_functions() {
+    let src = arity_src(
+        r#"pub fun result : Unit -> Int
+result () = {
+  let a = compose (apply_gen add 10) inc 1
+  let b = flip (ident add3) 1 2 3
+  let c = compose add inc 1 2
+  let d = flip add3 1 2 3
+  let e = compose (flip add3 1) inc 1 2
+  a + b * 100 + c * 100000 + d * 1000000 + e * 1000000000
+}
+"#,
+    );
+    // a = 12, b = 312, c = 4, d = 312, e = add3 2 1 2 = 212
+    check_result_int("arity_compose_flip", &src, 212_312_431_212);
+}
+
+#[test]
+fn arity_multi_argument_functions_in_list_partially_applied_by_generic_code() {
+    let src = arity_src(
+        r#"fun fns : Unit -> List (Int -> Int -> Int)
+fns () = [add, fun a b -> a * b, add3 1]
+
+pub fun result : Unit -> Int
+result () = {
+  let partials = map_gen (fun f -> f 10) (fns ())
+  let direct = sum (map_gen (fun g -> g 2) partials)
+  let partials2 = map_gen (flip apply_gen 10) (fns ())
+  let generic = sum (map_gen (flip apply_gen 2) partials2)
+  direct + generic * 1000
+}
+"#,
+    );
+    // 12 + 20 + 301 = 333 both ways
+    check_result_int("arity_list_of_functions", &src, 333_333);
+}
+
+#[test]
+fn arity_field_access_headed_call() {
+    let src = arity_src(
+        r#"record Ops { run : Int -> Int -> Int }
+record Holder a { item : a }
+
+fun unhold : Holder a -> a
+unhold h = h.item
+
+pub fun result : Unit -> Int
+result () = {
+  let ops = Ops { run: add }
+  let a = ops.run 1 2
+  let p = ops.run 1
+  let b = p 5
+  let g = Holder { item: add3 }
+  let c = g.item 1 2 3
+  let d = unhold g 1 2 3
+  let h = Holder { item: apply_gen add3 1 }
+  let e = h.item 2 3
+  a + b * 10 + c * 100 + d * 100000 + e * 100000000
+}
+"#,
+    );
+    // a = 3, b = 6, c = 321, d = 321, e = 321
+    check_result_int("arity_field_access", &src, 32_132_132_163);
+}
+
+#[test]
+fn arity_top_level_function_whose_body_returns_a_function() {
+    // `stage` is declared with three parameters in its type but written with
+    // one; the remaining arguments reach a body that returns a one-argument
+    // closure returning another closure.
+    let src = arity_src(
+        r#"fun stage : Int -> Int -> Int -> Int
+stage a = {
+  let k = a * 2
+  fun b -> {
+    let j = k + b
+    fun c -> j + c
+  }
+}
+
+fun via_ident : Int -> Int -> Int -> Int
+via_ident = ident stage
+
+pub fun result : Unit -> Int
+result () = {
+  let a = stage 1 2 3
+  let b = apply_gen stage 1 2 3
+  let c = via_ident 1 2 3
+  let d = (fun x -> {
+    let k = x
+    fun y -> k + y
+  }) 1 2
+  a + b * 10 + c * 100 + d * 1000
+}
+"#,
+    );
+    // a = b = c = 7, d = 3
+    check_result_int("arity_staged_body", &src, 3_777);
+}
+
+#[test]
+fn arity_pure_trait_method_partially_and_over_applied() {
+    // A dictionary slot's arity follows the impl body, not the trait
+    // signature: `mk w = fun n -> ...` is stored as a two-argument fun.
+    let src = arity_src(
+        r#"trait Comb a {
+  fun comb : a -> Int -> Int -> Int
+}
+
+impl Comb for Int {
+  comb a b c = a + b * 10 + c * 100
+}
+
+trait Mk a {
+  fun mk : a -> (Int -> Int)
+}
+
+type Wrap a = Wrap a
+
+impl Mk for Int {
+  mk a = {
+    let k = a
+    fun n -> n + k
+  }
+}
+
+impl Mk for Wrap a where {a: Mk} {
+  mk w = fun n -> case w { Wrap x -> mk x n }
+}
+
+fun partial_comb : a -> Int where {a: Comb}
+partial_comb x = {
+  let p = comb x
+  let q = p 2
+  q 3
+}
+
+fun over_mk : a -> Int where {a: Mk}
+over_mk x = mk x 5
+
+fun just_mk : a -> (Int -> Int) where {a: Mk}
+just_mk x = mk x
+
+pub fun result : Unit -> Int
+result () = {
+  let p = comb 1
+  let a = p 2 3
+  let b = apply_gen (comb 1) 2 3
+  let c = partial_comb 1
+  let d = over_mk 1 + over_mk (Wrap 2) + mk (Wrap 3) 5 + just_mk (Wrap 4) 5
+  a + b * 1000 + c * 1000000 + d * 1000000000
+}
+"#,
+    );
+    // a = b = c = 321, d = 6 + 7 + 8 + 9
+    check_result_int("arity_trait_methods", &src, 30_321_321_321);
+}
+
+#[test]
+fn arity_pure_call_with_effectful_arguments() {
+    // The callee is a pure function value of unknown arity; its arguments
+    // perform effects, so the call is assembled in continuation style.
+    let src = arity_src(
+        r#"fun use_exact : (Int -> Int -> Int) -> Int needs {Skip}
+use_exact f = f (skip! ()) 2
+
+fun use_partial : (Int -> Int -> Int -> Int) -> Int needs {Skip}
+use_partial f = {
+  let p = f (skip! ())
+  p 2 (skip! ())
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let a = use_exact add with { skip () = resume 5 }
+  let b = use_exact (apply_gen add3 1) with { skip () = resume 5 }
+  let c = use_partial add3 with { skip () = resume 5 }
+  a + b * 10 + c * 10000
+}
+"#,
+    );
+    // a = 7, b = 251, c = 525
+    check_result_int("arity_effectful_arguments", &src, 5_252_517);
+}
+
+#[test]
+fn arity_function_value_resumed_from_handler() {
+    let src = arity_src(
+        r#"effect Ask { fun ask : Unit -> (Int -> Int -> Int) }
+
+fun use_ask : Unit -> Int needs {Ask}
+use_ask () = {
+  let f = ask! ()
+  let p = f 1
+  let g = ask! ()
+  p 2 + g 3 4
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let a = use_ask () with { ask () = resume add }
+  let b = use_ask () with { ask () = resume (apply_gen add3 1) }
+  a + b * 100
+}
+"#,
+    );
+    // a = 3 + 7, b = 211 + 431
+    check_result_int("arity_resumed_function_value", &src, 64_210);
+}
+
+#[test]
+fn arity_partial_application_with_many_remaining_arguments() {
+    let src = arity_src(
+        r#"fun nine : Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int
+nine a b c d e f g h i = a + b + c + d + e + f + g + h + i
+
+pub fun result : Unit -> Int
+result () = {
+  let p = apply_gen nine 1
+  let q = p 2 3 4
+  q 5 6 7 8 9
+}
+"#,
+    );
+    check_result_int("arity_many_remaining", &src, 45);
+}
+
+#[test]
+fn arity_effectful_function_partially_applied_by_generic_code() {
+    // An effectful function value is a fun with trailing evidence and
+    // continuation parameters. A partial application built by the arity check
+    // leaves them in place, so the eventual effectful call still works.
+    let src = arity_src(
+        r#"pub fun result : Unit -> Int
+result () = {
+  let e = apply_gen eadd3 1
+  let a = e 2 3 with { skip () = resume 1000 }
+  let e2 = (ident eadd) 1
+  let b = e2 2 with { skip () = resume 100 }
+  a + b * 10000
+}
+"#,
+    );
+    // a = 1321, b = 103
+    check_result_int("arity_effectful_partial", &src, 1_031_321);
+}
+
+#[test]
+fn arity_effectful_function_as_callback_and_in_list() {
+    let src = arity_src(
+        r#"fun run_cb : (Int -> Int needs {Skip}) -> Int needs {Skip}
+run_cb f = f 5
+
+pub fun result : Unit -> Int
+result () = {
+  let a = run_cb (apply_gen eadd 1) with { skip () = resume 100 }
+  let es = map_gen (flip apply_gen 1) [eadd, eadd]
+  let b = case es {
+    f :: _ -> f 2 with { skip () = resume 100 }
+    [] -> 0
+  }
+  a + b * 1000
+}
+"#,
+    );
+    // a = 106, b = 103
+    check_result_int("arity_effectful_callback_list", &src, 103_106);
+}
+
+#[test]
+fn arity_effectful_field_access_headed_call() {
+    let src = arity_src(
+        r#"record EffOps { run : Int -> Int -> Int needs {Skip} }
+record Holder a { item : a }
+
+pub fun result : Unit -> Int
+result () = {
+  let ops = EffOps { run: eadd }
+  let a = ops.run 1 2 with { skip () = resume 100 }
+  let g = Holder { item: eadd }
+  let b = g.item 1 2 with { skip () = resume 100 }
+  let h = Holder { item: apply_gen eadd3 1 }
+  let c = h.item 2 3 with { skip () = resume 1000 }
+  a + b * 1000 + c * 1000000
+}
+"#,
+    );
+    // a = 103, b = 103, c = 1321
+    check_result_int("arity_effectful_field_access", &src, 1_321_103_103);
 }
