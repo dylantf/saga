@@ -68,6 +68,39 @@ pub(super) fn collect_list_literal_elements(expr: &Expr) -> Option<Vec<&Expr>> {
     }
 }
 
+/// The type of a lambda `fun p1 .. pn -> body`: a curried arrow whose effect
+/// row sits on the arrow of the *last* parameter, the same placement a
+/// declared `fun f : P1 -> .. -> Pn -> R needs {E}` gets. The body runs only
+/// once every parameter has been supplied, so that is the arrow whose
+/// application performs the effects. Arrows inside `body_ty` (a lambda that
+/// returns a function) are not touched: they carry their own rows.
+fn curried_lambda_type(param_types: Vec<Type>, body_ty: Type, body_effs: EffectRow) -> Type {
+    let mut params = param_types.into_iter().rev();
+    let Some(last_param) = params.next() else {
+        return body_ty;
+    };
+    let mut ty = if body_effs.effects.is_empty() {
+        Type::arrow(last_param, body_ty)
+    } else {
+        Type::Fun(Box::new(last_param), Box::new(body_ty), body_effs)
+    };
+    for param_ty in params {
+        ty = Type::arrow(param_ty, ty);
+    }
+    ty
+}
+
+/// `ty` with the row of its `n`th arrow (1-based, outermost first) replaced.
+fn with_row_on_arrow(ty: Type, n: usize, row: EffectRow) -> Type {
+    match ty {
+        Type::Fun(param, ret, _) if n == 1 => Type::Fun(param, ret, row),
+        Type::Fun(param, ret, own) if n > 1 => {
+            Type::Fun(param, Box::new(with_row_on_arrow(*ret, n - 1, row)), own)
+        }
+        other => other,
+    }
+}
+
 impl Checker {
     /// When a bare `Var` lookup fails, probe `scope_map.trait_methods` with
     /// the same tier-based shadowing rule the resolver uses. Locally defined
@@ -725,23 +758,10 @@ impl Checker {
         self.env = saved_env;
         self.effect_meta.type_param_cache = saved_cache;
 
-        // Build curried arrow
-        let mut ty = body_ty;
-        for param_ty in param_types.into_iter().rev() {
-            ty = Type::arrow(param_ty, ty);
-        }
-
-        // Put effects on outermost arrow
-        if !body_effs.effects.is_empty()
-            && let Type::Fun(a, b, _) = ty
-        {
-            ty = Type::Fun(a, b, body_effs.clone());
-        }
-
         // SPIKE: a closure is a value — defining it performs nothing. Its
-        // effects live in the arrow type above and are realized only when it is
+        // effects live in the arrow type and are realized only when it is
         // applied. (Was: self.emit_effects(&body_effs), which leaked them.)
-        Ok(ty)
+        Ok(curried_lambda_type(param_types, body_ty, body_effs))
     }
 
     fn infer_lambda_against(
@@ -780,19 +800,8 @@ impl Checker {
         self.env = saved_env;
         self.effect_meta.type_param_cache = saved_cache;
 
-        let mut ty = body_ty;
-        for param_ty in param_types.into_iter().rev() {
-            ty = Type::arrow(param_ty, ty);
-        }
-
-        if !body_effs.effects.is_empty()
-            && let Type::Fun(a, b, _) = ty
-        {
-            ty = Type::Fun(a, b, body_effs.clone());
-        }
-
         // SPIKE: see infer_lambda — closures don't perform effects at definition.
-        Ok(Some(ty))
+        Ok(Some(curried_lambda_type(param_types, body_ty, body_effs)))
     }
 
     fn infer_app_chain_with_expected(
@@ -1724,6 +1733,16 @@ impl Checker {
                         .definitions
                         .push((fun_id, fun_name.clone(), fun_name_span));
                     let arity = clauses[0].0.len();
+                    // Every clause shares one row variable on the innermost
+                    // arrow; it is bound once, after the loop, to the effects
+                    // of all clauses together (as `check_fun_clauses` does for
+                    // top-level functions). Pinning the row per clause would
+                    // type the function by its first clause alone.
+                    let clause_row = EffectRow {
+                        effects: vec![],
+                        tails: vec![self.fresh_var()],
+                    };
+                    let mut all_body_effs = EffectRow::empty();
 
                     for (params, guard, body) in &clauses {
                         if params.len() != arity {
@@ -1754,14 +1773,15 @@ impl Checker {
                         let saved_effs = self.save_effects();
                         let body_ty = self.infer_expr(body)?;
                         let body_effs = self.restore_effects(saved_effs);
+                        all_body_effs = all_body_effs.merge(&body_effs);
                         // Build curried arrow with effects on innermost
                         let mut clause_ty = body_ty;
                         for (j, param_ty) in param_types.into_iter().rev().enumerate() {
-                            if j == 0 && !body_effs.effects.is_empty() {
+                            if j == 0 {
                                 clause_ty = Type::Fun(
                                     Box::new(param_ty),
                                     Box::new(clause_ty),
-                                    body_effs.clone(),
+                                    clause_row.clone(),
                                 );
                             } else {
                                 clause_ty = Type::arrow(param_ty, clause_ty);
@@ -1770,6 +1790,12 @@ impl Checker {
                         self.unify_at(&fun_ty, &clause_ty, fun_span)?;
                         self.env = saved_env;
                     }
+
+                    // Close the shared row over what the clauses perform.
+                    let performed =
+                        EffectRow::closed(self.sub.apply_effect_row(&all_body_effs).effects);
+                    let closed_ty = with_row_on_arrow(self.sub.apply(&fun_ty), arity, performed);
+                    self.unify_at(&fun_ty, &closed_ty, fun_span)?;
 
                     let scheme = self.generalize(&fun_ty);
                     self.record_type(fun_id, &fun_ty);
@@ -1924,7 +1950,14 @@ impl Checker {
     ) -> Result<(), Diagnostic> {
         let actual = self.sub.apply(actual_arg);
         let expected = self.sub.apply(expected_param);
-        if let (Type::Fun(_, _, actual_row), Type::Fun(_, _, expected_row)) = (&actual, &expected) {
+        // Walk both curried chains arrow by arrow: a row on a later arrow
+        // (`A -> B -> C needs {E}`, or `fun a b -> ..`) is checked against
+        // the row on the same arrow of the parameter type.
+        let (mut actual, mut expected) = (&actual, &expected);
+        while let (Type::Fun(_, actual_ret, actual_row), Type::Fun(_, expected_ret, expected_row)) =
+            (actual, expected)
+        {
+            (actual, expected) = (actual_ret.as_ref(), expected_ret.as_ref());
             let actual_row = self.sub.apply_effect_row(actual_row);
             let expected_row = self.sub.apply_effect_row(expected_row);
             if actual_row.tails.is_empty() && expected_row.tails.is_empty() {

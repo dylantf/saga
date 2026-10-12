@@ -65,28 +65,6 @@ pub(crate) enum RowPosition<'a> {
 /// are recognised when a hard error for the same expression supersedes them.
 pub(crate) const ROW_RULE_NOTE: &str = "This is accepted for now and will become a type error.";
 
-/// `path` without its trailing return steps: identifies the function value
-/// (the curried arrow chain) a row belongs to.
-fn arrow_chain_prefix(path: &[UnifyStep]) -> &[UnifyStep] {
-    let trailing = path
-        .iter()
-        .rev()
-        .take_while(|step| **step == UnifyStep::FunRet)
-        .count();
-    &path[..path.len() - trailing]
-}
-
-/// Add to `out` the effects of `row` that `other` lacks.
-fn push_missing(out: &mut Vec<super::EffectEntry>, row: &EffectRow, other: &EffectRow) {
-    for entry in &row.effects {
-        if !other.effects.iter().any(|o| o.matches(entry))
-            && !out.iter().any(|seen| seen.matches(entry))
-        {
-            out.push(entry.clone());
-        }
-    }
-}
-
 /// Does `path` lead to a position where subsumption is allowed, given the
 /// expression whose type is being coerced? True when the path consists of
 /// return steps only (the row sits on the value's own arrow), after walking
@@ -648,30 +626,16 @@ impl Checker {
             return Ok(());
         }
 
-        // Rows at a coercion position are judged per function value, i.e.
-        // per curried arrow chain, not per arrow: see `coercion_warning`.
-        let mut chains: Vec<(&[UnifyStep], Vec<&RowSubsumption>)> = Vec::new();
         let mut messages: Vec<String> = Vec::new();
         for subsumption in &subsumptions {
-            let direct = match position {
-                RowPosition::Coercion { expr, .. } => {
-                    coercion_path_is_direct(expr, &subsumption.path)
+            match position {
+                RowPosition::Coercion {
+                    actual_is_left,
+                    expr,
+                } if coercion_path_is_direct(expr, &subsumption.path) => {
+                    messages.extend(self.coercion_warning(subsumption, actual_is_left));
                 }
-                RowPosition::Exact | RowPosition::Nested => false,
-            };
-            if !direct {
-                messages.push(self.strict_row_warning(subsumption, position));
-                continue;
-            }
-            let prefix = arrow_chain_prefix(&subsumption.path);
-            match chains.iter_mut().find(|(p, _)| *p == prefix) {
-                Some((_, members)) => members.push(subsumption),
-                None => chains.push((prefix, vec![subsumption])),
-            }
-        }
-        if let RowPosition::Coercion { actual_is_left, .. } = position {
-            for (_, members) in &chains {
-                messages.extend(self.coercion_warning(members, actual_is_left));
+                _ => messages.push(self.strict_row_warning(subsumption, position)),
             }
         }
         for message in messages {
@@ -722,58 +686,47 @@ impl Checker {
         }
     }
 
-    /// Warning for one function value at a coercion position, given every
-    /// unequal row pair along its curried arrow chain.
+    /// Warning for one arrow of a function value at a coercion position.
     ///
-    /// The actual side may have fewer effects than the expected side
+    /// The actual row may have fewer effects than the expected row
     /// (subsumption). The reverse is an effectful function used as a less
-    /// effectful one, and is reported.
-    ///
-    /// The comparison is over the whole chain rather than arrow by arrow
-    /// because the two sides do not always put a row on the same arrow: a
-    /// declared `A -> B -> C needs {E}` carries `{E}` on its last arrow,
-    /// while `infer_lambda` types `fun a b -> ...` with `{E}` on its first.
-    /// Arrow by arrow that pair reads as "effectful where pure is expected"
-    /// on one arrow and the opposite on the other, though both describe a
-    /// two-argument function that performs `E`. Effects the expected side
-    /// declares anywhere on the chain are therefore not reported.
-    fn coercion_warning(&self, chain: &[&RowSubsumption], actual_is_left: bool) -> Option<String> {
-        let mut actual_extra: Vec<super::EffectEntry> = Vec::new();
-        let mut expected_extra: Vec<super::EffectEntry> = Vec::new();
-        let mut actual_all = EffectRow::empty();
-        let mut expected_all = EffectRow::empty();
-        for subsumption in chain {
-            let (actual, expected) = if actual_is_left {
-                (&subsumption.left, &subsumption.right)
-            } else {
-                (&subsumption.right, &subsumption.left)
-            };
-            push_missing(&mut actual_extra, actual, expected);
-            push_missing(&mut expected_extra, expected, actual);
-            push_missing(&mut actual_all.effects, actual, &EffectRow::empty());
-            push_missing(&mut expected_all.effects, expected, &EffectRow::empty());
-        }
-        let unexpected: Vec<super::EffectEntry> = actual_extra
-            .into_iter()
-            .filter(|e| !expected_extra.iter().any(|x| x.matches(e)))
-            .collect();
-        if unexpected.is_empty() {
+    /// effectful one, and is reported. Rows are compared arrow by arrow: an
+    /// effect on a different arrow of a curried type is performed at a
+    /// different application, so `fun a -> { e! (); fun b -> .. }` is not an
+    /// `A -> B -> C needs {E}`.
+    fn coercion_warning(
+        &self,
+        subsumption: &RowSubsumption,
+        actual_is_left: bool,
+    ) -> Option<String> {
+        if subsumption.left_is_larger != actual_is_left {
             return None;
         }
+        let (actual, expected) = if actual_is_left {
+            (&subsumption.left, &subsumption.right)
+        } else {
+            (&subsumption.right, &subsumption.left)
+        };
+        let unexpected: Vec<super::EffectEntry> = actual
+            .effects
+            .iter()
+            .filter(|e| !expected.effects.iter().any(|x| x.matches(e)))
+            .cloned()
+            .collect();
         let unexpected = self.describe_effects(&unexpected);
-        let expected = if expected_all.effects.is_empty() {
+        let expected = if expected.effects.is_empty() {
             "a function with no effects is expected".to_string()
         } else {
             format!(
                 "a function that only allows {} is expected",
-                self.describe_effects(&expected_all.effects)
+                self.describe_effects(&expected.effects)
             )
         };
         Some(format!(
             "a function that uses {} is used where {}. Handle {} first \
              (for example `fun x -> f x with handler`), or add `needs {}` to the \
              expected function type. {}",
-            self.describe_effects(&actual_all.effects),
+            self.describe_effects(&actual.effects),
             expected,
             unexpected,
             unexpected,

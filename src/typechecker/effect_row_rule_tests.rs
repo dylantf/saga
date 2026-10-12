@@ -50,8 +50,34 @@ fn row_warnings(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Type-check `PRELUDE + src` and return the messages of its type errors.
+fn type_errors(src: &str) -> Vec<String> {
+    let src = format!("{PRELUDE}\n{src}");
+    let tokens = Lexer::new(&src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    crate::desugar::desugar_program(&mut program);
+    let mut checker = Checker::with_prelude(None).expect("prelude");
+    let result = checker.check_program(&mut program);
+    result.errors().iter().map(|d| d.message.clone()).collect()
+}
+
+/// "declares needs {..} but never uses it" warnings for `PRELUDE + src`.
+fn unused_needs_warnings(src: &str) -> Vec<String> {
+    let src = format!("{PRELUDE}\n{src}");
+    let tokens = Lexer::new(&src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    crate::desugar::desugar_program(&mut program);
+    let mut checker = Checker::with_prelude(None).expect("prelude");
+    let result = checker.check_program(&mut program);
+    result
+        .warnings()
+        .iter()
+        .filter(|d| d.message.contains("but never uses it"))
+        .map(|d| d.message.clone())
+        .collect()
+}
+
 const AT_DEPTH: &str = "are treated as the same type inside a larger type";
-const NOT_A_COERCION: &str = "are treated as the same type here";
 const WRONG_DIRECTION: &str = "is used where a function with no effects is expected";
 
 #[track_caller]
@@ -184,15 +210,40 @@ fn effectful_function_as_pure_warns_at_every_coercion_position() {
         ),
         WRONG_DIRECTION,
     );
-    // Return position of a lambda checked against an expected type: the
-    // existing call-argument check only looks at the lambda's own arrow.
+    // Return position of a lambda that is not a call argument.
     assert_one(
         &row_warnings(
-            "fun call : (Int -> (Unit -> Int)) -> Int\ncall mk = (mk 1) ()\n\
-             fun f : Unit -> Int\nf () = call (fun _ -> eff)",
+            "fun f : Unit -> Int\nf () = {\n  \
+             let _mk : Int -> (Unit -> Int) = fun _ -> eff\n  1\n}",
         ),
         WRONG_DIRECTION,
     );
+}
+
+#[test]
+fn call_argument_check_covers_every_arrow_of_the_callback() {
+    // `Int -> (Unit -> Int)` is `Int -> Unit -> Int`: the call-argument check
+    // compares the callback with its parameter type arrow by arrow, so an
+    // effect on a later arrow is a hard error like one on the first.
+    let call = "fun call : (Int -> Unit -> Int) -> Int\ncall mk = mk 1 ()\n";
+    for arg in [
+        "(fun _ -> eff)",
+        "(fun _ () -> skip! ())",
+        "(fun _ -> fun () -> skip! ())",
+        "eff2",
+    ] {
+        let errors = type_errors(&format!(
+            "{call}\
+             fun eff2 : Int -> Unit -> Int needs {{Skip}}\neff2 _ () = skip! ()\n\
+             fun f : Unit -> Int needs {{Skip}}\nf () = call {arg}"
+        ));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("passed where a pure callback is expected")),
+            "{arg}: {errors:#?}"
+        );
+    }
 }
 
 #[test]
@@ -281,21 +332,34 @@ fn branches_holding_literals_with_different_nested_rows_warn() {
 }
 
 #[test]
-fn local_function_clauses_with_different_rows_warn() {
-    // Not a coercion position: the clauses of one function must agree. Today
-    // the function's row is pinned to the first clause, so `go` is typed as
-    // pure although its second clause performs `Skip`.
-    let warnings = row_warnings(
-        r#"
-fun f : Int -> Int
-f n = {
-  let go 0 = 0
-  let go m = m + skip! ()
-  go n
-}
-"#,
+fn local_function_clauses_share_one_effect_row() {
+    // The row of a local multi-clause function is the union of what its
+    // clauses perform, not the row of its first clause.
+    let go = "  let go 0 = 0\n  let go m = m + skip! ()\n  go n\n}";
+    let src = format!("fun f : Int -> Int needs {{Skip}}\nf n = {{\n{go}");
+    assert_none(&row_warnings(&src));
+    assert!(unused_needs_warnings(&src).is_empty());
+    // A recursive one, and the effectful clause first.
+    assert_none(&row_warnings(
+        "fun f : Int -> Int needs {Skip}\nf n = {\n  \
+         let go 0 acc = acc\n  let go m acc = go (m - 1) (acc + skip! ())\n  go n 0\n}",
+    ));
+    assert_none(&row_warnings(
+        "fun f : Int -> Int needs {Skip}\nf n = {\n  \
+         let go 1 = skip! ()\n  let go _ = 0\n  go n\n}",
+    ));
+    // The enclosing function has to declare it.
+    let errors = type_errors(&format!("fun f : Int -> Int\nf n = {{\n{go}"));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("uses effects {Skip} but has no 'needs' declaration")),
+        "{errors:#?}"
     );
-    assert_one(&warnings, NOT_A_COERCION);
+    // A pure local function stays pure.
+    assert_none(&row_warnings(
+        "fun f : Int -> Int\nf n = {\n  let go 0 = 0\n  let go m = m + 1\n  go n\n}",
+    ));
 }
 
 // --- Legal subsumption: no warning ---
@@ -408,10 +472,8 @@ rest r = {
 
 #[test]
 fn multi_parameter_effectful_lambda_matches_a_declared_curried_type() {
-    // `infer_lambda` puts a lambda's row on its first arrow; a declared
-    // `A -> B -> C needs {E}` has it on the last. They describe the same
-    // two-argument effectful function, so no warning (see
-    // `Checker::coercion_warning`).
+    // `fun a b -> ..` and a declared `A -> B -> C needs {E}` both carry the
+    // row on the last arrow.
     assert_none(&row_warnings(
         r#"
 record Ops { combine : Int -> Int -> Int needs {Skip} }
@@ -426,7 +488,7 @@ use_ops () = {
 }
 "#,
     ));
-    // The effects still have to be declared somewhere on the expected type.
+    // The effects still have to be declared on the expected type.
     assert_one(
         &row_warnings(
             "record Ops { combine : Int -> Int -> Int }\n\
@@ -434,6 +496,34 @@ use_ops () = {
         ),
         WRONG_DIRECTION,
     );
+}
+
+#[test]
+fn effect_on_a_different_arrow_than_expected_warns() {
+    // The lambda performs `Skip` when given its first argument; the expected
+    // type performs it when given the second. Rows are compared per arrow.
+    let early = "fun a -> {\n  let n = skip! ()\n  fun b -> a + b + n\n}";
+    let warnings = row_warnings(&format!(
+        "fun mk : Unit -> (Int -> Int -> Int needs {{Skip}})\nmk () = {early}"
+    ));
+    assert_one(&warnings, WRONG_DIRECTION);
+    assert!(warnings[0].contains("a function that uses {Skip}"));
+    assert_one(
+        &row_warnings(&format!(
+            "record Ops {{ combine : Int -> Int -> Int needs {{Skip}} }}\n\
+             fun f : Unit -> Ops\nf () = Ops {{ combine: {early} }}"
+        )),
+        WRONG_DIRECTION,
+    );
+    // Against a type that puts the effect on the first arrow it is silent.
+    assert_none(&row_warnings(&format!(
+        "fun mk : Unit -> (Int -> (Int -> Int) needs {{Skip}})\nmk () = {early}"
+    )));
+    // The explicitly nested lambda performs it on the last arrow.
+    assert_none(&row_warnings(
+        "fun mk : Unit -> (Int -> Int -> Int needs {Skip})\n\
+         mk () = fun a -> fun b -> a + b + skip! ()",
+    ));
 }
 
 #[test]

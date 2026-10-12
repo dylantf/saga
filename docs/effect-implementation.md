@@ -43,6 +43,23 @@ fun greet : String -> String -> Unit needs {Log}
 
 Partial application `greet "hi"` returns `Fun(String, Unit, {Log})` -- effects are preserved until full saturation.
 
+Lambdas and local functions follow the same rule: the row of what the body
+performs goes on the arrow of the **last parameter of that lambda**
+(`curried_lambda_type` in `infer.rs`).
+
+```
+fun a b -> a + b + skip! ()             => Fun(a, Fun(b, Int, {Skip}), {})
+fun a -> fun b -> a + b + skip! ()      => Fun(a, Fun(b, Int, {Skip}), {})
+fun a -> { skip! (); fun b -> a + b }   => Fun(a, Fun(b, Int, {}), {Skip})
+```
+
+The third one performs `Skip` when `a` is supplied, before the inner lambda
+exists, so it is not an `a -> b -> Int needs {Skip}`. Rows are compared arrow
+by arrow, both by the effect-row rule warning at coercion positions and by
+the call-argument check (`check_callback_effect_subtype`). A local
+multi-clause function (`let go 0 = ..` / `let go m = ..`) gets the union of
+its clauses' effects, like a top-level one.
+
 ### Computation Types
 
 `infer_expr` returns the value `Type` and emits performed effects into
