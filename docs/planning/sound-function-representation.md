@@ -1,6 +1,57 @@
 # Sound Function Representation, Then Typed IR
 
-Status: proposed (2026-10-12). Nothing in this document is implemented.
+Status: Stage A implemented on branch `effect-ir` (2026-10-12). Stages B and C
+not started. The sections below are the plan as written before and during the
+work; "Stage A outcome" records what was actually done.
+
+## Stage A outcome
+
+Done, in this order: known-failure tests and the program generator; a complete
+per-expression type table; the runtime arity check; lambda effect rows on the
+innermost arrow; a fix for lambdas binding to the enclosing handler's fast
+paths; family-only effect identity (D6) with its typechecker rule and two
+follow-up soundness fixes; tagged closures; the effect-row rule as an error;
+deletion of the contextual planner and adapters; version 0.5.0.
+
+| | Before | After |
+|---|---|---|
+| Generated function-shape programs failing | 739 of about 2,100 | 0 of 2,171 |
+| Generated parameterised-effect programs failing | 188 of 391 | 0 of 216 (252 rejected by design) |
+| Appendix A repros passing | 0 of 12 | 12 of 12 |
+| Examples that run | 59 of 62 | 62 of 62 |
+
+Measured cost of tagged closures on the two `json_bench` programs that still
+compile against current `saga_json` (closure-heavy combinator style, 100k
+records, median of three runs): 1.6% to 3.4% slower than `main`. An effect
+operation in a hot loop inside a lambda was not measured.
+
+Departures from the plan as written:
+
+- A lambda is tagged only if applying its own parameters reaches an effect,
+  not if any arrow in its type has one. A pure lambda returning an effectful
+  one stays bare.
+- A reference to an effect operation used as a value captures the handler in
+  scope where it is mentioned, because the typechecker gives it a pure type and
+  charges the effect there.
+- Dictionary method calls go through the arity check; a slot's arity follows
+  the impl body, not the trait signature.
+- The lexical name-scope classification of variable calls was kept as a
+  fallback for heads with no type-table entry.
+
+Known gaps:
+
+- Handler arms that receive a callback from an operation and close its open
+  row: not shown to be unsound, not proven sound.
+- The trait-method-as-value fix skips multi-parameter traits.
+- An open-row trait method with a pure impl, used as a value at a pure type
+  through a `where`-bound dictionary, can deliver a tagged value to a pure
+  call; it raises a runtime error.
+- One `spawn` path with a non-lambda callback may see an incomplete frame.
+  From reading only.
+- No bridging feature for generic code over `neweffect` instances.
+- External projects were typechecked and four were compiled; none of their
+  test suites were run.
+
 
 Revised after comparing against the earlier attempts recorded in
 `docs/planning/direct-first-effect-lowering.md` on `main` and
