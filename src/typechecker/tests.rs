@@ -4141,8 +4141,8 @@ main () = parse \"x\" with { fail msg = String.length msg }",
 
 #[test]
 fn parameterized_effect_conflicting_instantiations_forwarded_is_error() {
-    // A single inferred `Fail` entry cannot silently cover two distinct
-    // applications; callers must declare both slots explicitly.
+    // A row holds one `Fail`: forwarding `Fail String` and `Fail Int`
+    // together is two applications of one family meeting in `both`'s row.
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4163,15 +4163,23 @@ main () = both 1 with { fail msg = 0 }",
         result
             .as_ref()
             .err()
-            .map(|e| e.message.contains("not declared"))
+            .map(|e| {
+                e.span.is_some()
+                    && e.message.contains("can hold only one `Fail`")
+                    && e.message.contains("Fail String")
+                    && e.message.contains("Fail Int")
+                    && e.message.contains("neweffect")
+            })
             .unwrap_or(false),
-        "expected an undeclared applied-effect error, got: {:?}",
+        "expected a one-application-per-family error, got: {:?}",
         result.err()
     );
 }
 
 #[test]
-fn parameterized_effect_distinct_declared_instantiations_coexist() {
+fn parameterized_effect_distinct_declared_instantiations_are_rejected() {
+    // Two applications of one family used to coexist in a declared row. An
+    // effect is now identified by its family, so the declaration is an error.
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4183,9 +4191,39 @@ fail_int () = fail! 99
 fun both : Unit -> Int needs {Fail String, Fail Int}
 both () = fail_string () + fail_int ()",
     );
+    let err = result
+        .err()
+        .expect("two applications of one family in a declared row must be rejected");
+    assert!(
+        err.span.is_some()
+            && err.message.contains("can hold only one `Fail`")
+            && err.message.contains("Fail String")
+            && err.message.contains("Fail Int")
+            && err.message.contains("neweffect"),
+        "expected a one-application-per-family error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn neweffect_instances_of_one_source_coexist_in_a_declared_row() {
+    // The `neweffect` form of the program above.
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+neweffect FailString = Fail String
+neweffect FailInt = Fail Int
+fun fail_string : Unit -> Int needs {FailString}
+fail_string () = FailString.fail! \"str\"
+fun fail_int : Unit -> Int needs {FailInt}
+fail_int () = FailInt.fail! 99
+fun both : Unit -> Int needs {FailString, FailInt}
+both () = fail_string () + fail_int ()",
+    );
     assert!(
         result.is_ok(),
-        "distinct applied effects should coexist, got: {:?}",
+        "distinct neweffect instances should coexist, got: {:?}",
         result.err()
     );
 }
@@ -4214,7 +4252,7 @@ acceptor_loop _ value = {
 }
 
 #[test]
-fn parameterized_effect_potentially_equal_instantiations_are_ambiguous() {
+fn parameterized_effect_potentially_equal_instantiations_are_rejected() {
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4225,8 +4263,8 @@ ambiguous _ _ = ()",
     assert!(
         result
             .err()
-            .is_some_and(|error| error.message.contains("ambiguous overlapping")),
-        "potentially equal applied effects must be rejected"
+            .is_some_and(|error| error.message.contains("can hold only one `Fail`")),
+        "two applications of one family in a declared row must be rejected"
     );
 }
 
@@ -4543,8 +4581,9 @@ effect Pg {
 }
 
 #[test]
-fn distinct_duplicate_effect_family_requirements_are_accepted() {
-    check(
+fn distinct_duplicate_effect_family_requirements_are_rejected() {
+    // `Actor Unit` and `Actor String` used to coexist in a declared row.
+    let err = check(
         r#"
 import Std.Actor (Process, Actor)
 
@@ -4552,7 +4591,15 @@ fun mixed_actor_messages : Unit -> String needs {Process, Actor Unit, Actor Stri
 mixed_actor_messages () = "ok"
 "#,
     )
-    .expect("distinct Actor applications should coexist");
+    .err()
+    .expect("two Actor applications in one declared row must be rejected");
+    assert!(
+        err.message.contains("can hold only one `Actor`")
+            && err.message.contains("Actor Unit")
+            && err.message.contains("Actor String"),
+        "expected a one-application-per-family error, got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -4583,9 +4630,10 @@ main () = {
     .err()
     .expect("expected mixed Fail instantiations to be rejected");
 
+    // The handled block is one row, and it would hold two `Fail`s.
     assert!(
-        err.message.contains("single `with`"),
-        "expected with-scope conflict error, got: {}",
+        err.message.contains("can hold only one `Fail`"),
+        "expected a one-application-per-family error, got: {}",
         err.message
     );
     assert!(
@@ -4596,7 +4644,39 @@ main () = {
 }
 
 #[test]
-fn named_handler_handles_only_its_applied_effect() {
+fn named_handler_does_not_handle_another_application() {
+    // A handler is found by family, so `app_fail` (for `Fail AppError`)
+    // would receive the `Fail String` operation. It used to be skipped as a
+    // handler for a different effect, leaving `Fail String` to escape.
+    let err = check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError = HttpError String
+
+handler app_fail for Fail AppError {
+  fail _ = ()
+}
+
+fun run_app2 : Unit -> Unit needs {Fail String}
+run_app2 () = fail! "something"
+
+main () = run_app2 () with app_fail
+"#,
+    )
+    .err()
+    .expect("expected a handler for another application to be rejected");
+
+    assert!(
+        err.message.contains("this handler handles `Fail AppError`")
+            && err.message.contains("performs `Fail String`"),
+        "expected a handler mismatch, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn named_handler_block_with_two_applications_is_rejected() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4620,17 +4700,19 @@ main () = {
 "#,
     )
     .err()
-    .expect("expected the unmatched Fail application to remain");
+    .expect("expected two applications in the handled block to be rejected");
 
     assert!(
-        err.message.contains("cannot use `needs`"),
-        "expected residual effect at main, got: {}",
+        err.message.contains("can hold only one `Fail`")
+            && err.message.contains("Fail AppError")
+            && err.message.contains("Fail String"),
+        "expected a one-application-per-family error, got: {}",
         err.message
     );
 }
 
 #[test]
-fn handler_binding_handles_only_its_applied_effect() {
+fn handler_binding_does_not_handle_another_application() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4641,27 +4723,22 @@ handler app_fail for Fail AppError {
   fail _ = ()
 }
 
-fun run_app : Unit -> Unit needs {Fail AppError}
-run_app () = fail! (HttpError "oops")
-
 fun run_app2 : Unit -> Unit needs {Fail String}
 run_app2 () = fail! "something"
 
 main () = {
   let h = app_fail
-  {
-    run_app ()
-    run_app2 ()
-  } with h
+  run_app2 () with h
 }
 "#,
     )
     .err()
-    .expect("expected the unmatched Fail application to remain");
+    .expect("expected a handler for another application to be rejected");
 
     assert!(
-        err.message.contains("cannot use `needs`"),
-        "expected residual effect at main, got: {}",
+        err.message.contains("this handler handles `Fail AppError`")
+            && err.message.contains("performs `Fail String`"),
+        "expected a handler mismatch, got: {}",
         err.message
     );
 }
@@ -8736,11 +8813,9 @@ fn multi_param_effectful_lambda_passed_to_open_row_callback() {
 #[test]
 fn calling_a_let_bound_multi_param_effectful_lambda_performs_its_effects() {
     let body = "t6 () = {\n  let f = fun a b -> a + b + skip! ()\n  f 1 2\n}\n";
-    let err = check(&format!(
-        "{LAMBDA_ROW_PRELUDE}fun t6 : Unit -> Int\n{body}"
-    ))
-    .err()
-    .expect("t6 performs Skip");
+    let err = check(&format!("{LAMBDA_ROW_PRELUDE}fun t6 : Unit -> Int\n{body}"))
+        .err()
+        .expect("t6 performs Skip");
     assert!(
         err.message
             .contains("uses effects {Skip} but has no 'needs' declaration"),

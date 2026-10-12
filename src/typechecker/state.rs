@@ -80,6 +80,15 @@ pub struct HandlerInfo {
     pub source_module: Option<String>,
 }
 
+/// A row variable fixed by a declared signature. See `Checker::rigid_row_vars`.
+#[derive(Debug, Clone, Default)]
+pub struct RigidRowVar {
+    /// Name as written (`r` for `..r`).
+    pub name: String,
+    /// Effects named in a declared row alongside this variable.
+    pub companions: Vec<EffectEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TraitMethodEffectSig {
     pub effects: Vec<String>,
@@ -230,6 +239,13 @@ pub struct Checker {
     /// checked for required forwarding in `check_fun_clauses`. Cleared at the
     /// start of each function body. See docs/planning/effect-polymorphic-traits.md.
     pub(crate) trait_forward_row_vars: std::collections::HashMap<u32, String>,
+    /// Row variables the code being checked may not refine: the `..r` tails
+    /// written in the enclosing function's signature (or in the signature of
+    /// the trait method or effect operation being implemented). Whoever calls
+    /// the function chooses what they stand for. Each maps to its source name
+    /// and to the effects written next to it in a declared row
+    /// (`needs {Fail e, ..r}`), which is all the body may assume about it.
+    pub(crate) rigid_row_vars: std::collections::HashMap<u32, RigidRowVar>,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).

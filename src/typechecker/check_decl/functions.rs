@@ -59,6 +59,31 @@ impl Checker {
             self.unify(fun_var, &pre_ty)?;
         }
 
+        // The row variables written in the signature are fixed for the body:
+        // the caller chooses them (see `Checker::rigid_row_vars`).
+        let mut own_rigid_rows: HashMap<u32, crate::typechecker::RigidRowVar> = HashMap::new();
+        if let Some(ann_ty) = annotation {
+            let names = self
+                .fun_type_param_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            Self::collect_rigid_row_vars(ann_ty, &names, &mut own_rigid_rows);
+            if let Some(row) = declared_effect_row {
+                Self::collect_rigid_row_vars_in_row(row, &names, &mut own_rigid_rows);
+            }
+        }
+        self.rigid_row_vars = own_rigid_rows.clone();
+        // Likewise the type variables written as effect arguments.
+        let mut own_effect_arg_vars: Vec<(u32, String)> = Vec::new();
+        if let Some(ann_ty) = annotation {
+            self.collect_effect_arg_vars(ann_ty, &mut own_effect_arg_vars);
+            if let Some(row) = declared_effect_row {
+                let as_fun = Type::Fun(Box::new(Type::unit()), Box::new(Type::unit()), row.clone());
+                self.collect_effect_arg_vars(&as_fun, &mut own_effect_arg_vars);
+            }
+        }
+
         // Register where clause bounds on type variable IDs
         for (trait_name, var_id, extra_types) in where_constraints {
             self.trait_state
@@ -172,7 +197,13 @@ impl Checker {
         }
         // Collect accumulated effects and restore outer scope
         let raw_all_body_effs = self.restore_effects(saved_effs);
-        let all_body_effs = self.sub.apply_effect_row(&raw_all_body_effs);
+        let all_body_effs = {
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            self.normalize_row_at(&raw_all_body_effs, span)?
+        };
 
         // Absorption (boundary half): when a function directly calls a callback
         // parameter like `f ()` in `run_state init f = (f (), init)`, the callee's
@@ -477,6 +508,30 @@ impl Checker {
             }
         }
 
+        {
+            let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            });
+            self.check_rigid_row_vars_abstract(
+                &own_rigid_rows,
+                &format!("`{}`", name),
+                err_span,
+                false,
+            )?;
+            let names = self
+                .fun_type_param_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            self.check_effect_arg_vars_abstract(
+                &own_effect_arg_vars,
+                &names,
+                &format!("`{}`", name),
+                err_span,
+            )?;
+        }
+
         self.trait_forward_row_vars = saved_trait_forward;
 
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates
@@ -512,11 +567,14 @@ impl Checker {
             .map(|row| self.sub.apply_effect_row(row))
             .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
             .or_else(|| {
-                if all_body_effs.is_empty() {
-                    None
-                } else {
-                    Some(all_body_effs.clone())
-                }
+                // A recursive call to a function whose type is still being
+                // inferred performs "whatever this function performs": that
+                // is the function's own row variable, and it adds nothing.
+                let own = self.spine_row_tails(fun_var);
+                let mut row = self.sub.apply_effect_row(&all_body_effs);
+                row.tails
+                    .retain(|t| !matches!(t, Type::Var(id) if own.contains(id)));
+                if row.is_empty() { None } else { Some(row) }
             });
         let mut first_arrow = true;
         for param_ty in param_types.into_iter().rev() {
@@ -534,6 +592,15 @@ impl Checker {
 
         // Unify with the pre-bound variable (resolves recursive uses)
         self.unify(fun_var, &fun_ty)?;
+        {
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            let resolved = self.sub.apply(&fun_ty);
+            self.check_type_rows(&resolved)
+                .map_err(|e| e.with_span(span))?;
+        }
 
         // Check against type annotation if present
         if let Some(ann_ty) = annotation {
@@ -556,6 +623,32 @@ impl Checker {
             annotation.is_some(),
             where_constraints,
         )?;
+        if annotation.is_none() {
+            // An inferred signature cannot say "this open row may contain
+            // `State` only as `State Int`"; a written one can, by naming the
+            // effect next to the row variable.
+            let resolved = self.sub.apply(&scheme.ty);
+            for var in scheme.forall.clone() {
+                if let Some(companion) = self.unexpressed_row_companion(&resolved, var) {
+                    let span = match clauses[0] {
+                        Decl::FunBinding { span, .. } => *span,
+                        _ => unreachable!(),
+                    };
+                    let family = companion.name.rsplit('.').next().unwrap_or(&companion.name);
+                    let shown = self.prettify_effect_entry(&companion);
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "`{name}` passes on an open effect row that it uses together with \
+                             `{shown}`: a caller's `{family}` at another type would be treated as \
+                             `{shown}`. An inferred type cannot express that restriction; give \
+                             `{name}` a signature that names the effect next to the open row \
+                             (`needs {{{shown}, ..r}}`)"
+                        ),
+                    ));
+                }
+            }
+        }
         self.env.insert(name.into(), scheme);
         self.outer_named_type_vars = saved_outer_named;
         Ok(())

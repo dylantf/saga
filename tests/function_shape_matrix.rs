@@ -805,12 +805,15 @@ fn build_program(producer: &str, position: &str, v: Variant) -> Result<Program, 
 // Parameterised-effect family
 // ---------------------------------------------------------------------------
 //
-// `effect Fail e { fun fail : e -> Int }` makes `Fail String` and `Fail Int`
-// distinct effects that can sit in one row. A handler installed by code that
-// is generic in `e` cannot know the argument at runtime, so it goes in under
-// a placeholder tag and the compiler lines it up with the performing code by
-// position. These cases pin which such programs work, ahead of closures
-// looking handlers up by tag.
+// `effect Fail e { fun fail : e -> Int }` used to make `Fail String` and
+// `Fail Int` distinct effects that could sit in one row. An effect is now
+// identified by its family alone and a row holds one application of it (see
+// "Family-only effect identity" in the plan), so every case whose `body` has
+// both in its row is rejected by the typechecker and listed as such. The
+// cases are kept: the rest pin which single-application programs work. A
+// handler installed by code that is generic in `e` cannot know the argument
+// at runtime, so today it goes in under a placeholder tag and the compiler
+// lines it up with the performing code by position.
 //
 // Case id is `param.<installer>.<route>.<instance>`:
 //

@@ -11,6 +11,24 @@ impl Checker {
             Diagnostic::error_at(source.span, format!("undefined effect: {}", source.name))
         })?;
         let args = self.convert_effect_ref_args(source, &mut vec![]);
+        // A `neweffect` is one fixed instance. With a type variable in its
+        // source every operation call would pick its own type for it, and
+        // nothing would tie those to the type its handler was written for.
+        let mut free = Vec::new();
+        for arg in &args {
+            crate::typechecker::collect_free_vars(arg, &mut free);
+        }
+        if !free.is_empty() || source.type_args.len() != source_info.type_params.len() {
+            return Err(Diagnostic::error_at(
+                source.span,
+                format!(
+                    "neweffect `{}` must fix every type argument of `{}` to a concrete type (for \
+                     example `neweffect {} = {} Int`): a `neweffect` names a single instance of \
+                     the effect, so it cannot be generic",
+                    name, source.name, name, source.name
+                ),
+            ));
+        }
         if args.len() != source_info.type_params.len() {
             return Err(Diagnostic::error_at(
                 source.span,
@@ -156,15 +174,16 @@ impl Checker {
             let return_type = self.convert_user_type_expr(&op.return_type, &mut params_list);
             // Convert the op's own `needs` clause to an EffectRow
             let needs = if !op.effects.is_empty() || !op.effect_row_var.is_empty() {
-                let effect_refs: Vec<EffectEntry> = op
-                    .effects
-                    .iter()
-                    .map(|e| {
-                        let args = self.convert_effect_ref_args(e, &mut params_list);
-                        let resolved_name = self.resolved_effect_name(e.id, &e.name);
-                        EffectEntry::unnamed(resolved_name, args)
-                    })
-                    .collect();
+                let mut effect_refs: Vec<EffectEntry> = Vec::new();
+                for e in &op.effects {
+                    let args = self.convert_effect_ref_args(e, &mut params_list);
+                    let resolved_name = self.resolved_effect_name(e.id, &e.name);
+                    self.push_declared_effect(
+                        &mut effect_refs,
+                        EffectEntry::unnamed(resolved_name, args),
+                        e.span,
+                    )?;
+                }
                 let tails: Vec<Type> = op
                     .effect_row_var
                     .iter()
@@ -462,6 +481,18 @@ impl Checker {
 
             let op_sig = matched_op.unwrap();
 
+            // The operation's signature is a declared type the arm must
+            // implement as written: its row variables are chosen by whoever
+            // performs the operation.
+            let mut arm_rigid_rows = std::collections::HashMap::new();
+            for (_, param_ty) in &op_sig.params {
+                Self::collect_rigid_row_vars(param_ty, &[], &mut arm_rigid_rows);
+            }
+            Self::collect_rigid_row_vars(&op_sig.return_type, &[], &mut arm_rigid_rows);
+            Self::collect_rigid_row_vars_in_row(&op_sig.needs, &[], &mut arm_rigid_rows);
+            self.rigid_row_vars
+                .extend(arm_rigid_rows.iter().map(|(id, info)| (*id, info.clone())));
+
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
             let saved_resume = self.resume_type.take();
@@ -496,6 +527,12 @@ impl Checker {
             {
                 self.collected_diagnostics.push(e);
             }
+            self.check_rigid_row_vars_abstract(
+                &arm_rigid_rows,
+                &format!("operation `{}`", arm.op_name),
+                arm.span,
+                true,
+            )?;
 
             // Typecheck optional `finally` block: may use the handler's `needs` effects
             // (they're already provided by the caller) but must not introduce new ones.
@@ -552,7 +589,11 @@ impl Checker {
         };
 
         // Collect accumulated handler effects and restore outer scope
+        // Resolved here so that only the handler's genuinely free type
+        // variables are instantiated per use: an arm that performs
+        // `Fail Int` needs `Fail Int` wherever the handler is installed.
         let all_handler_effs = self.restore_effects(handler_saved_effs);
+        let all_handler_effs = self.normalize_row_at(&all_handler_effs, *span)?;
         let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()
@@ -737,6 +778,32 @@ impl Checker {
                 })
             })
             .collect();
+        // The handled effects' type variables (`handler h for Fail a`) are
+        // instantiated per use, like the rest of the handler's scheme. Ones
+        // that belong to an enclosing signature are not: they are fixed
+        // there.
+        let applied_effects: Vec<EffectEntry> = applied_effects
+            .into_iter()
+            .map(|entry| EffectEntry {
+                name: entry.name,
+                args: entry.args.iter().map(|t| self.sub.apply(t)).collect(),
+            })
+            .collect();
+        {
+            let outer: std::collections::HashSet<u32> =
+                saved_outer_named.values().copied().collect();
+            let mut entry_vars = Vec::new();
+            for entry in &applied_effects {
+                for t in &entry.args {
+                    crate::typechecker::collect_free_vars(t, &mut entry_vars);
+                }
+            }
+            for var in entry_vars {
+                if !outer.contains(&var) && !forall.contains(&var) {
+                    forall.push(var);
+                }
+            }
+        }
         let info = HandlerInfo {
             effects: canonical_effects,
             effect_entries: applied_effects,

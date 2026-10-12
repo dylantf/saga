@@ -17,6 +17,51 @@ mod common;
 use common::*;
 use saga::{lexer, parser};
 
+/// Typecheck a single-module source that must be rejected, returning the
+/// rendered type errors.
+fn typecheck_error(src: &str) -> String {
+    let root = fixtures_root_for_main_only();
+    let mut checker = make_checker(root.clone());
+    let result = try_typecheck_source(src, &mut checker).map(|_| ());
+    let _ = std::fs::remove_dir_all(&root);
+    match result {
+        Err(FrontendError::Typecheck(message)) => message,
+        other => panic!("expected a type error, got {other:?}"),
+    }
+}
+
+/// `typecheck_error` for a main module importing `modules` (relative path,
+/// source) from a project on disk.
+fn typecheck_error_cross_module(fixture: &str, modules: &[(&str, &str)], main_src: &str) -> String {
+    let root = fresh_dir(&format!("{fixture}_root"));
+    std::fs::write(root.join("project.toml"), "[project]\nname=\"prop\"\n").unwrap();
+    for (rel, src) in modules {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, src).unwrap();
+    }
+    let mut checker = make_checker(root.clone());
+    let result = try_typecheck_source(main_src, &mut checker).map(|_| ());
+    let _ = std::fs::remove_dir_all(&root);
+    match result {
+        Err(FrontendError::Typecheck(message)) => message,
+        other => panic!("[{fixture}] expected a type error, got {other:?}"),
+    }
+}
+
+/// The error for two applications of one effect family meeting in a row.
+fn assert_one_application_per_family(message: &str, family: &str, first: &str, second: &str) {
+    assert!(
+        message.contains(&format!("can hold only one `{family}`"))
+            && message.contains(first)
+            && message.contains(second)
+            && message.contains("neweffect"),
+        "expected a one-application-per-family error for {first} and {second}, got: {message}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fixtures: basic op call (resume / abort)
 // ---------------------------------------------------------------------------
@@ -189,11 +234,16 @@ result () = {
 }
 
 #[test]
-fn trait_impls_preserve_distinct_applied_effects() {
+fn trait_impls_preserve_distinct_neweffect_instances() {
+    // Was two applications of `Fail` in one block; they are now two
+    // `neweffect` instances (a row holds one application per family).
     let src = r#"
 effect Fail e {
   fun fail : e -> a
 }
+
+neweffect FailText = Fail String
+neweffect FailInt = Fail Int
 
 trait Decode a {
   fun decode : a -> Int needs {..e}
@@ -202,19 +252,19 @@ trait Decode a {
 type TextInput = TextInput
 type IntInput = IntInput
 
-impl Decode for TextInput needs {Fail String} {
-  decode TextInput = fail! "text"
+impl Decode for TextInput needs {FailText} {
+  decode TextInput = FailText.fail! "text"
 }
 
-impl Decode for IntInput needs {Fail Int} {
-  decode IntInput = fail! 7
+impl Decode for IntInput needs {FailInt} {
+  decode IntInput = FailInt.fail! 7
 }
 
-handler text_fail for Fail String {
+handler text_fail for FailText {
   fail _message = resume 10
 }
 
-handler int_fail for Fail Int {
+handler int_fail for FailInt {
   fail _code = resume 32
 }
 
@@ -225,12 +275,17 @@ result () = show ({ decode TextInput + decode IntInput } with {text_fail, int_fa
 }
 
 #[test]
-fn cross_module_trait_impls_preserve_distinct_applied_effects() {
+fn cross_module_trait_impls_preserve_distinct_neweffect_instances() {
+    // Was two applications of `Fail` in one block; now two `neweffect`
+    // instances.
     let lib = r#"module Applied.Decode
 
 pub effect Fail e {
   fun fail : e -> a
 }
+
+pub neweffect FailText = Fail String
+pub neweffect FailInt = Fail Int
 
 pub trait Decode a {
   fun decode : a -> Int needs {..e}
@@ -239,23 +294,23 @@ pub trait Decode a {
 pub type TextInput = TextInput
 pub type IntInput = IntInput
 
-impl Decode for TextInput needs {Fail String} {
-  decode TextInput = fail! "text"
+impl Decode for TextInput needs {FailText} {
+  decode TextInput = FailText.fail! "text"
 }
 
-impl Decode for IntInput needs {Fail Int} {
-  decode IntInput = fail! 7
+impl Decode for IntInput needs {FailInt} {
+  decode IntInput = FailInt.fail! 7
 }
 "#;
     let main_src = r#"module Main
 
-import Applied.Decode (Fail, Decode, TextInput, IntInput)
+import Applied.Decode (FailText, FailInt, Decode, TextInput, IntInput)
 
-handler text_fail for Fail String {
+handler text_fail for FailText {
   fail _message = resume 10
 }
 
-handler int_fail for Fail Int {
+handler int_fail for FailInt {
   fail _code = resume 32
 }
 
@@ -1289,7 +1344,11 @@ result () = {
 }
 
 #[test]
-fn distinct_applied_fail_effects_coexist() {
+fn distinct_applied_fail_effects_in_one_block_are_rejected() {
+    // Two applications of one family used to coexist in a block and dispatch
+    // by type argument. An effect is now identified by its family alone, so
+    // the block's row cannot hold both. (Distinct `neweffect` instances
+    // coexisting is covered by the `neweffect` fixtures.)
     let src = r#"
 effect Fail e {
   fun fail : e -> a
@@ -1312,33 +1371,37 @@ from_int () = fail! 7
 pub fun result : Unit -> String
 result () = show ({ from_string () + from_int () } with {string_fail, int_fail})
 "#;
-    check_result_string("distinct_applied_fail_effects", src, "42");
+    assert_one_application_per_family(&typecheck_error(src), "Fail", "Fail String", "Fail Int");
 }
 
 #[test]
-fn nested_handler_replaces_only_matching_applied_effect() {
+fn nested_handler_replaces_only_matching_neweffect_instance() {
+    // Was `Fail String` and `Fail Int`; now two `neweffect` instances.
     let src = r#"
 effect Fail e {
   fun fail : e -> a
 }
 
-handler outer_string for Fail String {
+neweffect FailString = Fail String
+neweffect FailInt = Fail Int
+
+handler outer_string for FailString {
   fail _message = resume 1
 }
 
-handler inner_string for Fail String {
+handler inner_string for FailString {
   fail _message = resume 2
 }
 
-handler outer_int for Fail Int {
+handler outer_int for FailInt {
   fail _code = resume 10
 }
 
-fun from_string : Unit -> Int needs {Fail String}
-from_string () = fail! "nope"
+fun from_string : Unit -> Int needs {FailString}
+from_string () = FailString.fail! "nope"
 
-fun from_int : Unit -> Int needs {Fail Int}
-from_int () = fail! 7
+fun from_int : Unit -> Int needs {FailInt}
+from_int () = FailInt.fail! 7
 
 pub fun result : Unit -> String
 result () = show ({
@@ -1350,26 +1413,31 @@ result () = show ({
 }
 
 #[test]
-fn applied_effect_handler_factory_coexists_with_sibling_application() {
+fn neweffect_handler_factory_coexists_with_sibling_instance() {
+    // Was a `Handler (Fail String)` factory next to a `Fail Int` handler; now
+    // two `neweffect` instances.
     let src = r#"
 effect Fail e {
   fun fail : e -> a
 }
 
-fun make_string_fail : Int -> Handler (Fail String)
-make_string_fail fallback = handler for Fail String {
+neweffect FailString = Fail String
+neweffect FailInt = Fail Int
+
+fun make_string_fail : Int -> Handler FailString
+make_string_fail fallback = handler for FailString {
   fail _message = resume fallback
 }
 
-handler int_fail for Fail Int {
+handler int_fail for FailInt {
   fail _code = resume 32
 }
 
-fun from_string : Unit -> Int needs {Fail String}
-from_string () = fail! "nope"
+fun from_string : Unit -> Int needs {FailString}
+from_string () = FailString.fail! "nope"
 
-fun from_int : Unit -> Int needs {Fail Int}
-from_int () = fail! 7
+fun from_int : Unit -> Int needs {FailInt}
+from_int () = FailInt.fail! 7
 
 pub fun result : Unit -> String
 result () = {
@@ -1381,31 +1449,36 @@ result () = {
 }
 
 #[test]
-fn open_row_inner_handler_preserves_same_family_tail() {
+fn open_row_inner_handler_preserves_sibling_instance_in_tail() {
+    // Was `Fail Int` travelling through the open tail next to a handled
+    // `Fail String`; now two `neweffect` instances.
     let src = r#"
 effect Fail e {
   fun fail : e -> a
 }
 
-handler outer_string for Fail String {
+neweffect FailString = Fail String
+neweffect FailInt = Fail Int
+
+handler outer_string for FailString {
   fail _message = resume 10
 }
 
-handler inner_string for Fail String {
+handler inner_string for FailString {
   fail _message = resume 2
 }
 
-handler outer_int for Fail Int {
+handler outer_int for FailInt {
   fail _code = resume 32
 }
 
-fun from_string : Unit -> Int needs {Fail String}
-from_string () = fail! "nope"
+fun from_string : Unit -> Int needs {FailString}
+from_string () = FailString.fail! "nope"
 
-fun from_int : Unit -> Int needs {Fail Int}
-from_int () = fail! 7
+fun from_int : Unit -> Int needs {FailInt}
+from_int () = FailInt.fail! 7
 
-fun wrapped : Unit -> Int needs {Fail String, ..r}
+fun wrapped : Unit -> Int needs {FailString, ..r}
 wrapped () = (from_string () with inner_string) + from_int ()
 
 pub fun result : Unit -> String
@@ -1415,7 +1488,11 @@ result () = show (wrapped () with {outer_string, outer_int})
 }
 
 #[test]
-fn cross_module_applied_effects_select_generic_open_row_slots() {
+fn cross_module_generic_code_cannot_serve_two_applications_in_one_block() {
+    // Generic code over `Repo db` used at two databases in one block. That
+    // needed two applications of `Repo` in one row and is now rejected;
+    // `neweffect` instances are nominal, so generic code written against
+    // `Repo db` does not serve them and there is no direct rewrite.
     let lib = r#"module Applied.Repo
 
 pub type UsersDb = UsersDb
@@ -1458,12 +1535,12 @@ pub fun result : Unit -> String
 result () =
   show ({ use_users () + forward DataDb } with {users_repo, data_repo, extra_handler})
 "#;
-    check_cross_module(
+    let message = typecheck_error_cross_module(
         "cross_module_applied_effects_generic_open_row",
         &[("lib/Applied/Repo.saga", lib)],
         main_src,
-        "142",
     );
+    assert_one_application_per_family(&message, "Repo", "Repo UsersDb", "Repo DataDb");
 }
 
 #[test]

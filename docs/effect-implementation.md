@@ -32,6 +32,48 @@ during unification. This is important for higher-order functions with multiple
 effectful callbacks and for generic functions that forward multiple trait
 constraints' effects.
 
+### One Application Per Effect Family
+
+An effect is identified by its **family** (`Fail`), whatever its type
+arguments. `Fail String` and `Fail Int` are the same effect at two types, not
+two effects: an operation reaches the nearest handler for its family. The type
+arguments are still checked. Two instances that must coexist are declared with
+`neweffect` (`neweffect UserRepo = Repo UserDb`), which mints a distinct
+nominal effect with no type parameters of its own; a `neweffect` must fix
+every type argument of its source.
+
+So a row holds **at most one application of a family**. Wherever two entries
+of one family would end up in the same row their arguments are unified, and a
+mismatch is a type error that names both applications and suggests
+`neweffect`:
+
+| Where rows are built or combined | Code |
+| --- | --- |
+| a declared `needs {...}` (function, trait method, impl, handler, operation, callback type) | `push_declared_effect`: writing a family twice is an error unless the two are identical |
+| effects accumulating while a body is inferred | `emit_effect` / `emit_effects` |
+| two rows merged (handler `needs`, clauses of a local function) | `merge_rows` |
+| branch, list-element and tuple rows joined | `join_effect_rows` |
+| a body's row checked against its declared row | `check_effects_via_row` |
+| any row about to be unified, and any row variable being bound | `normalize_row`, `bind_row_checked` |
+| the type of a finished function | `check_type_rows` |
+
+Binding a row variable is the subtle case. `{Fail Int, ..r}` with
+`r := {Fail String}` must fail, and with `r := {Fail Int}` it collapses to one
+entry. The substitution cannot see the row a variable sits in when it is
+bound, so every open row records its entries against its tails
+(`Substitution.row_companions`, filled by `normalize_row` and on
+instantiation): "if `r` contains `Fail`, it is `Fail Int`". `bind_row_checked`
+checks the bound row against those entries and passes them on to the new
+tail. A variable may have several companions of one family, from different
+rows (`(.. needs {Fail a, ..r}) -> .. needs {Fail b, ..r}` does not force
+`a = b`; it only does once `r` is known to contain `Fail`).
+
+These obligations live in the substitution, not in the type, so a row
+variable is only generalised when its type shows them. A local binding whose
+row variable has an obligation the type does not show stays monomorphic in
+that variable; an unannotated top-level function in that position is an error
+asking for a signature (`unexpressed_row_companion`).
+
 ### Where Effects Live on Curried Functions
 
 Effects go on the **innermost** arrow (closest to the return type):
@@ -63,8 +105,11 @@ its clauses' effects, like a top-level one.
 ### Computation Types
 
 `infer_expr` returns the value `Type` and emits performed effects into
-`Checker.effect_row`. Callers use `save_effects` / `restore_effects` to isolate
-sub-expressions and recover their accumulated `EffectRow`. This is the core
+`Checker.effect_row`. The accumulator is a row: it holds one entry per effect
+family (see above), and it keeps the still-open tails of the functions that
+were called, so `fun () -> f ()` with `f : Unit -> a needs {..e}` has the row
+`{..e}` rather than being pure. Callers use `save_effects` / `restore_effects`
+to isolate sub-expressions and recover their accumulated `EffectRow`. This is the core
 mechanism: effects are inferred while walking expressions, then checked against
 the declared `needs` row at function, handler, and callback boundaries.
 
@@ -176,7 +221,12 @@ concrete effects must come from concrete impl method facts instead.
 
 Open trait rows must be forwarded even if the body wraps the call in `with`.
 The generic function cannot name the open row's effects, so it cannot soundly
-handle them internally.
+handle them internally. For an effect with type parameters this is an error
+rather than a redundant handler: the impl chosen by the caller could perform
+that effect at another type. It is accepted only when the function's own row
+names the effect next to the tail (`needs {Fail Int, ..a}`), and then a caller
+whose impl performs `Fail String` is rejected at the call, where the impl's
+effects and the function's row meet.
 
 ### Handler Effect Subtraction
 
@@ -196,8 +246,47 @@ using lexical order.
 
 Typechecking then happens one handler layer at a time: infer the inner
 expression to get `(ty, inner_effs)`, subtract the effects handled by this
-layer from `inner_effs` via `EffectRow::subtract`, then merge in any effects
-performed by this layer's arm bodies that escape outward.
+layer from `inner_effs` (`EffectRow::subtract_entries`, by family), then merge
+in any effects performed by this layer's arm bodies that escape outward. Open
+tails of `inner_effs` stay in the result: a handler cannot discharge effects
+it cannot name.
+
+Because a handler is found by family, **every** operation of that family
+performed inside the handled expression reaches it. The typechecker therefore
+makes sure none can do so at a type the handler was not written for
+(`resolve_handled_effect_entries`):
+
+- If the expression's row names the family, that entry is the one handled. A
+  handler declared for specific arguments (`handler h for Fail Int`, a value
+  of type `Handler (Fail Int)`) must agree with it; a handler for `Fail Int`
+  around a `Fail String` computation is an error, not a handler that is
+  skipped. A handler value must have a known `Handler (...)` type where it is
+  installed.
+- An open tail that inference is still free to refine is bound to contain the
+  family at the handled arguments. In an unannotated
+  `h f = f () with { fail n = resume (n + 1) }`, `f` becomes
+  `Unit -> a needs {Fail Int, ..}`.
+- An open tail fixed by a declared signature cannot be refined: the caller
+  chooses it. For an effect with type parameters the `with` is rejected unless
+  the signature names the family next to that tail.
+
+```saga
+fun h : (Unit -> Int needs {..r}) -> Int needs {..r}
+h f = f () with { fail n = resume (n + 1) }       # error: `..r` might contain `Fail`
+
+fun catch_it : (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}
+catch_it f = f () with { fail _ = 0 }             # ok
+```
+
+In `catch_it`, `{Fail e, ..r}` obliges every caller to keep `r` consistent
+with `Fail e` (one application per family), so no other `Fail` can hide in
+`r`. Effects without type parameters keep the old behaviour around a declared
+tail: the handler may catch operations the tail turns out to perform, and the
+signature still forwards them, which is imprecise but cannot mismatch a type.
+
+The declared row variables are tracked in `Checker.rigid_row_vars`: the tails
+written in the enclosing function's signature, in the trait method an impl
+implements, and in the operation a handler arm implements.
 
 This has one important consequence: sibling items in a surface `with {...}`
 block do not satisfy each other's arm-body effects. If an inline arm body uses
@@ -208,8 +297,21 @@ sibling item later in the same surface block.
 
 After inferring all clauses of a function body, the accumulated `EffectRow`
 (merged across clauses) is checked against the declared `needs` row from the
-annotation. This uses `check_effects_via_row`: if the declared row is open, any
-extras are allowed; if closed, undeclared effects are an error.
+annotation. This uses `check_effects_via_row`: a family both rows name is one
+application, so its arguments are unified; if the declared row is closed,
+undeclared effects are an error; if it is open, extras are allowed, except
+that an effect with type parameters must be named. The tail is the caller's
+row and says nothing about what this body performs, so an unnamed
+`Fail String` would be invisible to callers, who could then install a
+`Fail Int` handler around the call.
+
+A call emits the callee's row into the accumulator, tails included. The one
+tail left out is a row variable that the callee's signature does not tie to
+any argument (`fun f : Unit -> Int needs {Log, ..r}`): each call instantiates
+it afresh, nothing can bind it, and emitting it would only leave an
+unannotated caller with an open row of its own. A recursive call to a function
+still being inferred performs that function's own row variable, which is
+likewise dropped when the function's row is built.
 
 Function boundary checks also enforce forwarding obligations:
 
@@ -218,15 +320,39 @@ Function boundary checks also enforce forwarding obligations:
 - calls to open-row trait methods on abstract where-bound variables must
   forward the corresponding `..a` tail
 
+A row variable or an effect argument written in a signature is chosen by the
+caller, so the body must work for every choice. After the body is inferred
+(`check_rigid_row_vars_abstract`, `check_effect_arg_vars_abstract`):
+
+- a declared row variable must not have been unified with a row naming an
+  effect that has type parameters, nor closed (`h f = only_pure f` with
+  `f : .. needs {..r}`); it may be widened with effects that take no type
+  argument, which is how a callback is passed where more effects are allowed.
+  Handler arms may close an operation callback's row variable: the callback
+  finds those effects where the operation was performed.
+- a declared row variable must not have been used in a row together with a
+  type-parameterised effect that the signature does not name next to it
+  (`catch_it (fun () -> fail! "s" + k ())` with `k : .. needs {..t}` needs
+  `needs {Fail String, ..t}` on `k`'s type).
+- a type variable written as an effect argument (`needs {Fail e}`) must not
+  have been pinned to a type or merged with another one. An argument left out
+  (`needs {Fail}`) is a hole the body fills in; it stays one unknown type,
+  not generalised, until the body has been checked.
+
+These matter because impl method bodies are checked before function bodies,
+against the declared signatures.
+
 ### Key Files
 
-- `typechecker/mod.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `merge`, `subtract`), `EffectMeta`, `effects_from_type`, `ImplInfo.method_effects`
+- `typechecker/core.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `subtract_entries`), `Substitution` (row bindings and `row_companions`)
+- `typechecker/mod.rs` -- `emit_effect` / `emit_effects` (the accumulator), `EffectMeta`, `effects_from_type`, `ImplInfo.method_effects`
 - `typechecker/infer.rs` -- `infer_expr`, App absorption logic, lambda effect propagation, concrete trait impl effect emission, open-row trait forwarding surfacing, handler binding detection in `infer_block` (`extract_handler_info`, `handler_info_from_type`)
 - `typechecker/effects.rs` -- `check_effects_via_row`, effect op lookup/instantiation
-- `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, handler subtraction
+- `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, `resolve_handled_effect_entries` (which application a `with` handles, and the open-tail rule), handler subtraction
 - `typechecker/check_decl.rs` -- `collect_annotations` (builds EffectRow on innermost arrow), `check_fun_clauses` (body effect check and forwarding requirements), `innermost_effect_row` helper
 - `typechecker/check_traits.rs` -- impl body effect checking, trait method capability bounds, per-method impl effect collection
-- `typechecker/unify.rs` -- `unify_effect_rows` (row matching, tail binding)
+- `typechecker/unify.rs` -- `unify_effect_rows` (row matching, tail binding), `normalize_row` / `bind_row_checked` / `merge_rows` (one application per family), `check_rigid_row_vars_abstract`, `check_effect_arg_vars_abstract`
+- `typechecker/effect_family_tests.rs` -- tests for the family rule and the handler/open-tail rule
 
 ### EffectMeta
 

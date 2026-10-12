@@ -31,6 +31,8 @@ pub use result::{
 pub use state::*;
 
 #[cfg(test)]
+mod effect_family_tests;
+#[cfg(test)]
 mod effect_row_rule_tests;
 #[cfg(test)]
 mod expr_types_tests;
@@ -87,6 +89,7 @@ impl Checker {
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
             trait_forward_row_vars: std::collections::HashMap::new(),
+            rigid_row_vars: std::collections::HashMap::new(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),
@@ -619,31 +622,51 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Push effects onto the accumulator, deduplicating by name.
-    pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
+    /// Add the effects (and still-open tails) of `effs` to the accumulator.
+    ///
+    /// The accumulator is a row, so it holds one application per effect
+    /// family: an entry whose family is already present has its arguments
+    /// unified with the existing one, and a mismatch is a type error at
+    /// `span`.
+    pub(crate) fn emit_effects(&mut self, effs: &EffectRow, span: Span) -> Result<(), Diagnostic> {
         for entry in &effs.effects {
-            if !self
-                .effect_row
-                .effects
-                .iter()
-                .any(|e| e.same_instantiation(entry))
-            {
-                self.effect_row.effects.push(entry.clone());
+            self.emit_effect(entry.name.clone(), entry.args.clone(), span)?;
+        }
+        for tail in &effs.tails {
+            // A tail that has resolved to a concrete type is the row of an
+            // open-row trait method at a known impl; its effects are emitted
+            // from the impl's facts instead.
+            let tail = self.sub.apply(tail);
+            if matches!(tail, Type::Var(_)) && !self.effect_row.tails.contains(&tail) {
+                self.effect_row.tails.push(tail);
             }
         }
+        Ok(())
     }
 
-    /// Push a single named effect onto the accumulator, deduplicating by exact instantiation.
-    pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
-        if !self
+    /// Add a single effect to the accumulator (see `emit_effects`).
+    pub(crate) fn emit_effect(
+        &mut self,
+        name: String,
+        args: Vec<Type>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let entry = EffectEntry::unnamed(name, args);
+        let existing = self
             .effect_row
             .effects
             .iter()
-            .any(|e| e.name == name && e.args == args)
-        {
-            self.effect_row
-                .effects
-                .push(EffectEntry::unnamed(name, args));
+            .find(|e| e.matches(&entry))
+            .cloned();
+        match existing {
+            Some(existing) if existing.same_instantiation(&entry) => Ok(()),
+            Some(existing) => self
+                .unify_family(&existing, &entry)
+                .map_err(|e| e.with_span(span)),
+            None => {
+                self.effect_row.effects.push(entry);
+                Ok(())
+            }
         }
     }
 

@@ -682,6 +682,13 @@ impl Checker {
             .iter()
             .map(|e| self.resolved_effect_name(e.id, &e.name))
             .collect();
+        // The impl's `needs` as a row: one application per effect family.
+        let mut impl_needs: Vec<EffectEntry> = Vec::new();
+        for e in needs {
+            let args = self.convert_effect_ref_args(e, &mut impl_type_vars);
+            let name = self.resolved_effect_name(e.id, &e.name);
+            self.push_declared_effect(&mut impl_needs, EffectEntry::unnamed(name, args), e.span)?;
+        }
 
         // Expose the impl's own type-param names (with their fresh var IDs) to
         // any nested `convert_type_expr` call inside the method bodies, so an
@@ -754,6 +761,22 @@ impl Checker {
                 .collect();
             let expected_return = Self::replace_vars(&freshened_return, &impl_trait_param_mapping);
 
+            // The trait method's signature is the declared type of this
+            // body: its row (instantiated for this impl) is what callers of
+            // the method see, and its row variables are chosen by them.
+            let expected_row = super::check_decl::innermost_effect_row(&Self::replace_vars(
+                &Self::replace_vars(&trait_method.scheme.ty, &fresh_mapping),
+                &impl_trait_param_mapping,
+            ))
+            .unwrap_or_else(super::EffectRow::empty);
+            let mut method_rigid_rows = std::collections::HashMap::new();
+            for param_ty in &expected_params {
+                Self::collect_rigid_row_vars(param_ty, &[], &mut method_rigid_rows);
+            }
+            Self::collect_rigid_row_vars(&expected_return, &[], &mut method_rigid_rows);
+            Self::collect_rigid_row_vars_in_row(&expected_row, &[], &mut method_rigid_rows);
+            self.rigid_row_vars = method_rigid_rows.clone();
+
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
             let trait_saved_effs = self.save_effects();
@@ -818,6 +841,27 @@ impl Checker {
 
             // Check that body effects are covered by the impl's needs declaration
             let body_effs = self.restore_effects(trait_saved_effs);
+            let body_effs = self.normalize_row_at(&body_effs, body.span)?;
+            // An effect the body performs is the same application as the one
+            // the trait method (and the impl's `needs`) declares for that
+            // family: callers handle it at the declared type.
+            for entry in &body_effs.effects {
+                for declared in expected_row
+                    .effects
+                    .iter()
+                    .chain(impl_needs.iter())
+                    .filter(|d| d.matches(entry))
+                {
+                    self.unify_family(declared, entry)
+                        .map_err(|e| e.with_span(body.span))?;
+                }
+            }
+            self.check_rigid_row_vars_abstract(
+                &method_rigid_rows,
+                &format!("trait method `{}`", method_name),
+                body.span,
+                false,
+            )?;
             let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
             let body_effects: std::collections::HashSet<String> =

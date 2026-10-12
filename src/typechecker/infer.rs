@@ -79,7 +79,7 @@ fn curried_lambda_type(param_types: Vec<Type>, body_ty: Type, body_effs: EffectR
     let Some(last_param) = params.next() else {
         return body_ty;
     };
-    let mut ty = if body_effs.effects.is_empty() {
+    let mut ty = if body_effs.is_empty() {
         Type::arrow(last_param, body_ty)
     } else {
         Type::Fun(Box::new(last_param), Box::new(body_ty), body_effs)
@@ -485,7 +485,7 @@ impl Checker {
                             args: effect_args.clone(),
                         },
                     );
-                    self.emit_effect(effect_name.clone(), effect_args);
+                    self.emit_effect(effect_name.clone(), effect_args, span)?;
                 }
                 Ok(ty)
             }
@@ -664,7 +664,7 @@ impl Checker {
                     .map(|info| info.needs_effects.clone())
                     .unwrap_or_else(super::EffectRow::empty);
                 if !needs.effects.is_empty() {
-                    self.emit_effects(&needs);
+                    self.emit_effects(&needs, span)?;
                 }
                 let scheme = self.env.get(&synthetic_name).unwrap();
                 let ty = scheme.ty.clone();
@@ -755,6 +755,7 @@ impl Checker {
         let saved_effs = self.save_effects();
         let body_ty = self.infer_expr(body)?;
         let body_effs = self.restore_effects(saved_effs);
+        let body_effs = self.normalize_row_at(&body_effs, body.span)?;
         self.env = saved_env;
         self.effect_meta.type_param_cache = saved_cache;
 
@@ -795,6 +796,7 @@ impl Checker {
         let saved_effs = self.save_effects();
         let body_ty = self.infer_expr(body)?;
         let body_effs = self.restore_effects(saved_effs);
+        let body_effs = self.normalize_row_at(&body_effs, body.span)?;
         // Return position of the lambda.
         self.coerce_at(&body_ty, &expected_body_ty, body.span, Some(body))?;
         self.env = saved_env;
@@ -830,7 +832,12 @@ impl Checker {
         let mut args = Vec::new();
         let mut apps = Vec::new();
         let head = collect_app_spine(expr, &mut args, &mut apps);
+        // Variables allocated while inferring the head are the ones its
+        // scheme was instantiated with (see `emit_saturated_call_effects`).
+        let head_vars_start = self.next_var;
         let mut current_ty = self.infer_expr(head)?;
+        let head_vars = head_vars_start..self.next_var;
+        let head_ty = current_ty.clone();
         let mut deferred = Vec::<DeferredLambda<'_>>::new();
 
         // Effects performed by the saturated call must be emitted *after* every
@@ -925,8 +932,8 @@ impl Checker {
         // Now that deferred lambdas have bound any open effect rows, emit the
         // saturated call's effects.
         if let Some(callee_ty) = saturation_callee {
-            self.emit_saturated_call_effects(&callee_ty);
-            self.emit_concrete_trait_impl_effects(head);
+            self.emit_saturated_call_effects(&callee_ty, &head_ty, head_vars, expr.span)?;
+            self.emit_concrete_trait_impl_effects(head)?;
         }
 
         Ok(current_ty)
@@ -1254,7 +1261,9 @@ impl Checker {
             // Preserve specific, actionable row-ambiguity errors (e.g. an
             // argument forcing a named effect into one of several open tails)
             // rather than collapsing them into a generic type mismatch.
-            if orig.message.contains("ambiguous effect row") {
+            if orig.message.contains("ambiguous effect row")
+                || orig.message.contains(super::unify::FAMILY_CONFLICT_MARKER)
+            {
                 return Err(orig);
             }
             return Err(Diagnostic::error_at(
@@ -1288,12 +1297,42 @@ impl Checker {
         Ok(())
     }
 
-    fn emit_saturated_call_effects(&mut self, callee_ty: &Type) {
+    /// A saturated call performs the callee's row: its named effects and
+    /// whatever its still-open tails stand for.
+    ///
+    /// One kind of tail stands for nothing. A signature may be open without
+    /// tying its row variable to any argument
+    /// (`fun f : Unit -> Int needs {Log, ..r}`). Each call instantiates that
+    /// variable afresh and nothing can ever bind it, so the call performs
+    /// no more than the named effects. Such a tail (allocated when the head
+    /// was instantiated, `head_vars`, and absent from every parameter type
+    /// of `head_ty`) is not emitted; emitting it would leave the enclosing
+    /// function with an open row of its own.
+    fn emit_saturated_call_effects(
+        &mut self,
+        callee_ty: &Type,
+        head_ty: &Type,
+        head_vars: std::ops::Range<u32>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         let resolved_func = self.sub.apply(callee_ty);
         if let Type::Fun(_, _, row) = &resolved_func {
-            let applied_row = self.sub.apply_effect_row(row);
-            self.emit_effects(&applied_row);
+            let mut applied_row = self.normalize_row_at(row, span)?;
+            if !applied_row.tails.is_empty() && !head_vars.is_empty() {
+                let mut param_vars = Vec::new();
+                let mut current = self.sub.apply(head_ty);
+                while let Type::Fun(param, ret, _) = current {
+                    super::collect_free_vars(&param, &mut param_vars);
+                    current = *ret;
+                }
+                applied_row.tails.retain(|tail| match tail {
+                    Type::Var(id) => !head_vars.contains(id) || param_vars.contains(id),
+                    _ => true,
+                });
+            }
+            self.emit_effects(&applied_row, span)?;
         }
+        Ok(())
     }
 
     /// Trait-effect propagation (the bugfix): when a saturated call's head
@@ -1314,7 +1353,7 @@ impl Checker {
     /// the union of the impl's method effects is emitted. The precise
     /// per-constraint row variable that would replace the union is Phase B
     /// (see docs/planning/effect-polymorphic-traits.md).
-    fn emit_concrete_trait_impl_effects(&mut self, head: &Expr) {
+    fn emit_concrete_trait_impl_effects(&mut self, head: &Expr) -> Result<(), Diagnostic> {
         let head_id = head.id;
         // Bare method name from the head, for per-method precision on direct
         // trait-method calls (`foo 42` → "foo").
@@ -1428,9 +1467,10 @@ impl Checker {
                 }
             };
             for entry in entries {
-                self.emit_effect(entry.name, entry.args);
+                self.emit_effect(entry.name, entry.args, head.span)?;
             }
         }
+        Ok(())
     }
 
     /// Whether a call carrying a constraint on `trait_name` forwards an open
@@ -1532,7 +1572,11 @@ impl Checker {
             self.coerce_expected_first_at(&result_ty, &body_ty, body.span, Some(body))?;
         }
 
-        self.emit_effect("Std.Actor.Actor".to_string(), vec![self.sub.apply(&msg_ty)]);
+        self.emit_effect(
+            "Std.Actor.Actor".to_string(),
+            vec![self.sub.apply(&msg_ty)],
+            span,
+        )?;
         Ok(result_ty)
     }
 
@@ -1666,7 +1710,13 @@ impl Checker {
                         // Also record under the pattern's NodeId in a persistent
                         // map so the lowerer can recover the info after the
                         // per-clause `handlers` save/restore wipes the entry.
-                        if let Some(info) = self.extract_handler_info(value) {
+                        if let Some(mut info) = self.extract_handler_info(value) {
+                            // The handler's declaration carries its own type
+                            // variables; what this binding handles is what
+                            // its type says.
+                            if let Some(typed) = self.handler_info_from_type(&ty) {
+                                info.effect_entries = typed.effect_entries;
+                            }
                             self.handlers.insert(name.clone(), info.clone());
                             self.let_binding_handlers.insert(*pat_id, info);
                         } else if let Some(info) = self.handler_info_from_type(&ty) {
@@ -1773,7 +1823,7 @@ impl Checker {
                         let saved_effs = self.save_effects();
                         let body_ty = self.infer_expr(body)?;
                         let body_effs = self.restore_effects(saved_effs);
-                        all_body_effs = all_body_effs.merge(&body_effs);
+                        all_body_effs = self.merge_rows(&all_body_effs, &body_effs, body.span)?;
                         // Build curried arrow with effects on innermost
                         let mut clause_ty = body_ty;
                         for (j, param_ty) in param_types.into_iter().rev().enumerate() {
@@ -1792,12 +1842,18 @@ impl Checker {
                     }
 
                     // Close the shared row over what the clauses perform.
-                    let performed =
-                        EffectRow::closed(self.sub.apply_effect_row(&all_body_effs).effects);
+                    // A recursive call performs the function's own row
+                    // variable, which adds nothing.
+                    let mut performed = self.normalize_row_at(&all_body_effs, fun_span)?;
+                    let own = self.spine_row_tails(&fun_ty);
+                    performed
+                        .tails
+                        .retain(|t| !matches!(t, Type::Var(id) if own.contains(id)));
                     let closed_ty = with_row_on_arrow(self.sub.apply(&fun_ty), arity, performed);
                     self.unify_at(&fun_ty, &closed_ty, fun_span)?;
 
-                    let scheme = self.generalize(&fun_ty);
+                    let mut scheme = self.generalize(&fun_ty);
+                    self.keep_constrained_row_vars_monomorphic(&mut scheme);
                     self.record_type(fun_id, &fun_ty);
                     self.env.insert(fun_name, scheme);
                     last_ty = Type::unit();
@@ -1849,6 +1905,18 @@ impl Checker {
         determined
     }
 
+    /// Do not generalise a row variable that must stay consistent with an
+    /// effect its type does not show (see `unexpressed_row_companion`): each
+    /// instance would get a fresh variable free of that obligation.
+    fn keep_constrained_row_vars_monomorphic(&mut self, scheme: &mut Scheme) {
+        let ty = scheme.ty.clone();
+        for var in scheme.forall.clone() {
+            if self.unexpressed_row_companion(&ty, var).is_some() {
+                scheme.forall.retain(|id| *id != var);
+            }
+        }
+    }
+
     fn generalize_let_binding(
         &mut self,
         name: &str,
@@ -1866,6 +1934,7 @@ impl Checker {
         if !rigid_vars.is_empty() {
             scheme.forall.retain(|id| !rigid_vars.contains(id));
         }
+        self.keep_constrained_row_vars_monomorphic(&mut scheme);
 
         self.trait_state.pending_constraints.retain(
             |(trait_name, _trait_type_args, cty, _span, node_id)| {
