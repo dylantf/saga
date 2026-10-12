@@ -15,6 +15,7 @@ mod effects;
 pub(crate) mod exhaustiveness;
 mod handlers;
 mod infer;
+mod open_row_refs;
 mod patterns;
 mod records;
 mod resolve;
@@ -30,6 +31,8 @@ pub use result::{
 };
 pub use state::*;
 
+#[cfg(test)]
+mod effect_family_impl_tests;
 #[cfg(test)]
 mod effect_family_tests;
 #[cfg(test)]
@@ -89,6 +92,7 @@ impl Checker {
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
             trait_forward_row_vars: std::collections::HashMap::new(),
+            call_head: None,
             rigid_row_vars: std::collections::HashMap::new(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),

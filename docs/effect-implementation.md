@@ -228,6 +228,60 @@ names the effect next to the tail (`needs {Fail Int, ..a}`), and then a caller
 whose impl performs `Fail String` is rejected at the call, where the impl's
 effects and the function's row meet.
 
+#### Open-row methods used as values
+
+Everything above is about calls that supply every argument. An open-row
+method that is only *referenced* performs nothing yet: its impl's effects
+belong on the arrow of the value.
+
+```saga
+impl Foo for Text needs {Fail String} { foo _ = fail! "text" }
+
+apply_open foo Text                  # performs {Fail String}
+pick () = foo                        # pick : Unit -> (Text -> Int needs {Fail String})
+Box { run: foo }                     # the field's row must allow {Fail String}
+```
+
+The impl is usually not known where the name is inferred (`foo` is
+instantiated at a fresh type variable; the argument `Text` comes later), so
+the reference is recorded (`open_row_refs.rs`, `TraitState.open_row_refs`)
+with the row variable its arrow carries, and settled later:
+
+- **The type becomes known** (checked after each application, before a `with`
+  subtracts, and when the enclosing declaration ends): the row must contain
+  the impl's effects for that method. An unconstrained row is bound to exactly
+  those effects; a row that already names one of the families has its
+  arguments unified (a mismatch is the family-conflict error); a closed row
+  lacking one is an error at the reference that names the impl's effects.
+- **The type stays a variable** (it is under a `where` bound, or the
+  declaration or `let` is about to generalise it): the row becomes `..a`, the
+  same form a call produces, and the forwarding rule above applies.
+
+The same is done for a function whose own row is `..a`
+(`generic_foo` above, or a `let`-bound `foo`) when it is referenced without
+all its arguments: its `..a` is replaced by a row variable that is settled the
+same way. A generic function may also return such a value
+(`fun via : a -> (a -> Int needs {..a}) where {a: Foo}`, `via _ = foo`);
+`via Text` then has the type `Text -> Int needs {Fail String}`.
+
+Multi-parameter traits are not covered, here or at calls.
+
+#### Effect arguments in a method's or an operation's signature
+
+A type variable used as an effect's argument in a trait method's signature
+(`fun run : a -> (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}`), or in
+an effect operation's, is chosen by each caller of the method or performer of
+the operation. An impl method or handler arm is checked against the signature
+once, so it must work for every choice: after its body is inferred, the
+variable must still be a variable, must not have been merged with another
+effect-argument variable of the signature, and must not appear in an effect
+the body performs outward or (for an arm) in the handler's answer type, where
+it would be pinned later (`check_effect_arg_vars_abstract`,
+`check_effect_arg_vars_stay_inside`). An argument left out (`needs {Fail}`)
+counts the same. Variables that stand for the trait's or the effect's own
+parameters are exempt: `impl Run String for T` and `handler h for Scope
+String` say what they are, and callers agree by the ordinary rules.
+
 ### Handler Effect Subtraction
 
 `with` blocks are desugared early into nested handlers. For example:

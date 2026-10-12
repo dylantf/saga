@@ -769,6 +769,24 @@ impl Checker {
                 &impl_trait_param_mapping,
             ))
             .unwrap_or_else(super::EffectRow::empty);
+            // Likewise the type variables written as effect arguments
+            // (`needs {Fail e}` on the method or on a callback it takes).
+            // Those standing for the trait's own parameters were replaced by
+            // this impl's types above; what is left is chosen by each caller
+            // of the method, so the body may not pin it.
+            let mut method_effect_arg_vars: Vec<(u32, String)> = Vec::new();
+            for param_ty in &expected_params {
+                self.collect_effect_arg_vars(param_ty, &mut method_effect_arg_vars);
+            }
+            self.collect_effect_arg_vars(&expected_return, &mut method_effect_arg_vars);
+            self.collect_effect_arg_vars(
+                &Type::Fun(
+                    Box::new(Type::unit()),
+                    Box::new(Type::unit()),
+                    expected_row.clone(),
+                ),
+                &mut method_effect_arg_vars,
+            );
             let mut method_rigid_rows = std::collections::HashMap::new();
             for param_ty in &expected_params {
                 Self::collect_rigid_row_vars(param_ty, &[], &mut method_rigid_rows);
@@ -827,6 +845,9 @@ impl Checker {
             }
 
             // Infer body and check it matches the (possibly arrow-peeled) return.
+            self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Scope {
+                forward: false,
+            });
             let body_ty = self.infer_expr(body)?;
             self.coerce_at(&body_ty, &remaining_return, body.span, Some(body))
                 .map_err(|e| {
@@ -838,6 +859,12 @@ impl Checker {
                         ),
                     )
                 })?;
+
+            // An open-row trait method this body used as a value (see
+            // `open_row_refs.rs`).
+            self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Scope {
+                forward: true,
+            });
 
             // Check that body effects are covered by the impl's needs declaration
             let body_effs = self.restore_effects(trait_saved_effs);
@@ -862,6 +889,31 @@ impl Checker {
                 body.span,
                 false,
             )?;
+            self.check_effect_arg_vars_abstract(
+                &method_effect_arg_vars,
+                &[],
+                true,
+                &format!("trait method `{}`", method_name),
+                body.span,
+            )?;
+            {
+                // Effects the method's own row names are seen by each caller
+                // at its own instantiation; anything else the body performs
+                // is recorded once, for the impl.
+                let outward: Vec<EffectEntry> = body_effs
+                    .effects
+                    .iter()
+                    .filter(|entry| !expected_row.effects.iter().any(|d| d.matches(entry)))
+                    .cloned()
+                    .collect();
+                self.check_effect_arg_vars_stay_inside(
+                    &method_effect_arg_vars,
+                    &outward,
+                    None,
+                    &format!("trait method `{}`", method_name),
+                    body.span,
+                )?;
+            }
             let scope_result = self.exit_scope(body_scope);
             let body_field_candidates = scope_result.field_candidates;
             let body_effects: std::collections::HashSet<String> =

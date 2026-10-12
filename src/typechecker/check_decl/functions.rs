@@ -134,6 +134,11 @@ impl Checker {
             }
         }
 
+        // References left over from a declaration whose checking stopped at
+        // an error do not belong to this body.
+        self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Scope {
+            forward: false,
+        });
         // Save effects and start fresh for this function body
         let saved_trait_forward = std::mem::take(&mut self.trait_forward_row_vars);
         let saved_effs = self.save_effects();
@@ -195,6 +200,12 @@ impl Checker {
             self.env = saved_env;
             self.handlers = saved_handlers;
         }
+        // Every type the body could decide has been decided. An open-row
+        // trait method used as a value at a type that is still a variable
+        // forwards that variable's row (see `open_row_refs.rs`).
+        self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Scope {
+            forward: true,
+        });
         // Collect accumulated effects and restore outer scope
         let raw_all_body_effs = self.restore_effects(saved_effs);
         let all_body_effs = {
@@ -527,6 +538,7 @@ impl Checker {
             self.check_effect_arg_vars_abstract(
                 &own_effect_arg_vars,
                 &names,
+                false,
                 &format!("`{}`", name),
                 err_span,
             )?;
@@ -576,6 +588,28 @@ impl Checker {
                     .retain(|t| !matches!(t, Type::Var(id) if own.contains(id)));
                 if row.is_empty() { None } else { Some(row) }
             });
+        // When the clauses bind fewer parameters than the annotation has
+        // arrows, the annotation's innermost row sits on an arrow of the
+        // *result* (`fun via : a -> (a -> Int needs {..a})`, `via _ = meth`).
+        // Putting its `..a` on this function's last parameter arrow as well
+        // would unify it with that arrow's declared row, usually empty, and
+        // so erase the impl's effects from the returned function's type.
+        let effect_row = effect_row.map(|mut row| {
+            let annotated_arrows = annotation.map_or(0, |ann| {
+                let mut n = 0;
+                let mut current = self.sub.apply(ann);
+                while let Type::Fun(_, ret, _) = current {
+                    n += 1;
+                    current = *ret;
+                }
+                n
+            });
+            if annotated_arrows > arity {
+                row.tails
+                    .retain(|t| !matches!(t, Type::Var(id) if self.is_where_bound_var(*id)));
+            }
+            row
+        });
         let mut first_arrow = true;
         for param_ty in param_types.into_iter().rev() {
             if first_arrow {

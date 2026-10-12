@@ -464,6 +464,30 @@ impl Checker {
                 // the variable denotes the same set on both sides.
                 return Ok(());
             }
+            // A where-bound type variable used as a row (`..a` for
+            // `a: Trait`, the effects of the impl chosen for `a`) means that
+            // only as itself: renaming it to a fresh row variable would
+            // leave a row unrelated to `a`. When it has nothing to absorb,
+            // bind the other variable to it instead.
+            let where_bound = |checker: &Self, id: u32| checker.is_where_bound_var(id);
+            if extras1.is_empty() && where_bound(self, t2) && !where_bound(self, t1) {
+                return self.bind_row_checked(
+                    t1,
+                    EffectRow {
+                        effects: extras2,
+                        tails: vec![Type::Var(t2)],
+                    },
+                );
+            }
+            if extras2.is_empty() && where_bound(self, t1) && !where_bound(self, t2) {
+                return self.bind_row_checked(
+                    t2,
+                    EffectRow {
+                        effects: extras1,
+                        tails: vec![Type::Var(t1)],
+                    },
+                );
+            }
             let fresh = self.fresh_var();
             self.bind_row_checked(
                 t1,
@@ -517,6 +541,16 @@ impl Checker {
         let mut all_extras = extras1;
         all_extras.extend(extras2);
         Err(ambiguous_row_error(&all_extras))
+    }
+
+    /// Whether `id` is (what the substitution has made of) a type variable
+    /// under a `where` bound.
+    pub(crate) fn is_where_bound_var(&self, id: u32) -> bool {
+        let bounds = &self.trait_state.where_bounds;
+        bounds.contains_key(&id)
+            || bounds
+                .keys()
+                .any(|bound| self.sub.apply(&Type::Var(*bound)) == Type::Var(id))
     }
 
     // --- One application per effect family ---
@@ -799,10 +833,19 @@ impl Checker {
     /// (`needs {Fail e}`) is chosen by the caller, who handles or performs
     /// the effect at that type. The body must work for every choice: it may
     /// not have pinned the variable to a type, nor merged two of them.
+    ///
+    /// `names` are the variables the signature's author named. A function
+    /// owns its signature, so an argument it left out (`needs {Fail}`) is a
+    /// hole its body fills in, and is skipped. A handler arm or an impl
+    /// method implements a signature declared elsewhere (the operation's,
+    /// the trait method's), which every other user instantiates afresh:
+    /// there every variable is the user's choice, written or not
+    /// (`all_abstract`).
     pub(crate) fn check_effect_arg_vars_abstract(
         &self,
         vars: &[(u32, String)],
         names: &[(String, u32)],
+        all_abstract: bool,
         what: &str,
         span: Span,
     ) -> Result<(), Diagnostic> {
@@ -811,50 +854,126 @@ impl Checker {
                 .iter()
                 .find(|(_, id)| *id == var)
                 .map(|(name, _)| name.clone())
-                .unwrap_or_else(|| "e".to_string())
         };
-        let mut roots: Vec<(u32, u32)> = Vec::new();
+        let mut roots: Vec<(u32, u32, String)> = Vec::new();
         for (var, effect) in vars {
-            // An argument left out (`needs {Fail}`) is not a variable the
-            // caller chooses: it is a hole the body fills in.
-            if !names.iter().any(|(_, id)| id == var) {
+            let name = name_of(*var);
+            if name.is_none() && !all_abstract {
                 continue;
             }
-            let family = effect.rsplit('.').next().unwrap_or(effect);
+            let family = effect.rsplit('.').next().unwrap_or(effect).to_string();
             match self.sub.apply(&Type::Var(*var)) {
                 Type::Var(root) => {
-                    if let Some((_, other)) = roots.iter().find(|(r, o)| *r == root && o != var) {
-                        return Err(Diagnostic::error_at(
-                            span,
-                            format!(
+                    if let Some((_, other, other_family)) =
+                        roots.iter().find(|(r, o, _)| *r == root && o != var)
+                    {
+                        let message = match (name, name_of(*other)) {
+                            (Some(a), Some(b)) => format!(
                                 "{what} declares the effect argument `{a}` (of `{family}`) and \
                                  `{b}` as independent type variables, but its body only works \
                                  when they are the same type. The caller chooses them; use one \
-                                 variable for both in the signature",
-                                a = name_of(*var),
-                                b = name_of(*other),
+                                 variable for both in the signature"
                             ),
-                        ));
+                            _ => format!(
+                                "{what} is declared with independent type variables as effect \
+                                 arguments (of `{family}` and of `{other_family}`), but this \
+                                 implementation only works when they are the same type. \
+                                 Whoever uses it chooses them; use one variable for both in \
+                                 the declaration"
+                            ),
+                        };
+                        return Err(Diagnostic::error_at(span, message));
                     }
-                    roots.push((root, *var));
+                    roots.push((root, *var, family));
                 }
                 Type::Error => {}
                 other => {
                     let shown = self.prettify_type(&other);
-                    return Err(Diagnostic::error_at(
-                        span,
-                        format!(
+                    let message = match name {
+                        Some(var) => format!(
                             "{what} declares `{family} {var}` for any type `{var}`, but its \
                              body only works when `{var}` is `{shown}`. The caller chooses \
                              `{var}` and performs or handles `{family}` at that type; write \
-                             `{shown}` in the signature, or make the body work for every `{var}`",
-                            var = name_of(*var),
+                             `{shown}` in the signature, or make the body work for every `{var}`"
                         ),
-                    ));
+                        None => format!(
+                            "{what} is declared with `{family}` at any type, but this \
+                             implementation only works when that type is `{shown}`. Whoever \
+                             uses it chooses the type and performs or handles `{family}` at \
+                             it; write `{shown}` in the declaration, or make the \
+                             implementation work for every type"
+                        ),
+                    };
+                    return Err(Diagnostic::error_at(span, message));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Companion of `check_effect_arg_vars_abstract` for a handler arm or an
+    /// impl method: an effect-argument variable of the implemented signature
+    /// must not reach what outlives the implementation (`performed`, the
+    /// effects it performs outward; `result`, e.g. a handler's answer type).
+    /// Every user of the signature chooses that variable afresh, but the
+    /// surroundings see one type: it would be pinned there, after this body
+    /// was checked.
+    pub(crate) fn check_effect_arg_vars_stay_inside(
+        &self,
+        vars: &[(u32, String)],
+        performed: &[super::EffectEntry],
+        result: Option<&Type>,
+        what: &str,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if vars.is_empty() {
+            return Ok(());
+        }
+        let mut outside = Vec::new();
+        for entry in performed {
+            for arg in &entry.args {
+                collect_free_vars(&self.sub.apply(arg), &mut outside);
+            }
+        }
+        if let Some(ty) = result {
+            collect_free_vars(&self.sub.apply(ty), &mut outside);
+        }
+        for (var, effect) in vars {
+            let Type::Var(root) = self.sub.apply(&Type::Var(*var)) else {
+                continue;
+            };
+            if outside.contains(&root) {
+                let family = effect.rsplit('.').next().unwrap_or(effect);
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "{what} is declared with `{family}` at any type, but this \
+                         implementation passes that type on to its surroundings (in an effect \
+                         it performs, or in its result). Whoever uses it chooses the type, each \
+                         time, while the surroundings see a single type; handle `{family}` \
+                         inside the implementation in a way that works for every type"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The type variables an instantiated operation signature uses as effect
+    /// arguments, each with its family.
+    pub(crate) fn op_sig_effect_arg_vars(&self, sig: &super::EffectOpSig) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        for (_, param_ty) in &sig.params {
+            self.collect_effect_arg_vars(param_ty, &mut out);
+        }
+        self.collect_effect_arg_vars(&sig.return_type, &mut out);
+        let as_fun = Type::Fun(
+            Box::new(Type::unit()),
+            Box::new(Type::unit()),
+            sig.needs.clone(),
+        );
+        self.collect_effect_arg_vars(&as_fun, &mut out);
+        out
     }
 
     /// Collect the row variables written in a declared type, with the

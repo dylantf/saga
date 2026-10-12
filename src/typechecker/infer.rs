@@ -201,6 +201,7 @@ impl Checker {
                         }
                     }
                     let (ty, constraints) = self.instantiate(&scheme);
+                    let ty = self.note_open_row_reference(name, ty, &constraints, span, node_id);
                     for (trait_name, trait_ty, extra_types) in constraints {
                         self.trait_state.pending_constraints.push((
                             trait_name,
@@ -530,6 +531,8 @@ impl Checker {
                 match self.env.get(&key).cloned() {
                     Some(scheme) => {
                         let (ty, constraints) = self.instantiate(&scheme);
+                        let ty =
+                            self.note_open_row_reference(name, ty, &constraints, span, node_id);
                         for (trait_name, trait_ty, extra_types) in constraints {
                             self.trait_state.pending_constraints.push((
                                 trait_name,
@@ -835,7 +838,10 @@ impl Checker {
         // Variables allocated while inferring the head are the ones its
         // scheme was instantiated with (see `emit_saturated_call_effects`).
         let head_vars_start = self.next_var;
-        let mut current_ty = self.infer_expr(head)?;
+        self.call_head = Some((head.id, args.len()));
+        let head_result = self.infer_expr(head);
+        self.call_head = None;
+        let mut current_ty = head_result?;
         let head_vars = head_vars_start..self.next_var;
         let head_ty = current_ty.clone();
         let mut deferred = Vec::<DeferredLambda<'_>>::new();
@@ -928,6 +934,11 @@ impl Checker {
             // `infer_expr` this rewrites the same type.)
             self.record_expr_type(deferred_lambda.arg_expr.id, &arg_ty);
         }
+
+        // The arguments may have decided the impl behind an open-row trait
+        // method passed as a value; its effects belong on that value's arrow
+        // before this call's row is read.
+        self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Keep);
 
         // Now that deferred lambdas have bound any open effect rows, emit the
         // saturated call's effects.
@@ -1394,77 +1405,16 @@ impl Checker {
             let Type::Con(type_name, args) = &resolved else {
                 continue;
             };
-            // Single-param trait lookup: arity-keyed target first (tuples),
-            // then the bare canonical name. Multi-param traits (non-empty
-            // trait_type_args) are not handled here yet.
-            let arity_key = super::arity_keyed_target_name(type_name, args.len());
-            let info = self
-                .trait_state
-                .impls
-                .get(&(trait_name.clone(), vec![], arity_key))
-                .or_else(|| {
-                    self.trait_state
-                        .impls
-                        .get(&(trait_name.clone(), vec![], type_name.clone()))
-                })
-                .cloned();
-            let Some(info) = info else {
+            // Concrete discharge: the selected impl's effects for the method
+            // called (or, for a where-bound function, for the trait's
+            // open-row methods). See `open_row_impl_effects`.
+            let Some(entries) = self.open_row_impl_effects(
+                &trait_name,
+                type_name,
+                args.len(),
+                head_method.as_deref(),
+            ) else {
                 continue;
-            };
-            if info.method_effects.is_empty() {
-                continue;
-            }
-            // Only *open-row* trait methods need concrete discharge. Their
-            // effects are NOT in the method's declared type, so the normal
-            // row-tracking never sees them and an enclosing `with` cannot
-            // subtract them -- concrete discharge is what surfaces them at the
-            // concrete call site. A closed-named method (`to_json : a -> Json
-            // needs {JsonOptions}`) already carries its effect in the type: it
-            // propagates -- and gets subtracted by an enclosing handler --
-            // through the normal path. Re-emitting it here would resurrect an
-            // effect the callee already handled (e.g. `serialize x =
-            // serialize_with x with json_defaults`, where `serialize` is pure
-            // but PersonD's `ToJson` impl performs `JsonOptions`).
-            let open_row_methods: std::collections::HashSet<&str> = self
-                .trait_state
-                .traits
-                .get(&trait_name)
-                .map(|t| {
-                    t.methods
-                        .iter()
-                        .filter(|m| m.effect_sig.is_open_row)
-                        .map(|m| m.name.as_str())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if open_row_methods.is_empty() {
-                continue;
-            }
-            let entries: Vec<super::EffectEntry> = match &head_method {
-                // Direct trait-method call: discharge only if THAT method is
-                // open-row (a pure/closed sibling of an open-row method stays on
-                // the normal path).
-                Some(m) if info.method_effects.contains_key(m) => {
-                    if open_row_methods.contains(m.as_str()) {
-                        info.method_effects.get(m).cloned().unwrap_or_default()
-                    } else {
-                        continue;
-                    }
-                }
-                // Where-bound function call (`count_foos 42`): union the effects
-                // of the trait's open-row methods only.
-                _ => {
-                    let mut by_key: std::collections::BTreeMap<String, super::EffectEntry> =
-                        std::collections::BTreeMap::new();
-                    for (mname, effs) in &info.method_effects {
-                        if open_row_methods.contains(mname.as_str()) {
-                            for entry in effs {
-                                by_key.insert(super::applied_effect_key(entry), entry.clone());
-                            }
-                        }
-                    }
-                    by_key.into_values().collect()
-                }
             };
             for entry in entries {
                 self.emit_effect(entry.name, entry.args, head.span)?;
@@ -1895,7 +1845,7 @@ impl Checker {
     /// through the substitution). A `let` binding must not generalize over a
     /// variable the surrounding function/handler holds fixed, so these are
     /// excluded from let-generalization.
-    fn rigid_where_bound_vars(&self) -> std::collections::HashSet<u32> {
+    pub(crate) fn rigid_where_bound_vars(&self) -> std::collections::HashSet<u32> {
         let mut determined = std::collections::HashSet::new();
         for &bound_id in self.trait_state.where_bounds.keys() {
             if let Type::Var(resolved) = self.sub.apply(&Type::Var(bound_id)) {
@@ -1925,6 +1875,15 @@ impl Checker {
         ty: &Type,
         has_deferred_effects: bool,
     ) {
+        // An open-row trait method bound here without its impl being known
+        // (`let f = decode`) keeps its effects as `..a` on the generalised
+        // type, so each use of the binding is checked again.
+        if !self.trait_state.open_row_refs.is_empty() {
+            let about_to_generalize = self.generalize(ty).forall;
+            self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Generalized(
+                &about_to_generalize,
+            ));
+        }
         let mut scheme = self.generalize(ty);
 
         // A variable held rigid by an enclosing `where`-bound must not be

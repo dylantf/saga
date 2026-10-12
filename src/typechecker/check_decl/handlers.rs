@@ -524,6 +524,27 @@ impl Checker {
             self.rigid_row_vars
                 .extend(arm_rigid_rows.iter().map(|(id, info)| (*id, info.clone())));
 
+            // Likewise the type variables the operation uses as effect
+            // arguments (`e` in a callback's `needs {Fail e}`). The effect's
+            // own parameters are not among them: the handler's declaration
+            // (`for Scope String`, `for Scope a`) says what they are.
+            let arm_effect_arg_vars: Vec<(u32, String)> = {
+                let mut own_params: Vec<u32> = Vec::new();
+                for effect_ref in effect_names {
+                    let resolved = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
+                    if let Some(info) = self.effects.get(&resolved) {
+                        own_params.extend(info.type_params.iter().copied());
+                    }
+                }
+                for ty in handler_type_mapping.values() {
+                    crate::typechecker::unify::collect_free_vars(ty, &mut own_params);
+                }
+                self.op_sig_effect_arg_vars(&op_sig)
+                    .into_iter()
+                    .filter(|(var, _)| !own_params.contains(var))
+                    .collect()
+            };
+
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
             let saved_resume = self.resume_type.take();
@@ -558,12 +579,35 @@ impl Checker {
             {
                 self.collected_diagnostics.push(e);
             }
+            // An open-row trait method the arm used as a value: settle what
+            // is known (see `open_row_refs.rs`). A handler expression is
+            // checked inside a function body, whose own references stay.
+            self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Keep);
             self.check_rigid_row_vars_abstract(
                 &arm_rigid_rows,
                 &format!("operation `{}`", arm.op_name),
                 arm.span,
                 true,
             )?;
+            self.check_effect_arg_vars_abstract(
+                &arm_effect_arg_vars,
+                &[],
+                true,
+                &format!("operation `{}`", arm.op_name),
+                arm.span,
+            )?;
+            {
+                // What the arms have performed so far goes to the handler's
+                // `needs`, outside the arm.
+                let performed = self.effect_row.effects.clone();
+                self.check_effect_arg_vars_stay_inside(
+                    &arm_effect_arg_vars,
+                    &performed,
+                    Some(&answer_ty),
+                    &format!("operation `{}`", arm.op_name),
+                    arm.span,
+                )?;
+            }
 
             // Typecheck optional `finally` block: may use the handler's `needs` effects
             // (they're already provided by the caller) but must not introduce new ones.

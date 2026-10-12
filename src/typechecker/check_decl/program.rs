@@ -739,6 +739,14 @@ impl Checker {
                     let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);
                     self.coerce_at(&ty, &ann_ty, *span, Some(value))?;
                 }
+                // An open-row trait method bound as a value keeps its
+                // effects as `..a` on the generalised type.
+                let about_to_generalize = self.generalize(&ty).forall;
+                self.resolve_open_row_refs(
+                    crate::typechecker::open_row_refs::OpenRowFinish::Generalized(
+                        &about_to_generalize,
+                    ),
+                );
                 let scheme = self.generalize(&ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
                 self.lsp.node_spans.insert(*id, *name_span);

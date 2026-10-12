@@ -239,6 +239,11 @@ pub struct Checker {
     /// checked for required forwarding in `check_fun_clauses`. Cleared at the
     /// start of each function body. See docs/planning/effect-polymorphic-traits.md.
     pub(crate) trait_forward_row_vars: std::collections::HashMap<u32, String>,
+    /// The head of the application being inferred and how many arguments it
+    /// is applied to, set only while that head is inferred. Lets a name tell
+    /// a call that supplies every argument from a use as a value (see
+    /// `open_row_refs.rs`).
+    pub(crate) call_head: Option<(crate::ast::NodeId, usize)>,
     /// Row variables the code being checked may not refine: the `..r` tails
     /// written in the enclosing function's signature (or in the signature of
     /// the trait method or effect operation being implemented). Whoever calls
@@ -550,6 +555,9 @@ pub(crate) struct TraitState {
     pub where_bound_trait_args: HashMap<(u32, String), Vec<Type>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
     pub where_bound_var_names: HashMap<u32, String>,
+    /// Open-row trait methods referenced as values whose impl effects have
+    /// not been put on their arrows yet (see `open_row_refs.rs`).
+    pub open_row_refs: Vec<super::open_row_refs::OpenRowRef>,
 }
 
 /// Metadata for effect inference: instantiation caches and name registries.

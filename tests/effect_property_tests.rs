@@ -1578,7 +1578,9 @@ inner_transaction () = handler for InnerTransaction {
 fun transaction_repo : Unit -> Handler Repo
 transaction_repo () = handler for Repo {
   ping _ = resume ()
-  transaction _body = resume (Err "nested transaction")
+  # `e` is chosen by whoever performs `transaction`, so this arm cannot
+  # answer with a `String` error (`resume (Err "nested transaction")`).
+  transaction _body = resume (panic "nested transaction")
 }
 
 pub fun repo : Unit -> Handler Repo
@@ -4114,4 +4116,33 @@ result () = guarded False + guarded True
 "#;
     // a = 2 + 5 (resumed by run2's handler), b = 100 (aborted by the outer one)
     check_result_int("lambda_call_site_handler_abort", src, 107);
+}
+
+/// An open-row trait method passed as a value carries its impl's effects on
+/// its arrow: the enclosing function declares them and the caller's handler
+/// receives the operation at the impl's type.
+#[test]
+fn trait_method_reference_performs_its_impls_effect_under_the_callers_handler() {
+    let src = r#"module Main
+
+effect Fail e { fun fail : e -> Int }
+
+trait Decode a { fun decode : a -> Int needs {..e} }
+
+type TextInput = TextInput
+
+impl Decode for TextInput needs {Fail String} {
+  decode _ = fail! "text"
+}
+
+fun apply_open : (a -> Int needs {..r}) -> a -> Int needs {..r}
+apply_open f x = f x
+
+fun decode_text : Unit -> Int needs {Fail String}
+decode_text () = apply_open decode TextInput
+
+pub fun result : Unit -> Int
+result () = decode_text () with { fail s = resume (String.length s) }
+"#;
+    check_result_int("trait_method_reference_impl_effect", src, 4);
 }

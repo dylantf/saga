@@ -37,7 +37,7 @@ fun pure_int : Unit -> Int
 pure_int () = 1
 "#;
 
-fn diagnostics(src: &str) -> Vec<Diagnostic> {
+pub(super) fn diagnostics(src: &str) -> Vec<Diagnostic> {
     let src = format!("{PRELUDE}\n{src}");
     let tokens = Lexer::new(&src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
@@ -48,7 +48,7 @@ fn diagnostics(src: &str) -> Vec<Diagnostic> {
 }
 
 /// The program type-checks.
-fn accepted(src: &str) {
+pub(super) fn accepted(src: &str) {
     let errors = diagnostics(src);
     assert!(
         errors.is_empty(),
@@ -59,7 +59,7 @@ fn accepted(src: &str) {
 
 /// The program is rejected with an error whose message contains every
 /// needle, and that error has a source span. Returns the message.
-fn rejected(src: &str, needles: &[&str]) -> String {
+pub(super) fn rejected(src: &str, needles: &[&str]) -> String {
     let errors = diagnostics(src);
     let found = errors
         .iter()
@@ -78,7 +78,7 @@ fn rejected(src: &str, needles: &[&str]) -> String {
 }
 
 /// Rejected as two applications of `Oops` in one row.
-fn rejected_as_conflict(src: &str) -> String {
+pub(super) fn rejected_as_conflict(src: &str) -> String {
     let message = rejected(src, &[FAMILY_CONFLICT_MARKER, "`Oops`", "neweffect"]);
     assert!(
         message.contains("Oops String") && message.contains("Oops Int"),

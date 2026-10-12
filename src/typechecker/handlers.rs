@@ -338,6 +338,9 @@ impl Checker {
         let inner_scope = self.enter_scope();
         let saved_effs = self.save_effects();
         let expr_ty = self.infer_expr(expr)?;
+        // What the handler is installed around includes the effects of any
+        // open-row trait method the expression used as a value.
+        self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Keep);
         match handler {
             ast::Handler::Named(named) => {
                 let resolved_name = self.resolved_handler_name(named.id, &named.name);
@@ -603,6 +606,29 @@ impl Checker {
                     let saved_resume_ret = self.resume_return_type.take();
                     let saved_effect_cache = self.effect_meta.type_param_cache.clone();
 
+                    // The type variables the operation's signature uses as
+                    // effect arguments (`e` in a callback's `needs {Fail e}`)
+                    // are chosen by whoever performs the operation. The
+                    // effect's own parameters are not: the application of
+                    // the effect being handled says what they are.
+                    let arm_effect_arg_vars: Vec<(u32, String)> = match op_sig {
+                        Some(ref sig) => {
+                            let mut own_params = Vec::new();
+                            if let Some(mapping) =
+                                self.effect_meta.type_param_cache.get(&sig.effect_name)
+                            {
+                                for ty in mapping.values() {
+                                    super::unify::collect_free_vars(ty, &mut own_params);
+                                }
+                            }
+                            self.op_sig_effect_arg_vars(sig)
+                                .into_iter()
+                                .filter(|(var, _)| !own_params.contains(var))
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    };
+
                     let mut arm_rigid_rows = std::collections::HashMap::new();
                     if let Some(ref sig) = op_sig {
                         // The operation's signature is a declared type the
@@ -692,6 +718,20 @@ impl Checker {
                         &format!("operation `{}`", arm.op_name),
                         arm.span,
                         true,
+                    )?;
+                    self.check_effect_arg_vars_abstract(
+                        &arm_effect_arg_vars,
+                        &[],
+                        true,
+                        &format!("operation `{}`", arm.op_name),
+                        arm.span,
+                    )?;
+                    self.check_effect_arg_vars_stay_inside(
+                        &arm_effect_arg_vars,
+                        &arm_effs.effects,
+                        Some(&answer_ty),
+                        &format!("operation `{}`", arm.op_name),
+                        arm.span,
                     )?;
 
                     // Typecheck optional `finally` block. Under nested handler
