@@ -1,7 +1,7 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
          select_evidence/2, reframe_evidence/3,
-         append_tail/2]).
+         append_tail/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -80,16 +80,20 @@ reframe_evidence(Evidence, {StaticCount, ForwardStaticPositions}, Selectors) ->
 
 %% An effect-operation callback with an open row receives its named effects
 %% from the handler that invokes it, while the unknown row tail comes from the
-%% original perform site. Keep the call-time frame, whose static prefix is
-%% already in the callback's order, and append the captured entries it does not
-%% replace. The callback's named effects therefore come from the nested handler
-%% while its `..r` effects survive from the perform site.
-append_tail(CallEvidence, CapturedEvidence) ->
-    CallEntries = tuple_to_list(CallEvidence),
-    CallTags = [Tag || {Tag, _} <- CallEntries],
-    ExtraTail = [Entry || {Tag, _} = Entry <- tuple_to_list(CapturedEvidence),
-                          not lists:member(Tag, CallTags)],
-    list_to_tuple(CallEntries ++ ExtraTail).
+%% original perform site. Take the entries for NamedTags from the call-time
+%% frame and every other entry from the captured perform-site frame. Nothing
+%% else in the call-time frame is kept: a handler of an effect in `..r` that
+%% happens to surround the handler arm must not shadow the perform site's.
+%% A named effect the call-time frame lacks (one provided natively, such as
+%% `Actor` under `spawn`) falls back to the captured entry if there is one.
+%% The result is only ever read by tag.
+append_tail(CallEvidence, CapturedEvidence, NamedTags) ->
+    Named = [Entry || {Tag, _} = Entry <- tuple_to_list(CallEvidence),
+                      lists:member(Tag, NamedTags)],
+    Supplied = [Tag || {Tag, _} <- Named],
+    Tail = [Entry || {Tag, _} = Entry <- tuple_to_list(CapturedEvidence),
+                     not lists:member(Tag, Supplied)],
+    list_to_tuple(Named ++ Tail).
 
 unique_positions(Positions) -> unique_positions(Positions, []).
 

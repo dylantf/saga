@@ -237,13 +237,14 @@ impl<'a> Lowerer<'a> {
                     param_vars.push("_ReturnK".to_string());
                     let evidence_var = captured_evidence.as_ref().map_or_else(
                         || evidence_param.clone(),
-                        |captured| {
+                        |(captured, named_effects)| {
                             let merged = self.fresh();
                             callback_tail_binding = Some((
                                 merged.clone(),
                                 evidence::append_tail(
                                     CExpr::Var(evidence_param.clone()),
                                     CExpr::Var(captured.var.clone()),
+                                    named_effects,
                                 ),
                             ));
                             merged

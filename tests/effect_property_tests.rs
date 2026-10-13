@@ -4137,3 +4137,178 @@ result () = decode_text () with { fail s = resume (String.length s) }
 "#;
     check_result_int("trait_method_reference_impl_effect", src, 4);
 }
+
+// ---------------------------------------------------------------------------
+// Callback overlay: a callback passed to an effect operation, typed
+// `needs {Counter, ..r}`, takes its named effects (`Counter`) from the frame
+// the handler arm calls it with and everything in `..r` from the frame the
+// operation was performed in. Each handler resumes with a distinct number so
+// the result shows which one was reached.
+// ---------------------------------------------------------------------------
+
+const OVERLAY_PRELUDE: &str = r#"module Main
+
+effect Log { fun log : Unit -> Int }
+effect Counter { fun tick : Unit -> Int }
+effect Scope {
+  fun scoped : (Unit -> Int needs {Counter, ..r}) -> Int needs {..r}
+}
+"#;
+
+fn overlay_src(body: &str) -> String {
+    format!("{OVERLAY_PRELUDE}\n{body}")
+}
+
+/// The arm runs under the outer `Log` handler (2) and the operation is
+/// performed under the inner one (1). `Log` is in `..r`, so the callback
+/// reaches the inner handler.
+#[test]
+fn callback_overlay_tail_effect_comes_from_the_perform_site() {
+    let src = overlay_src(
+        r#"handler scope_h for Scope needs {Log} {
+  scoped body = {
+    let seen = log! ()
+    let r = body () with { tick () = resume 100 }
+    resume (r + seen * 1000)
+  }
+}
+
+fun perform : Unit -> Int needs {Scope, Log}
+perform () = scoped! (fun () -> log! () + tick! ())
+
+pub fun result : Unit -> Int
+result () = {
+  perform () with { log () = resume 1 }
+} with { scope_h, log () = resume 2 }
+"#,
+    );
+    // arm's own log = 2, callback's log = 1, callback's tick = 100
+    check_result_int("callback_overlay_tail_from_perform_site", &src, 2101);
+}
+
+/// The same with a named function as the callback, which is wrapped rather
+/// than overlaying in its own body.
+#[test]
+fn callback_overlay_tail_effect_comes_from_the_perform_site_for_named_callback() {
+    let src = overlay_src(
+        r#"handler scope_h for Scope needs {Log} {
+  scoped body = {
+    let seen = log! ()
+    let r = body () with { tick () = resume 100 }
+    resume (r + seen * 1000)
+  }
+}
+
+fun work : Unit -> Int needs {Counter, Log}
+work () = log! () + tick! ()
+
+fun perform : Unit -> Int needs {Scope, Log}
+perform () = scoped! work
+
+pub fun result : Unit -> Int
+result () = {
+  perform () with { log () = resume 1 }
+} with { scope_h, log () = resume 2 }
+"#,
+    );
+    check_result_int("callback_overlay_tail_named_callback", &src, 2101);
+}
+
+/// The perform site has a `Counter` handler too (5), but `Counter` is named
+/// by the callback's type, so the one the arm installs (100) wins.
+#[test]
+fn callback_overlay_named_effect_comes_from_the_handler_arm() {
+    let src = overlay_src(
+        r#"handler scope_h for Scope needs {Log} {
+  scoped body = {
+    let r = body () with { tick () = resume 100 }
+    resume (r + log! () * 1000)
+  }
+}
+
+fun perform : Unit -> Int needs {Scope, Log, Counter}
+perform () = tick! () * 10000 + scoped! (fun () -> log! () + tick! ())
+
+pub fun result : Unit -> Int
+result () = {
+  perform () with { log () = resume 1, tick () = resume 5 }
+} with { scope_h, log () = resume 2 }
+"#,
+    );
+    // perform's own tick = 5, arm's log = 2, callback's tick = 100, log = 1
+    check_result_int("callback_overlay_named_from_arm", &src, 52101);
+}
+
+/// The arm does not handle `Counter` itself: it passes on the one its
+/// handler was installed under (100), not the perform site's (5).
+#[test]
+fn callback_overlay_named_effect_comes_from_the_handlers_own_frame() {
+    let src = overlay_src(
+        r#"handler scope_h for Scope needs {Counter, Log} {
+  scoped body = resume (body () + log! () * 1000)
+}
+
+fun perform : Unit -> Int needs {Scope, Log, Counter}
+perform () = scoped! (fun () -> log! () + tick! ())
+
+pub fun result : Unit -> Int
+result () = {
+  perform () with { log () = resume 1, tick () = resume 5 }
+} with { scope_h, log () = resume 2, tick () = resume 100 }
+"#,
+    );
+    check_result_int("callback_overlay_named_from_handler_frame", &src, 2101);
+}
+
+/// `Log` is handled only around the perform site; the handler knows nothing
+/// about it.
+#[test]
+fn callback_overlay_reaches_an_effect_only_the_perform_site_has() {
+    let src = overlay_src(
+        r#"handler scope_h for Scope {
+  scoped body = resume (body () with { tick () = resume 100 })
+}
+
+fun perform : Unit -> Int needs {Scope, Log}
+perform () = scoped! (fun () -> log! () + tick! ())
+
+pub fun result : Unit -> Int
+result () = {
+  perform () with { log () = resume 1 }
+} with scope_h
+"#,
+    );
+    check_result_int("callback_overlay_perform_site_only_effect", &src, 101);
+}
+
+/// An operation with a callback performed inside another's callback, each
+/// under its own `Log` handler, with a third around the handler.
+#[test]
+fn callback_overlay_nested_operations_each_keep_their_perform_site() {
+    let src = overlay_src(
+        r#"handler scope_h for Scope needs {Log} {
+  scoped body = {
+    let r = body () with { tick () = resume 100 }
+    resume (r + log! () * 10000)
+  }
+}
+
+fun inner : Unit -> Int needs {Scope, Log}
+inner () = scoped! (fun () -> log! () + tick! ())
+
+fun outer : Unit -> Int needs {Scope, Log}
+outer () = scoped! (fun () -> {
+  let nested = inner () with { log () = resume 10 }
+  log! () + tick! () + nested
+})
+
+pub fun result : Unit -> Int
+result () = {
+  outer () with { log () = resume 1 }
+} with { scope_h, log () = resume 3 }
+"#,
+    );
+    // outer callback: 1 + 100; inner callback: 10 + 100; the arm's own log
+    // (3), once per `scoped!`: 2 * 30000
+    check_result_int("callback_overlay_nested_operations", &src, 60211);
+}

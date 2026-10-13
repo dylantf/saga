@@ -662,9 +662,11 @@ fun transaction :
 The handler invoking that callback supplies the named static frame (`Repo` and
 `Rollback e`). The original perform site supplies `..r`. The callback closure
 therefore retains the perform-site evidence, but does not use it directly:
-`append_tail/2` keeps the handler's call-time frame and appends only captured
-entries whose tags it does not already contain. This lets a transaction-scoped `Repo` shadow the outer
-repository while unrelated effects in `..r` continue to the callback.
+`append_tail/3` takes the entries for the named effects from the handler's
+call-time frame and every other entry from the captured frame. This lets a
+transaction-scoped `Repo` shadow the outer repository while effects in `..r`
+reach the handlers around the perform site, even when the handler arm itself
+runs under another handler of the same effect.
 Capturing the whole perform-site frame as the callback's active frame would
 incorrectly discard both nested handlers. A lambda argument applies the
 overlay at the top of its own body; any other callback value (a variable, a

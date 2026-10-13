@@ -199,15 +199,22 @@ pub(super) fn reframe_evidence(
     )
 }
 
-/// Combine handler-supplied callback evidence with the unknown tail captured
-/// at the original effect-operation call site. The call-time frame is kept as
-/// is, so its positional static prefix is undisturbed; captured entries it
-/// does not replace are appended.
-pub(super) fn append_tail(call_evidence: CExpr, captured_evidence: CExpr) -> CExpr {
+/// Combine handler-supplied callback evidence with the frame captured at the
+/// original effect-operation call site: the entries for `named_tags` (the
+/// effects the callback's type names) come from the call-time frame, every
+/// other entry from the captured one. The result has no positional layout.
+pub(super) fn append_tail(
+    call_evidence: CExpr,
+    captured_evidence: CExpr,
+    named_tags: &[String],
+) -> CExpr {
+    let tags = named_tags.iter().rev().fold(CExpr::Nil, |tail, tag| {
+        CExpr::Cons(Box::new(CExpr::Lit(CLit::Atom(tag.clone()))), Box::new(tail))
+    });
     cerl_call(
         EVIDENCE_BRIDGE_MODULE,
         "append_tail",
-        vec![call_evidence, captured_evidence],
+        vec![call_evidence, captured_evidence, tags],
     )
 }
 
@@ -418,13 +425,19 @@ mod tests {
         let call = append_tail(
             CExpr::Var("CallEvidence".to_string()),
             CExpr::Var("CapturedEvidence".to_string()),
+            &["Counter".to_string()],
         );
         let CExpr::Call(module, function, args) = call else {
             panic!("expected bridge call")
         };
         assert_eq!(module, "std_evidence_bridge");
         assert_eq!(function, "append_tail");
-        assert_eq!(args.len(), 2);
+        assert_eq!(args.len(), 3);
+        let CExpr::Cons(tag, rest) = &args[2] else {
+            panic!("expected a list of named tags")
+        };
+        assert!(matches!(tag.as_ref(), CExpr::Lit(CLit::Atom(tag)) if tag == "Counter"));
+        assert!(matches!(rest.as_ref(), CExpr::Nil));
     }
 
     #[test]

@@ -30,6 +30,10 @@ use util::{cerl_call, collect_effect_call, core_var, lower_string_to_binary};
 
 pub(super) type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
 
+/// A perform-site frame captured by an operation callback, and the effects
+/// the callback's parameter type names.
+pub(super) type CapturedCallbackEvidence = (EvidenceFrame, Vec<String>);
+
 /// Lower a simple expression used as a bitstring segment size.
 /// Handles integer literals and variable references — the common cases
 /// for pattern-position sizes like `<<len:8, data:len/binary>>`.
@@ -322,8 +326,9 @@ pub struct Lowerer<'a> {
     /// module-separated and are consulted only by semantic module.
     fallback_effect_abi_plans: HashMap<String, super::call_effects::EffectAbiPlan>,
     /// Perform-site evidence captured by an open-row callback value, keyed by
-    /// that callback expression's identity.
-    function_value_captured_evidence: HashMap<NodeId, EvidenceFrame>,
+    /// that callback expression's identity, with the effects the callback's
+    /// type names (those it takes from its caller instead).
+    function_value_captured_evidence: HashMap<NodeId, CapturedCallbackEvidence>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -501,14 +506,16 @@ impl<'a> Lowerer<'a> {
         &mut self,
         node_id: NodeId,
         frame: EvidenceFrame,
-    ) -> Option<EvidenceFrame> {
-        self.function_value_captured_evidence.insert(node_id, frame)
+        named_effects: Vec<String>,
+    ) -> Option<CapturedCallbackEvidence> {
+        self.function_value_captured_evidence
+            .insert(node_id, (frame, named_effects))
     }
 
     pub(super) fn restore_function_value_captured_evidence(
         &mut self,
         node_id: NodeId,
-        previous: Option<EvidenceFrame>,
+        previous: Option<CapturedCallbackEvidence>,
     ) {
         if let Some(previous) = previous {
             self.function_value_captured_evidence
