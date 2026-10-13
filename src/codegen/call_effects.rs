@@ -17,17 +17,17 @@
 //! through `App`, and are out of scope for this module.
 //!
 //! Saturated effectful calls produce `StaticOps` (closed row) or
-//! `RowForwarded` (open row). Otherwise: `Pure`. Effectful let-bindings
-//! (`let g = factory(); g x`) are tracked via a lexical scope stack inside
-//! the populator.
+//! `RowForwarded` (open row). A call is pure only by a rule that says so
+//! (see `Populator::classify_app`); a head no rule covers is an internal
+//! compiler error.
 //!
 //! This module is intentionally a classifier, not a lowerer. It names the
 //! ABI/evidence shape a call site needs; Core Erlang emission remains in
 //! `codegen::lower`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
+use crate::ast::{Decl, Expr, ExprKind, NodeId, Program, Stmt};
 use crate::codegen::CodegenContext;
 use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
@@ -340,16 +340,6 @@ fn unique_effects(ops: &[OpKey]) -> Vec<String> {
 pub struct FunSig {
     /// Authoritative runtime convention for this callable.
     pub abi: CallableAbi,
-    /// param-index -> absorbed effects (for HOF effect absorption).
-    pub param_absorbed_effects: HashMap<usize, Vec<String>>,
-    /// Source-level parameter types. Used to detect callback parameters
-    /// whose type has an open effect row but no named effects — these need
-    /// CPS threading at call sites even though `param_absorbed_effects`
-    /// (named-effects only) misses them.
-    pub param_types: Vec<crate::typechecker::Type>,
-    /// Number of dictionary params prepended by elaboration before source
-    /// parameters. Callback metadata is keyed by source parameter index.
-    pub dict_param_count: usize,
 }
 
 /// Read-only inputs the populator consults during its walk. Bundled into a
@@ -368,11 +358,8 @@ pub struct PopulatorInputs<'a> {
     /// Effect canonical name -> sorted op names.
     pub effect_ops: &'a HashMap<String, Vec<String>>,
     /// Bare effect name -> canonical effect name (mirrors `Lowerer::effect_canonical`).
-    /// Effects from `let_effect_bindings` and pattern-bound vars use bare names;
-    /// `effect_ops` is keyed canonically. This map bridges the two.
+    /// `effect_ops` is keyed canonically.
     pub effect_canonical: &'a HashMap<String, String>,
-    /// Static let-binding effects from CodegenContext.
-    pub let_effect_bindings: &'a HashMap<String, Vec<String>>,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
     /// `needs` clause. Used as a fallback for imported module metadata that
     /// does not yet expose per-method impl effects.
@@ -392,16 +379,6 @@ pub struct Populator<'a> {
     inputs: PopulatorInputs<'a>,
     plan: EffectAbiPlan,
     trace: Vec<CallEffectTraceEntry>,
-    /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
-    /// effects that calls of that name should thread.
-    scopes: Vec<HashMap<String, Vec<String>>>,
-    /// Stack of lexical scopes for variables whose type is an open-row
-    /// callable (e.g. a function parameter `f: Unit -> Unit needs {..e}`).
-    /// These have no static effects to pin, but the call site must still
-    /// route through the CPS path so the caller's ambient evidence is
-    /// forwarded into the callee. Parallel to `scopes` — pushed/popped
-    /// together so lookups walk the same lexical structure.
-    open_row_vars: Vec<HashSet<String>>,
     /// Stack of local function frames mirroring the lowerer's dynamic
     /// `fun_info` mutations for `Stmt::LetFun`. Maps name -> FunSig.
     local_fun_sigs: Vec<HashMap<String, FunSig>>,
@@ -411,26 +388,6 @@ pub struct Populator<'a> {
     current_decl: String,
 }
 
-/// `SAGA_CLASSIFY_REPORT=1`: print to stderr every call whose classification
-/// was not decided by a positive rule (see `Populator::report`). Any other
-/// value is a file to append the lines to instead (for runs that spawn the
-/// compiler as a subprocess).
-fn classify_report(line: std::fmt::Arguments<'_>) {
-    use std::io::Write;
-    let Some(target) = std::env::var_os("SAGA_CLASSIFY_REPORT") else {
-        return;
-    };
-    if target == "1" {
-        eprintln!("{line}");
-    } else if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(target)
-    {
-        let _ = writeln!(file, "{line}");
-    }
-}
-
 impl<'a> Populator<'a> {
     pub fn new(inputs: PopulatorInputs<'a>) -> Self {
         let head_open_row = Self::collect_head_open_rows(&inputs);
@@ -438,8 +395,6 @@ impl<'a> Populator<'a> {
             inputs,
             plan: EffectAbiPlan::default(),
             trace: Vec::new(),
-            scopes: Vec::new(),
-            open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
             head_open_row,
             current_decl: String::new(),
@@ -456,23 +411,16 @@ impl<'a> Populator<'a> {
         format!("{}.{} at {at}", self.inputs.module, self.current_decl)
     }
 
-    /// Report a call classified by `path`, a path that is not a positive
-    /// rule: `default-pure:*` (nothing is known about the head, so the call
-    /// was assumed pure) or `lexical-scope:*` (the head is an unresolved
-    /// name looked up in the scope stack filled from `type_at_span`).
-    /// A head with no entry in the type table was made after typechecking
-    /// (by elaboration, the generic fold or normalization).
-    fn report(&self, path: &str, head: &Expr) {
-        let origin = if self.node_type(head.id).is_some() {
-            "typed"
-        } else {
-            "untyped"
-        };
-        classify_report(format_args!(
-            "classify-report: {path} head={} origin={origin} in {}",
+    /// No rule says whether the call through `head` is pure or uses the CPS
+    /// convention. Nothing is assumed: this is a compiler bug.
+    fn unknown_head(&self, head: &Expr) -> ! {
+        panic!(
+            "internal compiler error: cannot classify the call through {} in {}: \
+             the head has no type and is not a known function, constructor, \
+             dictionary or operation",
             head_debug_label(head),
             self.location(head)
-        ));
+        )
     }
 
     fn canonicalize(&self, bare: &str) -> String {
@@ -540,24 +488,6 @@ impl<'a> Populator<'a> {
         }
     }
 
-    /// Push parallel frames onto `scopes` and `open_row_vars`. Use
-    /// `push_scope_with` when the caller has already built the effects frame
-    /// (e.g. from `fun_param_effectful_vars`).
-    fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-        self.open_row_vars.push(HashSet::new());
-    }
-
-    fn push_scope_with(&mut self, frame: HashMap<String, Vec<String>>, open_row: HashSet<String>) {
-        self.scopes.push(frame);
-        self.open_row_vars.push(open_row);
-    }
-
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
-        self.open_row_vars.pop();
-    }
-
     fn walk_decl(&mut self, decl: &Decl) {
         self.current_decl = match decl {
             Decl::FunBinding { name, .. }
@@ -570,58 +500,33 @@ impl<'a> Populator<'a> {
             Decl::FunBinding {
                 id,
                 name,
-                params,
+                guard,
                 body,
                 ..
             } => {
                 if let Some(sig) = self.inputs.fun_sigs.get(name) {
                     self.plan.record_declaration(*id, sig.abi.clone());
                 }
-                let (frame, open_row) = self.fun_param_effectful_vars(name, params);
-                self.push_scope_with(frame, open_row);
-                // `fun_param_effectful_vars` seeds callback shape from the
-                // function signature, but only a pattern variable can be
-                // paired directly with a parameter type. Bindings nested in
-                // constructor/tuple/record patterns have their own resolved
-                // types in `type_at_span`; record those too so calls through a
-                // destructured effectful callback retain the CPS ABI.
-                for param in params {
-                    self.record_pattern_effectful_vars(param);
+                if let Some(guard) = guard {
+                    self.walk_expr(guard);
                 }
                 self.walk_expr(body);
-                self.pop_scope();
             }
-            Decl::Let { value, .. } => {
-                self.push_scope();
-                self.walk_expr(value);
-                self.pop_scope();
-            }
+            Decl::Let { value, .. } => self.walk_expr(value),
             Decl::ImplDef { methods, .. } => {
                 for m in methods {
-                    self.push_scope();
                     self.walk_expr(&m.node.body);
-                    self.pop_scope();
                 }
             }
             Decl::HandlerDef { body, .. } => {
-                for arm in &body.arms {
-                    self.push_scope();
-                    for param in &arm.node.params {
-                        self.record_pattern_effectful_vars(param);
-                    }
-                    self.walk_expr(&arm.node.body);
-                    if let Some(fb) = &arm.node.finally_block {
+                for arm in body.arms.iter().map(|arm| &arm.node) {
+                    self.walk_expr(&arm.body);
+                    if let Some(fb) = &arm.finally_block {
                         self.walk_expr(fb);
                     }
-                    self.pop_scope();
                 }
                 if let Some(rc) = &body.return_clause {
-                    self.push_scope();
-                    for param in &rc.params {
-                        self.record_pattern_effectful_vars(param);
-                    }
                     self.walk_expr(&rc.body);
-                    self.pop_scope();
                 }
             }
             Decl::DictConstructor {
@@ -637,151 +542,10 @@ impl<'a> Populator<'a> {
                         m.id,
                         crate::codegen::effect_position::mentions_operation(m),
                     );
-                    self.push_scope();
                     self.walk_expr(m);
-                    self.pop_scope();
                 }
             }
             _ => {}
-        }
-    }
-
-    fn fun_param_effectful_vars(
-        &self,
-        name: &str,
-        params: &[Pat],
-    ) -> (HashMap<String, Vec<String>>, HashSet<String>) {
-        let mut effects = HashMap::new();
-        let mut open_row = HashSet::new();
-        let Some(info) = self.inputs.fun_sigs.get(name) else {
-            return (effects, open_row);
-        };
-        for (idx, effs) in &info.param_absorbed_effects {
-            let param_idx = idx + info.dict_param_count;
-            if let Some(Pat::Var { name: pname, .. }) = params.get(param_idx) {
-                effects.insert(pname.clone(), effs.clone());
-            }
-        }
-        // Callback parameters whose type is an open-row function (`f: Unit ->
-        // Unit needs {..e}`) have no named effects to absorb but must still
-        // route through the CPS path so the caller's ambient evidence is
-        // forwarded into them. `param_absorbed_effects` only tracks named
-        // effects, so detect the open-row tail directly off the param types.
-        for (idx, pty) in info.param_types.iter().enumerate() {
-            let param_idx = idx + info.dict_param_count;
-            if let Some(Pat::Var { name: pname, .. }) = params.get(param_idx)
-                && util::has_open_effect_row(pty)
-            {
-                open_row.insert(pname.clone());
-            }
-        }
-        (effects, open_row)
-    }
-
-    fn lookup_effectful_var(&self, name: &str) -> Option<Vec<String>> {
-        for frame in self.scopes.iter().rev() {
-            if let Some(effs) = frame.get(name) {
-                return Some(effs.clone());
-            }
-        }
-        None
-    }
-
-    fn lookup_open_row_var(&self, name: &str) -> bool {
-        self.open_row_vars.iter().rev().any(|f| f.contains(name))
-    }
-
-    fn record_effectful_var(&mut self, name: String, effects: Vec<String>) {
-        if let Some(frame) = self.scopes.last_mut() {
-            frame.insert(name, effects);
-        }
-    }
-
-    fn record_open_row_var(&mut self, name: String) {
-        if let Some(frame) = self.open_row_vars.last_mut() {
-            frame.insert(name);
-        }
-    }
-
-    fn record_pattern_effectful_vars(&mut self, pat: &Pat) {
-        match pat {
-            Pat::Var { name, .. } => {
-                if let Some(effects) = self.pattern_effects(pat)
-                    && !effects.is_empty()
-                {
-                    self.record_effectful_var(name.clone(), effects);
-                }
-                if self.pattern_is_open_row_callable(pat) {
-                    self.record_open_row_var(name.clone());
-                }
-            }
-            Pat::Constructor { args, .. } | Pat::Tuple { elements: args, .. } => {
-                for sub in args {
-                    self.record_pattern_effectful_vars(sub);
-                }
-            }
-            Pat::ListPat { elements, .. } => {
-                for sub in elements {
-                    self.record_pattern_effectful_vars(sub);
-                }
-            }
-            Pat::ConsPat { head, tail, .. } => {
-                self.record_pattern_effectful_vars(head);
-                self.record_pattern_effectful_vars(tail);
-            }
-            Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
-                for (_, sub) in fields {
-                    if let Some(sub_pat) = sub {
-                        self.record_pattern_effectful_vars(sub_pat);
-                    }
-                }
-            }
-            Pat::Or { patterns, .. } => {
-                for sub in patterns {
-                    self.record_pattern_effectful_vars(sub);
-                }
-            }
-            Pat::StringPrefix { rest, .. } => self.record_pattern_effectful_vars(rest),
-            Pat::BitStringPat { segments, .. } => {
-                for seg in segments {
-                    self.record_pattern_effectful_vars(&seg.value);
-                }
-            }
-            Pat::Wildcard { .. } | Pat::Lit { .. } => {}
-        }
-    }
-
-    /// True when the pattern binds a value whose function type has an
-    /// open-row effect tail. This is tracked independently from named effects:
-    /// `Unit -> Unit needs {Skip, ..e}` must classify as `RowForwarded`
-    /// with pinned `Skip` ops, not as a closed `StaticOps(Skip)` call.
-    fn pattern_is_open_row_callable(&self, pat: &Pat) -> bool {
-        let Pat::Var { span, .. } = pat else {
-            return false;
-        };
-        let Some(resolved) = self.inputs.check_result.type_at_span.get(span) else {
-            return false;
-        };
-        if !matches!(resolved, crate::typechecker::Type::Fun(..)) {
-            return false;
-        }
-        util::has_open_effect_row(resolved)
-    }
-
-    fn pattern_effects(&self, pat: &Pat) -> Option<Vec<String>> {
-        let Pat::Var { span, .. } = pat else {
-            return None;
-        };
-        let resolved = self.inputs.check_result.type_at_span.get(span)?;
-        let mut effects: Vec<String> = crate::typechecker::effects_from_type(resolved)
-            .into_iter()
-            .collect();
-        effects.sort();
-        let canonical = self.canonicalize_effects(effects);
-        if canonical.is_empty() {
-            None
-        } else {
-            Some(canonical)
         }
     }
 
@@ -831,244 +595,33 @@ impl<'a> Populator<'a> {
         }
     }
 
+    /// Walk the sub-expressions of `expr`. Every `App` node of a chain is
+    /// visited (each gets a plan entry); a block opens a frame for its local
+    /// functions; everything else is read off the `children` table.
     fn walk_children(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::App { func, arg } => {
                 self.walk_expr(func);
                 self.walk_expr(arg);
             }
-            ExprKind::BinOp { left, right, .. } => {
-                self.walk_expr(left);
-                self.walk_expr(right);
-            }
-            ExprKind::UnaryMinus { expr } => self.walk_expr(expr),
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.walk_expr(cond);
-                self.push_scope();
-                self.walk_expr(then_branch);
-                self.pop_scope();
-                self.push_scope();
-                self.walk_expr(else_branch);
-                self.pop_scope();
-            }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                self.walk_expr(scrutinee);
-                for arm in arms {
-                    self.push_scope();
-                    self.record_pattern_effectful_vars(&arm.node.pattern);
-                    if let Some(g) = &arm.node.guard {
-                        self.walk_expr(g);
-                    }
-                    self.walk_expr(&arm.node.body);
-                    self.pop_scope();
-                }
-            }
             ExprKind::Block { stmts, .. } => {
-                self.push_scope();
                 self.local_fun_sigs.push(HashMap::new());
                 for stmt in stmts {
                     self.walk_stmt(&stmt.node);
                 }
                 self.local_fun_sigs.pop();
-                self.pop_scope();
             }
-            ExprKind::Lambda { params, body, .. } => {
-                self.push_scope();
-                for param in params {
-                    self.record_pattern_effectful_vars(param);
-                }
-                self.walk_expr(body);
-                self.pop_scope();
-            }
-            ExprKind::FieldAccess { expr, .. } => self.walk_expr(expr),
-            ExprKind::RecordCreate { fields, .. }
-            | ExprKind::AnonRecordCreate { fields }
-            | ExprKind::RecordBuild { fields, .. } => {
-                for (_, _, e) in fields {
-                    self.walk_expr(e);
+            _ => {
+                for (_, child) in crate::codegen::effect_position::children(expr) {
+                    self.walk_expr(child);
                 }
             }
-            ExprKind::RecordUpdate { record, fields, .. } => {
-                self.walk_expr(record);
-                for (_, _, e) in fields {
-                    self.walk_expr(e);
-                }
-            }
-            ExprKind::EffectCall { args, .. } => {
-                for a in args {
-                    self.walk_expr(a);
-                }
-            }
-            ExprKind::With { expr, handler } => {
-                self.push_scope();
-                self.walk_expr(expr);
-                self.pop_scope();
-                if let ast::Handler::Inline { items, .. } = handler.as_ref() {
-                    for item in items {
-                        match &item.node {
-                            ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
-                                self.push_scope();
-                                for param in &arm.params {
-                                    self.record_pattern_effectful_vars(param);
-                                }
-                                self.walk_expr(&arm.body);
-                                if let Some(fb) = &arm.finally_block {
-                                    self.walk_expr(fb);
-                                }
-                                self.pop_scope();
-                            }
-                            ast::HandlerItem::Named(_) => {}
-                        }
-                    }
-                }
-            }
-            ExprKind::Resume { value } => self.walk_expr(value),
-            ExprKind::Tuple { elements } => {
-                for e in elements {
-                    self.walk_expr(e);
-                }
-            }
-            ExprKind::Do {
-                bindings,
-                success,
-                else_arms,
-                ..
-            } => {
-                for (_, e) in bindings {
-                    self.push_scope();
-                    self.walk_expr(e);
-                    self.pop_scope();
-                }
-                self.push_scope();
-                self.walk_expr(success);
-                self.pop_scope();
-                for arm in else_arms {
-                    self.push_scope();
-                    self.record_pattern_effectful_vars(&arm.node.pattern);
-                    if let Some(g) = &arm.node.guard {
-                        self.walk_expr(g);
-                    }
-                    self.walk_expr(&arm.node.body);
-                    self.pop_scope();
-                }
-            }
-            ExprKind::Receive {
-                arms, after_clause, ..
-            } => {
-                for arm in arms {
-                    self.push_scope();
-                    self.record_pattern_effectful_vars(&arm.node.pattern);
-                    if let Some(g) = &arm.node.guard {
-                        self.walk_expr(g);
-                    }
-                    self.walk_expr(&arm.node.body);
-                    self.pop_scope();
-                }
-                if let Some((timeout, body)) = after_clause {
-                    self.walk_expr(timeout);
-                    self.walk_expr(body);
-                }
-            }
-            ExprKind::BitString { segments } => {
-                for seg in segments {
-                    self.walk_expr(&seg.value);
-                    if let Some(s) = &seg.size {
-                        self.walk_expr(s);
-                    }
-                }
-            }
-            ExprKind::Ascription { expr, .. } => self.walk_expr(expr),
-            ExprKind::HandlerExpr { body } => {
-                for arm in &body.arms {
-                    self.push_scope();
-                    for param in &arm.node.params {
-                        self.record_pattern_effectful_vars(param);
-                    }
-                    self.walk_expr(&arm.node.body);
-                    if let Some(fb) = &arm.node.finally_block {
-                        self.walk_expr(fb);
-                    }
-                    self.pop_scope();
-                }
-                if let Some(rc) = &body.return_clause {
-                    self.push_scope();
-                    for param in &rc.params {
-                        self.record_pattern_effectful_vars(param);
-                    }
-                    self.walk_expr(&rc.body);
-                    self.pop_scope();
-                }
-            }
-            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
-                self.walk_expr(dict)
-            }
-            ExprKind::ForeignCall { args, .. } => {
-                for a in args {
-                    self.walk_expr(a);
-                }
-            }
-            // Leaves
-            ExprKind::Lit { .. }
-            | ExprKind::Var { .. }
-            | ExprKind::Constructor { .. }
-            | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. } => {}
-            // Surface syntax — should be desugared by now, but be permissive.
-            ExprKind::Pipe { .. }
-            | ExprKind::BinOpChain { .. }
-            | ExprKind::PipeBack { .. }
-            | ExprKind::ComposeForward { .. }
-            | ExprKind::Cons { .. }
-            | ExprKind::ListLit { .. }
-            | ExprKind::StringInterp { .. }
-            | ExprKind::ListComprehension { .. } => {}
         }
     }
 
     fn walk_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let { pattern, value, .. } => {
-                self.walk_expr(value);
-                // After walking the value, propagate effectful-binding info to
-                // the binder. `call_effects` is the authoritative owner of
-                // this lexical classification; the lowerer only consumes the
-                // completed per-App map.
-                let mut recorded = false;
-                if let Pat::Var { name, .. } = pattern {
-                    if let Some(effs) = self.inputs.let_effect_bindings.get(name)
-                        && !effs.is_empty()
-                    {
-                        self.record_effectful_var(name.clone(), effs.clone());
-                        recorded = true;
-                    } else if let Some(effs) = self.value_effect_signature(value)
-                        && !effs.is_empty()
-                    {
-                        self.record_effectful_var(name.clone(), effs);
-                        recorded = true;
-                    }
-                }
-                // Fall back to the binding's resolved type. This catches
-                // bindings whose *type* is an effectful function value — e.g. a
-                // partial application `let app = choose_string [route]` of type
-                // `String -> String needs {..e}` — which `value_effect_signature`
-                // misses because the partial application itself performs no
-                // effects, so the call map records it as Pure. Reading the
-                // binder's type also recovers open-row callables (`needs {..e}`
-                // with no named effects), which the value-signature path never
-                // tracks; without this, `app "/ok"` lowers as a pure 1-arg
-                // apply against a 3-arity CPS function and crashes with a
-                // badarity at runtime.
-                if !recorded {
-                    self.record_pattern_effectful_vars(pattern);
-                }
-            }
+            Stmt::Let { value, .. } => self.walk_expr(value),
             Stmt::LetFun {
                 id,
                 name,
@@ -1079,40 +632,18 @@ impl<'a> Populator<'a> {
                 // Mirror the lowerer: register the LetFun's signature into the
                 // top local fun frame BEFORE walking its body so recursive
                 // calls classify correctly.
-                if let Some(sig) = self.let_fun_sig(*id, name) {
+                if let Some(sig) = self.let_fun_sig(*id) {
                     self.plan.record_declaration(*id, sig.abi.clone());
                     if let Some(frame) = self.local_fun_sigs.last_mut() {
                         frame.insert(name.clone(), sig);
                     }
                 }
                 if let Some(g) = guard {
-                    self.push_scope();
                     self.walk_expr(g);
-                    self.pop_scope();
                 }
-                self.push_scope();
                 self.walk_expr(body);
-                self.pop_scope();
             }
             Stmt::Expr(e) => self.walk_expr(e),
-        }
-    }
-
-    /// If `value` is itself an effectful call, return its effect list. Used to
-    /// promote `let g = factory()` so subsequent `g x` calls thread evidence.
-    fn value_effect_signature(&self, value: &Expr) -> Option<Vec<String>> {
-        let effects = self
-            .plan
-            .call(value.id)?
-            .cps_call_abi()?
-            .evidence
-            .as_ref()?
-            .static_slots()
-            .to_vec();
-        if effects.is_empty() {
-            None
-        } else {
-            Some(effects)
         }
     }
 
@@ -1158,16 +689,27 @@ impl<'a> Populator<'a> {
         )
     }
 
-    /// Classification of every call shape. Calls to known functions are
-    /// classified from their declared ABI; everything else is a call through
-    /// a function value and is classified from the callee's type.
+    /// Classification of every call shape. Each call is classified by the
+    /// first rule that applies to its head; there is no default.
+    ///
+    /// 1. An applied operation is a perform, lowered by the effect-call
+    ///    path: not a CPS *call*.
+    /// 2. A constructor or a dictionary constructor builds a value: pure.
+    /// 3. A name resolved to an intrinsic: pure.
+    /// 4. A name that is a known function (top-level, imported, external or
+    ///    block-local): its declared signature.
+    /// 5. A dictionary method: the trait method's declared signature, plus
+    ///    the impl's own effects when the dictionary is statically known.
+    /// 6. Anything with a recorded type (a function value): CPS when an
+    ///    arrow the arguments consume carries effects or an open row.
+    /// 7. A lambda made after typechecking: CPS when its body performs.
     fn classify_app(&self, expr: &Expr) -> CallEffectInfo {
         let (head, args) = peel_app(expr);
         let supplied = args.len();
         match &head.kind {
-            // An effect operation applied to arguments is a perform, lowered
-            // by the effect-call path, not a call through a function value.
-            ExprKind::EffectCall { .. } => CallEffectInfo::pure(),
+            ExprKind::EffectCall { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::DictRef { .. } => CallEffectInfo::pure(),
             ExprKind::Var { name } | ExprKind::QualifiedName { name, .. } => {
                 let resolved = self.inputs.resolved.get(&head.id);
                 if resolved.is_some_and(|resolved| {
@@ -1200,23 +742,25 @@ impl<'a> Populator<'a> {
                             .plan
                             .call(inner.id)
                             .is_some_and(CallEffectInfo::is_cps_call);
-                        let rest = self.classify_value_call_from_type(inner.id, supplied - arity);
-                        if rest.is_none() && !inner_is_cps {
-                            self.report("default-pure:over-application-result", head);
+                        if inner_is_cps {
+                            return Self::tagged_value_call(supplied);
                         }
-                        let rest_is_cps = rest.is_some_and(|info| info.is_cps_call());
-                        if inner_is_cps || rest_is_cps {
-                            Self::tagged_value_call(supplied)
-                        } else {
-                            CallEffectInfo::pure()
+                        match self.classify_value_call_from_type(inner.id, supplied - arity) {
+                            Some(rest) if rest.is_cps_call() => Self::tagged_value_call(supplied),
+                            Some(_) => CallEffectInfo::pure(),
+                            None => self.unknown_head(inner),
                         }
                     }
-                    Some(arity) if arity > 0 => self.classify_named_call(head, name, supplied),
+                    Some(arity) if arity > 0 => self.classify_named_call(head.id, name, supplied),
                     // A constant holding a function, or anything that is not a
-                    // known function: a function value.
+                    // known function: a function value. A resolved name with
+                    // no type of its own still has its declared signature.
                     _ => self
                         .classify_value_call_from_type(head.id, supplied)
-                        .unwrap_or_else(|| self.classify_named_call(head, name, supplied)),
+                        .or_else(|| {
+                            resolved.map(|_| self.classify_named_call(head.id, name, supplied))
+                        })
+                        .unwrap_or_else(|| self.unknown_head(head)),
                 }
             }
             ExprKind::DictMethodAccess {
@@ -1226,137 +770,108 @@ impl<'a> Populator<'a> {
             } => {
                 let declared =
                     self.classify_dict_method_call(dict, trait_name, *method_index, supplied);
-                if declared.is_cps_call() {
-                    return declared;
+                match declared {
+                    Some(declared) if declared.is_cps_call() => declared,
+                    _ => self
+                        .classify_value_call_from_type(head.id, supplied)
+                        .or(declared)
+                        .unwrap_or_else(|| self.unknown_head(head)),
                 }
-                self.classify_value_call_from_type(head.id, supplied)
-                    .unwrap_or_else(|| {
-                        self.report_untyped_dict_method(head, dict, trait_name, *method_index);
-                        declared
-                    })
             }
             _ => self
                 .classify_value_call_from_type(head.id, supplied)
-                .unwrap_or_else(|| {
-                    if self.untyped_lambda_head_is_effectful(head) {
+                .unwrap_or_else(|| match &head.kind {
+                    ExprKind::Lambda { .. } if self.untyped_lambda_head_is_effectful(head) => {
                         Self::tagged_value_call(supplied)
-                    } else {
-                        self.report("default-pure:untyped-head", head);
-                        CallEffectInfo::pure()
                     }
+                    ExprKind::Lambda { .. } => CallEffectInfo::pure(),
+                    _ => self.unknown_head(head),
                 }),
         }
     }
 
-    /// Classify a call whose head is a `DictMethodAccess` node.
+    /// Classify a call whose head is a `DictMethodAccess` node, from the
+    /// method's declared signature. `None` when no declaration is known.
     ///
-    /// Effect resolution starts from the trait method's declared effect
-    /// signature. For concrete dicts, walk the dict expression to find the
-    /// underlying `DictRef { name }`, peeling `App` chains for parameterized
-    /// impls (e.g. `__dict_Show_List __dict_Show_String`), then union in the
-    /// concrete method slot's impl effects.
+    /// The signature is the trait's. For a statically known dictionary
+    /// (the dict expression is rooted at a `DictRef`, peeling `App` chains
+    /// of parameterized impls such as `__dict_Show_List __dict_Show_String`)
+    /// the concrete method slot's impl effects are added, and a trait this
+    /// module does not know (a call that arrived by inlining a body of
+    /// another module) is read off the dictionary's own constructor.
     ///
-    /// Where-bounded dispatch (dict from a function parameter) ends in a
-    /// `Var` rather than `DictRef`, so only the trait method signature is
-    /// available. Impl-specific extra effects are intentionally not assumed
-    /// for polymorphic dispatch.
+    /// For any other dictionary (a `where`-bound parameter, a superclass
+    /// projection, a dictionary literal made by elaboration) the concrete
+    /// impl is unknown and only the trait's declaration applies.
     fn classify_dict_method_call(
         &self,
         dict: &Expr,
         trait_name: &str,
         method_index: usize,
         supplied: usize,
-    ) -> CallEffectInfo {
-        if supplied == 0 {
-            return CallEffectInfo::pure();
+    ) -> Option<CallEffectInfo> {
+        let mut root = dict;
+        while let ExprKind::App { func, .. } = &root.kind {
+            root = func;
         }
-        let method_sig = self
-            .inputs
-            .trait_method_effects_by_key
-            .get(&(trait_name.to_string(), method_index));
-        if let Some(sig) = method_sig
-            && supplied < sig.user_arity
+        let known_dict = match &root.kind {
+            ExprKind::DictRef { name, .. } => Some(name),
+            _ => None,
+        };
+        let sig = (self.inputs.trait_method_effects_by_key)
+            .get(&(trait_name.to_string(), method_index))
+            .cloned()
+            .or_else(|| self.dict_constructor_method_sig(known_dict?, method_index))?;
+        if supplied < sig.user_arity {
+            return Some(CallEffectInfo::pure());
+        }
+        let mut effects = sig.effects;
+        if let Some(name) = known_dict
+            && let Some(impl_effects) = (self.inputs.impl_method_effects_by_dict)
+                .get(&(name.clone(), method_index))
+                .or_else(|| self.inputs.impl_effects_by_dict.get(name))
         {
-            return CallEffectInfo::pure();
+            effects.extend(impl_effects.iter().cloned());
+            effects.sort();
+            effects.dedup();
         }
-        let mut effects = method_sig
-            .map(|sig| sig.effects.clone())
-            .unwrap_or_default();
-        let is_open_row = method_sig.is_some_and(|sig| sig.is_open_row);
-
-        // Peel `App` chain inside the dict expression.
-        let mut current = dict;
-        while let ExprKind::App { func, .. } = &current.kind {
-            current = func;
-        }
-        match &current.kind {
-            ExprKind::DictRef { name, .. } => {
-                if let Some(impl_effects) = self
-                    .inputs
-                    .impl_method_effects_by_dict
-                    .get(&(name.clone(), method_index))
-                    .or_else(|| self.inputs.impl_effects_by_dict.get(name))
-                {
-                    effects.extend(impl_effects.iter().cloned());
-                    effects.sort();
-                    effects.dedup();
-                }
-                let ops = self.collect_op_keys(&effects);
-                if ops.is_empty() && !is_open_row {
-                    return CallEffectInfo::pure();
-                }
-                let kind = if is_open_row {
-                    CallEffectKind::RowForwarded { static_ops: ops }
-                } else {
-                    CallEffectKind::StaticOps { ops }
-                };
-                CallEffectInfo::cps(kind, supplied)
-            }
-            ExprKind::Var { .. } => {
-                // Where-bounded dispatch (dict from a function parameter):
-                // the concrete impl is unknown, so only the trait method's
-                // declared effects are available at this call site.
-                let ops = self.collect_op_keys(&effects);
-                if ops.is_empty() && !is_open_row {
-                    return CallEffectInfo::pure();
-                }
-                let kind = if is_open_row {
-                    CallEffectKind::RowForwarded { static_ops: ops }
-                } else {
-                    CallEffectKind::StaticOps { ops }
-                };
-                CallEffectInfo::cps(kind, supplied)
-            }
-            _ => CallEffectInfo::pure(),
-        }
+        let ops = self.collect_op_keys(&effects);
+        Some(if sig.is_open_row {
+            CallEffectInfo::cps(CallEffectKind::RowForwarded { static_ops: ops }, supplied)
+        } else {
+            CallEffectInfo::cps(CallEffectKind::StaticOps { ops }, supplied)
+        })
     }
 
-    /// A dictionary method call that is pure by its declared signature and
-    /// has no type of its own: report it unless the declaration is known.
-    fn report_untyped_dict_method(
+    /// The declared signature of method `method_index` of the dictionary
+    /// constructor `dict`, wherever it is defined.
+    fn dict_constructor_method_sig(
         &self,
-        head: &Expr,
-        dict: &Expr,
-        trait_name: &str,
+        dict: &str,
         method_index: usize,
-    ) {
-        let mut dict_head = dict;
-        while let ExprKind::App { func, .. } = &dict_head.kind {
-            dict_head = func;
-        }
-        let key = (trait_name.to_string(), method_index);
-        if !self.inputs.trait_method_effects_by_key.contains_key(&key) {
-            self.report("default-pure:dict-method-without-signature", head);
-        } else if !matches!(
-            dict_head.kind,
-            ExprKind::DictRef { .. } | ExprKind::Var { .. }
-        ) {
-            self.report("default-pure:dict-method-on-computed-dict", head);
-        }
+    ) -> Option<TraitMethodEffectSig> {
+        let decls = (self.inputs.ctx.modules.values()).flat_map(|m| &m.elaborated);
+        decls.into_iter().find_map(|decl| match decl {
+            Decl::DictConstructor {
+                name,
+                methods,
+                method_effects,
+                method_open_rows,
+                ..
+            } if name == dict => match &methods.get(method_index)?.kind {
+                ExprKind::Lambda { params, .. } => Some(TraitMethodEffectSig {
+                    effects: method_effects.get(method_index)?.clone(),
+                    is_open_row: *method_open_rows.get(method_index)?,
+                    user_arity: params.len(),
+                }),
+                _ => None,
+            },
+            _ => None,
+        })
     }
 
-    fn classify_named_call(&self, head: &Expr, name: &str, supplied: usize) -> CallEffectInfo {
-        let head_id = head.id;
+    /// Classify a call to a known function from its declared signature.
+    fn classify_named_call(&self, head_id: NodeId, name: &str, supplied: usize) -> CallEffectInfo {
         let pure = CallEffectInfo::pure;
 
         if supplied == 0 {
@@ -1385,47 +900,13 @@ impl<'a> Populator<'a> {
         let canonical_name = resolved.map(|resolved| resolved.canonical_name.clone());
         let mut effects: Vec<String> = match resolved {
             Some(resolved) if !resolved.effects().is_empty() => resolved.effects().to_vec(),
-            Some(_) => self
+            // A block-local function, or a resolved one that declares its
+            // effects only through its own signature.
+            _ => self
                 .lookup_fun_sig(name, canonical_name.as_deref())
                 .and_then(|sig| sig.abi.evidence.as_ref())
                 .map(|evidence| evidence.static_slots().to_vec())
                 .unwrap_or_default(),
-            None => {
-                // Not a resolved fun. Treat as effectful if it's an in-scope
-                // effectful var recorded by this pre-pass's lexical scope
-                // walk.
-                let is_open_row = self.lookup_open_row_var(name);
-                if let Some(effs) = self.lookup_effectful_var(name) {
-                    let ops = self.collect_op_keys(&effs);
-                    if ops.is_empty() && !is_open_row {
-                        // Either the var carried no effects, or the effects
-                        // didn't canonicalize against `effect_ops`. Either
-                        // way the call is Pure and carries no callable ABI.
-                        self.report("lexical-scope:pure", head);
-                        return pure();
-                    }
-                    let kind = if is_open_row {
-                        CallEffectKind::RowForwarded { static_ops: ops }
-                    } else {
-                        CallEffectKind::StaticOps { ops }
-                    };
-                    // Effectful-var calls don't carry a precise user_arity;
-                    // supplied > 0 is the gate (already checked above).
-                    self.report("lexical-scope:cps", head);
-                    return CallEffectInfo::cps(kind, supplied);
-                }
-                if is_open_row {
-                    self.report("lexical-scope:cps", head);
-                    return CallEffectInfo::cps(
-                        CallEffectKind::RowForwarded {
-                            static_ops: Vec::new(),
-                        },
-                        supplied,
-                    );
-                }
-                self.report("default-pure:unresolved-name", head);
-                return pure();
-            }
         };
         if let Some(shape) = &resolved_cps_shape
             && !shape.static_slots().is_empty()
@@ -1444,7 +925,6 @@ impl<'a> Populator<'a> {
             // to known ops or the callee has an open row; supplied is the
             // best-effort user arity. Pure calls carry no callable ABI.
             if ops.is_empty() && !is_open_row {
-                self.report("default-pure:resolved-name-without-signature", head);
                 return pure();
             }
             let kind = if is_open_row {
@@ -1507,30 +987,15 @@ impl<'a> Populator<'a> {
         None
     }
 
-    fn let_fun_sig(&self, id: NodeId, name: &str) -> Option<FunSig> {
-        if let Some(ty) = self.inputs.check_result.resolved_type_for_node(id) {
-            let abi = self.callable_abi_from_type(&ty);
-            let param_absorbed_effects = util::param_absorbed_effects_from_type(&ty)
-                .into_iter()
-                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                .collect();
-            return Some(FunSig {
-                abi,
-                param_absorbed_effects,
-                param_types: util::param_types_from_type(&ty),
-                dict_param_count: 0,
-            });
-        }
-
-        self.inputs.fun_sigs.get(name).cloned()
+    fn let_fun_sig(&self, id: NodeId) -> Option<FunSig> {
+        let abi = self.callable_abi_from_type(self.node_type(id)?);
+        Some(FunSig { abi })
     }
 
     fn collect_op_keys(&self, effects: &[String]) -> Vec<OpKey> {
         let mut out = Vec::new();
         for eff in effects {
-            // Effect names from `let_effect_bindings` and pattern bindings come
-            // through bare; `effect_ops` is keyed canonically. Canonicalize
-            // before lookup so the two stores agree.
+            // `effect_ops` is keyed canonically; canonicalize before lookup.
             let canonical = self.canonicalize(eff);
             if let Some(op_names) = self.inputs.effect_ops.get(&canonical) {
                 for op in op_names {

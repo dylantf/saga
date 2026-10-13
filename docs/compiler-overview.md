@@ -12,11 +12,12 @@ Source (.saga)
   -> Typecheck (src/typechecker/)
      includes: front-end Name Resolution (src/typechecker/resolve.rs)
   -> Elaborate (src/elaborate.rs)
-  -> Normalize (src/codegen/normalize.rs)
+  -> Generic fold (src/codegen/generic_fold/)
   -> Backend Resolve (src/codegen/resolve.rs)
   -> Optimization Facts (src/codegen/optimize.rs)
   -> Lower (src/codegen/lower/)
-     begins by populating CallEffectMap (src/codegen/call_effects.rs)
+     begins by populating CallEffectMap (src/codegen/call_effects.rs),
+     then normalizes each body (src/codegen/normalize.rs)
   -> Core Erlang AST (src/codegen/cerl.rs)
   -> Print -> .core file
   -> erlc -> .beam file
@@ -104,31 +105,26 @@ semantically the same source node.
 
 ### Normalize
 
-Effect normalization pre-pass. Prepares the elaborated AST for the CPS-aware
-lowerer.
+Effect normalization. It runs inside lowering, once the call plan is frozen
+(`normalize_body`, called from `src/codegen/lower/anf.rs` for each body the
+lowerer starts on: function clauses and guards, dictionary methods, handler
+arms and return clauses, `finally` blocks, inlined helpers). It is the only
+normalize run; the generic fold runs before it, on the elaborated program.
 
-A direct operation call (`op! x`) nested in an expression is lifted into a
-`let` ahead of the statement. The pass has no types, so to keep evaluation
-left to right it also lifts every sibling evaluated before the lifted call
+It knows which calls perform effects and lifts every expression that needs a
+continuation out of operand position: calls the plan classified CPS,
+operations (nullary ones included), `with`, `resume`, and any `if`/`case`/
+block/`do`/`receive` with such a thing in a branch. To keep evaluation left
+to right it also lifts every sibling evaluated before the lifted expression
 that is not a plain value (variable, literal, lambda, data built from those),
 each into its own `let`, in order. The variable replacing such a sibling keeps
 the sibling's `NodeId`, so its type is still found. Conditionally evaluated
-parts (`if`/`case` branches, the right operand of `&&`/`||`, lambda bodies,
-handler arms) are separate scopes. An expression with no nested operation call
-is left unchanged.
-
-The same pass runs a second time inside lowering, once the call plan is
-frozen (`normalize_body`, called from `src/codegen/lower/anf.rs` for each body
-the lowerer starts on: function clauses and guards, dictionary methods,
-handler arms and return clauses, `finally` blocks, inlined helpers). There it
-knows which calls perform effects and lifts every expression that needs a
-continuation out of operand position: calls the plan classified CPS,
-operations (nullary ones included), `with`, `resume`, and any `if`/`case`/
-block/`do`/`receive` with such a thing in a branch. `a && b` / `a || b` with
-an effectful right operand becomes an `if`. The rule it establishes, and the
-check that it holds, are in `src/codegen/effect_position.rs`: an expression
-that performs effects is the value of a block-level `let`/statement or is in
-tail position. A body that already satisfies the rule is lowered untouched; a
+parts (`if`/`case` branches, lambda bodies, handler arms) are separate scopes.
+`a && b` / `a || b` with an effectful right operand becomes an `if`. The rule
+it establishes, and the check that it holds, are in
+`src/codegen/effect_position.rs`: an expression that performs effects is the
+value of a block-level `let`/statement or is in tail position. A body that
+already satisfies the rule is lowered untouched; a
 violation left after normalizing is an internal compiler error. Facts the
 lowerer used to read off the tree's shape (whether an untyped lambda is a
 tagged closure, whether a dictionary method performs an operation directly)
@@ -193,6 +189,21 @@ other call goes through a function value and is classified from the head's
 own type: it is a CPS call when an arrow consumed by the supplied arguments
 carries effects or an open row.
 
+There is no default. A call is pure only by a rule that says so: an applied
+operation (a perform, lowered separately), a constructor or dictionary
+constructor, an intrinsic, a known function whose signature has no effects, a
+dictionary method whose declared signature has none, a head whose recorded
+type is a pure function, or a lambda made after typechecking whose body
+performs nothing. A head none of the rules covers is an internal compiler
+error naming the head, the function and the location; so is a call node the
+lowerer meets that has no entry.
+
+Types are read by `NodeId`. A node the generic fold copies has a fresh id;
+the fold's `NodeOrigins` map takes it back to the node the typechecker saw,
+in whichever module that was, and every node-keyed table is read through it
+(`Populator::node_type`, `Lowerer::origin`). A variable the fold puts in
+place of a parameter keeps the parameter occurrence's origin.
+
 The rest of lowering consumes this map. It should not rediscover call effect
 shape from raw syntax.
 
@@ -247,8 +258,7 @@ Important data used downstream includes:
 - `traits`
 - `effects`
 - `handlers`
-- `type_at_node`
-- `let_effect_bindings`
+- `type_at_node`, `expr_types`
 - `prelude_imports`
 - `resolution`
 - module codegen info and per-module check results
@@ -279,7 +289,6 @@ struct CompiledModule {
 
 - `modules: HashMap<String, CompiledModule>`
 - `prelude_imports`
-- `let_effect_bindings`
 - imported modules' optimization facts
 
 This is the cross-module semantic bundle the lowerer uses for imported modules.

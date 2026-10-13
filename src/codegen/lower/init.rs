@@ -542,7 +542,6 @@ impl<'a> Lowerer<'a> {
                             FunInfo::from_abi(
                                 abi,
                                 HashMap::new(),
-                                Vec::new(),
                                 self.check_result
                                     .env
                                     .get(name)
@@ -609,7 +608,7 @@ impl<'a> Lowerer<'a> {
             let erlang_name = util::module_name_to_erlang(&mod_path);
             for d in &info.trait_impl_dicts {
                 self.fun_info.entry(d.dict_name.clone()).or_insert_with(|| {
-                    FunInfo::from_abi(CallableAbi::pure(d.arity), HashMap::new(), Vec::new(), 0)
+                    FunInfo::from_abi(CallableAbi::pure(d.arity), HashMap::new(), 0)
                 });
             }
             if mod_name.starts_with("Std.") {
@@ -657,7 +656,6 @@ impl<'a> Lowerer<'a> {
                     let fi = FunInfo::from_abi(
                         callable_abi,
                         param_absorbed,
-                        util::param_types_from_type(&scheme.ty),
                         dict_param_count,
                     );
                     let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
@@ -766,7 +764,6 @@ impl<'a> Lowerer<'a> {
             let fi = FunInfo::from_abi(
                 callable_abi.clone(),
                 param_effs.clone(),
-                util::param_types_from_type(&scheme.ty),
                 dict_param_count,
             );
             self.fun_info.insert(alias_qualified, fi.clone());
@@ -779,7 +776,6 @@ impl<'a> Lowerer<'a> {
                 self.fun_info.entry(surface).or_insert(FunInfo::from_abi(
                     callable_abi,
                     param_effs,
-                    util::param_types_from_type(&scheme.ty),
                     dict_param_count,
                 ));
             }
@@ -814,7 +810,7 @@ impl<'a> Lowerer<'a> {
 
         for d in &info.trait_impl_dicts {
             self.fun_info.entry(d.dict_name.clone()).or_insert_with(|| {
-                FunInfo::from_abi(CallableAbi::pure(d.arity), HashMap::new(), Vec::new(), 0)
+                FunInfo::from_abi(CallableAbi::pure(d.arity), HashMap::new(), 0)
             });
         }
 
@@ -981,14 +977,10 @@ impl<'a> Lowerer<'a> {
                 if callable_abi.evidence.is_none() && !effects.is_empty() {
                     callable_abi.evidence = Some(EvidenceAbi::closed(effects.clone()));
                 }
-                let param_types = origin_scheme
-                    .map(|scheme| util::param_types_from_type(&scheme.ty))
-                    .unwrap_or_default();
                 let canonical = format!("{}.{}", source_module_name, name);
                 self.fun_info.entry(canonical).or_insert(FunInfo::from_abi(
                     callable_abi,
                     param_absorbed_effects,
-                    param_types,
                     dict_param_count,
                 ));
             }

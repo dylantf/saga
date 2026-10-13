@@ -802,7 +802,7 @@ such a child, stopping at lambdas and handler values.
    normalize calls; update docs.
 9. Separate: the generic fold carries types and operation resolution through
    inlining; elaboration's eta parameters get types; an unknown call head is
-   an internal error.
+   an internal error. Done on `anf-classify`, see "Step 9" below.
 
 Estimated net change to the lowerer: 500 to 700 lines fewer.
 
@@ -847,11 +847,13 @@ Not done, with reasons:
 - The chaining of an effectful `do` binding stays; a binding is a `let`
   position.
 - Step 9 (types and resolution through the generic fold, typed eta
-  parameters, unknown call heads as an internal error) is untouched.
+  parameters, unknown call heads as an internal error) was done afterwards
+  on `anf-classify`; see "Step 9" below.
 
 ### Outcome (2026-10-13)
 
-Steps 1 to 8 are done on `effect-anf` (`cc03ba11`). Step 9 is not started.
+Steps 1 to 8 are done on `effect-anf` (`cc03ba11`). Step 9 is done on
+`anf-classify`.
 
 - The position checker reported about 2,800 distinct violations in the test
   suite before the pass and none after. It is a hard error in all builds.
@@ -876,6 +878,47 @@ Not as planned:
   an effect, and one that takes the rest of the block as its continuation
   (the first minus `resume` and a delimiting `with`). That difference is the
   chain-versus-delimit gap.
+
+### Step 9 (branch `anf-classify`, 2026-10-13)
+
+Measured first (`SAGA_CLASSIFY_REPORT`, since removed). Across the whole
+suite 706 calls were classified without a positive rule: 659 dictionary
+constructor applications, 27 dictionary methods on a dictionary that is not a
+name (the tuple `Show`/`Debug` literal, a superclass projection), 12
+constructor applications and 3 calls of `panic` in bodies the fold had
+copied, 4 methods of a trait the consuming module never imported, and one
+call reached through the lexical name scope. (The first run of the three
+named test binaries showed about 55,000; nearly all came from the test
+harnesses planning stdlib modules against another module's check result,
+which the build never does. The harnesses now plan as the build does.)
+
+What changed:
+
+- The fold records, for every id it freshens, the node the typechecker saw
+  (`NodeOrigins`: module and id). Types and effect-operation resolution are
+  read through it. No body form had to be refused.
+- With that, the pre-fold normalize is gone: normalization runs once, at the
+  lowering roots.
+- Eta parameters did not get types of their own. Instead a variable the fold
+  substitutes for a parameter keeps the parameter occurrence's origin, and an
+  untyped wrapper lambda is effectful when its body is (in any operand
+  position, not only when the body is itself an effectful call).
+  `LET_EFFECT_ARG_PREFIX` and its guard are removed.
+- `contains_direct_effect_call` is replaced by `mentions_operation`, derived
+  from the `children` table.
+- The default is gone. The rules are listed on `Populator::classify_app`; a
+  head none covers, and a call node with no plan entry, are internal
+  compiler errors in all builds. The lexical name scope, its `type_at_span`
+  reads and the `let_effect_bindings` input are deleted.
+
+Left as they are: a resolved name with no function signature snapshot is
+classified from the signature its resolution carries, with a lookup of the
+type environment by canonical name as a second source
+(`runtime_shape_from_resolved_env`); a module absent from the per-module
+check results is planned against the result the caller passed
+(`precompute_missing_context_plans`), which is now loud if wrong. The
+lowerer's own fallbacks for a function value with no type (for example
+`lambda_is_tagged` for a lambda made after planning) were not looked at.
 
 Parked: branch `stageb-delim` (`d11b9c7e`) makes handlers that use the value
 of `resume` correct under an outer handler by adding a third `with` mode and

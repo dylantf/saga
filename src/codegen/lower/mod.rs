@@ -185,10 +185,6 @@ struct FunInfo {
     /// evidence threading into lambdas passed to effectful higher-order
     /// functions.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
-    /// Source-level parameter types from the declared/inferred function type.
-    /// Used to propagate expected callback shapes through containers at call sites
-    /// without depending on fully specialized row-polymorphic instantiations.
-    param_types: Vec<crate::typechecker::Type>,
     /// Number of dictionary arguments prepended by elaboration for `where`
     /// clauses. These runtime arguments are not present in the source-level
     /// function type, so expected user parameter types start after this offset.
@@ -199,13 +195,11 @@ impl FunInfo {
     fn from_abi(
         abi: crate::codegen::runtime_shape::CallableAbi,
         param_absorbed_effects: HashMap<usize, Vec<String>>,
-        param_types: Vec<crate::typechecker::Type>,
         dict_param_count: usize,
     ) -> Self {
         Self {
             abi,
             param_absorbed_effects,
-            param_types,
             dict_param_count,
         }
     }
@@ -702,7 +696,15 @@ impl<'a> Lowerer<'a> {
             return false;
         }
         self.planned_call(expr.id)
-            .is_some_and(|info| info.is_cps_call())
+            .unwrap_or_else(|| {
+                panic!(
+                    "internal compiler error: the call at offset {} in {}.{} was never classified",
+                    expr.span.start,
+                    self.current_semantic_module_name(),
+                    self.current_function
+                )
+            })
+            .is_cps_call()
     }
 
     fn app_head_and_source_arity(expr: &Expr) -> Option<(&Expr, usize)> {
@@ -736,9 +738,6 @@ impl<'a> Lowerer<'a> {
                     name.clone(),
                     FunSig {
                         abi: info.abi.clone(),
-                        param_absorbed_effects: info.param_absorbed_effects.clone(),
-                        param_types: info.param_types.clone(),
-                        dict_param_count: info.dict_param_count,
                     },
                 )
             })
@@ -777,7 +776,6 @@ impl<'a> Lowerer<'a> {
             fun_sigs: &fun_sigs,
             effect_ops: &effect_ops,
             effect_canonical: &self.effect_canonical,
-            let_effect_bindings: &self.ctx.let_effect_bindings,
             impl_effects_by_dict: &self.impl_effects_by_dict,
             impl_method_effects_by_dict: &self.impl_method_effects_by_dict,
             trait_method_effects_by_key: &trait_method_effects_by_key,

@@ -841,7 +841,8 @@ Effect ABI metadata is computed once by a pre-pass and stored in
 one `CallEffectInfo` per `App` node. A call to a known function (top-level,
 imported, block-local, or a dictionary method) is classified from the
 callee's declared ABI; every other call is a call through a function value
-and is classified from the head's entry in the type table. For a known
+and is classified from the head's entry in the type table. A head with
+neither is an internal compiler error; nothing is assumed pure. For a known
 callee the lowerer maps its current `EvidenceFrame` to the planned target
 through `EvidenceReframePlan`; for a function value it passes the frame
 unchanged.
@@ -904,12 +905,12 @@ with two exceptions that concern the continuation and not the position: a
 takes the rest of the block only when its handler chains (see "The
 Continuation of a `with`"). Both must still be `let`s, never operands.
 
-Two things are deliberately outside the rule. The normalize call that runs
-before the generic fold stays: the fold freshens non-duplicable arguments,
-and an operation left inside one would lose its node-keyed resolution.
-Handler arms and delimited `with` bodies that have no continuation are
-lowered with `k` absent; they are still in `let`/tail position within their
-own body.
+Normalization runs once, here. The generic fold runs before it and may copy
+an argument that still contains an operation; the copy has a fresh id, and
+the operation's resolution is found through the fold's record of where each
+copied node came from. Handler arms and delimited `with` bodies that have no
+continuation are lowered with `k` absent; they are still in `let`/tail
+position within their own body.
 
 ### Non-Resumable Effects
 

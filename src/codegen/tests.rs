@@ -27,7 +27,6 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
     let elaborated = elaborate::elaborate(&program, &result);
     let ctx = CodegenContext {
         modules: std::collections::HashMap::new(),
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     emit_module_with_context("_script", &elaborated, &ctx, &result, source_file, None)

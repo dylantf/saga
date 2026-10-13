@@ -60,9 +60,6 @@ pub struct CompiledModule {
     /// Complete per-expression type table (`CheckResult::expr_types`). Read
     /// by the lowerer under tagged closures (`lower/tagged.rs`).
     pub expr_types: HashMap<ast::NodeId, crate::typechecker::Type>,
-    /// Resolved binding/pattern types used by contextual ABI planning inside
-    /// imported handler bodies.
-    pub type_at_span: HashMap<crate::token::Span, crate::typechecker::Type>,
     /// NodeId-keyed callable ABI metadata produced by the effect-ABI pre-pass.
     /// Keeping calls and function values together is required for imported
     /// handler bodies and other cross-module lowering paths.
@@ -83,7 +80,6 @@ pub struct ModuleSemantics<'a> {
     pub effect_at_node: &'a HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     pub type_at_node: &'a HashMap<ast::NodeId, crate::typechecker::Type>,
     pub expr_types: &'a HashMap<ast::NodeId, crate::typechecker::Type>,
-    pub type_at_span: &'a HashMap<crate::token::Span, crate::typechecker::Type>,
     pub optimization: &'a optimize::OptimizationFacts,
 }
 
@@ -92,8 +88,6 @@ pub struct ModuleSemantics<'a> {
 pub struct CodegenContext {
     /// All compiled modules (Std + user), keyed by module name.
     pub modules: HashMap<String, CompiledModule>,
-    /// Deferred effects for let bindings that partially apply effectful functions.
-    pub let_effect_bindings: HashMap<String, Vec<String>>,
     /// Import declarations from the prelude, so the resolver knows
     /// which stdlib names are actually in scope for user code.
     pub prelude_imports: Vec<ast::Decl>,
@@ -150,7 +144,6 @@ impl CodegenContext {
             effect_at_node: &m.effect_at_node,
             type_at_node: &m.type_at_node,
             expr_types: &m.expr_types,
-            type_at_span: &m.type_at_span,
             optimization: &m.optimization,
         })
     }
@@ -167,7 +160,6 @@ impl CodegenContext {
                     effect_at_node: &m.effect_at_node,
                     type_at_node: &m.type_at_node,
                     expr_types: &m.expr_types,
-                    type_at_span: &m.type_at_span,
                     optimization: &m.optimization,
                 },
             )
@@ -213,7 +205,6 @@ pub fn compile_module_from_result(
         effect_at_node: mod_result.effect_at_node.clone(),
         type_at_node: mod_result.type_at_node.clone(),
         expr_types: mod_result.expr_types.clone(),
-        type_at_span: mod_result.type_at_span.clone(),
         effect_abi_plan: call_effects::EffectAbiPlan::default(),
         effect_abi_plan_ready: false,
         optimization,

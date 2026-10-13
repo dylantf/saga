@@ -88,7 +88,6 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 effect_at_node: Default::default(),
                 type_at_node: Default::default(),
                 expr_types: Default::default(),
-                type_at_span: Default::default(),
                 effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
                 effect_abi_plan_ready: false,
                 optimization: codegen::optimize::OptimizationFacts::default(),
@@ -123,7 +122,6 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     }
     let ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     codegen::emit_module_with_context("_script", &elaborated, &ctx, &result, None, None)

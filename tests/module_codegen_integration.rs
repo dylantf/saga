@@ -108,7 +108,6 @@ fn emit_from_program(
     }
     let mut ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     // As the build does: plan every module against its own check result. A
@@ -954,7 +953,6 @@ main () = 42
     }
     let ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     let out =

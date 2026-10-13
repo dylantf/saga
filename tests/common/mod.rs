@@ -344,7 +344,6 @@ pub fn build_stdlib() -> PathBuf {
     }
     let mut ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     codegen::precompute_context_call_effects(&mut ctx, &result);
@@ -573,7 +572,6 @@ pub fn emit_program(
     }
     let mut ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     // As the build does: plan every module against its own check result. A

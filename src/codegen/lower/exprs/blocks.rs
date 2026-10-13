@@ -61,25 +61,23 @@ impl<'a> Lowerer<'a> {
                         )
                     });
                 debug_assert_eq!(callable_abi.user_arity, source_arity);
-                let (param_absorbed_effects, param_types) = self
+                let param_absorbed_effects = self
                     .check_result
                     .resolved_type_for_node(fun_id)
                     .map(|ty| {
-                        let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
+                        param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                            .collect::<HashMap<usize, Vec<String>>>();
-                        let param_types = param_types_from_type(&ty);
-                        (param_absorbed_effects, param_types)
+                            .collect::<HashMap<usize, Vec<String>>>()
                     })
-                    .unwrap_or_else(|| (HashMap::new(), Vec::new()));
+                    .unwrap_or_default();
                 let arity = callable_abi.expanded_arity();
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
 
                 // Register in fun_info BEFORE lowering body so recursive
                 // calls are recognized as saturated apply
                 let fun_info =
-                    FunInfo::from_abi(callable_abi.clone(), param_absorbed_effects, param_types, 0);
+                    FunInfo::from_abi(callable_abi.clone(), param_absorbed_effects, 0);
                 self.fun_info.insert(fun_name.clone(), fun_info);
 
                 let has_effects = callable_abi.evidence.is_some();

@@ -457,8 +457,6 @@ impl<'a> Lowerer<'a> {
             return Some(hof_call);
         }
         // Source of truth: the per-call effect map, keyed by this App's NodeId.
-        // Pre-pass already walked the lexical scope and recorded the absorbed
-        // effects for the bound variable on its call-site App entry.
         //
         // `is_row_forward` distinguishes two effectful shapes:
         //   - `StaticOps`: callee asks for a specific set of effects. Caller

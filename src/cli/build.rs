@@ -557,7 +557,6 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
     // Build CodegenContext and emit .core files
     let mut ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
-        let_effect_bindings: HashMap::new(),
         prelude_imports: result.prelude_imports.clone(),
     };
     timed_build_phase("stdlib", "precompute_call_effects", || {
@@ -1425,7 +1424,6 @@ pub fn build_project_ext(
                 effect_at_node: mod_result.effect_at_node.clone(),
                 type_at_node: mod_result.type_at_node.clone(),
                 expr_types: mod_result.expr_types.clone(),
-                type_at_span: mod_result.type_at_span.clone(),
                 effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
                 effect_abi_plan_ready: false,
                 optimization,
@@ -1450,7 +1448,6 @@ pub fn build_project_ext(
                 effect_at_node: result.effect_at_node.clone(),
                 type_at_node: result.type_at_node.clone(),
                 expr_types: result.expr_types.clone(),
-                type_at_span: result.type_at_span.clone(),
                 effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
                 effect_abi_plan_ready: false,
                 optimization: codegen::optimize::OptimizationFacts::default(),
@@ -1473,7 +1470,6 @@ pub fn build_project_ext(
     // CodegenContext for cross-module resolution but their beams come from the cache.
     let mut ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
-        let_effect_bindings: HashMap::new(),
         prelude_imports: result.prelude_imports.clone(),
     };
     timed_build_phase("project", "precompute_call_effects", || {
@@ -1706,7 +1702,6 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             effect_at_node: result.effect_at_node.clone(),
             type_at_node: result.type_at_node.clone(),
             expr_types: result.expr_types.clone(),
-            type_at_span: result.type_at_span.clone(),
             effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
             effect_abi_plan_ready: false,
             optimization: codegen::optimize::OptimizationFacts::default(),
@@ -1716,7 +1711,6 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     // Phase 3: Emit only the user module
     let mut ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     timed_build_phase("script", "precompute_call_effects", || {

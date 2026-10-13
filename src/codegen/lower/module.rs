@@ -108,10 +108,6 @@ impl<'a> Lowerer<'a> {
         } = annotation;
         let scheme = self.check_result.env.get(name);
         let resolved_ty = scheme.map(|scheme| self.check_result.sub.apply(&scheme.ty));
-        let param_types = resolved_ty
-            .as_ref()
-            .map(util::param_types_from_type)
-            .unwrap_or_default();
         if effects.is_empty()
             && let Some(ty) = resolved_ty.as_ref()
         {
@@ -159,7 +155,6 @@ impl<'a> Lowerer<'a> {
         FunInfo::from_abi(
             abi,
             param_absorbed_effects,
-            param_types,
             scheme
                 .map(|scheme| util::dict_param_count(&scheme.constraints))
                 .unwrap_or(0),
@@ -242,7 +237,6 @@ impl<'a> Lowerer<'a> {
                         FunInfo::from_abi(
                             CallableAbi::pure(dict_params.len()),
                             HashMap::new(),
-                            Vec::new(),
                             0,
                         ),
                     );
@@ -399,7 +393,6 @@ impl<'a> Lowerer<'a> {
                             FunInfo::from_abi(
                                 CallableAbi::pure(dict_params.len()),
                                 HashMap::new(),
-                                Vec::new(),
                                 0,
                             ),
                         );
