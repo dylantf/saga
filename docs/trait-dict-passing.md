@@ -427,10 +427,13 @@ Turns a `KnownImpl` site from `apply (element(i, dict))(…)` into a direct call
 ### Generic folding — deforest inlined dict-method bodies
 
 `src/codegen/generic_fold/` is a **fuel-bounded bottom-up fixpoint AST
-rewriter** (`fold_program` → `FoldOutput { program, carried_resolution }`). It
-runs **after `normalize_effects`, before `resolve`**, so every NodeId-keyed
+rewriter** (`fold_program` → `FoldOutput { program, origins, carried_resolution }`). It
+runs **after elaboration, before `resolve`**, so every NodeId-keyed
 analysis (resolution, `call_effects`, optimizer) recomputes over the rewritten
 tree, and it is meaning-preserving (Anchor 2: the effect ABI is untouched).
+A node the fold copies gets a fresh id; `origins` maps it back to the node
+the typechecker saw, and the type tables and effect-operation resolution are
+read through that map.
 
 > Historical note: this pass was originally built to fuse the `Rep` walk of the
 > `Generic` deriving machinery, which is why the module is still named

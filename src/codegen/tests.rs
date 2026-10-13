@@ -1274,9 +1274,8 @@ fn dispatch_facts(src: &str) -> Vec<super::trait_dispatch::DictDispatch> {
     let result = checker.check_program(&mut program);
     assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
     let elaborated = elaborate::elaborate(&program, &result);
-    let normalized = super::normalize::normalize_effects(&elaborated);
     let resolution = super::resolve::ResolutionMap::new();
-    super::trait_dispatch::analyze("_script", &normalized, &resolution)
+    super::trait_dispatch::analyze("_script", &elaborated, &resolution)
         .into_values()
         .collect()
 }

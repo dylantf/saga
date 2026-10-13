@@ -189,7 +189,7 @@ pub fn compile_module_from_result(
     // Local-only fold here (no cross-module context); the cross-module fold runs
     // at emit, which re-folds with `ctx.modules` supplied.
     let folded = generic_fold::fold_program(
-        &normalize::normalize_effects(&elaborated),
+        &elaborated,
         &generic_fold::ExternalCtors::new(),
         &generic_fold::ExternalFuns::new(),
         &generic_fold::NodeOrigins::new(),
@@ -301,9 +301,6 @@ pub fn emit_module_with_prepared_context(
     // Generic fold, with cross-module impls supplied from the other compiled
     // modules. Inlined cross-module nodes carry the producer's resolution, merged
     // below after `resolve_names`.
-    let normalized = timed_codegen_phase(module_name, "normalize_effects", || {
-        normalize::normalize_effects(program)
-    });
     // The program may already have been folded once, on its own.
     let source_module = program.iter().find_map(|decl| match decl {
         ast::Decl::ModuleDecl { path, .. } => Some(path.join(".")),
@@ -315,7 +312,7 @@ pub fn emit_module_with_prepared_context(
         .unwrap_or_default();
     let fold_out = timed_codegen_phase(module_name, "generic_fold_cross_module", || {
         generic_fold::fold_program(
-            &normalized,
+            program,
             &prepared.external_ctors,
             &prepared.external_funs,
             &prior_origins,

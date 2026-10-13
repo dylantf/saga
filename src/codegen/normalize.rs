@@ -19,19 +19,15 @@
 //! right operand of `&&`/`||`, lambda bodies, handler arms) are their own
 //! scope: what is lifted out of them stays inside them.
 //!
-//! The pass runs twice, with two notions of what has to be lifted:
-//!
-//! - `normalize_effects`, before call classification, knows only syntax and
-//!   lifts applied operations (`op! x`).
-//! - `normalize_body`, at each lowering root once the call plan is frozen,
-//!   is given the nodes that perform an effect by themselves and lifts
-//!   every expression that needs a continuation (see
-//!   `effect_position::needs_continuation`) out of operand position: calls
-//!   the plan classified CPS, `with`, `resume`, and any `if`/`case`/block/
-//!   `do`/`receive` with such a thing in a branch. A short-circuit operator
-//!   whose right operand performs effects becomes an `if`. Its output
-//!   satisfies `effect_position::check_body`, and it leaves that output and
-//!   code that performs no effects as they are.
+//! The pass runs once: `normalize_body`, at each lowering root once the
+//! call plan is frozen, is given the nodes that perform an effect by
+//! themselves and lifts every expression that needs a continuation (see
+//! `effect_position::needs_continuation`) out of operand position: calls
+//! the plan classified CPS, applied operations, `with`, `resume`, and any
+//! `if`/`case`/block/`do`/`receive` with such a thing in a branch. A
+//! short-circuit operator whose right operand performs effects becomes an
+//! `if`. Its output satisfies `effect_position::check_body`, and it leaves
+//! that output and code that performs no effects as they are.
 
 use super::effect_position;
 use crate::ast::*;
@@ -39,26 +35,15 @@ use crate::ast::*;
 /// Counter for generating unique temporary variable names.
 struct Normalizer<'a> {
     counter: usize,
-    /// The nodes that perform an effect by themselves, when known. `None`
-    /// before call classification: then only applied operations are lifted.
-    performs: Option<&'a dyn Fn(&Expr) -> bool>,
+    /// The nodes that perform an effect by themselves.
+    performs: &'a dyn Fn(&Expr) -> bool,
 }
 
 impl<'a> Normalizer<'a> {
-    fn new() -> Self {
-        Self {
-            counter: 0,
-            performs: None,
-        }
-    }
-
     fn fresh(&mut self) -> String {
         let n = self.counter;
         self.counter += 1;
-        match self.performs {
-            None => format!("__eff{}", n),
-            Some(_) => format!("__anf{}", n),
-        }
+        format!("__anf{}", n)
     }
 
     /// Normalize a block's statements: lift nested effect calls to their own
@@ -140,20 +125,16 @@ impl<'a> Normalizer<'a> {
         // Its own operands first, then the expression itself if it still
         // needs a continuation.
         let normalized = self.normalize_top(expr, lifted);
-        match self.performs {
-            None if is_effect_call(&normalized) => self.lift_to_let(normalized, lifted),
-            Some(performs) if effect_position::needs_continuation(&normalized, performs) => {
-                self.lift_sibling_to_let(normalized, lifted)
-            }
-            _ => normalized,
+        if effect_position::needs_continuation(&normalized, self.performs) {
+            self.lift_sibling_to_let(normalized, lifted)
+        } else {
+            normalized
         }
     }
 
-    /// Whether `expr`, already normalized, performs effects. Always false
-    /// before call classification.
+    /// Whether `expr`, already normalized, performs effects.
     fn is_effectful(&self, expr: &Expr) -> bool {
-        self.performs
-            .is_some_and(|performs| effect_position::is_effectful(expr, performs))
+        effect_position::is_effectful(expr, self.performs)
     }
 
     /// Normalize the arguments of an effect call (or App-chain around one),
@@ -612,12 +593,8 @@ impl<'a> Normalizer<'a> {
                         .collect(),
                     dangling_trivia: vec![],
                     after_clause: after_clause.as_ref().map(|(timeout, body)| {
-                        // The timeout is an operand of the receive. Before
-                        // classification it is left as its own scope.
-                        let timeout = match self.performs {
-                            Some(_) => self.normalize_and_lift(timeout, lifted),
-                            None => self.normalize_expr(timeout),
-                        };
+                        // The timeout is an operand of the receive.
+                        let timeout = self.normalize_and_lift(timeout, lifted);
                         (Box::new(timeout), Box::new(self.normalize_expr(body)))
                     }),
                 },
@@ -733,12 +710,9 @@ impl<'a> Normalizer<'a> {
                 stmts,
                 dangling_trivia: vec![],
             };
-            match self.performs {
-                None => Expr::synth(expr.span, kind),
-                // The block stands where `expr` stood and has its value, so
-                // it keeps its id: lookups keyed on the id still answer.
-                Some(_) => Expr::rebuild_like(expr, kind),
-            }
+            // The block stands where `expr` stood and has its value, so
+            // it keeps its id: lookups keyed on the id still answer.
+            Expr::rebuild_like(expr, kind)
         }
     }
 }
@@ -840,120 +814,18 @@ pub(crate) fn normalize_body(
 ) -> Expr {
     let mut normalizer = Normalizer {
         counter: *counter,
-        performs: Some(performs),
+        performs,
     };
     let normalized = normalizer.normalize_expr(body);
     *counter = normalizer.counter;
     normalized
 }
 
-/// Public entry point: normalize a program's declarations, lifting nested
-/// effect calls in function bodies to block-level statements.
-pub fn normalize_effects(program: &Program) -> Program {
-    let mut normalizer = Normalizer::new();
-    program
-        .iter()
-        .map(|decl| match decl {
-            Decl::FunBinding {
-                id,
-                name,
-                name_span,
-                params,
-                guard,
-                body,
-                span,
-            } => Decl::FunBinding {
-                id: *id,
-                name: name.clone(),
-                name_span: *name_span,
-                params: params.clone(),
-                guard: guard.clone(),
-                body: normalizer.normalize_expr(body),
-                span: *span,
-            },
-            Decl::HandlerDef {
-                id,
-                doc,
-                public,
-                name,
-                name_span,
-                body,
-                span,
-                ..
-            } => {
-                let new_arms = body
-                    .arms
-                    .iter()
-                    .map(|ann| {
-                        Annotated::bare(HandlerArm {
-                            id: ann.node.id,
-                            op_name: ann.node.op_name.clone(),
-                            qualifier: ann.node.qualifier.clone(),
-                            params: ann.node.params.clone(),
-                            body: Box::new(normalizer.normalize_expr(&ann.node.body)),
-                            finally_block: ann
-                                .node
-                                .finally_block
-                                .as_ref()
-                                .map(|fb| Box::new(normalizer.normalize_expr(fb))),
-                            span: ann.node.span,
-                        })
-                    })
-                    .collect();
-                let new_return = body.return_clause.as_ref().map(|rc| {
-                    Box::new(HandlerArm {
-                        id: rc.id,
-                        op_name: rc.op_name.clone(),
-                        qualifier: rc.qualifier.clone(),
-                        params: rc.params.clone(),
-                        body: Box::new(normalizer.normalize_expr(&rc.body)),
-                        finally_block: None,
-                        span: rc.span,
-                    })
-                });
-                Decl::HandlerDef {
-                    id: *id,
-                    doc: doc.clone(),
-                    public: *public,
-                    name: name.clone(),
-                    name_span: *name_span,
-                    body: HandlerBody {
-                        effects: body.effects.clone(),
-                        needs: body.needs.clone(),
-                        where_clause: body.where_clause.clone(),
-                        arms: new_arms,
-                        return_clause: new_return,
-                    },
-                    recovered_arms: vec![],
-                    span: *span,
-                    dangling_trivia: vec![],
-                }
-            }
-            // Impl method bodies live here after elaboration.
-            Decl::DictConstructor { methods, .. } => {
-                let mut decl = decl.clone();
-                if let Decl::DictConstructor {
-                    methods: new_methods,
-                    ..
-                } = &mut decl
-                {
-                    *new_methods = methods
-                        .iter()
-                        .map(|m| normalizer.normalize_expr(m))
-                        .collect();
-                }
-                decl
-            }
-            other => other.clone(),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    //! Regression: the call-effects pre-pass keys on `NodeId` and assumes
-    //! source `App` ids survive `normalize_effects`. Verify this remains true
-    //! so future normalize changes don't silently break the pre-pass.
+    //! Regression: the call plan is keyed on `NodeId` and assumes source
+    //! `App` ids survive normalization. Verify this remains true so future
+    //! normalize changes don't silently break the plan's lookups.
 
     use super::*;
     use crate::lexer::Lexer;
@@ -962,6 +834,19 @@ mod tests {
     fn parse(source: &str) -> Program {
         let tokens = Lexer::new(source).lex().expect("lex");
         Parser::new(tokens).parse_program().expect("parse")
+    }
+
+    /// Normalize every function body, with applied operations as the nodes
+    /// that perform an effect.
+    fn normalize_effects(program: &Program) -> Program {
+        let mut counter = 0;
+        let mut program = program.clone();
+        for decl in &mut program {
+            if let Decl::FunBinding { body, .. } = decl {
+                *body = normalize_body(body, &is_effect_call, &mut counter);
+            }
+        }
+        program
     }
 
     fn collect_app_ids(program: &Program) -> Vec<NodeId> {

@@ -97,7 +97,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     }
     // Overlay elaborated modules with their resolution maps
     for (name, elab) in elaborated_modules {
-        let normalized = codegen::normalize::normalize_effects(&elab);
+        let normalized = elab;
         let front_resolution = result
             .module_check_results()
             .get(&name)

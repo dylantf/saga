@@ -1389,12 +1389,9 @@ pub fn build_project_ext(
         });
         // Local-only fold here; the cross-module fold runs at emit with the full
         // set of compiled modules supplied as externals.
-        let normalized_effects = timed_build_phase(module_name, "normalize_effects_local", || {
-            codegen::normalize::normalize_effects(&elaborated)
-        });
         let folded = timed_build_phase(module_name, "generic_fold_local", || {
             codegen::generic_fold::fold_program(
-                &normalized_effects,
+                &elaborated,
                 &codegen::generic_fold::ExternalCtors::new(),
                 &codegen::generic_fold::ExternalFuns::new(),
                 &codegen::generic_fold::NodeOrigins::new(),
