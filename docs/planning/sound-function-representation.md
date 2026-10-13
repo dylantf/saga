@@ -639,6 +639,91 @@ relabelling; the higher-order gate disagreeing with closure creation;
 dictionary slots and hoisted entry points sharing one body; variable call
 classification being name-scoped.
 
+## Stage B implementation notes
+
+From a read-only survey on 2026-10-13. Emitted code was read for four small
+programs; nothing was built, tested or benchmarked, and every statement about
+BEAM cost is an inference.
+
+### What is emitted today
+
+| Site | Cost |
+|------|------|
+| Operation in a named function, effect in its declared row | three `element` loads, no call |
+| Operation in a closure body | one bridge call (linear scan) plus one `element` |
+| Named call, same row | frame passed unchanged |
+| Named call to a narrower or open row | one bridge call per call, building lists and a new tuple |
+| `with` installing k handlers | k bridge calls, each a list round trip |
+| Named effectful function used as a value | a bridge call on every invocation |
+| Callback passed to an effect operation | a bridge call on every invocation |
+
+Lookups are not shared: three operations in one body emit the load chain three
+times.
+
+### Decision
+
+Use an Erlang map `#{Tag => Ops}`. Install is a put, perform is a get, every
+call passes the frame unchanged, and an inner `with` shadows by replacing the
+key in a new map while the outer map stays bound outside. Searching the
+existing tuple by tag everywhere deletes no more code and makes every
+operation as slow as closure operations are now. Keeping positions for closed
+rows keeps the two-layout agreement this stage exists to remove.
+
+Fallback: if the closed-row benchmark below regresses by more than about 10%
+and binding `Ops = get(Tag, Ev)` once per function body does not recover it,
+reconsider a positional fast path for closed rows.
+
+To check when implementing: that the lookup compiles to an inline map
+instruction and not a remote `maps:get` call (`erlc -S`). The Core Erlang AST
+in `cerl.rs` has no map node yet.
+
+### Two bugs found, independent of this stage
+
+- **Callback overlay picks the wrong handler.** A callback typed
+  `needs {Counter, ..r}` with `Log` in `..r`, performed under an inner `Log`
+  handler while the operation's handler arm sits under an outer one, reaches
+  the outer handler. The documented rule is that the perform site supplies
+  `..r`. `append_tail` keeps the whole call-time frame, not only the named
+  effects. Fix before this stage: once callees stop narrowing their frame, the
+  bug becomes easier to reach.
+- **An unannotated `main` whose row stays open** is emitted with two extra
+  parameters and fails at run time with "called a function that does not
+  exist".
+
+### Benchmarks to write first
+
+1. **Closed-row hot operation.** A self-recursive named function with a closed
+   row, ten million iterations, one operation each, under a handler the static
+   fast path cannot bypass. Isolates three loads against a map get. This is
+   the gate.
+2. **The same through an open row,** with the body as a lambda. Expected to
+   improve.
+3. **Deep call chain with no operations,** several effects in scope, callees
+   alternating closed and open rows. Isolates reframing, which should drop to
+   zero.
+
+### Order of work
+
+1. Add the benchmarks and record a baseline. Add expected-failure tests for
+   the two bugs.
+2. Fix the overlay to merge only the callback's named effects.
+3. Behind a flag hashed into the cache key, give named-function bodies the
+   tag-only frame closures already use. Run the suite and the generator under
+   both settings.
+4. Under the same flag, switch the representation to a map: operation lookup,
+   install, overlay, the native callback context, empty-frame literals and the
+   bridge flip together.
+5. Run the benchmarks. If the gate passes, make it the default and update the
+   roughly twelve text assertions that mention `element`.
+6. Delete the reframe types, the layout on `EvidenceFrame`, the bridge exports
+   and the flag; update the docs.
+
+### Size
+
+Roughly 700 to 900 lines removed and 150 to 250 added across 15 to 20 files,
+about a tenth of Stage A. Nothing exported names a position, but all modules,
+the stdlib and the bridge must agree on the representation.
+
 ## Appendix A: reproductions
 
 All fail on `87e68150`. Shared declarations:
