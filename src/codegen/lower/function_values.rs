@@ -20,6 +20,7 @@ impl<'a> Lowerer<'a> {
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
         for arg in args {
             let v = self.fresh();
+            self.assert_operand(arg, "a call");
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));

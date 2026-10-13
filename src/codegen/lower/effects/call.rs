@@ -54,19 +54,6 @@ impl<'a> Lowerer<'a> {
             .saturating_sub(runtime_param_count + dict_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
-        // An argument that performs effects when evaluated (e.g. `add! (make_frag
-        // ())`, or one nested deeper like `add! (combine [make_frag ()])`) cannot
-        // be lowered as a plain value: a CPS-compiled function delivers its result
-        // through its own `_ReturnK`, not as the value of `apply`. Lowering it with
-        // an identity continuation would feed the *handler's* yielded value into
-        // the op call instead of the argument's actual value. Defer each such arg
-        // and sequence it through the op call's continuation below, mirroring the
-        // statement-position path that already handles arbitrary nesting.
-        //
-        // `branch_is_effectful` is depth-aware (it descends through constructor
-        // calls, records, tuples, etc.) but does NOT flag lambda bodies, so
-        // callback arguments stay on the normal value path.
-        let mut effectful_chain: Vec<(String, &Expr)> = Vec::new();
         for (source_idx, arg) in args.iter().enumerate() {
             let is_unit_literal = matches!(
                 arg.kind,
@@ -80,13 +67,7 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
-            if self.branch_is_effectful(arg) {
-                // Real runtime param, but its value is produced by sequencing the
-                // argument through a continuation rather than a let-binding here.
-                param_vars.push(v.clone());
-                effectful_chain.push((v, arg));
-                continue;
-            }
+            self.assert_operand(arg, "an operation call");
             // Effect call args are generally not CPS-expanded — the handler
             // arm receives the callback as a plain value. However, if the op's
             // parameter declares absorbed effects, the lambda always gets its
@@ -166,7 +147,7 @@ impl<'a> Lowerer<'a> {
             param_vars.push(v);
         }
 
-        let mut result = match self.effect_op_lowering_plan(&effect_key, &effect_name) {
+        let result = match self.effect_op_lowering_plan(&effect_key, &effect_name) {
             EffectOpLoweringPlan::DirectNative { handler_canonical } => {
                 // Direct path: ops that always resume exactly once can be
                 // inlined as `let Result = <native call> in <continuation
@@ -306,20 +287,6 @@ impl<'a> Lowerer<'a> {
             }
         };
 
-        // Sequence deferred effectful arguments. Rightmost first so the outermost
-        // wrapper is the leftmost arg, preserving left-to-right evaluation: `arg0`
-        // resolves and binds its var, then `arg1`, then the op call runs. Each arg
-        // is threaded to a continuation that binds its result var (referenced by
-        // the op call in `param_vars`) and proceeds with `result`.
-        // `lower_terminal_effectful_expr_to_k` dispatches on the argument's shape:
-        // a bare effectful call, an effectful call nested inside a constructor /
-        // record / tuple, or (degenerately) a pure value.
-        for (v, arg) in effectful_chain.into_iter().rev() {
-            let k_fun = CExpr::Fun(vec![v], Box::new(result));
-            let k_var = self.fresh();
-            let threaded = self.lower_terminal_effectful_expr_to_k(arg, &k_var);
-            result = CExpr::Let(k_var, Box::new(k_fun), Box::new(threaded));
-        }
         result
     }
 

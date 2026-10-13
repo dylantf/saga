@@ -225,9 +225,9 @@ impl<'a> Lowerer<'a> {
             || stack.iter().any(|name| name == lookup_name)
             || !Self::static_helper_params_supported(&helper.params)
             || helper.params.len() != args.len()
-            || args.iter().any(|arg| {
-                self.branch_is_effectful(arg) || !self.static_helper_expr_supported(arg, stack)
-            })
+            || args
+                .iter()
+                .any(|arg| !self.static_helper_expr_supported(arg, stack))
         {
             return false;
         }
@@ -378,9 +378,9 @@ impl<'a> Lowerer<'a> {
         };
         let key = format!("{}.{}", effect_name, op_name);
         self.static_tail_resume_ops.contains_key(&key)
-            && args.iter().all(|arg| {
-                !self.branch_is_effectful(arg) && self.static_helper_expr_supported(arg, stack)
-            })
+            && args
+                .iter()
+                .all(|arg| self.static_helper_expr_supported(arg, stack))
     }
 
     fn static_helper_expr_supported(&self, expr: &Expr, stack: &mut Vec<String>) -> bool {
@@ -503,9 +503,9 @@ impl<'a> Lowerer<'a> {
             || stack.iter().any(|name| name == lookup_name)
             || !Self::static_helper_params_supported(&helper.params)
             || helper.params.len() != args.len()
-            || args.iter().any(|arg| {
-                self.branch_is_effectful(arg) || !self.imported_static_helper_arg_supported(arg)
-            })
+            || args
+                .iter()
+                .any(|arg| !self.imported_static_helper_arg_supported(arg))
         {
             return false;
         }
@@ -808,9 +808,9 @@ impl<'a> Lowerer<'a> {
         };
         let key = format!("{}.{}", effect_name, op_name);
         let has_key = self.static_tail_resume_ops.contains_key(&key);
-        let args_ok = args.iter().all(|arg| {
-            !self.branch_is_effectful(arg) && self.imported_static_helper_arg_supported(arg)
-        });
+        let args_ok = args
+            .iter()
+            .all(|arg| self.imported_static_helper_arg_supported(arg));
         has_key && args_ok
     }
 

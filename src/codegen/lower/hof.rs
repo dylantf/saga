@@ -56,12 +56,8 @@ impl<'a> Lowerer<'a> {
         if !Self::hof_direct_effects_covered(info, &specialization) {
             return None;
         }
-        // The direct variant takes plain values. An argument that performs
-        // effects needs the rest of the call as its continuation, which only
-        // the CPS call path builds.
         if specialization.source_arity != args.len()
             || !self.hof_direct_callback_args_supported(&specialization.callback_params, args)
-            || args.iter().any(|arg| self.branch_is_effectful(arg))
         {
             return None;
         }
@@ -116,12 +112,8 @@ impl<'a> Lowerer<'a> {
     ) -> Option<CExpr> {
         let binding = self.direct_hof_value_bindings.get(var_name).cloned()?;
         let specialization = binding.specialization;
-        // The direct variant takes plain values. An argument that performs
-        // effects needs the rest of the call as its continuation, which only
-        // the CPS call path builds.
         if specialization.source_arity != args.len()
             || !self.hof_direct_callback_args_supported(&specialization.callback_params, args)
-            || args.iter().any(|arg| self.branch_is_effectful(arg))
         {
             return None;
         }

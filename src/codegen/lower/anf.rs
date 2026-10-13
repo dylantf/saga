@@ -60,6 +60,22 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// `expr` is about to be lowered as a plain value, as an operand of
+    /// `operand_of`. If it needs a continuation, the body it is in was not
+    /// normalized (it did not pass through `effect_normal_body`); stop
+    /// instead of lowering it with an identity continuation.
+    pub(super) fn assert_operand(&self, expr: &Expr, operand_of: &str) {
+        if effect_position::needs_continuation(expr, &|node| self.performs_effect(node)) {
+            panic!(
+                "internal compiler error: {} reached lowering as an operand of {operand_of} \
+                 in {}.{}: its body was not effect-normalized",
+                effect_position::construct_name(expr, &|node| self.performs_effect(node)),
+                self.current_semantic_module_name(),
+                self.current_function,
+            );
+        }
+    }
+
     /// The body the lowerer is about to lower, in effect-normal form.
     /// `root` names the kind of body for diagnostics.
     pub(super) fn effect_normal_body<'e>(

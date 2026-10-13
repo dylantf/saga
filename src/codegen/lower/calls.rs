@@ -12,12 +12,6 @@ use super::{Lowerer, QualifiedCallSite, ResolvedCallSite};
 /// Runtime module holding the slow path of [`Lowerer::arity_checked_apply`].
 const ARITY_RUNTIME_MODULE: &str = "saga_runtime";
 
-#[derive(Clone, Copy)]
-enum RuntimeCpsArgLowering {
-    Value,
-    EtaReduced,
-}
-
 /// How a CPS call reaches its callee. `Value` applies a runtime function value
 /// (closure, `FunRef`, or var); `Remote` emits a direct `call 'mod':'fun'(...)`
 /// to a known exported function (a cross-module specialized dict method).
@@ -74,8 +68,6 @@ struct RuntimeCpsApplySite<'a> {
     callee: CpsCallee,
     args: &'a [&'a Expr],
     return_k: Option<CExpr>,
-    nested_pure_arg_lowering: RuntimeCpsArgLowering,
-    flat_arg_lowering: RuntimeCpsArgLowering,
 }
 
 impl<'a> Lowerer<'a> {
@@ -156,45 +148,6 @@ impl<'a> Lowerer<'a> {
                 )
             {
                 return Some(variant_call);
-            }
-
-            if is_effectful {
-                // CPS-chain arguments that perform effects so that aborting
-                // handlers skip the outer call entirely: the remaining
-                // arguments and the outer call become the continuation of
-                // each such argument.
-                let target_evidence = target_evidence.clone();
-                let chain_return_k = return_k.clone();
-                if let Some(call) = self.lower_effectful_call_args_in_cps(
-                    args,
-                    RuntimeCpsArgLowering::Value,
-                    |this, arg_vars| {
-                        let mut call_args: Vec<CExpr> =
-                            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                        // Effectful callee: thread evidence + _ReturnK.
-                        let (ev_var, ev_ce) = this.build_call_evidence_with(
-                            target_evidence
-                                .as_ref()
-                                .expect("effectful call missing target evidence ABI"),
-                        );
-                        call_args.push(CExpr::Var(ev_var.clone()));
-                        let (rk_var, rk_ce) = this.effectful_call_return_k_binding(chain_return_k);
-                        call_args.push(CExpr::Var(rk_var.clone()));
-
-                        let outer_call = this.emit_call(
-                            emit_name,
-                            head.id,
-                            call_arity,
-                            call_args,
-                            call_span,
-                            fallback_erlang_module,
-                        );
-                        let body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
-                        CExpr::Let(ev_var, Box::new(ev_ce), Box::new(body))
-                    },
-                ) {
-                    return Some(call);
-                }
             }
 
             let (mut arg_vars, mut bindings) = self.lower_call_args(args);
@@ -287,58 +240,11 @@ impl<'a> Lowerer<'a> {
         None
     }
 
-    /// Lower the arguments of a call when at least one of them performs
-    /// effects while being evaluated, binding each to a fresh variable and
-    /// continuing with `build` (the call itself). Returns `None`, lowering
-    /// nothing, when no argument performs effects.
-    ///
-    /// An argument performs effects when it is an effectful call or effect
-    /// operation, or merely contains one (`acc + g n`, `(g n, 1)`,
-    /// `if g n == 0 then ..`). Either way the rest of the argument list and
-    /// the call are that argument's continuation, so a handler that aborts
-    /// skips them. Arguments are evaluated left to right.
-    fn lower_effectful_call_args_in_cps(
-        &mut self,
-        args: &[&Expr],
-        pure_arg_lowering: RuntimeCpsArgLowering,
-        build: impl FnOnce(&mut Self, &[String]) -> CExpr,
-    ) -> Option<CExpr> {
-        let effectful: Vec<bool> = args.iter().map(|a| self.branch_is_effectful(a)).collect();
-        if !effectful.contains(&true) {
-            return None;
-        }
-        let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
-        let mut pure_args: Vec<Option<CExpr>> = Vec::with_capacity(args.len());
-        for (arg, is_effectful) in args.iter().zip(&effectful) {
-            arg_vars.push(self.fresh());
-            pure_args
-                .push((!is_effectful).then(|| self.lower_runtime_cps_arg(arg, pure_arg_lowering)));
-        }
-        let mut body = build(self, &arg_vars);
-        // Innermost (rightmost) first, so evaluation runs left to right.
-        for ((arg, var), pure) in args.iter().zip(arg_vars).zip(pure_args).rev() {
-            body = match pure {
-                Some(ce) => CExpr::Let(var, Box::new(ce), Box::new(body)),
-                None => self.lower_bind_effectful_expr(arg, var, body),
-            };
-        }
-        Some(body)
-    }
-
-    fn lower_runtime_cps_arg(&mut self, arg: &Expr, mode: RuntimeCpsArgLowering) -> CExpr {
-        match mode {
-            RuntimeCpsArgLowering::Value => self.lower_expr_value(arg),
-            RuntimeCpsArgLowering::EtaReduced => self
-                .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr_value(arg)),
-        }
-    }
-
     /// Lower a call to an already-materialized runtime CPS callable value.
     ///
     /// The call shape still comes from `CallEffectInfo::cps_call_abi()`;
-    /// callers supply only the callee expression and the narrow argument
-    /// lowering mode needed to preserve existing value-boundary behavior.
+    /// callers supply only the callee expression. Arguments are plain
+    /// values: effect normalization has moved anything else into a `let`.
     fn lower_runtime_cps_apply(&mut self, site: RuntimeCpsApplySite<'_>) -> CExpr {
         let RuntimeCpsApplySite {
             abi,
@@ -346,31 +252,16 @@ impl<'a> Lowerer<'a> {
             callee,
             args,
             return_k,
-            nested_pure_arg_lowering,
-            flat_arg_lowering,
         } = site;
         let evidence_abi = abi.evidence.expect("CPS call plan missing evidence ABI");
-        if args.iter().any(|a| self.branch_is_effectful(a)) {
-            let chained = self.lower_effectful_call_args_in_cps(
-                args,
-                nested_pure_arg_lowering,
-                |this, arg_vars| {
-                    let (ev_var, ev_ce) = this.cps_apply_evidence(mode, &evidence_abi);
-                    let (rk_var, rk_ce) = this.effectful_call_return_k_binding(return_k);
-                    let outer_call =
-                        this.emit_cps_callee_call(callee, mode, arg_vars, &ev_var, &rk_var);
-                    let body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
-                    CExpr::Let(ev_var, Box::new(ev_ce), Box::new(body))
-                },
-            );
-            return chained.expect("an argument performs effects");
-        }
-
         let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
         for arg in args {
             let v = self.fresh();
-            let ce = self.lower_runtime_cps_arg(arg, flat_arg_lowering);
+            self.assert_operand(arg, "an effectful call");
+            let ce = self
+                .lower_eta_reduced_effect_expr(arg)
+                .unwrap_or_else(|| self.lower_expr_value(arg));
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }
@@ -487,10 +378,8 @@ impl<'a> Lowerer<'a> {
             .planned_call(expr.id)
             .and_then(|info| info.cps_call_abi().cloned())
             .expect("effectful call is missing its CPS plan");
-        // A head that performs effects to produce the function (`(if g n ==
-        // 0 then f else h) x`) has the arguments and the call as its
-        // continuation.
-        let func_ce = (!self.branch_is_effectful(head)).then(|| self.lower_expr_value(head));
+        self.assert_operand(head, "an effectful call");
+        let func_ce = self.lower_expr_value(head);
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
             abi: plan,
@@ -498,13 +387,8 @@ impl<'a> Lowerer<'a> {
             callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
             args: &args,
             return_k,
-            nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
-            flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
         });
-        match func_ce {
-            Some(func_ce) => CExpr::Let(func_var, Box::new(func_ce), Box::new(body)),
-            None => self.lower_bind_effectful_expr(head, func_var, body),
-        }
+        CExpr::Let(func_var, Box::new(func_ce), Box::new(body))
     }
 
     /// Tagged closures: `f a b c` where the named function `f` takes fewer
@@ -540,21 +424,7 @@ impl<'a> Lowerer<'a> {
                 callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
                 args: rest,
                 return_k,
-                nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
-                flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
             })
-        } else if rest.iter().any(|a| self.branch_is_effectful(a)) {
-            // The result of the effectful `f a` is a pure function, but its
-            // arguments perform effects: the call is their continuation.
-            let chained = self.lower_effectful_call_args_in_cps(
-                rest,
-                RuntimeCpsArgLowering::EtaReduced,
-                |this, arg_vars| {
-                    let call = Self::arity_checked_apply(&func_var, arg_vars);
-                    this.apply_return_k_with(return_k, call)
-                },
-            );
-            chained.expect("an argument performs effects")
         } else {
             let (arg_vars, bindings) = self.lower_call_args(rest);
             let call = Self::arity_checked_apply(&func_var, &arg_vars);
@@ -564,9 +434,6 @@ impl<'a> Lowerer<'a> {
         if self.expr_is_effectful_call(inner) {
             let inner_k = CExpr::Fun(vec![func_var], Box::new(body));
             self.lower_expr_with_call_return_k(inner, Some(inner_k))
-        } else if self.has_nested_effectful_expr(inner) {
-            // `f a` is a pure call whose own arguments perform effects.
-            self.lower_bind_expr_with_cps(inner, func_var, body)
         } else {
             let inner_ce = self.lower_expr(inner);
             CExpr::Let(func_var, Box::new(inner_ce), Box::new(body))
@@ -621,8 +488,6 @@ impl<'a> Lowerer<'a> {
             callee,
             args,
             return_k,
-            nested_pure_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
-            flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
         }))
     }
 
@@ -853,8 +718,6 @@ impl<'a> Lowerer<'a> {
                 callee,
                 args,
                 return_k,
-                nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
-                flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
             }));
         }
 
@@ -877,8 +740,6 @@ impl<'a> Lowerer<'a> {
             callee: CpsCallee::Value(CExpr::Var(method_var.clone())),
             args,
             return_k,
-            nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
-            flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
         });
         let body = CExpr::Let(method_var, Box::new(extract), Box::new(body));
         Some(CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body)))
