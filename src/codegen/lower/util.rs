@@ -145,52 +145,6 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, &Expr, Vec<&Expr>)>
     }
 }
 
-/// Peel a chain of App nodes to find a `DictMethodAccess` head and its arguments.
-/// Returns `Some((dict_expr, trait_name, method_index, args))` if the head is a
-/// `DictMethodAccess`, `None` otherwise. Used to recognize trait method calls
-/// (post-elaboration shape) for evidence-threaded emission.
-pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, &str, usize, Vec<&Expr>)> {
-    let mut args: Vec<&Expr> = Vec::new();
-    let mut current = expr;
-    loop {
-        match &current.kind {
-            ExprKind::App { func, arg, .. } => {
-                args.push(arg);
-                current = func;
-            }
-            ExprKind::DictMethodAccess {
-                dict,
-                trait_name,
-                method_index,
-            } => {
-                args.reverse();
-                return Some((dict.as_ref(), trait_name.as_str(), *method_index, args));
-            }
-            _ => return None,
-        }
-    }
-}
-
-/// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
-/// Returns `Some((module, func_name, head_expr, args))` if the head is a QualifiedName.
-pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, Vec<&Expr>)> {
-    let mut args: Vec<&Expr> = Vec::new();
-    let mut current = expr;
-    loop {
-        match &current.kind {
-            ExprKind::App { func, arg, .. } => {
-                args.push(arg);
-                current = func;
-            }
-            ExprKind::QualifiedName { module, name, .. } => {
-                args.reverse();
-                return Some((module.as_str(), name.as_str(), current, args));
-            }
-            _ => return None,
-        }
-    }
-}
-
 /// Peel a chain of App nodes to find a Constructor head and its arguments.
 pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     collect_ctor_call_with_head(expr).map(|(_, name, args)| (name, args))

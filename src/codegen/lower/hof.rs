@@ -46,7 +46,6 @@ impl<'a> Lowerer<'a> {
     pub(super) fn try_hof_direct_specialized_call(
         &mut self,
         lookup_name: &str,
-        _emit_name: &str,
         head: &Expr,
         args: &[&Expr],
         return_k: Option<CExpr>,

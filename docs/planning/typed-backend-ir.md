@@ -332,3 +332,60 @@ Snapshot unchanged.
   module reuses (block-local functions overwrite `fun_info` by bare name and
   are never removed). A check that they agree did not fire on the snapshot
   corpus, the codegen unit tests or the effect property tests.
+
+### Step 3 (2026-10-13)
+
+Applications go through `Lowerer::build_app` and are lowered from the node:
+`lower_app` is "build, then `lower_built`", and every call is emitted by the
+one `lower_call`. `src/`: 698 lines added, 1,005 removed. Snapshot unchanged.
+
+- The builder turns an application chain into `Val::Ctor`, `Val::DictApp`,
+  `Expr::Perform`, `Expr::Intrinsic`, `Expr::Raise` (`panic`, `todo`),
+  `Expr::Partial`, or `Expr::Call` with `Callee::{Fn, DictMethod, Value,
+  Result}`. `Call::new` is the only constructor and sets `conv` (a private
+  field) from the classification it is given: the plan's entry, or, for the
+  second half of an over-applied call, the type rule. `lower_call` reads
+  `conv` and never the plan.
+- Deleted: `lower_app_expr` (the head-resolution ladder),
+  `lower_resolved_fun_call`, `lower_qualified_call`, `lower_effectful_call`,
+  `lower_tagged_value_app`, `lower_over_applied_named_call`,
+  `lower_effectful_var_call`, `lower_dict_method_call`, `lower_generic_apply`,
+  `lower_runtime_cps_apply` with `CpsCallee`, `CpsApplyMode` and
+  `RuntimeCpsApplySite`, `emit_call` and `lower_local_fun_call` (the
+  resolution match), `ResolvedCallSite`, `QualifiedCallSite`,
+  `collect_qualified_call`, `collect_dict_method_call`, and the `Option`
+  plumbing of `lower_intrinsic`. Not deleted: the scans of other modules'
+  declarations (`external_dict_method_arity`,
+  `external_dict_constructor_arity`, `imported_handler_function_source`).
+  They are still what the rules for hoisted methods and for private
+  functions of an inlined handler's module read; they go with step 9.
+- `Expr::Perform` only marks the application as a perform: it holds the
+  operation node and the argument expressions, and is lowered by the
+  unchanged `lower_effect_call`. `OpRef` and its lowering are step 5.
+- Deviations from the draft. `Callee::Result(Box<Expr>)`: an over-applied
+  call is one `Call` whose callee is the result of the saturated call, not a
+  `let` and a call, because the existing emission lowers the second half
+  before the first even when the first is pure, and a `let` lowered by the
+  block rule would number the temporaries the other way. Step 8 either
+  accepts that renumbering or keeps the form. `Callee::LocalFn` does not
+  exist: a block-local function is an `FnRef` with no module.
+  `Callee::DictMethod` has no direct, unspecialized case: that call is
+  `Callee::Value(Val::DictMethod)`, which is what was emitted. `Conv::Cps`
+  holds the existing `EvidenceAbi`. `Call` has two extra fields: `span`
+  (`None` for the calls that were not annotated) and `site`, the lookup name
+  and head expression the fast paths still match on (step 7). `Raise` is
+  separate from `Intrinsic` because `panic` and `todo` have no
+  `IntrinsicId`; they are still matched by spelling.
+- The old code had two orders for the rules, one for a call lowered without
+  a continuation (`lower_app_expr`) and one for a CPS call lowered with one
+  (`lower_effectful_call`). They differed for a variable head with no entry
+  in the resolution map: the second tried the known-function rule on it and
+  never tried the rule for a private function of an inlined handler's
+  module, and it did not intercept `panic`/`todo`. The builder has the first
+  order only. Before the change, a panic placed on each of those differences
+  (and on the two branches the builder turns into an internal error or a
+  plain rule: a partial application classified CPS, and the remote callee of
+  `lower_effectful_var_call`) did not fire on the snapshot corpus, the
+  codegen unit tests or the effect property tests.
+- A missing plan entry is now an internal error wherever an application is
+  built. The known-function path used to read a missing entry as "pure".

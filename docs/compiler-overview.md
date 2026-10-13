@@ -235,6 +235,15 @@ This phase is responsible for:
 - direct fast paths proven by optimizer facts
 - runtime-specific data layout and call shaping
 
+Values and applications are not lowered from the AST directly. A builder
+(`lower/build.rs`) turns one AST node into one node of the typed back-end
+tree (`src/codegen/ir.rs`), in which references are absolute, record slots
+are indices and a call has its callee and convention; `lower_val` and
+`lower_call` emit from the node and look nothing up. The builder is shallow
+for now (children stay AST until the lowerer reaches them) and the other
+constructs are still lowered from the AST: see
+`docs/planning/typed-backend-ir.md`.
+
 The lowerer consumes two different semantic layers:
 
 - front-end `ResolutionResult`

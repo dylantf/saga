@@ -11,7 +11,7 @@
 //! never altered by specialization.
 //!
 //! Keyed by the **outer `App` node id** — the same key `call_effects` uses
-//! (`CallEffectMap`) and the same id lowering passes to `lower_dict_method_call`
+//! (`CallEffectMap`) and the same id the builder passes to `specialized_dict_method`
 //! — so the two maps join trivially at the call site.
 
 use crate::ast::{self, Decl, Expr, ExprKind, NodeId};

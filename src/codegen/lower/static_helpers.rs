@@ -55,7 +55,8 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
-        let (arg_vars, arg_bindings) = self.lower_call_args(args);
+        let operands = self.operands(args.iter().copied(), "a call");
+        let (arg_vars, arg_bindings) = self.lower_call_args(&operands);
         let params = pats::lower_params(&helper.params);
         if params.len() != arg_vars.len() {
             return None;
@@ -136,7 +137,8 @@ impl<'a> Lowerer<'a> {
         }
         let captures = self.imported_static_helper_variant_captures(&helper_key)?;
 
-        let (arg_vars, arg_bindings) = self.lower_call_args(args);
+        let operands = self.operands(args.iter().copied(), "a call");
+        let (arg_vars, arg_bindings) = self.lower_call_args(&operands);
         let params = pats::lower_params(&helper.params);
         if params.len() != arg_vars.len() {
             return None;

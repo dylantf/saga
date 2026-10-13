@@ -12,7 +12,11 @@
 //! and dropped within a single lowering call.
 
 use crate::ast;
-use crate::codegen::runtime_shape::CallableAbi;
+use crate::codegen::call_effects::CallEffectInfo;
+use crate::codegen::lower::errors::ErrorKind;
+use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
+use crate::intrinsics::IntrinsicId;
+use crate::token::Span;
 
 /// A function the compiler calls or references directly: a top-level,
 /// imported, external or block-local function, or a dictionary constructor.
@@ -98,6 +102,11 @@ pub(crate) enum Val<'a> {
     },
     /// A dictionary that takes no dictionaries.
     Dict(FnRef),
+    /// A dictionary constructor applied to its dictionaries.
+    DictApp {
+        ctor: FnRef,
+        args: Vec<Val<'a>>,
+    },
     /// A dictionary passed to the enclosing function.
     DictParam(String),
     /// Element `slot` (1-based) of a dictionary tuple: a method.
@@ -117,4 +126,100 @@ pub(crate) enum Val<'a> {
     },
     /// A named handler used as a value. Its lowering is not migrated.
     HandlerRef(String),
+}
+
+/// A computation: only ever the value of a `let` or a tail. So far the
+/// forms an application is built into.
+#[derive(Debug)]
+pub(crate) enum Expr<'a> {
+    Val(Val<'a>),
+    Call(Call<'a>),
+    /// A known function applied to fewer arguments than it takes: a closure
+    /// over the arguments given.
+    Partial {
+        target: FnRef,
+        args: Vec<Val<'a>>,
+        repr: FnRepr,
+        span: Span,
+    },
+    /// An applied operation. Still the operation node and the argument
+    /// expressions: operations are not migrated.
+    Perform {
+        op: &'a ast::Expr,
+        args: Vec<&'a ast::Expr>,
+    },
+    Intrinsic {
+        id: IntrinsicId,
+        args: Vec<Val<'a>>,
+    },
+    /// `panic msg` or `todo ()`: raise the error `kind`, with `message` or
+    /// the kind's own text.
+    Raise {
+        kind: ErrorKind,
+        message: Option<Val<'a>>,
+        span: Span,
+    },
+}
+
+/// The convention of one call: direct, or with the evidence the callee's
+/// row asks for and a return continuation.
+#[derive(Debug, Clone)]
+pub(crate) enum Conv {
+    Direct,
+    Cps(EvidenceAbi),
+}
+
+#[derive(Debug)]
+pub(crate) struct Call<'a> {
+    pub callee: Callee<'a>,
+    pub args: Vec<Val<'a>>,
+    conv: Conv,
+    /// Where the call is written, when the emitted call is annotated with it.
+    pub span: Option<Span>,
+    /// For the fast paths that still match on the AST: the name the
+    /// lowerer's tables know the callee by, and the head expression.
+    pub site: Option<(String, &'a ast::Expr)>,
+}
+
+impl<'a> Call<'a> {
+    /// The only way to make a call, so the convention is always the one the
+    /// callee was classified with. (It is read from the plan's entry for
+    /// now; it will be computed from the callee here.)
+    pub(crate) fn new(callee: Callee<'a>, args: Vec<Val<'a>>, classified: &CallEffectInfo) -> Self {
+        let conv = match classified.cps_call_abi() {
+            Some(abi) => Conv::Cps(abi.evidence.clone().expect("a CPS call has evidence")),
+            None => Conv::Direct,
+        };
+        Call {
+            callee,
+            args,
+            conv,
+            span: None,
+            site: None,
+        }
+    }
+
+    pub(crate) fn conv(&self) -> &Conv {
+        &self.conv
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum Callee<'a> {
+    /// A known function, saturated.
+    Fn(FnRef),
+    /// Method `slot` (1-based) of a dictionary. `known_impl` is the method's
+    /// own function when the dictionary is statically known and the method
+    /// is hoisted. A direct call always has one: without it the method is
+    /// called as the value `Val::DictMethod`.
+    DictMethod {
+        dict: Val<'a>,
+        slot: usize,
+        known_impl: Option<FnRef>,
+    },
+    /// A function value.
+    Value(Val<'a>),
+    /// The function another computation returns: the second half of a named
+    /// function applied to more arguments than it takes.
+    Result(Box<Expr<'a>>),
 }

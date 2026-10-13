@@ -1,6 +1,5 @@
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
 
 impl<'a> Lowerer<'a> {
@@ -72,17 +71,13 @@ impl<'a> Lowerer<'a> {
             } => self.with_continuation_var(k, |this, k| {
                 this.lower_receive(arms, after_clause.as_ref(), k.as_ref())
             }),
+            ExprKind::App { .. } => self.lower_app(expr, k),
             _ => {
                 let Some(k) = k else {
                     return self.lower_expr(expr);
                 };
-                if let Some((head, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
-                    let args: Vec<Expr> = args.into_iter().cloned().collect();
-                    self.lower_effect_call(head.id, op_name, qualifier, &args, Some(k))
-                } else if let Some((name, qualifier)) = self.nullary_operation(expr) {
+                if let Some((name, qualifier)) = self.nullary_operation(expr) {
                     self.lower_effect_call(expr.id, name, qualifier, &[], Some(k))
-                } else if self.expr_is_effectful_call(expr) {
-                    self.lower_effectful_call(expr, Some(k))
                 } else {
                     let value = self.lower_expr(expr);
                     self.apply_return_k_with(Some(k), value)
@@ -108,40 +103,5 @@ impl<'a> Lowerer<'a> {
             }
             k => body(self, k),
         }
-    }
-
-    /// Lower a call the plan classified as effectful, passing `return_k` as
-    /// its return continuation.
-    pub(crate) fn lower_effectful_call(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
-        if let Some((module, func_name, head, args)) =
-            crate::codegen::lower::util::collect_qualified_call(expr)
-            && let Some(call) = self.lower_qualified_call(crate::codegen::lower::QualifiedCallSite {
-                app_id: expr.id,
-                module,
-                func_name,
-                head,
-                args: &args,
-                return_k: return_k.clone(),
-                call_span: Some(&expr.span),
-            })
-        {
-            return call;
-        }
-        if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
-            && let Some(call) =
-                self.lower_resolved_fun_call(crate::codegen::lower::ResolvedCallSite {
-                    app_id: expr.id,
-                    lookup_name: func_name,
-                    emit_name: func_name,
-                    head: head_expr,
-                    args: &args,
-                    return_k: return_k.clone(),
-                    call_span: Some(&expr.span),
-                    fallback_erlang_module: None,
-                })
-        {
-            return call;
-        }
-        self.lower_tagged_value_app(expr, return_k)
     }
 }

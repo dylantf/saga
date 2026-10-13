@@ -50,32 +50,6 @@ pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
     }
 }
 
-/// Bundled inputs to `Lowerer::lower_resolved_fun_call`, gathered to keep its
-/// signature readable as bare and qualified calls share the same consumer.
-/// `lookup_name` indexes `FunInfo`; `emit_name` is the runtime function name.
-pub(super) struct ResolvedCallSite<'a> {
-    pub app_id: NodeId,
-    pub lookup_name: &'a str,
-    pub emit_name: &'a str,
-    pub head: &'a Expr,
-    pub args: &'a [&'a Expr],
-    pub return_k: Option<CExpr>,
-    pub call_span: Option<&'a crate::token::Span>,
-    pub fallback_erlang_module: Option<&'a str>,
-}
-
-/// Bundled inputs to `Lowerer::lower_qualified_call`, gathered to keep its
-/// wrapper call readable. All borrows tie back to the same lowering invocation.
-pub(super) struct QualifiedCallSite<'a> {
-    pub app_id: NodeId,
-    pub module: &'a str,
-    pub func_name: &'a str,
-    pub head: &'a Expr,
-    pub args: &'a [&'a Expr],
-    pub return_k: Option<CExpr>,
-    pub call_span: Option<&'a crate::token::Span>,
-}
-
 #[derive(Clone)]
 pub(crate) struct StaticTailResumeOp {
     arm: HandlerArm,
@@ -256,7 +230,7 @@ pub struct Lowerer<'a> {
     /// Current function being lowered (e.g. "handle_request"). Set per function.
     current_function: String,
     /// Maps module alias -> Erlang module atom (e.g. "List" -> "std_list").
-    /// Used by lower_qualified_call as a fallback for unresolved qualified names.
+    /// The builder's module for a qualified head that has no resolution entry.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
     pub_names: std::collections::HashSet<String>,
@@ -699,16 +673,7 @@ impl<'a> Lowerer<'a> {
         {
             return false;
         }
-        self.planned_call(expr.id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "internal compiler error: the call at offset {} in {}.{} was never classified",
-                    expr.span.start,
-                    self.current_semantic_module_name(),
-                    self.current_function
-                )
-            })
-            .is_cps_call()
+        self.planned(expr).is_cps_call()
     }
 
     fn app_head_and_source_arity(expr: &Expr) -> Option<(&Expr, usize)> {

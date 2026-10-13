@@ -61,7 +61,7 @@ impl Elaborator {
                     //   g  -->  fun (__p0, ..) -> g(dict.., __p0, ..)
                     // Top-level functions don't need this: their under-saturated
                     // call sites are turned into partial-application closures during
-                    // lowering (`lower_resolved_fun_call`).
+                    // lowering (`ir::Expr::Partial`).
                     if matches!(
                         self.resolution.value(node_id),
                         Some(ResolvedValue::Local { .. })

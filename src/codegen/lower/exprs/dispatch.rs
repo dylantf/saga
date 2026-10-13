@@ -226,7 +226,7 @@ impl<'a> Lowerer<'a> {
                 self.lower_val(&val)
             }
 
-            ExprKind::App { .. } => self.lower_app_expr(expr),
+            ExprKind::App { .. } => self.lower_app(expr, None),
 
             ExprKind::BinOp {
                 op, left, right, ..

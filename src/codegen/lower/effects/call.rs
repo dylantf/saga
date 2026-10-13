@@ -72,7 +72,7 @@ impl<'a> Lowerer<'a> {
             // arm receives the callback as a plain value. However, if the op's
             // parameter declares absorbed effects, the lambda always gets its
             // own evidence/continuation params: the handler arm invokes it via
-            // lower_effectful_var_call with the evidence the *handler* chooses
+            // a call of a function value with the evidence the *handler* chooses
             // (it may install its own handler around the call, e.g. a nested
             // `with`), so capturing the caller's in-scope evidence would both
             // mismatch the arm's CPS calling convention and pin the callback

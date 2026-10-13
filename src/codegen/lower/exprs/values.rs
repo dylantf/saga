@@ -22,6 +22,11 @@ impl<'a> Lowerer<'a> {
             Val::Fn { target, repr } | Val::LocalFn { target, repr } => {
                 self.lower_fn_value(target, *repr)
             }
+            Val::DictApp { ctor, args } => {
+                let ctor_var = self.fresh();
+                let ctor_ce = self.lower_fn_value(ctor, FnRepr::Bare);
+                self.apply_lowered(ctor_var, ctor_ce, args)
+            }
             Val::HandlerRef(name) => self
                 .lower_handler_def_to_tuple(name)
                 .expect("a handler reference names a handler definition"),

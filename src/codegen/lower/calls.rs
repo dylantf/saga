@@ -1,24 +1,14 @@
 use crate::ast::{Expr, ExprKind, NodeId};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::ir::{self, Call, Callee, Conv, FnRef, Val};
+use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 
-use super::errors::ErrorKind;
+use super::Lowerer;
 use super::evidence;
-use super::util::{
-    cerl_call, collect_effect_call_expr, collect_fun_call, collect_qualified_call, core_var,
-    lower_string_to_binary,
-};
-use super::{Lowerer, QualifiedCallSite, ResolvedCallSite};
+use super::util::{cerl_call, lower_string_to_binary};
 
 /// Runtime module holding the slow path of [`Lowerer::arity_checked_apply`].
 const ARITY_RUNTIME_MODULE: &str = "saga_runtime";
-
-/// How a CPS call reaches its callee. `Value` applies a runtime function value
-/// (closure, `FunRef`, or var); `Remote` emits a direct `call 'mod':'fun'(...)`
-/// to a known exported function (a cross-module specialized dict method).
-enum CpsCallee {
-    Value(CExpr),
-    Remote { erlang_mod: String, name: String },
-}
 
 /// The arity of a lowered callee that is visibly a fun of fixed arity: a
 /// local function reference, a fun literal, or `erlang:make_fun/3` on a
@@ -37,485 +27,303 @@ fn lowered_fun_arity(callee: &CExpr) -> Option<usize> {
     }
 }
 
-impl CpsCallee {
-    /// Emit the call: apply a value, or a direct remote call to a known fun.
-    fn apply(self, args: Vec<CExpr>) -> CExpr {
-        match self {
-            CpsCallee::Value(f) => CExpr::Apply(Box::new(f), args),
-            CpsCallee::Remote { erlang_mod, name } => CExpr::Call(erlang_mod, name, args),
-        }
-    }
-}
-
-/// How a CPS call passes evidence and reaches its callee.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CpsApplyMode {
-    /// Reframe the caller's evidence into the planned callee ABI and apply
-    /// the callee directly. The only mode without tagged closures.
-    Planned,
-    /// Tagged closures: a known function whose body finds its handlers by
-    /// tag (a hoisted dictionary method). Pass the caller's frame unchanged
-    /// and call directly.
-    DirectTagOnly,
-    /// Tagged closures: a function value of unknown representation. Pass the
-    /// caller's frame unchanged and dispatch on the tag.
-    TaggedValue,
-}
-
-struct RuntimeCpsApplySite<'a> {
-    abi: crate::codegen::runtime_shape::CallableAbi,
-    mode: CpsApplyMode,
-    callee: CpsCallee,
-    args: &'a [&'a Expr],
-    return_k: Option<CExpr>,
-}
-
 impl<'a> Lowerer<'a> {
-    pub(super) fn lower_resolved_fun_call(&mut self, site: ResolvedCallSite<'_>) -> Option<CExpr> {
-        let ResolvedCallSite {
-            app_id,
-            lookup_name,
-            emit_name,
-            head,
-            args,
-            return_k,
-            call_span,
-            fallback_erlang_module,
-        } = site;
-        // Source of truth: the per-call effect map populated pre-lowering.
-        // `info` tells us whether this call is effectful (needs evidence + _ReturnK)
-        // and which effects the callee declares; both used to be recomputed here
-        // from `resolved_effects` + `effect_handler_ops`.
-        let cps_plan = self
-            .planned_call(app_id)
-            .and_then(|info| info.cps_call_abi().cloned());
-        let is_effectful = cps_plan.is_some();
-        let target_evidence = cps_plan
-            .as_ref()
-            .and_then(|abi| abi.evidence.as_ref())
-            .cloned();
-        let total_arity = self
-            .resolved_fun_info(head.id, lookup_name)
-            .map(|info| info.arity());
-        let has_static_call_target = total_arity.is_some()
-            || fallback_erlang_module.is_some()
-            || self.imported_handler_function_source(lookup_name).is_some()
-            || self.current_value_ref(head.id).is_some_and(|value| {
-                matches!(
-                    value,
-                    crate::typechecker::ResolvedValue::Global { lookup_name }
-                        if lookup_name.contains('.')
-                )
-            })
-            || self.resolved.get(&head.id).is_some_and(|resolved| {
-                matches!(
-                    resolved.kind,
-                    super::super::resolve::ResolvedCodegenKind::BeamFunction { .. }
-                        | super::super::resolve::ResolvedCodegenKind::ExternalFunction { .. }
-                )
-            });
-        if !has_static_call_target {
-            return None;
-        }
-        // Effectful callees take `_Evidence` and `_ReturnK`.
-        let extras = if is_effectful { 2 } else { 0 };
-        let call_arity = total_arity.unwrap_or(args.len() + extras);
-
-        if args.len() + extras == call_arity {
-            if is_effectful
-                && let Some(hof_call) = self.try_hof_direct_specialized_call(
-                    lookup_name,
-                    emit_name,
-                    head,
-                    args,
-                    return_k.clone(),
-                )
-            {
-                return Some(hof_call);
-            }
-            if is_effectful
-                && let Some(inlined) =
-                    self.try_inline_static_helper_call(lookup_name, head, args, return_k.clone())
-            {
-                return Some(inlined);
-            }
-            if is_effectful
-                && let Some(variant_call) = self.try_imported_static_helper_variant_call(
-                    lookup_name,
-                    head,
-                    args,
-                    return_k.clone(),
-                )
-            {
-                return Some(variant_call);
-            }
-
-            let (mut arg_vars, mut bindings) = self.lower_call_args(args);
-            if is_effectful {
-                // Effectful callee: thread evidence + _ReturnK.
-                let (ev_var, ev_ce) = self.build_call_evidence_with(
-                    target_evidence
-                        .as_ref()
-                        .expect("effectful call missing target evidence ABI"),
-                );
-                bindings.push((ev_var.clone(), ev_ce));
-                arg_vars.push(ev_var);
-                let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
-                bindings.push((rk_var.clone(), rk_ce));
-                arg_vars.push(rk_var);
-            }
-            let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-            let call = self.emit_call(
-                emit_name,
-                head.id,
-                call_arity,
-                call_args,
-                call_span,
-                fallback_erlang_module,
-            );
-            return Some(self.wrap_let_bindings(bindings, call));
-        }
-
-        if let Some(abi) = self
-            .resolved_fun_info(head.id, lookup_name)
-            .map(|info| info.abi.clone())
-            && abi.evidence.is_some()
-            && args.len() < abi.user_arity
-        {
-            // Partial application of an effectful function: a tagged closure
-            // over the supplied arguments that reframes the evidence it is
-            // eventually called with into the callee's declared layout.
-            let (arg_vars, bindings) = self.lower_call_args(args);
-            let repr = self.fn_repr(&abi, app_id);
-            let value = self.named_function_value(&abi, abi.user_arity - args.len(), repr);
-            let mut call_args: Vec<CExpr> = arg_vars.into_iter().map(CExpr::Var).collect();
-            call_args.extend(value.call_args.iter().cloned());
-            let call = self.emit_call(
-                emit_name,
-                head.id,
-                abi.expanded_arity(),
-                call_args,
-                call_span,
-                fallback_erlang_module,
-            );
-            return Some(self.wrap_let_bindings(bindings, value.finish(call)));
-        }
-
-        if let Some(arity) = total_arity {
-            let user_slots = arity.saturating_sub(extras);
-            if args.len() < user_slots {
-                let remaining_user = user_slots - args.len();
-                let (arg_vars, bindings) = self.lower_call_args(args);
-                let mut params: Vec<String> = Vec::new();
-                for _ in 0..remaining_user {
-                    params.push(self.fresh());
-                }
-                let mut call_args: Vec<CExpr> =
-                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-                call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
-                if is_effectful {
-                    // Closure takes `_Evidence` and `_ReturnK` for the
-                    // residual user args; the call forwards them straight
-                    // through.
-                    let ev = "_Evidence".to_string();
-                    params.push(ev.clone());
-                    call_args.push(CExpr::Var(ev));
-                    let rk = "_ReturnK".to_string();
-                    params.push(rk.clone());
-                    call_args.push(CExpr::Var(rk));
-                }
-                let call = self.emit_call(
-                    emit_name,
-                    head.id,
-                    arity,
-                    call_args,
-                    call_span,
-                    fallback_erlang_module,
-                );
-                let lambda = CExpr::Fun(params, Box::new(call));
-                return Some(self.wrap_let_bindings(bindings, lambda));
-            }
-        }
-
-        None
+    /// Lower an application: build it, then lower the node. With `k`, its
+    /// value is passed to that continuation; a CPS call or a perform takes
+    /// `k` as its own.
+    pub(super) fn lower_app(&mut self, expr: &Expr, k: Option<CExpr>) -> CExpr {
+        let built = self.build_app(expr);
+        self.lower_built(&built, k)
     }
 
-    /// Lower a call to an already-materialized runtime CPS callable value.
-    ///
-    /// The call shape still comes from `CallEffectInfo::cps_call_abi()`;
-    /// callers supply only the callee expression. Arguments are plain
-    /// values: effect normalization has moved anything else into a `let`.
-    fn lower_runtime_cps_apply(&mut self, site: RuntimeCpsApplySite<'_>) -> CExpr {
-        let RuntimeCpsApplySite {
-            abi,
-            mode,
-            callee,
-            args,
-            return_k,
-        } = site;
-        let evidence_abi = abi.evidence.expect("CPS call plan missing evidence ABI");
-        let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
-        let mut bindings: Vec<(String, CExpr)> = Vec::new();
-        for arg in args {
-            let v = self.fresh();
-            let _ = self.operand(arg, "an effectful call");
-            let ce = self
-                .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr(arg));
-            arg_vars.push(v.clone());
-            bindings.push((v, ce));
+    fn lower_built(&mut self, built: &ir::Expr<'_>, k: Option<CExpr>) -> CExpr {
+        let value = match built {
+            ir::Expr::Call(call) => return self.lower_call(call, k),
+            ir::Expr::Perform { op, args } => {
+                let ExprKind::EffectCall {
+                    name, qualifier, ..
+                } = &op.kind
+                else {
+                    unreachable!("a perform is built from an operation");
+                };
+                let args: Vec<Expr> = args.iter().map(|arg| (*arg).clone()).collect();
+                return self.lower_effect_call(op.id, name, qualifier.as_deref(), &args, k);
+            }
+            ir::Expr::Val(val) => self.lower_val(val),
+            ir::Expr::Partial {
+                target,
+                args,
+                repr,
+                span,
+            } => {
+                let (arg_vars, bindings) = self.lower_call_args(args);
+                let remaining = target.abi.user_arity - args.len();
+                let value = self.named_function_value(&target.abi, remaining, *repr);
+                let mut call_args: Vec<CExpr> = arg_vars.into_iter().map(CExpr::Var).collect();
+                call_args.extend(value.call_args.iter().cloned());
+                let call = self.annotate(Self::call_fn(target, call_args), Some(span));
+                self.wrap_let_bindings(bindings, value.finish(call))
+            }
+            ir::Expr::Intrinsic { id, args } => self.lower_intrinsic(*id, args),
+            ir::Expr::Raise {
+                kind,
+                message,
+                span,
+            } => {
+                let v = self.fresh();
+                let message = match message {
+                    Some(message) => self.lower_val(message),
+                    None => lower_string_to_binary("not implemented"),
+                };
+                let error = self.make_error(*kind, CExpr::Var(v.clone()), Some(span));
+                CExpr::Let(v, Box::new(message), Box::new(error))
+            }
+        };
+        self.apply_return_k_with(k, value)
+    }
+
+    /// The one lowering of a call. A direct call is evaluated and its value
+    /// passed to `k`; a CPS call takes evidence and `k` (the identity when
+    /// there is none).
+    fn lower_call(&mut self, call: &Call<'_>, k: Option<CExpr>) -> CExpr {
+        let args = &call.args;
+        match (&call.callee, call.conv()) {
+            (Callee::Fn(target), Conv::Direct) => {
+                let (arg_vars, bindings) = self.lower_call_args(args);
+                let call_args = arg_vars.into_iter().map(CExpr::Var).collect();
+                let direct = self.annotate(Self::call_fn(target, call_args), call.span.as_ref());
+                let value = self.wrap_let_bindings(bindings, direct);
+                self.apply_return_k_with(k, value)
+            }
+            (Callee::Fn(target), Conv::Cps(evidence)) => {
+                if let Some(fast) = self.try_call_fast_paths(call, &k) {
+                    return fast;
+                }
+                let (vars, bindings) = self.cps_call_args(args, Some(evidence), k);
+                let call_args = vars.into_iter().map(CExpr::Var).collect();
+                let direct = self.annotate(Self::call_fn(target, call_args), call.span.as_ref());
+                self.wrap_let_bindings(bindings, direct)
+            }
+            // A hoisted method of a statically known impl finds its
+            // handlers by tag: it takes the caller's frame unchanged.
+            (
+                Callee::DictMethod {
+                    known_impl: Some(method),
+                    ..
+                },
+                Conv::Cps(_),
+            ) => {
+                let (vars, bindings) = self.cps_call_args(args, None, k);
+                let call_args = vars.into_iter().map(CExpr::Var).collect();
+                self.wrap_let_bindings(bindings, Self::call_fn(method, call_args))
+            }
+            (
+                Callee::DictMethod {
+                    known_impl: Some(method),
+                    ..
+                },
+                Conv::Direct,
+            ) => {
+                let call_args = args.iter().map(|arg| self.lower_val(arg)).collect();
+                self.apply_return_k_with(k, Self::call_fn(method, call_args))
+            }
+            (
+                Callee::DictMethod {
+                    dict,
+                    slot,
+                    known_impl: None,
+                },
+                Conv::Cps(_),
+            ) => {
+                let dict_var = self.fresh();
+                let dict_ce = self.lower_val(dict);
+                let method_var = self.fresh();
+                let index = CExpr::Lit(CLit::Int(*slot as i64));
+                let method = cerl_call(
+                    "erlang",
+                    "element",
+                    vec![index, CExpr::Var(dict_var.clone())],
+                );
+                let body = self.tagged_call(&method_var, args, k);
+                let body = CExpr::Let(method_var, Box::new(method), Box::new(body));
+                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body))
+            }
+            (Callee::DictMethod { .. }, Conv::Direct) => {
+                unreachable!("a direct method call without a known impl is a call of a value")
+            }
+            (Callee::Value(func), Conv::Direct) => {
+                let value = match self.try_hof_value_call(func, args, None) {
+                    Some(fast) => fast,
+                    None => {
+                        let func_var = self.fresh();
+                        let func_ce = self.lower_val(func);
+                        self.apply_lowered(func_var, func_ce, args)
+                    }
+                };
+                self.apply_return_k_with(k, value)
+            }
+            (Callee::Value(func), Conv::Cps(_)) => {
+                if let Some(fast) = self.try_hof_value_call(func, args, k.clone()) {
+                    return fast;
+                }
+                let func_ce = self.lower_val(func);
+                let func_var = self.fresh();
+                let body = self.tagged_call(&func_var, args, k);
+                CExpr::Let(func_var, Box::new(func_ce), Box::new(body))
+            }
+            (Callee::Result(first), conv) => {
+                let first_cps = match first.as_ref() {
+                    ir::Expr::Call(first) => matches!(first.conv(), Conv::Cps(_)),
+                    _ => false,
+                };
+                // `k` belongs to the pair when either half is a CPS call;
+                // otherwise the pair is a value, which `k` is applied to.
+                let (inner_k, outer_k) = match conv {
+                    Conv::Direct if !first_cps => (None, k),
+                    _ => (k, None),
+                };
+                let func_var = self.fresh();
+                let body = match conv {
+                    Conv::Cps(_) => self.tagged_call(&func_var, args, inner_k),
+                    Conv::Direct => {
+                        let (arg_vars, bindings) = self.lower_call_args(args);
+                        let call = Self::arity_checked_apply(&func_var, &arg_vars);
+                        let call = self.apply_return_k_with(inner_k, call);
+                        self.wrap_let_bindings(bindings, call)
+                    }
+                };
+                // The rest is lowered first: it is the continuation of a
+                // first half that is a CPS call.
+                let pair = if first_cps {
+                    let first_k = CExpr::Fun(vec![func_var], Box::new(body));
+                    self.lower_built(first, Some(first_k))
+                } else {
+                    let first_ce = self.lower_built(first, None);
+                    CExpr::Let(func_var, Box::new(first_ce), Box::new(body))
+                };
+                self.apply_return_k_with(outer_k, pair)
+            }
         }
-        let (ev_var, ev_ce) = self.cps_apply_evidence(mode, &evidence_abi);
-        bindings.push((ev_var.clone(), ev_ce));
-        let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
-        bindings.push((rk_var.clone(), rk_ce));
-        let call = self.emit_cps_callee_call(callee, mode, &arg_vars, &ev_var, &rk_var);
+    }
+
+    /// The fast paths for a saturated CPS call of a known function. They
+    /// still match on the AST.
+    fn try_call_fast_paths(&mut self, call: &Call<'_>, k: &Option<CExpr>) -> Option<CExpr> {
+        let (lookup, head) = call.site.as_ref()?;
+        let args = Self::ast_args(&call.args);
+        self.try_hof_direct_specialized_call(lookup, head, &args, k.clone())
+            .or_else(|| self.try_inline_static_helper_call(lookup, head, &args, k.clone()))
+            .or_else(|| {
+                self.try_imported_static_helper_variant_call(lookup, head, &args, k.clone())
+            })
+    }
+
+    /// The fast path for a call through a variable bound to a function that
+    /// has a direct-callback variant. It still matches on the AST.
+    fn try_hof_value_call(
+        &mut self,
+        func: &Val<'_>,
+        args: &[Val<'_>],
+        k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let Val::Ast(Expr {
+            kind: ExprKind::Var { name },
+            ..
+        }) = func
+        else {
+            return None;
+        };
+        self.try_hof_direct_specialized_value_call(name, &Self::ast_args(args), k)
+    }
+
+    /// The argument expressions of a call, for the fast paths.
+    fn ast_args<'e>(args: &[Val<'e>]) -> Vec<&'e Expr> {
+        args.iter()
+            .map(|arg| match arg {
+                Val::Ast(expr) => *expr,
+                built => unreachable!("fast paths match on the AST, not on {built:?}"),
+            })
+            .collect()
+    }
+
+    /// The arguments of a CPS call, each bound to a variable: the user
+    /// arguments, the evidence, the return continuation (the identity when
+    /// there is no `k`). The evidence is the caller's frame reframed into
+    /// `evidence`, or, with `None`, passed unchanged (the callee finds its
+    /// handlers by tag).
+    fn cps_call_args(
+        &mut self,
+        args: &[Val<'_>],
+        evidence: Option<&EvidenceAbi>,
+        k: Option<CExpr>,
+    ) -> (Vec<String>, Vec<(String, CExpr)>) {
+        let (mut vars, mut bindings) = self.lower_call_args(args);
+        let (ev_var, ev_ce) = match evidence {
+            Some(evidence) => self.build_call_evidence_with(evidence),
+            None => self.current_frame_binding(),
+        };
+        let rk_var = self.fresh();
+        let rk_ce = k.unwrap_or_else(|| {
+            let p = self.fresh();
+            CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
+        });
+        bindings.extend([(ev_var.clone(), ev_ce), (rk_var.clone(), rk_ce)]);
+        vars.extend([ev_var, rk_var]);
+        (vars, bindings)
+    }
+
+    /// A CPS call of the function value bound to `func_var`, whose
+    /// representation is not known: dispatch on the tag.
+    fn tagged_call(&mut self, func_var: &str, args: &[Val<'_>], k: Option<CExpr>) -> CExpr {
+        let (vars, bindings) = self.cps_call_args(args, None, k);
+        let (user, rest) = vars.split_at(args.len());
+        let func = self.fresh();
+        let call = self.tagged_cps_apply(&func, user, &rest[0], &rest[1]);
+        let func_ce = CExpr::Var(func_var.to_string());
+        self.wrap_let_bindings(
+            bindings,
+            CExpr::Let(func, Box::new(func_ce), Box::new(call)),
+        )
+    }
+
+    /// Apply the function value `func_ce` (to be bound to `func_var`) at a
+    /// pure type: a plain `apply` when it visibly lowers to a fun of the
+    /// arguments' number, the arity-checked call otherwise.
+    pub(super) fn apply_lowered(
+        &mut self,
+        func_var: String,
+        func_ce: CExpr,
+        args: &[Val<'_>],
+    ) -> CExpr {
+        let (arg_vars, mut bindings) = self.lower_call_args(args);
+        let call = if lowered_fun_arity(&func_ce) == Some(arg_vars.len()) {
+            let args = arg_vars.into_iter().map(CExpr::Var).collect();
+            CExpr::Apply(Box::new(CExpr::Var(func_var.clone())), args)
+        } else {
+            Self::arity_checked_apply(&func_var, &arg_vars)
+        };
+        bindings.insert(0, (func_var, func_ce));
         self.wrap_let_bindings(bindings, call)
     }
 
-    fn cps_apply_evidence(
-        &mut self,
-        mode: CpsApplyMode,
-        planned: &crate::codegen::runtime_shape::EvidenceAbi,
-    ) -> (String, CExpr) {
-        match mode {
-            CpsApplyMode::Planned => self.build_call_evidence_with(planned),
-            CpsApplyMode::DirectTagOnly | CpsApplyMode::TaggedValue => self.current_frame_binding(),
-        }
-    }
-
-    fn emit_cps_callee_call(
-        &mut self,
-        callee: CpsCallee,
-        mode: CpsApplyMode,
-        user_arg_vars: &[String],
-        ev_var: &str,
-        rk_var: &str,
-    ) -> CExpr {
-        match (mode, callee) {
-            (CpsApplyMode::TaggedValue, CpsCallee::Value(func)) => {
-                let func_var = self.fresh();
-                let call = self.tagged_cps_apply(&func_var, user_arg_vars, ev_var, rk_var);
-                CExpr::Let(func_var, Box::new(func), Box::new(call))
-            }
-            (_, callee) => {
-                let mut call_args: Vec<CExpr> =
-                    user_arg_vars.iter().cloned().map(CExpr::Var).collect();
-                call_args.push(CExpr::Var(ev_var.to_string()));
-                call_args.push(CExpr::Var(rk_var.to_string()));
-                callee.apply(call_args)
-            }
-        }
-    }
-
-    /// Lower an application that the known-function paths
-    /// did not take: a call through a function value, or a named function
-    /// applied to more arguments than it takes. `return_k` is only supplied
-    /// for an application classified as effectful.
-    pub(super) fn lower_tagged_value_app(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
-        let mut head = expr;
-        let mut args: Vec<&Expr> = Vec::new();
-        while let ExprKind::App { func, arg, .. } = &head.kind {
-            args.push(arg.as_ref());
-            head = func.as_ref();
-        }
-        args.reverse();
-
-        if let Some(abi) = self.known_named_callee(head)
-            && abi.user_arity < args.len()
-        {
-            return self.lower_over_applied_named_call(expr, abi.user_arity, &args, return_k);
-        }
-
-        if !self.expr_is_effectful_call(expr) {
-            if let Some((dict, trait_name, method_index, dm_args)) =
-                super::util::collect_dict_method_call(expr)
-                && let Some(callee) = self.specialized_dict_method_callee(
-                    expr.id,
-                    dict,
-                    trait_name,
-                    method_index,
-                    dm_args.len(),
-                    false,
-                )
-            {
-                let arg_ces: Vec<CExpr> =
-                    dm_args.iter().map(|a| self.lower_expr(a)).collect();
-                let call = callee.apply(arg_ces);
-                return self.apply_return_k_with(return_k, call);
-            }
-            let call = self.lower_generic_apply(head, &args);
-            return self.apply_return_k_with(return_k, call);
-        }
-
-        if let Some((dict, trait_name, method_index, dm_args)) =
-            super::util::collect_dict_method_call(expr)
-            && let Some(call) = self.lower_dict_method_call(
-                expr.id,
-                dict,
-                trait_name,
-                method_index,
-                &dm_args,
-                return_k.clone(),
-            )
-        {
-            return call;
-        }
-        if let ExprKind::Var { name, .. } = &head.kind {
-            if let Some(call) =
-                self.try_hof_direct_specialized_value_call(name, &args, return_k.clone())
-            {
-                return call;
-            }
-            if self.imported_handler_function_source(name).is_some()
-                && let Some(call) =
-                    self.lower_effectful_var_call(expr.id, name, &args, return_k.clone())
-            {
-                return call;
-            }
-        }
-        let plan = self
-            .planned_call(expr.id)
-            .and_then(|info| info.cps_call_abi().cloned())
-            .expect("effectful call is missing its CPS plan");
-        let _ = self.operand(head, "an effectful call");
-        let func_ce = self.lower_expr(head);
-        let func_var = self.fresh();
-        let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            abi: plan,
-            mode: CpsApplyMode::TaggedValue,
-            callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
-            args: &args,
-            return_k,
-        });
-        CExpr::Let(func_var, Box::new(func_ce), Box::new(body))
-    }
-
-    /// Tagged closures: `f a b c` where the named function `f` takes fewer
-    /// arguments. The saturated call `f a` runs first (in CPS when `f` is
-    /// effectful) and its result, a function value, is applied to the rest
-    /// according to the result's own type.
-    fn lower_over_applied_named_call(
-        &mut self,
-        expr: &Expr,
-        user_arity: usize,
-        args: &[&Expr],
-        return_k: Option<CExpr>,
-    ) -> CExpr {
-        let mut inner = expr;
-        for _ in user_arity..args.len() {
-            let ExprKind::App { func, .. } = &inner.kind else {
-                unreachable!("over-applied call is shorter than its argument list");
-            };
-            inner = func.as_ref();
-        }
-        let rest = &args[user_arity..];
-        let rest_is_cps = self
-            .value_type(inner.id)
-            .is_some_and(|ty| super::tagged::consumed_arrows_effectful(&ty, rest.len()));
-        let func_var = self.fresh();
-        let body = if rest_is_cps {
-            self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-                abi: crate::codegen::runtime_shape::CallableAbi::cps(
-                    rest.len(),
-                    super::tagged::tag_only_abi(),
-                ),
-                mode: CpsApplyMode::TaggedValue,
-                callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
-                args: rest,
-                return_k,
-            })
-        } else {
-            let (arg_vars, bindings) = self.lower_call_args(rest);
-            let call = Self::arity_checked_apply(&func_var, &arg_vars);
-            let call = self.apply_return_k_with(return_k, call);
-            self.wrap_let_bindings(bindings, call)
-        };
-        if self.expr_is_effectful_call(inner) {
-            let inner_k = CExpr::Fun(vec![func_var], Box::new(body));
-            self.lower_effectful_call(inner, Some(inner_k))
-        } else {
-            let inner_ce = self.lower_expr(inner);
-            CExpr::Let(func_var, Box::new(inner_ce), Box::new(body))
-        }
-    }
-
-    /// Lower a call to a runtime closure value bound to a local variable
-    /// whose type carries effects (e.g. `let g = factory(); g x`). See
-    /// [`Self::lower_resolved_fun_call`] for the resolved-fun counterpart
-    /// and the rationale for keeping the two paths separate.
-    pub(super) fn lower_effectful_var_call(
-        &mut self,
-        app_id: NodeId,
-        var_name: &str,
-        args: &[&Expr],
-        return_k: Option<CExpr>,
-    ) -> Option<CExpr> {
-        if let Some(hof_call) =
-            self.try_hof_direct_specialized_value_call(var_name, args, return_k.clone())
-        {
-            return Some(hof_call);
-        }
-        // Source of truth: the per-call effect map, keyed by this App's NodeId.
-        //
-        // `is_row_forward` distinguishes two effectful shapes:
-        //   - `StaticOps`: callee asks for a specific set of effects. Caller
-        //     projects its evidence to that set.
-        //   - `RowForwarded`: callee is row-polymorphic (e.g. an open-row
-        //     callback param). Caller forwards its full ambient evidence
-        //     without narrowing — including when `static_ops` is empty, which
-        //     is the open-row-only case (`f: Unit -> Unit needs {..e}`).
-        let plan = self
-            .planned_call(app_id)
-            .and_then(|info| info.cps_call_abi().cloned())?;
-        let callee = if let Some(source_module) = self.imported_handler_function_source(var_name) {
-            CpsCallee::Remote {
-                erlang_mod: Self::module_name_to_erlang(source_module),
-                name: var_name.rsplit('.').next().unwrap_or(var_name).to_string(),
-            }
-        } else {
-            CpsCallee::Value(CExpr::Var(core_var(var_name)))
-        };
-        let mode = match &callee {
-            CpsCallee::Value(_) => CpsApplyMode::TaggedValue,
-            CpsCallee::Remote { .. } => CpsApplyMode::Planned,
-        };
-        Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            abi: plan,
-            mode,
-            callee,
-            args,
-            return_k,
-        }))
-    }
-
     /// If the trait method call at `app_id` dispatches on a statically-known
-    /// impl whose method is hoisted to a top-level function, return a direct
-    /// callee — a local `FunRef` (Phase 2) or a cross-module `call` (Phase 3) —
-    /// and record the specialization. Returns `None` (and records the fallback
-    /// reason) when the site stays on the normal `element/2` dispatch. This only
-    /// chooses the callee; argument/evidence/return-continuation threading is
-    /// unchanged. `supplied` is the user-arg count and `cps` the call-site ABI.
-    fn specialized_dict_method_callee(
+    /// impl whose method is hoisted to a top-level function, that function —
+    /// local (Phase 2) or of another module (Phase 3) — with the call's
+    /// convention `abi`; the specialization is recorded. `None` (and the
+    /// fallback reason is recorded) when the site stays on the normal
+    /// `element/2` dispatch.
+    pub(super) fn specialized_dict_method(
         &mut self,
         app_id: NodeId,
         dict: &Expr,
         trait_name: &str,
         method_index: usize,
-        supplied: usize,
-        cps: bool,
-    ) -> Option<CpsCallee> {
-        match self.classify_dict_specialization(
-            app_id,
-            dict,
-            trait_name,
-            method_index,
-            supplied,
-            cps,
-        )? {
-            Ok(callee) => {
+        abi: CallableAbi,
+    ) -> Option<FnRef> {
+        match self.classify_dict_specialization(app_id, dict, trait_name, method_index, abi)? {
+            Ok(method) => {
                 self.trait_spec_stats.record_specialized(app_id);
-                Some(callee)
+                Some(method)
             }
             Err(reason) => {
                 self.trait_spec_stats.record_fallback(app_id, reason);
@@ -533,10 +341,10 @@ impl<'a> Lowerer<'a> {
         dict: &Expr,
         trait_name: &str,
         method_index: usize,
-        supplied: usize,
-        cps: bool,
-    ) -> Option<Result<CpsCallee, super::trait_spec_stats::FallbackReason>> {
+        abi: CallableAbi,
+    ) -> Option<Result<FnRef, super::trait_spec_stats::FallbackReason>> {
         use super::trait_spec_stats::FallbackReason;
+        let (supplied, cps) = (abi.user_arity, abi.evidence.is_some());
 
         let (dict_constructor, sub_dicts_empty) =
             match self.optimization.dict_dispatch.get(&app_id)? {
@@ -566,11 +374,11 @@ impl<'a> Lowerer<'a> {
             if hoist.is_cps != cps {
                 Err(FallbackReason::AbiMismatch)
             } else {
-                let arity = supplied + if cps { 2 } else { 0 };
-                Ok(CpsCallee::Value(CExpr::FunRef(
-                    hoist.fn_name.clone(),
-                    arity,
-                )))
+                Ok(FnRef {
+                    module: None,
+                    name: hoist.fn_name.clone(),
+                    abi,
+                })
             }
         } else if self.external_dict_constructor_arity(&dict_constructor) == Some(0)
             && let Some(erlang_mod) = self.imported_dict_erlang_mod(dict)
@@ -580,7 +388,11 @@ impl<'a> Lowerer<'a> {
             // and the call's CPS shape derives from the same impl-effect data as
             // the producer's, so the remote function's arity matches.
             let name = format!("__saga_dictmethod_{dict_constructor}_{method_index}");
-            Ok(CpsCallee::Remote { erlang_mod, name })
+            Ok(FnRef {
+                module: Some(erlang_mod),
+                name,
+                abi,
+            })
         } else {
             // Known impl on a dict we cannot resolve to a module — leave it on
             // the dict-passing path rather than emit an unresolved call.
@@ -680,69 +492,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a saturated effectful call whose head is a `DictMethodAccess`
-    /// (post-elaboration shape of a trait method call). Returns `None` when
-    /// the per-call effect map says the call is pure — caller falls through
-    /// to the regular non-effectful path which extracts the method via
-    /// `erlang:element` and applies it without evidence threading.
-    pub(super) fn lower_dict_method_call(
-        &mut self,
-        app_id: NodeId,
-        dict: &Expr,
-        trait_name: &str,
-        method_index: usize,
-        args: &[&Expr],
-        return_k: Option<CExpr>,
-    ) -> Option<CExpr> {
-        let plan = self
-            .planned_call(app_id)
-            .and_then(|info| info.cps_call_abi().cloned())?;
-
-        // Statically-known impl with a hoisted method — call it directly,
-        // skipping the dict tuple build and `element/2`: a local `FunRef`
-        // (Phase 2) or a cross-module call (Phase 3). Only the callee changes;
-        // evidence/return-continuation threading is unchanged.
-        if let Some(callee) = self.specialized_dict_method_callee(
-            app_id,
-            dict,
-            trait_name,
-            method_index,
-            args.len(),
-            true,
-        ) {
-            return Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-                abi: plan,
-                mode: CpsApplyMode::DirectTagOnly,
-                callee,
-                args,
-                return_k,
-            }));
-        }
-
-        let dict_var = self.fresh();
-        let dict_ce = self.lower_expr(dict);
-        let method_var = self.fresh();
-        let tuple_index = self.trait_method_tuple_index(trait_name, method_index);
-        let extract = cerl_call(
-            "erlang",
-            "element",
-            vec![
-                CExpr::Lit(CLit::Int(tuple_index as i64 + 1)),
-                CExpr::Var(dict_var.clone()),
-            ],
-        );
-
-        let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
-            abi: plan,
-            mode: CpsApplyMode::TaggedValue,
-            callee: CpsCallee::Value(CExpr::Var(method_var.clone())),
-            args,
-            return_k,
-        });
-        let body = CExpr::Let(method_var, Box::new(extract), Box::new(body));
-        Some(CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body)))
-    }
-
     /// Apply the already-lowered function value `func_ce` to
     /// already-evaluated arguments at a pure-typed call site: a plain `apply`
     /// when its arity is statically known to equal the argument count, the
@@ -765,25 +514,6 @@ impl<'a> Lowerer<'a> {
         // A named effectful function is not a bare fun as a value, so only
         // the lowered shape proves the arity.
         lowered_fun_arity(func_ce) == Some(supplied)
-    }
-
-    fn lower_generic_apply(&mut self, callee: &Expr, args: &[&Expr]) -> CExpr {
-        // The callee is a function value: its arity is only known when it
-        // visibly lowers to a bare fun.
-        let func_var = self.fresh();
-        let func_ce = self.lower_expr(callee);
-        let (arg_vars, mut bindings) = self.lower_call_args(args);
-        let exact_arity = lowered_fun_arity(&func_ce) == Some(arg_vars.len());
-        bindings.insert(0, (func_var.clone(), func_ce));
-        let call = if exact_arity {
-            CExpr::Apply(
-                Box::new(CExpr::Var(func_var)),
-                arg_vars.into_iter().map(CExpr::Var).collect(),
-            )
-        } else {
-            Self::arity_checked_apply(&func_var, &arg_vars)
-        };
-        self.wrap_let_bindings(bindings, call)
     }
 
     /// Apply a function value whose arity is not statically known (decision D1
@@ -841,272 +571,6 @@ impl<'a> Lowerer<'a> {
                 },
             ],
         )
-    }
-
-    pub(super) fn lower_app_expr(&mut self, expr: &Expr) -> CExpr {
-        if matches!(expr.kind, ExprKind::App { .. })
-            && let Some(ctor) = self.build_ctor_app(expr)
-        {
-            return self.lower_val(&ctor);
-        }
-
-        if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
-            return self.lower_effect_call(
-                head_expr.id,
-                op_name,
-                qualifier,
-                &args.into_iter().cloned().collect::<Vec<_>>(),
-                None,
-            );
-        }
-
-        let qualified_call = collect_qualified_call(expr);
-        if let Some((module, func_name, head, args)) = qualified_call {
-            if let Some(resolved) = self.resolved.get(&head.id)
-                && let super::super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } =
-                    &resolved.kind
-                && let Some(ce) = self.lower_intrinsic(*id, &args)
-            {
-                return ce;
-            }
-            if self.resolved.contains_key(&head.id) {
-                if let Some(call) = self.lower_qualified_call(QualifiedCallSite {
-                    app_id: expr.id,
-                    module,
-                    func_name,
-                    head,
-                    args: &args,
-                    return_k: None,
-                    call_span: Some(&expr.span),
-                }) {
-                    return call;
-                }
-                return self.lower_tagged_value_app(expr, None);
-            }
-            if let Some(call) = self.lower_qualified_call(QualifiedCallSite {
-                app_id: expr.id,
-                module,
-                func_name,
-                head,
-                args: &args,
-                return_k: None,
-                call_span: Some(&expr.span),
-            }) {
-                return call;
-            }
-        }
-
-        let fun_call = collect_fun_call(expr);
-        if let Some((_func_name, head, args)) = fun_call.as_ref()
-            && let Some(resolved) = self.resolved.get(&head.id)
-            && let super::super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } = &resolved.kind
-            && let Some(ce) = self.lower_intrinsic(*id, args)
-        {
-            return ce;
-        }
-
-        if let Some((func_name, _head, args)) = fun_call.as_ref()
-            && (*func_name == "panic" || *func_name == "todo")
-            && args.len() == 1
-        {
-            let v = self.fresh();
-            let (kind, arg) = if *func_name == "todo" {
-                (ErrorKind::Todo, lower_string_to_binary("not implemented"))
-            } else {
-                (ErrorKind::Panic, self.lower_expr(args[0]))
-            };
-            let error = self.make_error(kind, CExpr::Var(v.clone()), Some(&expr.span));
-            return CExpr::Let(v, Box::new(arg), Box::new(error));
-        }
-
-        if let Some((func_name, head_expr, args)) = fun_call.as_ref()
-            && self.resolved.contains_key(&head_expr.id)
-            && let Some(call) = self.lower_resolved_fun_call(ResolvedCallSite {
-                app_id: expr.id,
-                lookup_name: func_name,
-                emit_name: func_name,
-                head: head_expr,
-                args,
-                return_k: None,
-                call_span: Some(&expr.span),
-                fallback_erlang_module: None,
-            })
-        {
-            return call;
-        }
-
-        // Imported static handler arms may contain calls to private helpers
-        // from their defining module. Those nodes can be freshened during
-        // elaboration and therefore absent from the consumer's backend
-        // resolution map. Emit a direct call to the recovered origin module.
-        if let Some((func_name, head_expr, args)) = fun_call.as_ref()
-            && let Some(source_module) = self.imported_handler_function_source(func_name)
-        {
-            let erlang_module = Self::module_name_to_erlang(source_module);
-            let lookup_name = format!("{source_module}.{func_name}");
-            if let Some(call) = self.lower_resolved_fun_call(ResolvedCallSite {
-                app_id: expr.id,
-                lookup_name: &lookup_name,
-                emit_name: func_name,
-                head: head_expr,
-                args,
-                return_k: None,
-                call_span: Some(&expr.span),
-                fallback_erlang_module: Some(&erlang_module),
-            }) {
-                return call;
-            }
-        }
-
-        if let Some((var_name, _head, args)) = fun_call.as_ref()
-            && let Some(call) = self.try_hof_direct_specialized_value_call(var_name, args, None)
-        {
-            return call;
-        }
-
-        self.lower_tagged_value_app(expr, None)
-    }
-
-    /// Lower a qualified function call like `Math.abs x` to `call 'math':'abs'(X)`.
-    /// For effectful imported functions, handler params and _ReturnK are threaded.
-    pub(super) fn lower_qualified_call(&mut self, site: QualifiedCallSite<'_>) -> Option<CExpr> {
-        let QualifiedCallSite {
-            app_id,
-            module,
-            func_name,
-            head,
-            args,
-            return_k,
-            call_span,
-        } = site;
-        let erlang_module = self
-            .module_aliases
-            .get(module)
-            .cloned()
-            .unwrap_or_else(|| module.to_lowercase());
-
-        let qualified = format!("{}.{}", module, func_name);
-        self.lower_resolved_fun_call(ResolvedCallSite {
-            app_id,
-            lookup_name: &qualified,
-            emit_name: func_name,
-            head,
-            args,
-            return_k,
-            call_span,
-            fallback_erlang_module: Some(erlang_module.as_str()),
-        })
-    }
-    fn lower_local_fun_call(
-        &self,
-        name: &str,
-        arity: usize,
-        call_args: Vec<CExpr>,
-        source_module: Option<&str>,
-    ) -> CExpr {
-        if let Some(source_module) =
-            source_module.filter(|source| *source != self.current_source_module)
-        {
-            let (erlang_mod, target_name) = self
-                .imported_handler_external_target(source_module, name, arity)
-                .unwrap_or_else(|| (Self::module_name_to_erlang(source_module), name.to_string()));
-            CExpr::Call(erlang_mod, target_name, call_args)
-        } else {
-            CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), arity)), call_args)
-        }
-    }
-
-    /// Emit a function call using the resolution map.
-    fn emit_call(
-        &self,
-        func_name: &str,
-        head_node_id: crate::ast::NodeId,
-        arity: usize,
-        call_args: Vec<CExpr>,
-        span: Option<&crate::token::Span>,
-        fallback_erlang_module: Option<&str>,
-    ) -> CExpr {
-        let call = match self.resolved.get(&head_node_id) {
-            Some(resolved) => match &resolved.kind {
-                super::super::resolve::ResolvedCodegenKind::BeamFunction {
-                    erlang_mod: Some(erlang_mod),
-                    name,
-                    ..
-                } => CExpr::Call(erlang_mod.clone(), name.clone(), call_args),
-                super::super::resolve::ResolvedCodegenKind::ExternalFunction {
-                    erlang_mod,
-                    name,
-                    target_erlang_mod,
-                    target_name,
-                    ..
-                } if resolved.source_module.as_deref() != Some(&self.current_source_module) => {
-                    if self.current_handler_source_module.as_deref()
-                        == resolved.source_module.as_deref()
-                    {
-                        CExpr::Call(target_erlang_mod.clone(), target_name.clone(), call_args)
-                    } else {
-                        CExpr::Call(erlang_mod.clone(), name.clone(), call_args)
-                    }
-                }
-                super::super::resolve::ResolvedCodegenKind::ExternalFunction { name, .. } => self
-                    .lower_local_fun_call(
-                        name,
-                        arity,
-                        call_args,
-                        resolved.source_module.as_deref(),
-                    ),
-                super::super::resolve::ResolvedCodegenKind::BeamFunction { name, .. } => self
-                    .lower_local_fun_call(
-                        name,
-                        arity,
-                        call_args,
-                        resolved.source_module.as_deref(),
-                    ),
-                super::super::resolve::ResolvedCodegenKind::Intrinsic { .. } => {
-                    // Intrinsics are intercepted by `lower_intrinsic` at the
-                    // qualified/bare-call dispatch sites above. This arm exists
-                    // so the match is exhaustive.
-                    debug_assert!(
-                        false,
-                        "intrinsic should be intercepted upstream: {}",
-                        resolved.canonical_name,
-                    );
-                    CExpr::Apply(
-                        Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                        call_args,
-                    )
-                }
-            },
-            _ => {
-                if let Some(module) = fallback_erlang_module {
-                    CExpr::Call(module.to_string(), func_name.to_string(), call_args)
-                } else if let Some(crate::typechecker::ResolvedValue::Global { lookup_name }) =
-                    self.current_value_ref(head_node_id)
-                    && let Some((module, name)) = lookup_name.rsplit_once('.')
-                {
-                    self.lower_local_fun_call(name, arity, call_args, Some(module))
-                } else if let Some(module) = self.imported_handler_function_source(func_name) {
-                    let name = func_name.rsplit('.').next().unwrap_or(func_name);
-                    self.lower_local_fun_call(name, arity, call_args, Some(module))
-                } else {
-                    // Not in resolution map: local function or variable apply
-                    CExpr::Apply(
-                        Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                        call_args,
-                    )
-                }
-            }
-        };
-        self.annotate(call, span)
-    }
-
-    fn effectful_call_return_k_binding(&mut self, return_k: Option<CExpr>) -> (String, CExpr) {
-        let rk_var = self.fresh();
-        let return_k = return_k.unwrap_or_else(|| {
-            let p = self.fresh();
-            CExpr::Fun(vec![p.clone()], Box::new(CExpr::Var(p)))
-        });
-        (rk_var, return_k)
     }
 
     pub(super) fn wrap_let_bindings(&self, bindings: Vec<(String, CExpr)>, body: CExpr) -> CExpr {

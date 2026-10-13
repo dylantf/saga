@@ -1,5 +1,6 @@
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::CExpr;
+use crate::codegen::ir::Val;
 use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 
 use super::Lowerer;
@@ -12,18 +13,16 @@ impl<'a> Lowerer<'a> {
         CallableAbi::from_type(ty, |effects| self.canonicalize_effects(effects)).cps_evidence()
     }
 
+    /// Bind each argument of a call to a fresh variable, in order.
     pub(super) fn lower_call_args(
         &mut self,
-        args: &[&Expr],
+        args: &[Val<'_>],
     ) -> (Vec<String>, Vec<(String, CExpr)>) {
         let mut arg_vars: Vec<String> = Vec::new();
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
         for arg in args {
             let v = self.fresh();
-            let _ = self.operand(arg, "a call");
-            let ce = self
-                .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr(arg));
+            let ce = self.lower_val(arg);
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }

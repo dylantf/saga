@@ -382,7 +382,7 @@ section is the navigable reference; that doc is the archaeology.
    (conceptually) to `apply (element(i, <dict ctor>)) (args…, _Evidence,
    _ReturnK)`. Specialization changes *only* the `element(i, <dict ctor>)`
    sub-expression into a direct function reference; all user-argument, evidence,
-   and return-continuation threading in `lower_runtime_cps_apply` stays
+   and return-continuation threading in `lower_call` (`cps_call_args`) stays
    identical. This is how the optimization honors "trait methods carry effect
    rows": an effectful `PostgresRow` method specializes exactly like a pure
    `ToJson` one — same evidence ABI, cheaper callee.
