@@ -1,12 +1,15 @@
-//! Effect-normal form at the lowering roots.
+//! Value-normal form at the lowering roots.
 //!
 //! Every body the lowerer starts on (a function clause or its guard, a
 //! dictionary method, a handler arm or return clause, a `finally` block, an
-//! inlined helper) passes through `effect_normal_body` first. A body that
-//! already satisfies the position rule in `codegen::effect_position` is
-//! lowered as it is. Any other body is normalized by
-//! `normalize::normalize_body` and checked again; a violation that survives
-//! is a compiler bug and stops compilation.
+//! inlined helper or handler arm) passes through `effect_normal_body`
+//! first. A body that already satisfies the position rule in
+//! `codegen::effect_position` (every operand is a value) is lowered as it
+//! is. Any other body is normalized by `normalize::normalize_body` and
+//! checked again; a violation that survives is a compiler bug and stops
+//! compilation. `lower_operand` checks the same rule again where an operand
+//! is lowered, so a body that reached the lowerer without passing through
+//! here stops compilation too.
 //!
 //! This runs after call classification on purpose: which calls perform
 //! effects is only known from the frozen plan, and the plan's entries are
@@ -78,19 +81,36 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `expr` is about to be lowered as a plain value, as an operand of
-    /// `operand_of`. If it needs a continuation, the body it is in was not
+    /// `operand_of`. If it is not a value, the body it is in was not
     /// normalized (it did not pass through `effect_normal_body`); stop
-    /// instead of lowering it with an identity continuation.
+    /// instead of lowering it where it stands (with an identity
+    /// continuation, if it performs).
     pub(super) fn assert_operand(&self, expr: &Expr, operand_of: &str) {
-        if effect_position::needs_continuation(expr, &|node| self.performs_effect(node)) {
+        if self.in_beam_guard {
+            return;
+        }
+        if !effect_position::is_operand(expr, &|node| self.performs_effect(node)) {
             panic!(
                 "internal compiler error: {} reached lowering as an operand of {operand_of} \
-                 in {}.{}: its body was not effect-normalized",
+                 in {}.{}: its body was not normalized",
                 effect_position::construct_name(expr, &|node| self.performs_effect(node)),
                 self.current_semantic_module_name(),
                 self.current_function,
             );
         }
+    }
+
+    /// Lower a guard into guard position. A BEAM guard expression is not
+    /// normalized (its operators nest), so the operand rule is off inside
+    /// one.
+    pub(super) fn lower_guard(&mut self, guard: &Expr) -> CExpr {
+        let saved = std::mem::replace(
+            &mut self.in_beam_guard,
+            effect_position::is_guard_safe(guard),
+        );
+        let lowered = self.lower_expr(guard);
+        self.in_beam_guard = saved;
+        lowered
     }
 
     /// Lower an operand of `operand_of` as a plain value.
@@ -99,7 +119,21 @@ impl<'a> Lowerer<'a> {
         self.lower_expr(expr)
     }
 
-    /// The body the lowerer is about to lower, in effect-normal form.
+    /// The guard the lowerer is about to lower: as written when it is a
+    /// BEAM guard expression, otherwise a body in value-normal form.
+    pub(super) fn effect_normal_guard<'e>(
+        &mut self,
+        guard: &'e Expr,
+        root: &'static str,
+    ) -> Cow<'e, Expr> {
+        if effect_position::is_guard_safe(guard) {
+            Cow::Borrowed(guard)
+        } else {
+            self.effect_normal_body(guard, root)
+        }
+    }
+
+    /// The body the lowerer is about to lower, in value-normal form.
     /// `root` names the kind of body for diagnostics.
     pub(super) fn effect_normal_body<'e>(
         &mut self,

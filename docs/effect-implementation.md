@@ -863,27 +863,34 @@ Optimization facts are not a second lowered program.
 
 #### One rule for where effects go
 
-Effectful code reaches the lowerer in one shape. Before a body is lowered
+All code reaches the lowerer in one shape. Before a body is lowered
 (a function clause, a dictionary method, a handler arm or return clause, a
-`finally` block, an inlined helper), `lower/anf.rs` checks it against the
-position rule in `codegen/effect_position.rs` and, if it fails,
+`finally` block, an inlined helper or handler arm), `lower/anf.rs` checks it
+against the position rule in `codegen/effect_position.rs` and, if it fails,
 normalizes it (`normalize::normalize_body`):
 
-> An expression that performs an effect is the value of a block-level
+> Every operand is a value. An expression that computes (a call, an
+> operator, a record update, a bit string, a branching form), and so every
+> expression that performs an effect, is the value of a block-level
 > `let`/statement (or a `do` binding), or is in tail position of a body or
-> branch. It is never an operand.
+> branch.
+
+A value (`effect_position::is_value`) is a name, literal, lambda, handler
+value or operation reference, a projection out of a value, or data built
+only from values. The rule covers pure code too: the position of an
+expression never depends on whether it performs.
 
 "Performs" is one definition, `Lowerer::performs_effect`: a call the plan
 classified CPS, an applied operation, a nullary operation (`number!`), a
 `with`, a `resume`. It is composed over sub-expressions by one exhaustive
 table (`effect_position::children`), which stops at bodies that run later
 (lambdas, local functions, handler arms, the computation a `with` handles,
-guards). Normalization lifts an offending operand into a `let`, earlier
-siblings first so evaluation order is kept, and turns `a && b` / `a || b`
-with an effectful right operand into an `if`. A violation that survives is
-an internal compiler error, and so is an operand that still needs a
-continuation when the lowerer evaluates it (`lower_operand`): a body that
-bypassed normalization fails loudly.
+guards). Normalization lifts each operand that is not a value into a `let`,
+in evaluation order, and turns `a && b` / `a || b` whose right operand is
+not a value into an `if`. A guard that is a BEAM guard expression is exempt
+and left as written. A violation that survives is an internal compiler
+error, and so is an operand that is not a value when the lowerer evaluates
+it (`lower_operand`): a body that bypassed normalization fails loudly.
 
 The lowerer then has two rules, each with one implementation:
 
@@ -941,7 +948,7 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/effect_position.rs` -- the position rule: the table of sub-expression positions, the effect predicate and the checker.
-- `codegen/normalize.rs`, `codegen/lower/anf.rs` -- effect normalization, and where it is applied and asserted.
+- `codegen/normalize.rs`, `codegen/lower/anf.rs` -- value-normal form, and where it is applied and asserted.
 - `codegen/lower/exprs/` -- `lower_tail` (`return_k.rs`), `lower_block` (`blocks.rs`), `lower_expr` (`dispatch.rs`), `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- registers local/imported `FunInfo` entries carrying `CallableAbi` plus non-ABI HOF parameter metadata.
 - `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.

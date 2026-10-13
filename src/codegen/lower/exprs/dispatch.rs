@@ -6,6 +6,25 @@ use crate::codegen::lower::*;
 use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
+    /// Lower the field values of a record literal, binding each to a fresh
+    /// variable in the order the fields are written (the order they are
+    /// evaluated in, whatever the record's layout). Returns the bindings and
+    /// the variable of each field.
+    fn lower_record_fields<'e>(
+        &mut self,
+        fields: &'e [(String, crate::token::Span, Expr)],
+    ) -> (Vec<(String, CExpr)>, HashMap<&'e str, String>) {
+        let mut bindings = Vec::new();
+        let mut field_vars = HashMap::new();
+        for (name, _, value) in fields {
+            let var = self.fresh();
+            let ce = self.lower_operand(value, "a record literal");
+            field_vars.insert(name.as_str(), var.clone());
+            bindings.push((var, ce));
+        }
+        (bindings, field_vars)
+    }
+
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
     pub(crate) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
         use crate::codegen::lower::util::{
@@ -120,7 +139,7 @@ impl<'a> Lowerer<'a> {
                         )
                     };
 
-                let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
+                let guard = arm.guard.as_ref().map(|g| self.lower_guard(g));
                 let raw_body = lower_body(self, &arm.body);
                 let body = if let Some((user_var, raw_var)) = reason_wrapper {
                     let ctor_atoms = self.constructor_atoms.clone();
@@ -503,19 +522,16 @@ impl<'a> Lowerer<'a> {
                             self.current_semantic_module_name(),
                         )
                     });
-                let field_map: HashMap<&str, &Expr> =
-                    fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-                let mut vars: Vec<String> = Vec::new();
-                let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for field_name in &order {
-                    let v = self.fresh();
-                    let e = field_map
-                        .get(field_name.as_str())
-                        .expect("field missing in RecordCreate");
-                    let ce = self.lower_operand(e, "a record literal");
-                    vars.push(v.clone());
-                    bindings.push((v, ce));
-                }
+                let (bindings, field_vars) = self.lower_record_fields(fields);
+                let vars: Vec<String> = order
+                    .iter()
+                    .map(|field_name| {
+                        field_vars
+                            .get(field_name.as_str())
+                            .expect("field missing in RecordCreate")
+                            .clone()
+                    })
+                    .collect();
                 let ctor_name = self
                     .current_record_type_name(expr.id)
                     .and_then(|name| self.canonical_constructor_key_for(name))
@@ -538,19 +554,16 @@ impl<'a> Lowerer<'a> {
                 let tag = crate::ast::anon_record_tag(&names);
                 let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
                 sorted_names.sort();
-                let field_map: HashMap<&str, &Expr> =
-                    fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-                let mut vars: Vec<String> = Vec::new();
-                let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for field_name in &sorted_names {
-                    let v = self.fresh();
-                    let e = field_map
-                        .get(field_name.as_str())
-                        .expect("field missing in AnonRecordCreate");
-                    let ce = self.lower_operand(e, "a record literal");
-                    vars.push(v.clone());
-                    bindings.push((v, ce));
-                }
+                let (bindings, field_vars) = self.lower_record_fields(fields);
+                let vars: Vec<String> = sorted_names
+                    .iter()
+                    .map(|field_name| {
+                        field_vars
+                            .get(field_name.as_str())
+                            .expect("field missing in AnonRecordCreate")
+                            .clone()
+                    })
+                    .collect();
                 let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);

@@ -109,7 +109,7 @@ impl<'a> Lowerer<'a> {
                     &self.constructor_atoms,
                     self.handler_origin_module(),
                 ),
-                guard: arm.guard.as_ref().map(|g| self.lower_expr(g)),
+                guard: arm.guard.as_ref().map(|g| self.lower_guard(g)),
                 body: lower_body(self, &arm.body),
             })
             .collect();

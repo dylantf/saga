@@ -508,7 +508,7 @@ impl<'a> Lowerer<'a> {
                 .iter()
                 .map(|&(_, guard, body)| {
                     let guard = guard.as_deref().map(|guard| {
-                        Box::new(self.effect_normal_body(guard, "clause guard").into_owned())
+                        Box::new(self.effect_normal_guard(guard, "clause guard").into_owned())
                     });
                     (guard, self.effect_normal_body(body, "function clause"))
                 })
@@ -704,7 +704,7 @@ impl<'a> Lowerer<'a> {
                                     .collect(),
                             )
                         };
-                        let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
+                        let guard_ce = guard.as_deref().map(|g| self.lower_guard(g));
                         let body_ce = self.lower_tail(body, effect_return_k.clone());
                         self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         CArm {

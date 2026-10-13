@@ -8,9 +8,18 @@
 //!   leaf (decided by the caller: a call the plan classified CPS, an applied
 //!   operation, ...) or has a sub-expression that does, not looking into
 //!   bodies that run later (lambdas, handler arms, local functions).
-//! - `check_body`: in a body, an expression that performs effects must be
-//!   the value of a block-level `let`/statement or in tail position. One
-//!   found as an operand of something else is a violation.
+//! - `is_value`: the forms whose evaluation runs no user code and cannot
+//!   perform: names, literals, lambdas, handler values, operation
+//!   references, and data or projections built only from those.
+//! - `check_body`: in a body, every operand is a value. Anything that
+//!   computes (a call, pure or not, an operator, a record update, a bit
+//!   string, a branching form) is the value of a block-level
+//!   `let`/statement or is in tail position. One found as an operand of
+//!   something else is a violation.
+//!
+//! The one exemption is a guard that is a BEAM guard expression
+//! (`is_guard_safe`): it is emitted as a guard, where operators nest, and
+//! is left exactly as written.
 //!
 //! The rule is about position in the tree only. How a body is lowered
 //! (with a continuation or as a plain value) does not enter into it.
@@ -32,14 +41,73 @@ pub(crate) enum Position {
     /// or a `do` binding (its continuation is the rest of the block).
     Tail,
     /// A body of its own, run later or delimited: a lambda or local function
-    /// body, a handler arm, the computation a `with` handles, a guard. It is
-    /// a tail context, and what it performs is not performed by the parent.
+    /// body, a handler arm, the computation a `with` handles. It is a tail
+    /// context, and what it performs is not performed by the parent.
     Body,
+    /// The guard of a case arm or local function clause. A body of its own
+    /// like `Body`, unless it is a BEAM guard expression (`is_guard_safe`),
+    /// which is not normalized at all.
+    Guard,
+}
+
+/// Whether `expr` is a valid Core Erlang guard expression: comparisons,
+/// arithmetic, boolean operators and unary minus over literals and
+/// variables. Any application makes it a guard the lowerer has to evaluate
+/// as a body.
+pub(crate) fn is_guard_safe(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Lit { .. } | ExprKind::Var { .. } => true,
+        ExprKind::BinOp { left, right, .. } => is_guard_safe(left) && is_guard_safe(right),
+        ExprKind::UnaryMinus { expr, .. } => is_guard_safe(expr),
+        // No App, Constructor, Block, If, Case, etc. -- too complex for a guard
+        _ => false,
+    }
+}
+
+/// Whether `expr` is a value form: evaluating it runs no user code. A
+/// variable, literal, lambda, handler value or operation reference, a
+/// projection out of a value, or data (tuple, record, constructor or
+/// dictionary application) built only from values.
+///
+/// Syntactic: an operation that takes no parameters is written like an
+/// operation reference but performs, which `needs_continuation` answers.
+pub(crate) fn is_value(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictRef { .. }
+        | ExprKind::Lambda { .. }
+        | ExprKind::HandlerExpr { .. }
+        | ExprKind::EffectCall { .. } => true,
+        ExprKind::Ascription { expr: inner, .. }
+        | ExprKind::FieldAccess { expr: inner, .. }
+        | ExprKind::DictMethodAccess { dict: inner, .. }
+        | ExprKind::DictSuperAccess { dict: inner, .. } => is_value(inner),
+        ExprKind::Tuple { elements } => elements.iter().all(is_value),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            fields.iter().all(|(_, _, e)| is_value(e))
+        }
+        // A constructor or a trait dictionary applied to values only builds
+        // data.
+        ExprKind::App { .. } => {
+            let (head, spine) = app_spine(expr);
+            matches!(
+                head.kind,
+                ExprKind::Constructor { .. } | ExprKind::DictRef { .. }
+            ) && spine.into_iter().all(|app| match &app.kind {
+                ExprKind::App { arg, .. } => is_value(arg),
+                _ => true,
+            })
+        }
+        _ => false,
+    }
 }
 
 fn arm_children<'a>(arm: &'a CaseArm, out: &mut Vec<(Position, &'a Expr)>) {
     if let Some(guard) = &arm.guard {
-        out.push((Position::Body, guard));
+        out.push((Position::Guard, guard));
     }
     out.push((Position::Tail, &arm.body));
 }
@@ -71,7 +139,7 @@ fn app_spine(expr: &Expr) -> (&Expr, Vec<&Expr>) {
 /// The match is exhaustive on purpose: a new expression kind has to be
 /// placed here before the compiler builds.
 pub(crate) fn children(expr: &Expr) -> Vec<(Position, &Expr)> {
-    use Position::{Body, Operand, Tail};
+    use Position::{Body, Guard, Operand, Tail};
     let mut out = Vec::new();
     match &expr.kind {
         ExprKind::Lit { .. }
@@ -132,7 +200,7 @@ pub(crate) fn children(expr: &Expr) -> Vec<(Position, &Expr)> {
                     Stmt::Expr(e) => out.push((Tail, e)),
                     Stmt::LetFun { guard, body, .. } => {
                         if let Some(guard) = guard {
-                            out.push((Body, guard.as_ref()));
+                            out.push((Guard, guard.as_ref()));
                         }
                         out.push((Body, body));
                     }
@@ -290,24 +358,37 @@ pub(crate) fn is_effectful(expr: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
     is_leaf
         || children(expr)
             .into_iter()
-            .any(|(position, child)| position != Position::Body && is_effectful(child, leaf))
+            .any(|(position, child)| {
+                matches!(position, Position::Operand | Position::Tail) && is_effectful(child, leaf)
+            })
 }
 
-/// An expression that performs effects found as an operand.
+/// An operand that is not a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Violation {
-    /// The construct that performs effects.
+    /// The construct found as an operand.
     pub construct: &'static str,
     /// The construct it is an operand of.
     pub operand_of: &'static str,
     pub span: Span,
 }
 
-/// Check a body (an expression in tail position): every expression that
-/// performs effects must be in `let`/statement or tail position.
+/// Whether `expr` may stand as an operand: it is a value, and not an
+/// operation performed where it stands.
+pub(crate) fn is_operand(expr: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
+    is_value(expr) && !needs_continuation(expr, leaf)
+}
+
+/// Check a body (an expression in tail position): every operand must be a
+/// value, so that everything else is in `let`/statement or tail position.
 pub(crate) fn check_body(body: &Expr, leaf: &dyn Fn(&Expr) -> bool, out: &mut Vec<Violation>) {
     for (position, child) in children(body) {
-        if position == Position::Operand && needs_continuation(child, leaf) {
+        // A BEAM guard expression is emitted as one; nothing in it is
+        // normalized.
+        if position == Position::Guard && is_guard_safe(child) {
+            continue;
+        }
+        if position == Position::Operand && !is_operand(child, leaf) {
             out.push(Violation {
                 construct: construct_name(child, leaf),
                 operand_of: construct_name(body, leaf),
@@ -476,6 +557,42 @@ mod tests {
         assert_eq!(
             violations("f x = fun y -> (eff y, 1)"),
             vec![("effectful call", "tuple")]
+        );
+    }
+
+    #[test]
+    fn an_operand_that_computes_is_reported_even_when_pure() {
+        assert_eq!(violations("f x = g (h x)"), vec![("pure call", "pure call")]);
+        assert_eq!(
+            violations("f x = g (x + 1)"),
+            vec![("binary operator", "pure call")]
+        );
+        assert_eq!(
+            violations("f x = if x > 1 then 1 else 2"),
+            vec![("binary operator", "if")]
+        );
+        assert_eq!(
+            violations("f x = (g x).name"),
+            vec![("pure call", "field access")]
+        );
+        // Data built from values is a value.
+        assert_eq!(violations("f x = g (x, Some x) (fun y -> y)"), vec![]);
+        assert_eq!(
+            violations("f x = {\n  let y = h x\n  let z = y + 1\n  g z\n}"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_beam_guard_is_left_alone() {
+        assert_eq!(
+            violations("f x = case x {\n  y when y > 1 && y < 3 -> 1\n  _ -> 2\n}"),
+            vec![]
+        );
+        // A guard with a call is a body of its own, checked like one.
+        assert_eq!(
+            violations("f x = case x {\n  y when g (h y) -> 1\n  _ -> 2\n}"),
+            vec![("pure call", "pure call")]
         );
     }
 

@@ -237,6 +237,8 @@ pub struct Lowerer<'a> {
     /// Numbers the temporaries effect normalization introduces, across all
     /// the bodies of the module.
     anf_counter: usize,
+    /// Set while a BEAM guard expression is being lowered (`lower_guard`).
+    in_beam_guard: bool,
     /// The lambda with this id is lowered as a raw fun with
     /// the given convention (CPS or direct) instead of deciding from its own
     /// type. Set by dictionary-method lowering, which owns the slot's
@@ -413,6 +415,7 @@ impl<'a> Lowerer<'a> {
         Lowerer {
             counter: 0,
             anf_counter: 0,
+            in_beam_guard: false,
             forced_lambda_cps: None,
             ctx,
             source_info,

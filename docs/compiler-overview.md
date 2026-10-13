@@ -105,34 +105,41 @@ semantically the same source node.
 
 ### Normalize
 
-Effect normalization. It runs inside lowering, once the call plan is frozen
+Value-normal form. It runs inside lowering, once the call plan is frozen
 (`normalize_body`, called from `src/codegen/lower/anf.rs` for each body the
 lowerer starts on: function clauses and guards, dictionary methods, handler
-arms and return clauses, `finally` blocks, inlined helpers). It is the only
-normalize run; the generic fold runs before it, on the elaborated program.
+arms and return clauses, `finally` blocks, inlined helpers and handler arms).
+It is the only normalize run; the generic fold runs before it, on the
+elaborated program.
 
-It knows which calls perform effects and lifts every expression that needs a
-continuation out of operand position: calls the plan classified CPS,
-operations (nullary ones included), `with`, `resume`, and any `if`/`case`/
-block/`do`/`receive` with such a thing in a branch. To keep evaluation left
-to right it also lifts every sibling evaluated before the lifted expression
-that is not a plain value (variable, literal, lambda, data built from those),
-each into its own `let`, in order. The variable replacing such a sibling keeps
-the sibling's `NodeId`, so its type is still found. Conditionally evaluated
-parts (`if`/`case` branches, lambda bodies, handler arms) are separate scopes.
-`a && b` / `a || b` with an effectful right operand becomes an `if`. The rule
-it establishes, and the check that it holds, are in
-`src/codegen/effect_position.rs`: an expression that performs effects is the
-value of a block-level `let`/statement or is in tail position. A body that
-already satisfies the rule is lowered untouched; a
-violation left after normalizing is an internal compiler error. Facts the
-lowerer used to read off the tree's shape (whether an untyped lambda is a
-tagged closure, whether a dictionary method performs an operation directly)
-are recorded in the plan before this runs.
+After it every operand is a value: a name, literal, lambda, handler value or
+operation reference, a projection out of a value, or data (tuple, record,
+constructor or dictionary application) built only from values
+(`effect_position::is_value`). Everything that computes is lifted out of
+operand position into a `let` of its own, in evaluation order: every call
+(pure ones too), operator, record update, bit string, `resume`, `with`, and
+every `if`/`case`/block/`do`/`receive`. Such an expression is then the value
+of a block-level `let`/statement or is in tail position, and nowhere else.
+Record fields are lifted in the order written. The variable replacing a
+lifted expression keeps the expression's `NodeId`, and an application chain
+keeps its `App` nodes, so types and the call plan are still found.
+Conditionally evaluated parts (`if`/`case` branches, lambda bodies, handler
+arms) are separate scopes.
 
-The first run cannot be dropped in favour of the second: the generic fold
-runs between them and freshens arguments it cannot duplicate, which would
-orphan the node-keyed resolution of an operation still nested in one.
+Two forms are special. `a && b` / `a || b` keeps its operator when the right
+operand is a value and otherwise becomes an `if`, since the right operand may
+not be evaluated ahead of the operator. A guard that is a BEAM guard
+expression (`effect_position::is_guard_safe`: operators over variables and
+literals) is left exactly as written, because it is emitted as a guard; any
+other guard is a body of its own.
+
+The rule and the check that it holds are in
+`src/codegen/effect_position.rs`. A body that already satisfies the rule is
+lowered untouched; a violation left after normalizing is an internal compiler
+error, and so is a non-value operand met while lowering (`lower_operand`).
+Facts the lowerer used to read off the tree's shape (whether an untyped
+lambda is a tagged closure, whether a dictionary method performs an operation
+directly) are recorded in the plan before this runs.
 
 ### Backend Resolve (`src/codegen/resolve.rs`)
 

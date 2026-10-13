@@ -131,7 +131,7 @@ impl<'a> Lowerer<'a> {
                                         .collect(),
                                 )
                             };
-                            let guard_ce = guard.as_ref().map(|g| self.lower_expr(g));
+                            let guard_ce = guard.as_ref().map(|g| self.lower_guard(g));
                             let body_ce = self.lower_tail(body, effect_return_k.clone());
                             CArm {
                                 pat,

@@ -136,7 +136,17 @@ impl<'a> Lowerer<'a> {
         runtime_param_positions: &[usize],
         continuation: Option<CExpr>,
     ) -> Option<CExpr> {
-        let body = self.static_tail_resume_direct_body(&plan.arm.body)?;
+        // The arm of a handler declaration reaches here as written: it is a
+        // lowering root. Normalizing keeps the shape the plan was made for
+        // (a `resume` of plain data, or a block of statements that take no
+        // continuation ending in one); it only adds `let`s to the block.
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = plan.source_module.clone();
+        let arm_body = self
+            .effect_normal_body(&plan.arm.body, "inlined handler arm")
+            .into_owned();
+        self.current_handler_source_module = saved_source_module;
+        let body = self.static_tail_resume_direct_body(&arm_body)?;
 
         let param_bindings = self.static_tail_resume_bindings(
             &plan.arm.params,

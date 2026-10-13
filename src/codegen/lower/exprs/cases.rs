@@ -59,7 +59,7 @@ impl<'a> Lowerer<'a> {
                 },
                 Some(guard) if is_guard_safe(guard) => CArm {
                     pat,
-                    guard: Some(self.lower_expr(guard)),
+                    guard: Some(self.lower_guard(guard)),
                     body: self.lower_tail(&arm.body, k.cloned()),
                 },
                 Some(_guard) => {
@@ -119,7 +119,7 @@ impl<'a> Lowerer<'a> {
                     vec![
                         CArm {
                             pat,
-                            guard: Some(self.lower_expr(guard)),
+                            guard: Some(self.lower_guard(guard)),
                             body: body_ce,
                         },
                         CArm {

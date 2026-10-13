@@ -1,33 +1,43 @@
-//! A-normalization pass for effect calls.
+//! Value-normal form.
 //!
-//! Effect calls in CPS-compiled code must appear at the top level of a block
-//! statement so that `lower_block` can capture the continuation. When an effect
-//! call is nested inside another expression (e.g. `1 + ask!()`), this pass
-//! lifts it into its own `let` binding and replaces it with the bound variable.
+//! Brings a body into the form `effect_position::check_body` accepts: every
+//! operand is a value (`effect_position::is_value`: a name, literal, lambda,
+//! handler value or operation reference, a projection out of a value, or
+//! data built only from values). Everything that computes is lifted out of
+//! operand position into a `let` of its own, in evaluation order: every call
+//! (pure ones too), operator, record update, bit string, `resume`, `with`,
+//! and every branching form (`if`, `case`, block, `do`, `receive`). After
+//! the pass such an expression is the value of a block-level
+//! `let`/statement or is in tail position, and nowhere else.
 //!
-//! This runs on the saga AST before lowering. The interpreter is unaffected.
+//! Lowering then needs two rules for a computation: in tail position it
+//! gets the body's continuation; as `let x = e; rest` its continuation is
+//! `fun x -> rest`.
 //!
-//! Lifting an effect call moves it ahead of the whole statement, so everything
-//! that is evaluated before it in source order has to move with it: when a
-//! later sibling lifts something, each earlier sibling that is not a plain
-//! value is lifted into its own `let` first (see `normalize_parts`). The pass
-//! has no types, so this applies to any earlier sibling that computes
-//! something, whether an effectful call, a pure call or a foreign call.
-//! Expressions from which nothing is lifted are left exactly as they were.
+//! The variable that replaces a lifted expression keeps the expression's
+//! `NodeId`, and an application chain is rebuilt on its own `App` nodes, so
+//! the tables keyed by id (types, the call plan) still answer.
 //!
-//! Parts that are evaluated conditionally or later (`if`/`case` branches, the
-//! right operand of `&&`/`||`, lambda bodies, handler arms) are their own
-//! scope: what is lifted out of them stays inside them.
+//! Parts that are evaluated conditionally or later (`if`/`case` branches,
+//! lambda bodies, handler arms, return clauses, `finally` blocks, guards)
+//! are their own scope: what is lifted out of them stays inside them.
 //!
-//! The pass runs once: `normalize_body`, at each lowering root once the
-//! call plan is frozen, is given the nodes that perform an effect by
-//! themselves and lifts every expression that needs a continuation (see
-//! `effect_position::needs_continuation`) out of operand position: calls
-//! the plan classified CPS, applied operations, `with`, `resume`, and any
-//! `if`/`case`/block/`do`/`receive` with such a thing in a branch. A
-//! short-circuit operator whose right operand performs effects becomes an
-//! `if`. Its output satisfies `effect_position::check_body`, and it leaves
-//! that output and code that performs no effects as they are.
+//! Two forms are treated specially:
+//!
+//! - `a && b` / `a || b`: the right operand is evaluated only when the left
+//!   one does not decide the result, so it cannot be lifted ahead of the
+//!   operator. When it is a value the operator stays; otherwise the
+//!   operator becomes `if a then b else False` / `if a then True else b`,
+//!   whose branch is a scope of its own.
+//! - A guard that is a BEAM guard expression
+//!   (`effect_position::is_guard_safe`) is left exactly as written: it is
+//!   emitted as a guard, where operators nest. Any other guard is a body of
+//!   its own.
+//!
+//! The pass runs once, at each lowering root, when the call plan is frozen
+//! (`normalize_body`). The nodes that perform an effect by themselves are
+//! given to it only to tell an operation that takes no parameters (which
+//! performs where it stands) from a reference to an operation (a value).
 
 use super::effect_position;
 use crate::ast::*;
@@ -82,7 +92,7 @@ impl<'a> Normalizer<'a> {
                     span,
                 } => {
                     let new_body = self.normalize_expr(body);
-                    let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_expr(g)));
+                    let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_guard(g)));
                     result.push(Annotated::bare(Stmt::LetFun {
                         id: *id,
                         name: name.clone(),
@@ -118,23 +128,25 @@ impl<'a> Normalizer<'a> {
         }
     }
 
-    /// Normalize an expression, lifting any effect calls (including this one)
-    /// into `lifted` as let-bindings. This is called for sub-expressions where
-    /// effect calls must not remain nested.
+    /// Normalize an operand: its own operands first, then the expression
+    /// itself, lifted into a `let` unless it is a value.
     fn normalize_and_lift(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        // Its own operands first, then the expression itself if it still
-        // needs a continuation.
         let normalized = self.normalize_top(expr, lifted);
-        if effect_position::needs_continuation(&normalized, self.performs) {
-            self.lift_sibling_to_let(normalized, lifted)
-        } else {
+        if effect_position::is_operand(&normalized, self.performs) {
             normalized
+        } else {
+            self.lift_operand_to_let(normalized, lifted)
         }
     }
 
-    /// Whether `expr`, already normalized, performs effects.
-    fn is_effectful(&self, expr: &Expr) -> bool {
-        effect_position::is_effectful(expr, self.performs)
+    /// A guard: left as written when it is a BEAM guard expression,
+    /// otherwise a scope of its own.
+    fn normalize_guard(&mut self, guard: &Expr) -> Expr {
+        if effect_position::is_guard_safe(guard) {
+            guard.clone()
+        } else {
+            self.normalize_expr(guard)
+        }
     }
 
     /// Normalize the arguments of an effect call (or App-chain around one),
@@ -165,41 +177,21 @@ impl<'a> Normalizer<'a> {
         rebuild_app_chain(new_head, &apps, new_parts)
     }
 
-    /// Normalize sub-expressions that are evaluated one after another, in
-    /// the order given. If a later part lifts something, every earlier part
-    /// that still computes something is lifted as well, ahead of it, so the
-    /// parts keep their relative order. Nothing is lifted when no part
-    /// contains an effect call.
+    /// Normalize operands that are evaluated one after another, in the
+    /// order given. Each one that is not a value is lifted, so the lifted
+    /// ones keep their relative order.
     fn normalize_parts(&mut self, parts: &[&Expr], lifted: &mut Vec<Stmt>) -> Vec<Expr> {
-        let normalized: Vec<(Expr, Vec<Stmt>)> = parts
+        parts
             .iter()
-            .map(|part| {
-                let mut own = Vec::new();
-                let new_part = self.normalize_and_lift(part, &mut own);
-                (new_part, own)
-            })
-            .collect();
-        let last_lifting = normalized.iter().rposition(|(_, own)| !own.is_empty());
-        normalized
-            .into_iter()
-            .enumerate()
-            .map(|(i, (new_part, own))| {
-                lifted.extend(own);
-                if last_lifting.is_some_and(|last| i < last) && !is_atomic(&new_part) {
-                    self.lift_sibling_to_let(new_part, lifted)
-                } else {
-                    new_part
-                }
-            })
+            .map(|part| self.normalize_and_lift(part, lifted))
             .collect()
     }
 
-    /// Lift a sibling evaluated before a lifted effect call into its own
-    /// let-binding. The variable that replaces it keeps the expression's
-    /// `NodeId`, so lookups keyed on the id (the expression's type, which
-    /// decides how a function value is called or passed) still answer for
-    /// the value now reached through the variable.
-    fn lift_sibling_to_let(&mut self, expr: Expr, lifted: &mut Vec<Stmt>) -> Expr {
+    /// Lift an operand into its own let-binding. The variable that replaces
+    /// it keeps the expression's `NodeId`, so lookups keyed on the id (the
+    /// expression's type, which decides how a function value is called or
+    /// passed) still answer for the value now reached through the variable.
+    fn lift_operand_to_let(&mut self, expr: Expr, lifted: &mut Vec<Stmt>) -> Expr {
         let (id, span) = (expr.id, expr.span);
         let var = self.lift_to_let(expr, lifted);
         Expr {
@@ -241,10 +233,10 @@ impl<'a> Normalizer<'a> {
             } => {
                 let new_left = self.normalize_and_lift(left, lifted);
                 let new_right = self.normalize_expr(right);
-                let kind = if self.is_effectful(&new_right) {
-                    // The right operand needs a continuation, and an
-                    // operand cannot have one: `a && b` is
-                    // `if a then b else False`, `a || b` is
+                let kind = if !effect_position::is_operand(&new_right, self.performs) {
+                    // The right operand computes, and it may only do so
+                    // when the left one does not decide the result:
+                    // `a && b` is `if a then b else False`, `a || b` is
                     // `if a then True else b`.
                     let decided = Box::new(Expr::synth(
                         expr.span,
@@ -330,7 +322,7 @@ impl<'a> Normalizer<'a> {
                     .map(|ann| {
                         Annotated::bare(CaseArm {
                             pattern: ann.node.pattern.clone(),
-                            guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                            guard: ann.node.guard.as_ref().map(|g| self.normalize_guard(g)),
                             body: self.normalize_expr(&ann.node.body),
                             span: ann.node.span,
                         })
@@ -505,7 +497,7 @@ impl<'a> Normalizer<'a> {
                             .map(|ann| {
                                 Annotated::bare(CaseArm {
                                     pattern: ann.node.pattern.clone(),
-                                    guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                                    guard: ann.node.guard.as_ref().map(|g| self.normalize_guard(g)),
                                     body: self.normalize_expr(&ann.node.body),
                                     span: ann.node.span,
                                 })
@@ -585,7 +577,7 @@ impl<'a> Normalizer<'a> {
                         .map(|ann| {
                             Annotated::bare(CaseArm {
                                 pattern: ann.node.pattern.clone(),
-                                guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                                guard: ann.node.guard.as_ref().map(|g| self.normalize_guard(g)),
                                 body: self.normalize_expr(&ann.node.body),
                                 span: ann.node.span,
                             })
@@ -640,7 +632,8 @@ impl<'a> Normalizer<'a> {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => expr.clone(),
-            ExprKind::Ascription { expr: inner, .. } => self.normalize_and_lift(inner, lifted),
+            // An ascription is its inner expression, in the same position.
+            ExprKind::Ascription { expr: inner, .. } => self.normalize_top(inner, lifted),
 
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }
@@ -768,44 +761,9 @@ fn rebuild_app_chain(
     })
 }
 
-/// Whether evaluating `expr` computes nothing that could be observed: a
-/// variable, literal, lambda or other value form, a projection out of one, or
-/// data built only from such parts. These stay in place when a later sibling
-/// is lifted; everything else is lifted ahead of it.
-fn is_atomic(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Lit { .. }
-        | ExprKind::Var { .. }
-        | ExprKind::Constructor { .. }
-        | ExprKind::QualifiedName { .. }
-        | ExprKind::DictRef { .. }
-        | ExprKind::Lambda { .. }
-        | ExprKind::HandlerExpr { .. }
-        | ExprKind::EffectCall { .. } => true,
-        ExprKind::Ascription { expr: inner, .. }
-        | ExprKind::FieldAccess { expr: inner, .. }
-        | ExprKind::DictMethodAccess { dict: inner, .. }
-        | ExprKind::DictSuperAccess { dict: inner, .. } => is_atomic(inner),
-        ExprKind::Tuple { elements } => elements.iter().all(is_atomic),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
-            fields.iter().all(|(_, _, e)| is_atomic(e))
-        }
-        // A constructor or a trait dictionary applied to values only builds
-        // data.
-        ExprKind::App { .. } => {
-            let (head, apps) = peel_app_chain(expr);
-            matches!(
-                head.kind,
-                ExprKind::Constructor { .. } | ExprKind::DictRef { .. }
-            ) && apps.iter().all(|(_, arg)| is_atomic(arg))
-        }
-        _ => false,
-    }
-}
-
-/// Bring one body (an expression in tail position) into the form
-/// `effect_position::check_body` accepts, given the nodes that perform an
-/// effect by themselves. `counter` numbers the temporaries and is advanced,
+/// Bring one body (an expression in tail position) into value-normal form,
+/// the form `effect_position::check_body` accepts, given the nodes that
+/// perform an effect by themselves. `counter` numbers the temporaries and is advanced,
 /// so bodies normalized one after another do not reuse a name.
 pub(crate) fn normalize_body(
     body: &Expr,
@@ -1197,5 +1155,149 @@ main () = {
             "normalize dropped App NodeIds on the lift path: {:?}",
             missing,
         );
+    }
+
+    /// The body of `f`, normalized with applied operations as the nodes
+    /// that perform.
+    fn normalized_body(src: &str) -> Expr {
+        let program = normalize_effects(&parse(src));
+        program
+            .into_iter()
+            .find_map(|decl| match decl {
+                Decl::FunBinding { name, body, .. } if name == "f" => Some(body),
+                _ => None,
+            })
+            .expect("function f")
+    }
+
+    fn violations(body: &Expr) -> Vec<effect_position::Violation> {
+        let mut out = Vec::new();
+        effect_position::check_body(body, &is_effect_call, &mut out);
+        out
+    }
+
+    /// The statements of a block, each as (bound name, value kind).
+    fn block_shape(body: &Expr) -> Vec<(Option<String>, &'static str)> {
+        let ExprKind::Block { stmts, .. } = &body.kind else {
+            panic!("expected a block, got {:?}", body.kind);
+        };
+        stmts
+            .iter()
+            .map(|stmt| match &stmt.node {
+                Stmt::Let {
+                    pattern: Pat::Var { name, .. },
+                    value,
+                    ..
+                } => (
+                    Some(name.clone()),
+                    effect_position::construct_name(value, &is_effect_call),
+                ),
+                Stmt::Let { value, .. } | Stmt::Expr(value) => {
+                    (None, effect_position::construct_name(value, &is_effect_call))
+                }
+                Stmt::LetFun { .. } => (None, "local function"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_operand_that_computes_is_lifted_in_evaluation_order() {
+        let body = normalized_body("f x = g (h x) (x + 1) (x, Some x)");
+        assert_eq!(violations(&body), vec![]);
+        assert_eq!(
+            block_shape(&body),
+            vec![
+                (Some("__anf0".to_string()), "pure call"),
+                (Some("__anf1".to_string()), "binary operator"),
+                (None, "pure call"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_body_whose_operands_are_values_is_left_alone() {
+        let src = "f x = g x (fun y -> y) (x, Some x)";
+        let before = parse(src);
+        assert_eq!(normalize_effects(&before), before);
+    }
+
+    #[test]
+    fn conditions_scrutinees_and_branches() {
+        let body = normalized_body("f x = if g x then h (x + 1) else 2");
+        assert_eq!(violations(&body), vec![]);
+        // The condition is lifted in the enclosing scope, the operand of
+        // the call in the branch stays in the branch.
+        assert_eq!(
+            block_shape(&body),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "if")]
+        );
+        let ExprKind::Block { stmts, .. } = &body.kind else {
+            unreachable!()
+        };
+        let Stmt::Expr(Expr {
+            kind: ExprKind::If { then_branch, .. },
+            ..
+        }) = &stmts[1].node
+        else {
+            panic!("expected the if last");
+        };
+        assert_eq!(
+            block_shape(then_branch),
+            vec![
+                (Some("__anf1".to_string()), "binary operator"),
+                (None, "pure call")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_short_circuit_operator_whose_right_operand_computes_becomes_an_if() {
+        let body = normalized_body("f x y = g x && h y");
+        assert_eq!(violations(&body), vec![]);
+        assert_eq!(
+            block_shape(&body),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "if")]
+        );
+        // With a value on the right the operator stays.
+        let body = normalized_body("f x y = g x || y");
+        assert_eq!(
+            block_shape(&body),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "`&&`/`||`")]
+        );
+    }
+
+    #[test]
+    fn a_beam_guard_is_not_normalized_and_another_guard_is_its_own_scope() {
+        let src = "f x = case x {\n  y when y + 1 > 2 && y < 9 -> 1\n  y when g (h y) -> 2\n  _ -> 3\n}";
+        let body = normalized_body(src);
+        assert_eq!(violations(&body), vec![]);
+        let ExprKind::Case { arms, .. } = &body.kind else {
+            panic!("expected the case to stay in tail position");
+        };
+        let guard = |i: usize| arms[i].node.guard.as_ref().expect("guard");
+        assert!(matches!(guard(0).kind, ExprKind::BinOp { .. }));
+        assert!(effect_position::is_guard_safe(guard(0)));
+        assert_eq!(
+            block_shape(guard(1)),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "pure call")]
+        );
+    }
+
+    #[test]
+    fn record_fields_are_lifted_in_written_order() {
+        let body = normalized_body("f x = P { b: g x, a: h x }");
+        assert_eq!(violations(&body), vec![]);
+        let ExprKind::Block { stmts, .. } = &body.kind else {
+            panic!("expected a block");
+        };
+        let callee = |stmt: &Stmt| match stmt {
+            Stmt::Let { value, .. } => match &peel_app_chain(value).0.kind {
+                ExprKind::Var { name } => name.clone(),
+                other => panic!("unexpected head {other:?}"),
+            },
+            _ => panic!("expected a let"),
+        };
+        assert_eq!(callee(&stmts[0].node), "g");
+        assert_eq!(callee(&stmts[1].node), "h");
     }
 }

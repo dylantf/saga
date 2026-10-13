@@ -227,4 +227,65 @@ Does not shrink: `beam_interop.rs`, `evidence.rs`, `effects/analysis.rs`,
 
 ## Outcome
 
-(Filled in as steps land.)
+### Step 0 (2026-10-13)
+
+- `tests/core_snapshot.rs`, hashes in `tests/fixtures/core_snapshot.txt`:
+  172 units (34 stdlib modules, 129 single-file programs from `examples/`,
+  `examples/bugs/` and `examples/optimization/*/`, 9 modules of
+  `tests/fixtures/modules`). No `erlc`; about 17 s in a debug build.
+  `SAGA_SNAPSHOT_BLESS=1` rewrites the list, `SAGA_SNAPSHOT_DUMP=<dir>`
+  (with `SAGA_SNAPSHOT_FILTER`) writes the text.
+- Output is deterministic as it stands: two runs gave byte-identical text
+  for all 172 units. Nothing is normalised before hashing.
+- Two units are pinned in a failing state that predates this work:
+  `examples/bugs/nullary-handler-fn.saga` (`panic`: unknown handler item)
+  and `selective-uniform/03-pure-val.saga` (`rejected` by the typechecker).
+- `CompiledModule::new` is the only place the struct is built, with
+  `metadata_only` and `entry` as two named calls of it. `Default` is gone.
+
+### Step 1 (2026-10-13)
+
+`normalize` lifts every operand that is not a value; `check_body` and
+`lower_operand` reject one. `src/`: 453 lines added, 187 removed, of which
+180 added are tests.
+
+- Snapshot: 94 of 172 units changed (19 of 34 stdlib modules). Compared
+  structurally (every `call M:F`, `apply F/N`, closure application, `fun`,
+  `case`, `letrec`, `try`, `receive`, `primop`, tagged closure, per unit),
+  93 differ only in `let`s (1,742 more in total). No fast path was lost.
+- One unit gained a fast path: `examples/44-handle-bindings.saga`.
+  `resume dbg msg` is now `let t = dbg msg; resume t`, the block shape the
+  static tail-resume inlining already accepted when written by hand, so two
+  inline handlers are inlined instead of installed. The same kind of gain
+  is possible wherever a matcher asks for a plain argument and used to see
+  a pure call: handler factory arguments (`recover_handler_factory_binding`)
+  and imported static helper arguments.
+- One lowering root was not normalized: the arm of a handler declaration
+  inlined by static tail-resume (`lower_static_tail_resume_op`). It now is.
+  Found by the strengthened `lower_operand`.
+- Guards: a guard made only of operators, variables and literals is left as
+  written (and the operand check is off while it is lowered). Every other
+  guard is normalized as a body. Only `case` lowers such a guard as a body;
+  function clauses, local functions, `receive` and `do ... else` arms emit
+  it in guard position, where `erlc` accepts the `let`s and `case`s it now
+  contains. A call to a user function in those guards did not compile
+  before and still does not.
+- `a && b` / `a || b`: an `if` when the right operand is not a value,
+  unchanged otherwise.
+- Record literals: fields are evaluated in written order, by the pass and
+  by the lowerer. Before, a literal with pure fields evaluated them in
+  declared order.
+- Gate, release builds, same machine and session, `elapsed_ms`:
+  `closed_row_hot_op` 794 / 784 / 779 before, 791 / 779 / 786 after;
+  `open_row_hot_op` 1325 / 1324 / 1323 before, 1311 / 1310 / 1313 after;
+  `deep_call_chain` 1690 / 1685 / 1663 / 1785 before,
+  1707 / 1679 / 2078 / 1674 / 1676 after (the two high readings are one
+  run each).
+- Compile time, `saga build examples/42-dijkstra.saga` in an empty
+  directory (so the stdlib is compiled too), `real`: 0.93 / 0.93 / 0.93 s
+  before, 0.93 / 0.93 / 0.94 s after.
+- Suite: 1,766 passed, 0 failed, 5 ignored (1,757 before, plus the snapshot
+  test and 8 unit tests). No text-asserting test needed a change, and the
+  function-shape matrix fixtures are unchanged. Clippy: the same 4 warnings.
+- Stdlib `.core`: 401,111 bytes before, 426,357 after (+6.3%); the whole
+  corpus 1,494,360 to 1,574,141 (+5.3%).
