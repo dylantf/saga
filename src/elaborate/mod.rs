@@ -101,14 +101,6 @@ pub(crate) type ImplKey = (String, Vec<String>, String);
 
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
-/// Name prefix of the eta parameters of a dictionary-abstracted `let` whose
-/// value has an effect row somewhere in its type
-/// (`let f = fun (dict, arg) -> value arg`). The generic fold must leave
-/// `value arg` alone for these: substituting the untyped `arg` for the value's
-/// typed parameter would erase the type that call classification reads, and
-/// an effectful call through the parameter would be emitted as a pure one.
-pub(crate) const LET_EFFECT_ARG_PREFIX: &str = "__let_eff_arg";
-
 pub fn elaborate(program: &Program, result: &CheckResult) -> Program {
     elaborate_module(program, result, "")
 }

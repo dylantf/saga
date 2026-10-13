@@ -802,9 +802,10 @@ impl<'a> Populator<'a> {
     }
 
     /// A lambda head that has no entry in the type table (a node made after
-    /// typechecking). It is a tagged closure when the call its body wraps is
-    /// effectful; this mirrors `Lowerer::lambda_is_tagged`, which decides how
-    /// the lambda itself is lowered.
+    /// typechecking). It is a tagged closure when evaluating its body
+    /// performs an effect: an effectful call or an applied operation, in
+    /// any position that is not a body of its own. `Lowerer::lambda_is_tagged`
+    /// reads the answer from the plan to decide how the lambda is lowered.
     fn untyped_lambda_head_is_effectful(&self, head: &Expr) -> bool {
         if !matches!(head.kind, ExprKind::Lambda { .. }) {
             return false;
@@ -813,10 +814,10 @@ impl<'a> Populator<'a> {
         while let ExprKind::Lambda { body: inner, .. } = &body.kind {
             body = inner.as_ref();
         }
-        self.plan
-            .call(body.id)
-            .is_some_and(CallEffectInfo::is_cps_call)
-            || util::collect_effect_call(body).is_some()
+        crate::codegen::effect_position::is_effectful(body, &|node| {
+            (self.plan.call(node.id)).is_some_and(CallEffectInfo::is_cps_call)
+                || util::collect_effect_call(node).is_some()
+        })
     }
 
     fn trace_entry(&self, expr: &Expr, info: &CallEffectInfo) -> CallEffectTraceEntry {

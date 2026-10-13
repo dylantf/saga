@@ -349,15 +349,6 @@ pub(crate) fn beta_reduce_lambda_app(expr: &Expr) -> Option<Expr> {
     if !args.iter().all(|a| is_duplicable(a)) {
         return None;
     }
-    // An elaboration-made variable standing in for a parameter whose type
-    // carries effects: the parameter's occurrences keep the type that call
-    // classification needs, the variable has none.
-    if args.iter().any(|a| {
-        matches!(&a.kind, ExprKind::Var { name, .. }
-            if name.starts_with(crate::elaborate::LET_EFFECT_ARG_PREFIX))
-    }) {
-        return None;
-    }
     Some(bind_subpats(params, &args, body))
 }
 

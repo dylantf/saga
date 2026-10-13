@@ -689,9 +689,15 @@ pub fn take_freshened_ids() -> Vec<(NodeId, NodeId)> {
 
 fn refresh(id: &mut NodeId) {
     let old = std::mem::replace(id, NodeId::fresh());
+    record_freshened_id(old, *id);
+}
+
+/// Record that the node `new` stands for the node `old`. A later record
+/// for the same `new` replaces an earlier one.
+pub fn record_freshened_id(old: NodeId, new: NodeId) {
     FRESHENED.with(|f| {
         if let Some(pairs) = f.borrow_mut().as_mut() {
-            pairs.push((old, *id));
+            pairs.push((old, new));
         }
     });
 }

@@ -107,6 +107,13 @@ pub(crate) fn substitute_var(expr: &mut Expr, name: &str, replacement: &Expr) {
             if var_name == name {
                 let mut value = replacement.clone();
                 freshen_expr_ids(&mut value);
+                // A variable put in place of a variable is a rename: the
+                // occurrence keeps the type it had at this use. (The
+                // replacement may be a variable made after typechecking,
+                // with no type of its own.)
+                if matches!(value.kind, ExprKind::Var { .. }) {
+                    crate::desugar::record_freshened_id(expr.id, value.id);
+                }
                 *expr = value;
             }
         }
