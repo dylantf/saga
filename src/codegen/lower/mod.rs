@@ -695,11 +695,14 @@ impl<'a> Lowerer<'a> {
             ExprKind::BinOp { left, right, .. } => {
                 self.branch_is_effectful(left) || self.branch_is_effectful(right)
             }
-            ExprKind::FieldAccess { expr, .. } => self.branch_is_effectful(expr),
+            ExprKind::FieldAccess { expr, .. } | ExprKind::UnaryMinus { expr } => {
+                self.branch_is_effectful(expr)
+            }
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.branch_is_effectful(record)
                     || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
             }
+            ExprKind::Resume { value } => self.branch_is_effectful(value),
             // A `with` with an *inline, abort-only* handler over effectful
             // inner work needs CPS-aware routing in enclosing contexts so
             // the handler closure receives the host's return K and the

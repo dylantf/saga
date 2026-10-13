@@ -102,6 +102,27 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Bind an expression that performs effects to `var_name` for use in
+    /// `body`, making `body` its continuation. Unlike
+    /// [`Self::lower_bind_expr_with_cps`] the expression may also be a
+    /// direct effect operation (`op! x`), and a direct effectful call
+    /// receives the continuation as its `_ReturnK` without an intermediate
+    /// binding.
+    pub(crate) fn lower_bind_effectful_expr(
+        &mut self,
+        expr: &Expr,
+        var_name: String,
+        body: CExpr,
+    ) -> CExpr {
+        let k = CExpr::Fun(vec![var_name], Box::new(body));
+        if self.expr_is_effectful_call(expr) {
+            return self.lower_expr_with_call_return_k(expr, Some(k));
+        }
+        let k_var = self.fresh();
+        let inner = self.lower_terminal_effectful_expr_to_k(expr, &k_var);
+        CExpr::Let(k_var, Box::new(k), Box::new(inner))
+    }
+
     /// Assemble a composite expression from `slots`, then apply `k_var` to
     /// the result. Effectful slots are CPS-chained so an aborting handler
     /// bypasses both the assembly and the outer continuation.

@@ -4390,3 +4390,785 @@ main () = case [] {
         "{message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Effectful sub-expressions nested inside the arguments of an effectful call.
+//
+// `fin (1 + g n)` with `fin` and `g` both effectful: the rest of the argument,
+// the remaining arguments and the call to `fin` are all part of `g n`'s
+// continuation, so a handler that aborts must skip them. Each cell of the grid
+// below is run under an aborting handler (the result must be exactly the abort
+// value, 1000) and under a resuming handler (the result must be the ordinary
+// value, so the fix cannot work by dropping the argument).
+// ---------------------------------------------------------------------------
+
+const NESTED_ARG_PRELUDE: &str = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Tick { fun tick : Unit -> Unit }
+effect Sink { fun sink : a -> (a -> Int) -> Int }
+
+record Box { value : Int }
+type Wrap = Wrap(Int)
+
+fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+fun g_st : Int -> Int needs {Stop, Tick}
+g_st i = {
+  tick! ()
+  stop! i
+}
+
+fun fin : a -> (a -> Int) -> Int needs {Tick}
+fin x proj = {
+  tick! ()
+  proj x + 100
+}
+
+fun fin_st : a -> (a -> Int) -> Int needs {Stop, Tick}
+fin_st x proj = {
+  tick! ()
+  proj x + 100
+}
+
+fun finb : Int -> a -> (a -> Int) -> Int needs {Tick}
+finb z x proj = {
+  tick! ()
+  proj x + 100 + z
+}
+
+fun id2 : Int -> Int
+id2 x = x
+
+fun mkbox : Int -> Box
+mkbox v = Box { value: v }
+
+fun boxv : Box -> Int
+boxv b = b.value
+
+fun unwrap : Wrap -> Int
+unwrap w = case w {
+  Wrap(v) -> v
+}
+
+fun addp : (Int, Int) -> Int
+addp p = case p {
+  (a, b) -> a + b
+}
+
+fun sum2 : List Int -> Int
+sum2 xs = case xs {
+  [a, b] -> a + b
+  _ -> 0
+}
+
+fun sval : String -> Int
+sval s = if s == "v3" then 3 else 0
+"#;
+
+/// What surrounds the inner effectful call inside the argument. `expr` holds
+/// `@` where the inner call goes; `proj` is a pure function turning the
+/// argument back into an `Int`; `value` is that `Int` when the inner call
+/// yields 3.
+struct NestedArgWrapper {
+    name: &'static str,
+    ty: &'static str,
+    expr: &'static str,
+    proj: &'static str,
+    value: i64,
+}
+
+const NESTED_ARG_WRAPPERS: &[NestedArgWrapper] = &[
+    NestedArgWrapper {
+        name: "bare",
+        ty: "Int",
+        expr: "@",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "binop_right",
+        ty: "Int",
+        expr: "1 + @",
+        proj: "id2",
+        value: 4,
+    },
+    NestedArgWrapper {
+        name: "binop_left",
+        ty: "Int",
+        expr: "@ + 1",
+        proj: "id2",
+        value: 4,
+    },
+    NestedArgWrapper {
+        name: "tuple",
+        ty: "(Int, Int)",
+        expr: "(@, 1)",
+        proj: "addp",
+        value: 4,
+    },
+    NestedArgWrapper {
+        name: "constructor",
+        ty: "Wrap",
+        expr: "Wrap(@)",
+        proj: "unwrap",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "record_field",
+        ty: "Box",
+        expr: "Box { value: @ }",
+        proj: "boxv",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "record_update",
+        ty: "Box",
+        expr: "{ mkbox 0 | value: @ }",
+        proj: "boxv",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "list_literal",
+        ty: "List Int",
+        expr: "[@, 1]",
+        proj: "sum2",
+        value: 4,
+    },
+    NestedArgWrapper {
+        name: "string_interp",
+        ty: "String",
+        expr: "$\"v{@}\"",
+        proj: "sval",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "if_condition",
+        ty: "Int",
+        expr: "if @ == 3 then 5 else 6",
+        proj: "id2",
+        value: 5,
+    },
+    NestedArgWrapper {
+        name: "if_branch",
+        ty: "Int",
+        expr: "if 1 == 1 then @ else 6",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "case_scrutinee",
+        ty: "Int",
+        expr: "case @ {\n    3 -> 5\n    _ -> 6\n  }",
+        proj: "id2",
+        value: 5,
+    },
+    NestedArgWrapper {
+        name: "case_arm",
+        ty: "Int",
+        expr: "case 1 {\n    1 -> @\n    _ -> 6\n  }",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "field_access",
+        ty: "Int",
+        expr: "(Box { value: @ }).value",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "field_of_pure_call",
+        ty: "Int",
+        expr: "(mkbox (@)).value",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "pipe",
+        ty: "Int",
+        expr: "@ |> id2",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "pure_call",
+        ty: "Int",
+        expr: "id2 (@)",
+        proj: "id2",
+        value: 3,
+    },
+    NestedArgWrapper {
+        name: "negation",
+        ty: "Int",
+        expr: "-(@)",
+        proj: "id2",
+        value: -3,
+    },
+    NestedArgWrapper {
+        name: "block",
+        ty: "Int",
+        expr: "{\n    let t = @\n    t + 1\n  }",
+        proj: "id2",
+        value: 4,
+    },
+    NestedArgWrapper {
+        name: "two_deep",
+        ty: "Int",
+        expr: "1 + id2 (@ * 2)",
+        proj: "id2",
+        value: 7,
+    },
+];
+
+/// The effectful call at the bottom of the argument.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NestedArgInner {
+    Named,
+    ClosedParam,
+    OpenParam,
+    Op,
+}
+
+const NESTED_ARG_INNERS: &[NestedArgInner] = &[
+    NestedArgInner::Named,
+    NestedArgInner::ClosedParam,
+    NestedArgInner::OpenParam,
+    NestedArgInner::Op,
+];
+
+/// The effectful callee whose argument holds the nested call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NestedArgOuter {
+    Named,
+    NamedSecondArg,
+    ClosedParam,
+    OpenParam,
+    Lambda,
+    Op,
+    InsideConstructor,
+    InsideTuple,
+}
+
+/// One generated cell: its label and the three function names it defines.
+struct NestedArgCell {
+    label: String,
+    abort_fn: String,
+    resume_fn: String,
+    resume_value: i64,
+}
+
+fn nested_arg_cells(outer: NestedArgOuter) -> (String, Vec<NestedArgCell>) {
+    let mut src = String::from(NESTED_ARG_PRELUDE);
+    let mut cells = Vec::new();
+    for wrapper in NESTED_ARG_WRAPPERS {
+        for &inner in NESTED_ARG_INNERS {
+            let idx = cells.len();
+            let inner_open = inner == NestedArgInner::OpenParam;
+            let outer_open = outer == NestedArgOuter::OpenParam;
+
+            // Parameters of the cell function and the values passed for them.
+            let mut params: Vec<(&str, String, &str)> = Vec::new();
+            // Effects the cell names directly, and those reaching it only
+            // through the row variable of an open-row parameter.
+            let mut named: Vec<&str> = Vec::new();
+            let mut via_row: Vec<&str> = Vec::new();
+
+            let ty = wrapper.ty;
+            let callee_ty = |row: &str| format!("({ty} -> ({ty} -> Int) -> Int needs {{{row}}})");
+            match outer {
+                NestedArgOuter::ClosedParam => {
+                    params.push(("h", callee_ty("Tick"), "fin"));
+                    named.push("Tick");
+                }
+                NestedArgOuter::OpenParam => {
+                    let passed = if inner_open { "fin_st" } else { "fin" };
+                    params.push(("h", callee_ty("..e"), passed));
+                    via_row.push("Tick");
+                }
+                NestedArgOuter::Op => named.push("Sink"),
+                _ => named.push("Tick"),
+            }
+            match inner {
+                NestedArgInner::ClosedParam => {
+                    params.push(("f", "(Int -> Int needs {Stop})".to_string(), "g"));
+                    named.push("Stop");
+                }
+                NestedArgInner::OpenParam => {
+                    let passed = if outer_open { "g_st" } else { "g" };
+                    params.push(("f", "(Int -> Int needs {..e})".to_string(), passed));
+                    via_row.push("Stop");
+                }
+                NestedArgInner::Named | NestedArgInner::Op => named.push("Stop"),
+            }
+
+            let inner_expr = match inner {
+                NestedArgInner::Named => "g 3",
+                NestedArgInner::ClosedParam | NestedArgInner::OpenParam => "f 3",
+                NestedArgInner::Op => "stop! 3",
+            };
+            let arg = wrapper.expr.replace('@', inner_expr);
+            let proj = wrapper.proj;
+            let body = match outer {
+                NestedArgOuter::Named => format!("fin ({arg}) {proj}"),
+                NestedArgOuter::NamedSecondArg => format!("finb 0 ({arg}) {proj}"),
+                NestedArgOuter::ClosedParam | NestedArgOuter::OpenParam => {
+                    format!("h ({arg}) {proj}")
+                }
+                NestedArgOuter::Lambda => format!(
+                    "{{\n  let lam = fun x p -> {{\n    tick! ()\n    p x + 100\n  }}\n  lam ({arg}) {proj}\n}}"
+                ),
+                NestedArgOuter::Op => format!("sink! ({arg}) {proj}"),
+                NestedArgOuter::InsideConstructor => {
+                    format!("unwrap (Wrap(fin ({arg}) {proj}))")
+                }
+                NestedArgOuter::InsideTuple => format!("addp (fin ({arg}) {proj}, 0)"),
+            };
+
+            let mut row: Vec<String> = named.iter().map(|e| e.to_string()).collect();
+            if !via_row.is_empty() {
+                row.push("..e".to_string());
+            }
+            let sig: String = params
+                .iter()
+                .map(|(_, ty, _)| format!("{ty} -> "))
+                .collect();
+            let names: String = params.iter().map(|(n, _, _)| format!("{n} ")).collect();
+            let passed: String = params.iter().map(|(_, _, p)| format!("{p} ")).collect();
+            src.push_str(&format!(
+                "\nfun c{idx} : {sig}Unit -> Int needs {{{}}}\nc{idx} {names}() = {body}\n",
+                row.join(", ")
+            ));
+
+            let handles = |eff: &str| named.contains(&eff) || via_row.contains(&eff);
+            let mut common_arms = String::new();
+            if handles("Tick") {
+                common_arms.push_str(", tick () = resume ()");
+            }
+            if handles("Sink") {
+                common_arms.push_str(", sink x p = resume (p x + 100)");
+            }
+            for (suffix, stop_arm) in [("abort", "stop i = 1000"), ("resume", "stop i = resume i")]
+            {
+                src.push_str(&format!(
+                    "\npub fun c{idx}_{suffix} : Unit -> Int\nc{idx}_{suffix} () = c{idx} {passed}() with {{ {stop_arm}{common_arms} }}\n"
+                ));
+            }
+            cells.push(NestedArgCell {
+                label: format!("{outer:?} / {} / {inner:?}", wrapper.name),
+                abort_fn: format!("c{idx}_abort"),
+                resume_fn: format!("c{idx}_resume"),
+                resume_value: wrapper.value + 100,
+            });
+        }
+    }
+    (src, cells)
+}
+
+/// Call each exported `Unit -> _` function of the compiled `main` module in
+/// one VM, returning `name -> printed result`, with a runtime exception
+/// reported as `crash` instead of taking the VM down.
+fn call_each_export(
+    fixture: &str,
+    src: &str,
+    functions: &[String],
+) -> std::collections::HashMap<String, String> {
+    let root = fixtures_root_for_main_only();
+    let mut checker = make_checker(root.clone());
+    let program = typecheck_source(src, &mut checker, fixture);
+    let core = emit_program(&program, "main", &checker, Some("main"));
+    let dir = fresh_dir(fixture);
+    compile_with_erlc(&dir, &core, "main", fixture);
+    let eval = format!(
+        "lists:foreach(fun(N) -> R = try erlang:apply(main, N, [unit]) of V -> \
+         io_lib:format(\"~0p\", [V]) catch _:_ -> \"crash\" end, \
+         io:format(\"~s=~s~n\", [N, R]) end, [{}]), init:stop().",
+        functions.join(", ")
+    );
+    let stdout = run_erl(&dir, &eval, fixture);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+    stdout
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+fn check_nested_arg_grid(fixture: &str, outer: NestedArgOuter) {
+    let (src, cells) = nested_arg_cells(outer);
+    let functions: Vec<String> = cells
+        .iter()
+        .flat_map(|c| [c.abort_fn.clone(), c.resume_fn.clone()])
+        .collect();
+    let results = call_each_export(fixture, &src, &functions);
+    let mut failures = Vec::new();
+    for cell in &cells {
+        let abort = results.get(&cell.abort_fn).map(String::as_str);
+        if abort != Some("1000") {
+            failures.push(format!(
+                "{}: aborting handler gave {abort:?}, expected 1000",
+                cell.label
+            ));
+        }
+        let resume = results.get(&cell.resume_fn).map(String::as_str);
+        if resume != Some(cell.resume_value.to_string().as_str()) {
+            failures.push(format!(
+                "{}: resuming handler gave {resume:?}, expected {}",
+                cell.label, cell.resume_value
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "[{fixture}] {} of {} cells failed:\n{}",
+        failures.len(),
+        cells.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn nested_effectful_arg_of_named_effectful_call() {
+    check_nested_arg_grid("nested_arg_named", NestedArgOuter::Named);
+}
+
+#[test]
+fn nested_effectful_arg_in_second_position_of_named_effectful_call() {
+    check_nested_arg_grid("nested_arg_named_second", NestedArgOuter::NamedSecondArg);
+}
+
+#[test]
+fn nested_effectful_arg_of_closed_row_parameter_call() {
+    check_nested_arg_grid("nested_arg_closed_param", NestedArgOuter::ClosedParam);
+}
+
+#[test]
+fn nested_effectful_arg_of_open_row_parameter_call() {
+    check_nested_arg_grid("nested_arg_open_param", NestedArgOuter::OpenParam);
+}
+
+#[test]
+fn nested_effectful_arg_of_local_effectful_lambda_call() {
+    check_nested_arg_grid("nested_arg_lambda", NestedArgOuter::Lambda);
+}
+
+#[test]
+fn nested_effectful_arg_of_effect_operation() {
+    check_nested_arg_grid("nested_arg_op", NestedArgOuter::Op);
+}
+
+#[test]
+fn nested_effectful_arg_of_effectful_call_inside_constructor() {
+    check_nested_arg_grid("nested_arg_in_ctor", NestedArgOuter::InsideConstructor);
+}
+
+#[test]
+fn nested_effectful_arg_of_effectful_call_inside_tuple() {
+    check_nested_arg_grid("nested_arg_in_tuple", NestedArgOuter::InsideTuple);
+}
+
+/// Other call shapes with an effectful sub-expression in an argument (or in
+/// the function position). Each entry is `(label, cell body, value under a
+/// resuming handler)`; the cell is `Unit -> Int needs {Stop, Tick}` and may
+/// use the parameter-free helpers below. Under the aborting handler every
+/// cell must give exactly 1000.
+#[test]
+fn nested_effectful_arg_in_other_call_shapes() {
+    let prelude = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Tick { fun tick : Unit -> Unit }
+effect Ask { fun ask : Unit -> Int }
+
+fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+fun fin : Int -> Int needs {Tick}
+fin x = {
+  tick! ()
+  x + 100
+}
+
+fun fin2 : Int -> Int -> Int needs {Tick}
+fin2 x y = {
+  tick! ()
+  x + y + 100
+}
+
+fun mk : Int -> (Int -> Int needs {Tick})
+mk a = fun x -> {
+  tick! ()
+  a + x + 100
+}
+
+fun each : (Int -> Int needs {Tick}) -> Int -> Int needs {Tick}
+each f x = f x + 100
+
+trait Run a {
+  fun run : a -> Int -> Int needs {Tick}
+}
+
+impl Run for Int needs {Tick} {
+  run a x = {
+    tick! ()
+    a + x + 100
+  }
+}
+
+fun id2 : Int -> Int
+id2 x = x
+
+fun inc : Int -> Int
+inc x = x + 1
+
+fun ident : a -> a
+ident x = x
+
+fun eident : a -> a needs {Tick}
+eident x = {
+  tick! ()
+  x
+}
+
+fun user : Unit -> Int needs {Ask}
+user () = ask! () + 1
+"#;
+    let cells: &[(&str, &str, i64)] = &[
+        // A function that returns an effectful function, called in one go.
+        ("returned_function_first_arg", "mk (1 + g 3) 5", 109),
+        ("returned_function_rest_arg", "mk 1 (1 + g 3)", 105),
+        // A named function applied to more arguments than it takes.
+        ("over_applied_effectful_rest", "ident fin (1 + g 3)", 104),
+        ("over_applied_pure_rest", "eident inc (1 + g 3)", 5),
+        (
+            "over_applied_nested_first_arg",
+            "ident (if g 3 == 3 then fin else fin) 1",
+            101,
+        ),
+        (
+            "over_applied_effectful_first_call",
+            "eident (if g 3 == 3 then inc else inc) 1",
+            2,
+        ),
+        // A higher-order function with a pure callback takes the direct
+        // (non-CPS) specialization; its other arguments may still perform.
+        (
+            "hof_direct_nested_arg",
+            "each (fun x -> x + 1) (1 + g 3)",
+            105,
+        ),
+        (
+            "hof_direct_effectful_arg",
+            "each (fun x -> x + 1) (g 3)",
+            104,
+        ),
+        (
+            "hof_partial_application_arg",
+            "each (fin2 (1 + g 3)) 1",
+            205,
+        ),
+        ("trait_method", "run 1 (1 + g 3)", 105),
+        (
+            "effectful_head_of_effectful_call",
+            "(if g 3 == 3 then fin else fin) 1",
+            101,
+        ),
+        (
+            "effectful_head_and_nested_arg",
+            "(if g 3 == 3 then fin else fin) (1 + g 3)",
+            104,
+        ),
+        (
+            "effectful_head_of_pure_call",
+            "{\n  tick! ()\n  let v = (if g 3 == 3 then inc else id2) 1\n  v + 100\n}",
+            102,
+        ),
+        (
+            "effectful_head_of_pure_call_in_arg",
+            "fin ((if g 3 == 3 then inc else id2) 1)",
+            102,
+        ),
+        (
+            "partial_application_bound",
+            "{\n  let p = fin2 (1 + g 3)\n  p 1\n}",
+            105,
+        ),
+        ("operator_over_call", "1 + fin (1 + g 3)", 105),
+        ("call_in_arg_of_call", "fin (fin (1 + g 3) + 1)", 205),
+        // The value passed to `resume` in a handler arm.
+        (
+            "resume_effectful_call",
+            "{\n  tick! ()\n  user () with { ask () = resume (g 3) }\n}",
+            4,
+        ),
+        (
+            "resume_nested_call",
+            "{\n  tick! ()\n  user () with { ask () = resume (1 + g 3) }\n}",
+            5,
+        ),
+        (
+            "resume_nested_call_not_last",
+            "{\n  tick! ()\n  user () with { ask () = {\n    let r = resume (1 + g 3)\n    r + 10\n  } }\n}",
+            15,
+        ),
+    ];
+
+    let mut src = String::from(prelude);
+    let mut functions = Vec::new();
+    for (idx, (_, body, _)) in cells.iter().enumerate() {
+        src.push_str(&format!(
+            "\nfun c{idx} : Unit -> Int needs {{Stop, Tick}}\nc{idx} () = {body}\n"
+        ));
+        for (suffix, stop_arm) in [("abort", "stop i = 1000"), ("resume", "stop i = resume i")] {
+            src.push_str(&format!(
+                "\npub fun c{idx}_{suffix} : Unit -> Int\nc{idx}_{suffix} () = c{idx} () with {{ {stop_arm}, tick () = resume () }}\n"
+            ));
+            functions.push(format!("c{idx}_{suffix}"));
+        }
+    }
+    let results = call_each_export("nested_arg_other_shapes", &src, &functions);
+    let mut failures = Vec::new();
+    for (idx, (label, _, resume_value)) in cells.iter().enumerate() {
+        let abort = results.get(&format!("c{idx}_abort")).map(String::as_str);
+        if abort != Some("1000") {
+            failures.push(format!(
+                "{label}: aborting handler gave {abort:?}, expected 1000"
+            ));
+        }
+        let resume = results.get(&format!("c{idx}_resume")).map(String::as_str);
+        if resume != Some(resume_value.to_string().as_str()) {
+            failures.push(format!(
+                "{label}: resuming handler gave {resume:?}, expected {resume_value}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} cells failed:\n{}",
+        failures.len(),
+        cells.len(),
+        failures.join("\n")
+    );
+}
+
+/// Arguments that perform effects are evaluated left to right, each exactly
+/// once, whichever of them are direct effectful calls and whichever merely
+/// contain one. The handler resumes and prepends the operation's argument to
+/// the result, so the result spells out the order the operations ran in.
+#[test]
+fn nested_effectful_args_evaluate_left_to_right_once() {
+    let prelude = r#"module Main
+
+effect Mark { fun mark : Int -> Int }
+effect Note { fun note : Int -> Int }
+effect Sink { fun sink : Int -> Int -> Int }
+
+fun m : Int -> Int needs {Mark}
+m i = mark! i
+
+fun n : Int -> Int needs {Note}
+n i = note! i
+
+fun noted2 : Int -> Int -> Int needs {Note}
+noted2 a b = {
+  let z = note! 9
+  a * 10 + b
+}
+
+fun fin2 : Int -> Int -> Int needs {Mark}
+fin2 a b = {
+  let z = mark! 9
+  a * 10 + b
+}
+
+fun fin3 : Int -> Int -> Int -> Int needs {Mark}
+fin3 a b c = {
+  let z = mark! 9
+  a * 100 + b * 10 + c
+}
+
+fun id2 : Int -> Int
+id2 x = x
+"#;
+    // (label, expression of type Int, expected result)
+    let cells: &[(&str, &str, &str)] = &[
+        ("named_both_nested", "fin2 (1 + m 1) (2 + m 2)", "129=24"),
+        ("named_direct_then_nested", "fin2 (m 1) (2 + m 2)", "129=14"),
+        ("named_nested_then_direct", "fin2 (1 + m 1) (m 2)", "129=22"),
+        (
+            "named_pure_between",
+            "fin3 (1 + m 1) (id2 5) (2 + m 2)",
+            "129=254",
+        ),
+        (
+            "named_two_in_one_arg",
+            "fin2 (m 1 + m 2) (m 3 * m 4)",
+            "12349=42",
+        ),
+        (
+            "named_nested_calls",
+            "fin2 (fin2 (m 1) (1 + m 2)) (m 3 + 1)",
+            "12939=134",
+        ),
+        ("closed_param", "h (1 + f 1) (2 + f 2)", "129=24"),
+        ("open_param", "ho (1 + fo 1) (2 + fo 2)", "129=24"),
+        (
+            "lambda",
+            "{\n    let lam = fun a b -> {\n      let z = mark! 9\n      a * 10 + b\n    }\n    lam (1 + m 1) (2 + m 2)\n  }",
+            "129=24",
+        ),
+        ("operation", "sink! (1 + m 1) (2 + m 2)", "12=24"),
+        (
+            "tuple_of_calls",
+            "case (fin2 (1 + m 1) 0, 2 + m 2) {\n    (a, b) -> a + b\n  }",
+            "192=24",
+        ),
+    ];
+
+    let mut src = String::from(prelude);
+    let mut functions = Vec::new();
+    for (idx, (_, expr, _)) in cells.iter().enumerate() {
+        src.push_str(&format!(
+            r#"
+fun c{idx} : (Int -> Int needs {{Mark}}) -> (Int -> Int -> Int needs {{Mark}}) -> (Int -> Int needs {{..e}}) -> (Int -> Int -> Int needs {{..e}}) -> Unit -> String needs {{Mark, Sink, ..e}}
+c{idx} f h fo ho () = {{
+  let r = {expr}
+  "=" <> show r
+}}
+
+pub fun c{idx}_run : Unit -> String
+c{idx}_run () = c{idx} m fin2 n noted2 () with {{
+  mark i = {{
+    let rest = resume i
+    show i <> rest
+  }},
+  note i = {{
+    let rest = resume i
+    show i <> rest
+  }},
+  sink a b = resume (a * 10 + b),
+}}
+"#
+        ));
+        functions.push(format!("c{idx}_run"));
+    }
+    let results = call_each_export("nested_arg_order", &src, &functions);
+    let mut failures = Vec::new();
+    for (idx, (label, _, expected)) in cells.iter().enumerate() {
+        let got = results.get(&format!("c{idx}_run")).map(String::as_str);
+        // Strings print as Erlang binaries: <<"129=24">>.
+        let want = format!("<<\"{expected}\">>");
+        if got != Some(want.as_str()) {
+            failures.push(format!("{label}: got {got:?}, expected {want}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} cells failed:\n{}",
+        failures.len(),
+        cells.len(),
+        failures.join("\n")
+    );
+}

@@ -440,6 +440,28 @@ impl<'a> Lowerer<'a> {
             {
                 self.lower_binop_with_k(op, left, right, Some(&expr.span), k_var)
             }
+            ExprKind::Resume { value } if self.branch_is_effectful(value) => {
+                let v = self.fresh();
+                let result = self.fresh();
+                let resumed = self.lower_resume_of_var(&v);
+                let body = CExpr::Let(
+                    result.clone(),
+                    Box::new(resumed),
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(k_var.to_string())),
+                        vec![CExpr::Var(result)],
+                    )),
+                );
+                self.lower_bind_effectful_expr(value, v, body)
+            }
+            ExprKind::UnaryMinus { expr: operand } if self.branch_is_effectful(operand) => self
+                .lower_with_cps_slots(vec![CpsSlot::Expr { expr: operand }], k_var, |_, vars| {
+                    cerl_call(
+                        "erlang",
+                        "-",
+                        vec![CExpr::Lit(CLit::Int(0)), CExpr::Var(vars[0].clone())],
+                    )
+                }),
             ExprKind::FieldAccess {
                 expr: rec_expr,
                 field,
@@ -521,6 +543,20 @@ impl<'a> Lowerer<'a> {
                     let any_eff = args_rev.iter().any(|a| {
                         self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
                     });
+                    // The function itself may be produced effectfully:
+                    // `(if g n == 0 then f else h) x`. It is evaluated
+                    // first, with the arguments and the call as its
+                    // continuation.
+                    if self.expr_is_effectful_call(callee) || self.has_nested_effectful_expr(callee)
+                    {
+                        let slots: Vec<CpsSlot<'_>> = std::iter::once(callee)
+                            .chain(args_rev.iter().copied())
+                            .map(|expr| CpsSlot::Expr { expr })
+                            .collect();
+                        return self.lower_with_cps_slots(slots, k_var, |this, vars| {
+                            this.apply_function_value(CExpr::Var(vars[0].clone()), &vars[1..])
+                        });
+                    }
                     if any_eff {
                         let slots: Vec<CpsSlot<'_>> =
                             args_rev.iter().map(|a| CpsSlot::Expr { expr: a }).collect();

@@ -55,6 +55,65 @@ impl<'a> Lowerer<'a> {
         CExpr::Binary(segs)
     }
 
+    /// `resume v` for an already-bound value: call the handler arm's
+    /// continuation K. When a `finally` block is active, the K call is wrapped
+    /// in try/catch so cleanup runs after K completes or panics.
+    pub(crate) fn lower_resume_of_var(&mut self, v: &str) -> CExpr {
+        let k_name = self
+            .current_handler_k
+            .clone()
+            .expect("resume used outside handler");
+        let k_call = CExpr::Apply(
+            Box::new(CExpr::Var(k_name)),
+            vec![CExpr::Var(v.to_string())],
+        );
+        if let Some(ref finally_expr) = self.current_handler_finally.clone() {
+            // let Cleanup = fun() -> finally_body in
+            // try apply K(V)
+            // of OkVar -> let _ = apply Cleanup() in OkVar
+            // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
+            let cleanup_var = self.fresh();
+            let cleanup_body = self.lower_expr(finally_expr);
+            let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
+            let cleanup_call_ok = CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
+            let cleanup_call_catch =
+                CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
+            let ok_var = self.fresh();
+            let class_var = self.fresh();
+            let reason_var = self.fresh();
+            let trace_var = self.fresh();
+            CExpr::Let(
+                cleanup_var,
+                Box::new(cleanup_lambda),
+                Box::new(CExpr::Try {
+                    expr: Box::new(k_call),
+                    ok_var: ok_var.clone(),
+                    ok_body: Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_call_ok),
+                        Box::new(CExpr::Var(ok_var)),
+                    )),
+                    catch_vars: (class_var.clone(), reason_var.clone(), trace_var.clone()),
+                    catch_body: Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_call_catch),
+                        Box::new(CExpr::Call(
+                            "erlang".to_string(),
+                            "raise".to_string(),
+                            vec![
+                                CExpr::Var(class_var),
+                                CExpr::Var(reason_var),
+                                CExpr::Var(trace_var),
+                            ],
+                        )),
+                    )),
+                }),
+            )
+        } else {
+            k_call
+        }
+    }
+
     pub(crate) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
             ExprKind::Lit { value, .. } => match value {
@@ -782,63 +841,18 @@ impl<'a> Lowerer<'a> {
             // once into a lambda (at the resume site, where arm body variables are
             // in scope) and called in both the ok and catch branches.
             ExprKind::Resume { value, .. } => {
-                let k_name = self
-                    .current_handler_k
-                    .clone()
-                    .expect("resume used outside handler");
                 let v = self.fresh();
-                let ce = self.lower_expr_value(value);
-                let k_call =
-                    CExpr::Apply(Box::new(CExpr::Var(k_name)), vec![CExpr::Var(v.clone())]);
-                let k_or_wrapped = if let Some(ref finally_expr) =
-                    self.current_handler_finally.clone()
-                {
-                    // let Cleanup = fun() -> finally_body in
-                    // try apply K(V)
-                    // of OkVar -> let _ = apply Cleanup() in OkVar
-                    // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
-                    let cleanup_var = self.fresh();
-                    let cleanup_body = self.lower_expr(finally_expr);
-                    let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
-                    let cleanup_call_ok =
-                        CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
-                    let cleanup_call_catch =
-                        CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
-                    let ok_var = self.fresh();
-                    let class_var = self.fresh();
-                    let reason_var = self.fresh();
-                    let trace_var = self.fresh();
-                    CExpr::Let(
-                        cleanup_var,
-                        Box::new(cleanup_lambda),
-                        Box::new(CExpr::Try {
-                            expr: Box::new(k_call),
-                            ok_var: ok_var.clone(),
-                            ok_body: Box::new(CExpr::Let(
-                                "_".to_string(),
-                                Box::new(cleanup_call_ok),
-                                Box::new(CExpr::Var(ok_var)),
-                            )),
-                            catch_vars: (class_var.clone(), reason_var.clone(), trace_var.clone()),
-                            catch_body: Box::new(CExpr::Let(
-                                "_".to_string(),
-                                Box::new(cleanup_call_catch),
-                                Box::new(CExpr::Call(
-                                    "erlang".to_string(),
-                                    "raise".to_string(),
-                                    vec![
-                                        CExpr::Var(class_var),
-                                        CExpr::Var(reason_var),
-                                        CExpr::Var(trace_var),
-                                    ],
-                                )),
-                            )),
-                        }),
-                    )
+                // A resume value that performs effects (`resume (g n)`,
+                // `resume (1 + g n)`) has the resumption as its continuation,
+                // so a handler that aborts it does not resume.
+                if self.branch_is_effectful(value) {
+                    let resumed = self.lower_resume_of_var(&v);
+                    self.lower_bind_effectful_expr(value, v, resumed)
                 } else {
-                    k_call
-                };
-                CExpr::Let(v, Box::new(ce), Box::new(k_or_wrapped))
+                    let ce = self.lower_expr_value(value);
+                    let resumed = self.lower_resume_of_var(&v);
+                    CExpr::Let(v, Box::new(ce), Box::new(resumed))
+                }
             }
 
             // Handler expression as a value (e.g. returned from a function).
