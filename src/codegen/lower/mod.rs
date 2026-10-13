@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
 pub(super) use evidence::EvidenceFrame;
 pub(crate) use tagged::consumed_arrows_effectful as tagged_consumed_arrows_effectful;
-use util::{cerl_call, collect_effect_call, core_var, lower_string_to_binary};
+use util::{cerl_call, core_var, lower_string_to_binary};
 
 pub(super) type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
 
@@ -655,128 +655,28 @@ impl<'a> Lowerer<'a> {
         format!("{}__{}", Self::handler_param_name(effect, op), suffix)
     }
 
-    /// Check if an expression contains effectful calls nested inside if/case/block
-    /// branches. Like `has_nested_effect_call` but also detects effectful function
-    /// calls (e.g. `assert_eq 1 1`) that the static utility misses because it has
-    /// no access to the resolution/fun_info tables.
-    fn has_nested_effectful_expr(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.branch_is_effectful(cond)
-                    || self.branch_is_effectful(then_branch)
-                    || self.branch_is_effectful(else_branch)
-            }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                self.branch_is_effectful(scrutinee)
-                    || arms
-                        .iter()
-                        .any(|arm| self.branch_is_effectful(&arm.node.body))
-            }
-            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
-                Stmt::Expr(e) => self.branch_is_effectful(e),
-                Stmt::Let { value, .. } => self.branch_is_effectful(value),
-                Stmt::LetFun { body, .. } => self.branch_is_effectful(body),
-            }),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
-                fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
-            }
-            ExprKind::App { func, arg } => {
-                if let Some((_, args)) = super::lower::util::collect_ctor_call(expr) {
-                    args.iter().any(|a| self.branch_is_effectful(a))
-                } else if self.expr_is_effectful_call(expr) {
-                    // Outer call is itself effectful — it's not "nested",
-                    // and callers should route through
-                    // `expr_is_effectful_call` /
-                    // `lower_expr_with_call_return_k`, not through the
-                    // build-k-from-rest CPS path.
-                    false
-                } else {
-                    // Non-ctor pure outer with potentially effectful
-                    // subexprs — e.g. `from (decode x)` from a routed-
-                    // derive delegating impl. Report nested effects so the
-                    // caller chains them through CPS.
-                    self.branch_is_effectful(func) || self.branch_is_effectful(arg)
-                }
-            }
-            ExprKind::Tuple { elements, .. } => {
-                elements.iter().any(|e| self.branch_is_effectful(e))
-            }
-            ExprKind::BinOp { left, right, .. } => {
-                self.branch_is_effectful(left) || self.branch_is_effectful(right)
-            }
-            ExprKind::FieldAccess { expr, .. } | ExprKind::UnaryMinus { expr } => {
-                self.branch_is_effectful(expr)
-            }
-            ExprKind::RecordUpdate { record, fields, .. } => {
-                self.branch_is_effectful(record)
-                    || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
-            }
-            ExprKind::Resume { value } => self.branch_is_effectful(value),
-            ExprKind::Do {
-                bindings,
-                success,
-                else_arms,
-                ..
-            } => {
-                bindings.iter().any(|(_, e)| self.branch_is_effectful(e))
-                    || self.branch_is_effectful(success)
-                    || else_arms
-                        .iter()
-                        .any(|arm| self.branch_is_effectful(&arm.node.body))
-            }
-            ExprKind::Receive {
-                arms, after_clause, ..
-            } => {
-                arms.iter()
-                    .any(|arm| self.branch_is_effectful(&arm.node.body))
-                    || after_clause.as_ref().is_some_and(|(timeout, body)| {
-                        self.branch_is_effectful(timeout) || self.branch_is_effectful(body)
-                    })
-            }
-            ExprKind::BitString { segments } => segments
-                .iter()
-                .any(|seg| self.branch_is_effectful(&seg.value)),
-            // A `with` over effectful work whose handler never needs the
-            // value of the handled computation back (see
-            // `with_handler_chains_continuation`) takes the rest of the
-            // enclosing body as its continuation, like an effectful call.
-            // An outer handler that aborts an operation performed inside
-            // it then skips that rest. Other handlers stay delimiters that
-            // produce a plain value.
-            ExprKind::With {
-                expr: inner,
-                handler,
-            } => self.with_handler_chains_continuation(handler) && self.branch_is_effectful(inner),
-            _ => false,
-        }
-    }
-
-    /// Check if an expression is or contains an effectful call — either a direct
-    /// effect op (`!` call), an effectful function call, or nested branches
-    /// containing either.
+    /// Whether `expr`, as a block statement or a `do` binding, takes the
+    /// rest of the block as its continuation (the `let` rule), instead of
+    /// being evaluated to a value that is then bound.
     ///
-    /// Composition over sub-expressions is `effect_position::is_effectful`;
-    /// this supplies the nodes that perform by themselves as the lowering
-    /// routines see them: a `with` counts only when it takes the enclosing
-    /// continuation, and a `resume` only through its value.
-    fn branch_is_effectful(&self, expr: &Expr) -> bool {
+    /// It does when something in it performs (`Lowerer::performs_effect`,
+    /// the one definition of that), composed over sub-expressions by
+    /// `effect_position::is_effectful`, with two exceptions that are about
+    /// the continuation and not about position. A `resume` is a call of the
+    /// handler's continuation that returns: only its value can perform. A
+    /// `with` takes the rest only when its handler never needs the value of
+    /// the handled computation back (`with_handler_chains_continuation`)
+    /// and that computation performs; otherwise it stays a delimiter that
+    /// produces a plain value. See "The Continuation of a `with`" in
+    /// `docs/effect-implementation.md`.
+    fn takes_continuation(&self, expr: &Expr) -> bool {
         super::effect_position::is_effectful(expr, &|node| match &node.kind {
-            ExprKind::App { .. } => {
-                collect_effect_call(node).is_some() || self.expr_is_effectful_call(node)
-            }
+            ExprKind::Resume { .. } => false,
             ExprKind::With {
                 expr: inner,
                 handler,
-            } => self.with_handler_chains_continuation(handler) && self.branch_is_effectful(inner),
-            ExprKind::EffectCall { .. } => self.nullary_operation(node).is_some(),
-            _ => false,
+            } => self.with_handler_chains_continuation(handler) && self.takes_continuation(inner),
+            _ => self.performs_effect(node),
         })
     }
 

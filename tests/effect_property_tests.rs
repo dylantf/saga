@@ -7365,3 +7365,55 @@ result () = compute () with { number = 1000 }
         1000,
     );
 }
+
+/// Whether an untyped lambda is a tagged closure is recorded in the plan
+/// from "its body is an effectful call". Inside a direct-callback variant of
+/// a higher-order function, a call of the callback parameter is direct, so
+/// a lambda there whose body is such a call would have to be bare. That
+/// cannot arise: a function with a lambda left in its body after the
+/// generic fold gets no direct-callback variant
+/// (`optimize::hof_body_supported`), so `apply_l` below is only ever
+/// lowered with `f y` as an effectful call. `apply_d`
+/// has a variant and no lambda. Both are called with a pure and with an
+/// effectful callback.
+#[test]
+fn lambda_calling_a_callback_parameter_has_no_direct_variant() {
+    let src = format!(
+        "{ANF_PRELUDE}{}",
+        r#"
+fun apply_d : (Int -> Int needs {Stop}) -> Int -> Int needs {Stop}
+apply_d f x = f x + 1
+
+fun apply_l : (Int -> Int needs {Stop}) -> Int -> Int needs {Stop}
+apply_l f x = {
+  let h = fun y -> f y
+  h x + 1
+}
+
+fun inc : Int -> Int
+inc i = i + 10
+
+fun direct : Unit -> Int needs {Stop}
+direct () = apply_d inc 1 + apply_l inc 2
+
+fun effectful : Unit -> Int needs {Stop}
+effectful () = apply_d g 1 + apply_l g 2
+
+pub fun result : Unit -> Int
+result () = {
+  let pure = direct () with { stop i = resume i }
+  let eff = effectful () with { stop i = resume (i * 100) }
+  pure * 1000 + eff
+}
+"#
+    );
+    let root = fixtures_root_for_main_only();
+    let mut checker = make_checker(root.clone());
+    let program = typecheck_source(&src, &mut checker, "anf_hof_lambda");
+    let core = emit_program(&program, "main", &checker, Some("main"));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(core.contains("__saga_direct_hof_apply_d"));
+    assert!(!core.contains("__saga_direct_hof_apply_l"));
+    // pure: (11 + 1) + (12 + 1) = 25; effectful: (100 + 1) + (200 + 1) = 302
+    check_result_int("anf_hof_lambda", &src, 25_302);
+}

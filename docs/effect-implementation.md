@@ -829,10 +829,10 @@ Erlang stack frames; see the ignored tests
 `non_tail_with_delimited_handler_under_aborting_outer_handler` and
 `tail_with_delimited_handler_resume_returns_value_of_with`.
 
-A handled block that ends in an expression with an effectful sub-expression
-and has no return continuation at all (`{ g 3 + 100 } with h` in a pure
-function) is given an identity continuation, so that expression is chained
-like the same expression in an effectful function.
+A handled block with no return continuation at all (`{ g 3 + 100 } with h`
+in a pure function) needs nothing special: normalization has turned its tail
+into `{ let t = g 3; t + 100 }`, and the `let` rule below gives `g 3` the
+rest as its continuation whether or not the block itself has one.
 
 ### Lowering Structure
 
@@ -860,13 +860,56 @@ Those facts are independent metadata that the lowerer may consume for direct
 fast paths. Missing facts always fall back to the classified evidence/CPS path.
 Optimization facts are not a second lowered program.
 
-Continuation flow is threaded through explicit helpers:
+#### One rule for where effects go
 
-- value-position lowering — produces a value for the enclosing construct
-- terminal/tail lowering — routes successful completion through an explicit `_ReturnK`
-- handler-owned expression lowering — produces the handled result directly, doesn't inherit an enclosing return continuation
+Effectful code reaches the lowerer in one shape. Before a body is lowered
+(a function clause, a dictionary method, a handler arm or return clause, a
+`finally` block, an inlined helper), `lower/anf.rs` checks it against the
+position rule in `codegen/effect_position.rs` and, if it fails,
+normalizes it (`normalize::normalize_body`):
 
-This keeps handler delimiters and nested `with` boundaries explicit in the lowerer.
+> An expression that performs an effect is the value of a block-level
+> `let`/statement (or a `do` binding), or is in tail position of a body or
+> branch. It is never an operand.
+
+"Performs" is one definition, `Lowerer::performs_effect`: a call the plan
+classified CPS, an applied operation, a nullary operation (`number!`), a
+`with`, a `resume`. It is composed over sub-expressions by one exhaustive
+table (`effect_position::children`), which stops at bodies that run later
+(lambdas, local functions, handler arms, the computation a `with` handles,
+guards). Normalization lifts an offending operand into a `let`, earlier
+siblings first so evaluation order is kept, and turns `a && b` / `a || b`
+with an effectful right operand into an `if`. A violation that survives is
+an internal compiler error, and so is an operand that still needs a
+continuation when the lowerer evaluates it (`lower_operand`): a body that
+bypassed normalization fails loudly.
+
+The lowerer then has two rules, each with one implementation:
+
+- **Tail** (`lower_tail(expr, k)` in `lower/exprs/return_k.rs`). `k` is the
+  continuation, or absent when the value is simply returned. An operation
+  or an effectful call takes `k` as its own; a `with` inherits it; `if`,
+  `case`, blocks, `do` and `receive` hand it to their branches; anything
+  else is a value (`lower_expr`) to which `k` is applied. `lower_expr`
+  sends the branching forms back to `lower_tail` with no continuation.
+- **Let** (`lower_block` / `lower_statement` in `lower/exprs/blocks.rs`).
+  For `let p = e; rest`, if `e` takes a continuation it is lowered in tail
+  position with `fun p -> rest` as that continuation; otherwise `e` is
+  evaluated and bound. This is the same whether or not the block has a
+  continuation of its own. A `do` binding follows the same rule.
+
+"Takes a continuation" (`Lowerer::takes_continuation`) is `performs_effect`
+with two exceptions that concern the continuation and not the position: a
+`resume` is a call that returns (only its value can perform), and a `with`
+takes the rest of the block only when its handler chains (see "The
+Continuation of a `with`"). Both must still be `let`s, never operands.
+
+Two things are deliberately outside the rule. The normalize call that runs
+before the generic fold stays: the fold freshens non-duplicable arguments,
+and an operation left inside one would lose its node-keyed resolution.
+Handler arms and delimited `with` bodies that have no continuation are
+lowered with `k` absent; they are still in `let`/tail position within their
+own body.
 
 ### Non-Resumable Effects
 
@@ -896,7 +939,9 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/lower/effects/ops.rs` -- resolves static or dynamic operation slots through `EvidenceAbi`.
 - `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
-- `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
+- `codegen/effect_position.rs` -- the position rule: the table of sub-expression positions, the effect predicate and the checker.
+- `codegen/normalize.rs`, `codegen/lower/anf.rs` -- effect normalization, and where it is applied and asserted.
+- `codegen/lower/exprs/` -- `lower_tail` (`return_k.rs`), `lower_block` (`blocks.rs`), `lower_expr` (`dispatch.rs`), `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- registers local/imported `FunInfo` entries carrying `CallableAbi` plus non-ABI HOF parameter metadata.
 - `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly.
 

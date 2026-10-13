@@ -147,7 +147,7 @@ impl<'a> Lowerer<'a> {
             param_vars.push(v);
         }
 
-        let result = match self.effect_op_lowering_plan(&effect_key, &effect_name) {
+        match self.effect_op_lowering_plan(&effect_key, &effect_name) {
             EffectOpLoweringPlan::DirectNative { handler_canonical } => {
                 // Direct path: ops that always resume exactly once can be
                 // inlined as `let Result = <native call> in <continuation
@@ -285,9 +285,7 @@ impl<'a> Lowerer<'a> {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
             }
-        };
-
-        result
+        }
     }
 
     /// Build a per-op handler function for a single BEAM-native operation.

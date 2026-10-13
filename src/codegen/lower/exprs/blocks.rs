@@ -195,14 +195,14 @@ impl<'a> Lowerer<'a> {
             let Some((var, _, _)) = self.handle_dynamic_vars.get(name.as_str()).cloned() else {
                 return rest(self);
             };
-            if !self.branch_is_effectful(value) {
+            if !self.takes_continuation(value) {
                 let rhs_ce = self.lower_expr(value);
                 let rest_ce = rest(self);
                 return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
             }
         }
 
-        if self.branch_is_effectful(value) {
+        if self.takes_continuation(value) {
             let saved_handler_vars = pat_opt
                 .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
                 .unwrap_or_default();

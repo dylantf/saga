@@ -235,7 +235,7 @@ impl<'a> Lowerer<'a> {
             Stmt::Let { value, .. } | Stmt::Expr(value) => value,
             Stmt::LetFun { .. } => return false,
         };
-        !value.contains_resume() && !self.branch_is_effectful(value)
+        !value.contains_resume() && !self.takes_continuation(value)
     }
 
     pub(crate) fn static_tail_resume_direct_body(
@@ -351,29 +351,12 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
         let expr = &*self.effect_normal_body(expr, "handler arm");
-        // For abort handler arm bodies inside an effectful host context
-        // (e.g. an impl method that has its own `_ReturnK`), the abort
-        // value must flow through the with's outer K — not just return
-        // raw up the Erlang stack, which would bypass the host's CPS
-        // chain. `current_handler_inherited_k` carries the with's outer
-        // K when applicable. For non-effectful hosts (None) we fall back
-        // to plain value-mode lowering: the abort value just becomes the
-        // closure's Erlang return value.
-        if let Some(k) = self.current_handler_inherited_k.clone() {
-            self.lower_tail(expr, Some(k))
-        } else if self.branch_is_effectful(expr) {
-            // The body performs effects of its own (handled further out)
-            // somewhere inside an expression: `resume (g x) + 1`,
-            // `if g x == 0 then resume 1 else resume 2`. Thread an identity
-            // continuation through it, so each effectful sub-expression is
-            // called in tail position with the rest of the body as its
-            // continuation, and a handler that aborts it skips that rest.
-            let param = self.fresh();
-            let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
-            self.lower_tail(expr, Some(identity))
-        } else {
-            self.lower_expr(expr)
-        }
+        // Inside an effectful host (e.g. an impl method with its own
+        // `_ReturnK`), `current_handler_inherited_k` carries the `with`'s
+        // outer continuation, so the arm's value flows through the host's
+        // CPS chain. Without one the value is the closure's return value.
+        let k = self.current_handler_inherited_k.clone();
+        self.lower_tail(expr, k)
     }
 
     pub(crate) fn lower_handled_inner_expr(
@@ -382,30 +365,8 @@ impl<'a> Lowerer<'a> {
         handled_return_k: Option<CExpr>,
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
-        let mut return_k = self.compose_return_k(handled_return_k, inherited_return_k);
-        if return_k.is_none() && self.handled_tail_needs_continuation(expr) {
-            // The handled computation ends in an expression with an
-            // effectful sub-expression (`{ g 3 + 100 } with h`). Without a
-            // continuation that expression would be lowered as a plain
-            // value, and a handler that aborts the sub-expression would
-            // return into the rest of it. An identity continuation makes it
-            // CPS-chained like the same expression in an effectful function.
-            return_k = Some(self.identity_return_lambda());
-        }
+        let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
         self.lower_tail(expr, return_k)
-    }
-
-    /// Whether the expression a handled computation ends in (the last
-    /// expression of its block, through nested blocks) has an effectful
-    /// sub-expression that needs a continuation to be chained into.
-    fn handled_tail_needs_continuation(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Block { stmts, .. } => match stmts.last().map(|stmt| &stmt.node) {
-                Some(Stmt::Expr(tail)) => self.handled_tail_needs_continuation(tail),
-                _ => false,
-            },
-            _ => !self.expr_is_effectful_call(expr) && self.has_nested_effectful_expr(expr),
-        }
     }
 
     pub(crate) fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {

@@ -120,7 +120,7 @@ impl<'a> Lowerer<'a> {
         for (pat, expr) in bindings.iter().rev() {
             let scrut_var = self.fresh();
             let fail_var = self.fresh();
-            let val_ce = (!self.branch_is_effectful(expr)).then(|| self.lower_expr(expr));
+            let val_ce = (!self.takes_continuation(expr)).then(|| self.lower_expr(expr));
 
             let success_pat =
                 self.lower_pat(pat, &self.constructor_atoms, self.handler_origin_module());

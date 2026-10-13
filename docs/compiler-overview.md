@@ -122,18 +122,21 @@ frozen (`normalize_body`, called from `src/codegen/lower/anf.rs` for each body
 the lowerer starts on: function clauses and guards, dictionary methods,
 handler arms and return clauses, `finally` blocks, inlined helpers). There it
 knows which calls perform effects and lifts every expression that needs a
-continuation out of operand position: calls the plan classified CPS, `with`,
-`resume`, and any `if`/`case`/block/`do`/`receive` with such a thing in a
-branch. `a && b` / `a || b` with an effectful right operand becomes an `if`.
-The rule it establishes, and the check that it holds, are in
-`src/codegen/effect_position.rs`: an expression that performs effects is the
-value of a block-level `let`/statement or is in tail position. A body that
-already satisfies the rule is lowered untouched; a violation left after
-normalizing is an internal compiler error. Facts the lowerer used to read off
-the tree's shape (whether an untyped lambda is a tagged closure, whether a
-dictionary method performs an operation directly) are recorded in the plan
-before this runs. A nullary operation (`number!`) is not yet counted as
-performing.
+continuation out of operand position: calls the plan classified CPS,
+operations (nullary ones included), `with`, `resume`, and any `if`/`case`/
+block/`do`/`receive` with such a thing in a branch. `a && b` / `a || b` with
+an effectful right operand becomes an `if`. The rule it establishes, and the
+check that it holds, are in `src/codegen/effect_position.rs`: an expression
+that performs effects is the value of a block-level `let`/statement or is in
+tail position. A body that already satisfies the rule is lowered untouched; a
+violation left after normalizing is an internal compiler error. Facts the
+lowerer used to read off the tree's shape (whether an untyped lambda is a
+tagged closure, whether a dictionary method performs an operation directly)
+are recorded in the plan before this runs.
+
+The first run cannot be dropped in favour of the second: the generic fold
+runs between them and freshens arguments it cannot duplicate, which would
+orphan the node-keyed resolution of an operation still nested in one.
 
 ### Backend Resolve (`src/codegen/resolve.rs`)
 
@@ -206,7 +209,10 @@ This phase is responsible for:
   tagged CPS closure `{'$saga_cps', Fun}` when effectful (`lower/tagged.rs`);
   there is no planning pass or adapter between the two
 - saturated vs partial application detection
-- handler parameter / return continuation threading
+- handler parameter / return continuation threading, by two rules over
+  effect-normal bodies: `lower_tail` (pass the continuation on) and
+  `lower_block` (`let x = e; rest` gives `e` the continuation `fun x -> rest`).
+  See "One rule for where effects go" in `docs/effect-implementation.md`
 - direct fast paths proven by optimizer facts
 - runtime-specific data layout and call shaping
 

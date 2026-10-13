@@ -806,13 +806,48 @@ such a child, stopping at lambdas and handler values.
 
 Estimated net change to the lowerer: 500 to 700 lines fewer.
 
-### Open bugs this is expected to close (unverified, from reading)
+### What happened (steps 1 to 8 done)
 
-A local function inside a continuation-threaded block reaching
-`unreachable!`; `assert` ignored on a `let` in such a block; a block ending
-in `let x = <effectful call>` lowered with an identity continuation; an
-effectful condition in `let h = if c then h1 else h2`; return clauses of
-handler values lowered in value mode.
+Each of these was reproduced before the change that closed it and has a
+test in `tests/effect_property_tests.rs`:
+
+- An effectful condition in `let h = if c then h1 else h2`: closed by the
+  pass (step 3). Answered 102, now 1000.
+- An effectful operand in the return clause of a handler value: closed by
+  the pass (step 3). Answered 1100, now 1000. Under an effectful host with
+  an aborting outer handler the result is still wrong for a different
+  reason: a `with` on a runtime handler value is a delimiter (the
+  chain-versus-delimit gap).
+- An effectful bit string segment size (not predicted): closed by the pass.
+- A local function inside a continuation-threaded block reaching
+  `unreachable!`: closed by the single block lowerer (step 7).
+- `assert` ignored on a `let` of an effectful call (it failed with
+  `case_clause`): closed by the single block lowerer (step 7).
+- A block ending in `let x = <effectful call>` lowered with an identity
+  continuation: closed by the single block lowerer (step 7).
+- A nullary operation (`number!`) never given the rest of the block (not
+  predicted; the survey's "applied `EffectCall`" missed it): closed in
+  step 7 by making it a performing leaf.
+- `case` lowered with a continuation had no complex-guard chain and no
+  `case_clause` fallthrough, and an effectful `do` binding in a block
+  without a continuation was not chained: both closed by step 7 as a side
+  effect of there being one implementation. No test reproduces them.
+
+Not done, with reasons:
+
+- The pre-fold normalize calls stay. Without them the generic fold
+  freshens an argument that still contains an operation and the operation's
+  node-keyed resolution is lost (three order-table tests fail with "no
+  effect for op").
+- Two leaf notions remain, sharing one definition: `performs_effect`
+  (position) and `takes_continuation` (the `let` rule), which excludes
+  `resume` and a delimiting `with`. Folding the second into the `with`
+  lowering would need the lowering to know whether its continuation is a
+  block's rest or the body's own, which is the chain-versus-delimit work.
+- The chaining of an effectful `do` binding stays; a binding is a `let`
+  position.
+- Step 9 (types and resolution through the generic fold, typed eta
+  parameters, unknown call heads as an internal error) is untouched.
 
 ## Appendix A: reproductions
 

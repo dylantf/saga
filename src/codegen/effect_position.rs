@@ -82,7 +82,12 @@ pub(crate) fn children(expr: &Expr) -> Vec<(Position, &Expr)> {
 
         ExprKind::App { .. } => {
             let (head, spine) = app_spine(expr);
-            out.push((Operand, head));
+            // The operation of an applied operation is not an operand: it
+            // is not evaluated on its own.
+            match &head.kind {
+                ExprKind::EffectCall { args, .. } => out.extend(args.iter().map(|e| (Operand, e))),
+                _ => out.push((Operand, head)),
+            }
             for app in spine {
                 if let ExprKind::App { arg, .. } = &app.kind {
                     out.push((Operand, arg.as_ref()));
