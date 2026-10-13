@@ -107,6 +107,16 @@ semantically the same source node.
 Effect normalization pre-pass. Prepares the elaborated AST for the CPS-aware
 lowerer.
 
+A direct operation call (`op! x`) nested in an expression is lifted into a
+`let` ahead of the statement. The pass has no types, so to keep evaluation
+left to right it also lifts every sibling evaluated before the lifted call
+that is not a plain value (variable, literal, lambda, data built from those),
+each into its own `let`, in order. The variable replacing such a sibling keeps
+the sibling's `NodeId`, so its type is still found. Conditionally evaluated
+parts (`if`/`case` branches, the right operand of `&&`/`||`, lambda bodies,
+handler arms) are separate scopes. An expression with no nested operation call
+is left unchanged.
+
 ### Backend Resolve (`src/codegen/resolve.rs`)
 
 This phase is now a **backend-oriented projection layer**, not a second

@@ -6169,8 +6169,18 @@ result () = {
 /// Known gap: a `case` guard that performs effects is lowered as a plain
 /// value. Expected 1000; gives 106 (the abort value fails the guard and the
 /// next arm runs).
+///
+/// The typechecker means guards to be pure: `check_guard` rejects a direct
+/// `op!` and then discards whatever effects the guard inferred, so a call to
+/// an effectful function in a guard is accepted and its effects are not
+/// charged to the enclosing function. A function declared pure can therefore
+/// perform effects from a guard and fail at run time with no handler in
+/// scope; a function-clause guard of that shape does not compile at all.
+/// Threading a continuation through guards would not close that hole. This
+/// stays ignored until the typechecker either rejects such guards or tracks
+/// their effects.
 #[test]
-#[ignore = "effectful case guards are lowered without a continuation"]
+#[ignore = "effectful guards: typechecker drops their effects; lowering has no continuation"]
 fn effectful_case_guard_under_aborting_handler() {
     check_expression_form_cells(
         "expr_forms_guard",
@@ -6185,11 +6195,11 @@ fn effectful_case_guard_under_aborting_handler() {
     );
 }
 
-/// Known gap: the normalize pass lifts a direct operation call into a `let`
-/// ahead of the whole statement, so it runs before an effectful function
-/// call written to its left. Expected "12=3"; gives "21=3".
+/// An operation call nested in an expression is lifted into a `let` ahead of
+/// the statement by the normalize pass. Everything evaluated before it in
+/// source order is lifted too, so an effectful function call written to its
+/// left still runs first.
 #[test]
-#[ignore = "normalize lifts `op!` ahead of effectful function calls to its left"]
 fn operation_after_effectful_call_in_one_expression_keeps_order() {
     let src = r#"module Main
 
@@ -6213,6 +6223,356 @@ result () = run () with {
 }
 "#;
     check_result_string("op_after_call_order", src, "12=3");
+}
+
+/// Source for the order table: one function per (wrapper, left sibling)
+/// cell, each evaluating `L` and then `mark! 2` inside the wrapper, run under
+/// handlers that prepend the operation's argument to the result (so the
+/// result spells out the order) and abort when the argument is `abort_at`.
+const OP_ORDER_PRELUDE: &str = r#"module Main
+
+effect Mark { fun mark : Int -> Int }
+effect Note { fun note : Int -> Int }
+effect Sink { fun sink : Int -> Int -> Int }
+
+type P = P(Int, Int)
+
+record Pt {
+  x : Int,
+  y : Int,
+}
+
+fun m : Int -> Int needs {Mark}
+m i = mark! i
+
+fun n : Int -> Int needs {Note}
+n i = note! i
+
+fun fin2 : Int -> Int -> Int needs {Mark}
+fin2 a b = {
+  let z = mark! 9
+  a * 10 + b
+}
+
+fun add2 : Int -> Int -> Int
+add2 a b = a * 10 + b
+
+fun id2 : Int -> Int
+id2 x = x
+"#;
+
+/// (label, template with `L` and `R` holes giving an Int, value, operations
+/// the wrapper itself performs after its parts)
+const OP_ORDER_WRAPPERS: &[(&str, &str, &str, &str)] = &[
+    ("binop", "L - R", "-1", ""),
+    ("tuple", "case (L, R) {\n    (a, b) -> a * 10 + b\n  }", "12", ""),
+    (
+        "ctor_args",
+        "case P(L, R) {\n    P(a, b) -> a * 10 + b\n  }",
+        "12",
+        "",
+    ),
+    (
+        "record_fields",
+        "{\n    let p = Pt { x: L, y: R }\n    p.x * 10 + p.y\n  }",
+        "12",
+        "",
+    ),
+    (
+        "record_fields_reversed",
+        "{\n    let p = Pt { y: L, x: R }\n    p.y * 10 + p.x\n  }",
+        "12",
+        "",
+    ),
+    (
+        "list_literal",
+        "case [L, R] {\n    [a, b] -> a * 10 + b\n    _ -> 0\n  }",
+        "12",
+        "",
+    ),
+    (
+        "string_interp",
+        "{\n    let s = $\"{show (L)}-{show (R)}\"\n    if s == \"1-2\" then 12 else 0\n  }",
+        "12",
+        "",
+    ),
+    ("pure_call_args", "add2 (L) (R)", "12", ""),
+    ("effectful_call_args", "fin2 (L) (R)", "12", "9"),
+    ("param_call_args", "h (L) (R)", "12", "9"),
+    ("operation_args", "sink! (L) (R)", "12", ""),
+    (
+        "nested_two_deep",
+        "(1 * (L + 0)) - (0 + id2 (R))",
+        "-1",
+        "",
+    ),
+    (
+        "nested_in_call_arg",
+        "add2 (id2 (L + 0)) (0 + id2 (R))",
+        "12",
+        "",
+    ),
+];
+
+/// (label, expression of value 1, whether it records a "1")
+const OP_ORDER_LEFTS: &[(&str, &str, bool)] = &[
+    ("named_call", "m 1", true),
+    ("closed_param", "f 1", true),
+    ("open_param", "fo 1", true),
+    ("operation", "mark! 1", true),
+    ("pure_call", "id2 1", false),
+];
+
+/// Build the table's source for one handler variant and return
+/// `(source, [(label, exported function, expected result)])`.
+fn op_order_cells(abort_at: i64) -> (String, Vec<(String, String, String)>) {
+    let mut src = String::from(OP_ORDER_PRELUDE);
+    let mut cells = Vec::new();
+    let mut idx = 0;
+    for (wrapper, template, value, after) in OP_ORDER_WRAPPERS {
+        for (left, left_expr, records) in OP_ORDER_LEFTS {
+            let expr = template.replace('L', left_expr).replace('R', "mark! 2");
+            src.push_str(&format!(
+                r#"
+fun c{idx} : (Int -> Int needs {{Mark}}) -> (Int -> Int -> Int needs {{Mark}}) -> (Int -> Int needs {{..e}}) -> Unit -> String needs {{Mark, Sink, ..e}}
+c{idx} f h fo () = {{
+  let r = {expr}
+  "=" <> show r
+}}
+
+pub fun c{idx}_run : Unit -> String
+c{idx}_run () = c{idx} m fin2 n () with {{
+  mark i = if i == {abort_at} then "A" else {{
+    let rest = resume i
+    show i <> rest
+  }},
+  note i = if i == {abort_at} then "A" else {{
+    let rest = resume i
+    show i <> rest
+  }},
+  sink a b = resume (a * 10 + b),
+}}
+"#
+            ));
+            let order = format!("{}2{after}", if *records { "1" } else { "" });
+            let expected = match order.find(&abort_at.to_string()) {
+                Some(pos) => format!("{}A", &order[..pos]),
+                None => format!("{order}={value}"),
+            };
+            cells.push((
+                format!("{wrapper}/{left}"),
+                format!("c{idx}_run"),
+                expected,
+            ));
+            idx += 1;
+        }
+    }
+    (src, cells)
+}
+
+fn check_op_order_table(fixture: &str, abort_at: i64) {
+    let (src, cells) = op_order_cells(abort_at);
+    let functions: Vec<String> = cells.iter().map(|(_, f, _)| f.clone()).collect();
+    let results = call_each_export(fixture, &src, &functions);
+    let mut failures = Vec::new();
+    for (label, function, expected) in &cells {
+        let got = results.get(function).map(String::as_str);
+        // Strings print as Erlang binaries: <<"12=3">>.
+        let want = format!("<<\"{expected}\">>");
+        if got != Some(want.as_str()) {
+            failures.push(format!("{label}: got {got:?}, expected {want}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "[{fixture}] {} of {} cells failed:\n{}",
+        failures.len(),
+        cells.len(),
+        failures.join("\n")
+    );
+}
+
+/// Whatever is written to the left of a nested operation call runs before
+/// it, exactly once: an effectful function call, a call through an effectful
+/// or open-row parameter, another operation, or a pure call.
+#[test]
+fn left_sibling_of_nested_operation_runs_first() {
+    check_op_order_table("op_order_resume", 0);
+}
+
+/// The same table when the handler aborts at the left sibling: nothing
+/// after it runs, in particular not the operation to its right.
+#[test]
+fn left_sibling_of_nested_operation_can_abort() {
+    check_op_order_table("op_order_abort_left", 1);
+}
+
+/// The same table when the handler aborts at the nested operation: the left
+/// sibling has run, the rest of the expression and the block have not.
+#[test]
+fn nested_operation_after_left_sibling_can_abort() {
+    check_op_order_table("op_order_abort_right", 2);
+}
+
+/// Left-to-right order also holds for a sibling whose effect is not tracked
+/// by the type system: a foreign call that writes the process dictionary, and
+/// a `panic`.
+#[test]
+fn impure_left_sibling_of_nested_operation_runs_first() {
+    let src = r#"module Main
+
+effect Mark { fun mark : Int -> Int }
+
+@external("erlang", "erlang", "put")
+fun pd_put : Int -> Int -> Int
+
+@external("erlang", "erlang", "get")
+fun pd_get : Int -> Int
+
+fun bump : Int -> Int
+bump i = {
+  let previous = pd_put 7 i
+  i
+}
+
+fun boom : Int -> Int
+boom i = panic "left sibling ran first"
+
+fun seen : Unit -> Int needs {Mark}
+seen () = bump 1 + mark! 2
+
+fun panics : Unit -> Int needs {Mark}
+panics () = boom 1 + mark! 2
+
+pub fun order : Unit -> Int
+order () = seen () with { mark i = resume (pd_get 7 * 10 + i) }
+
+pub fun panic_first : Unit -> Int
+panic_first () = panics () with { mark i = 1000 }
+"#;
+    let functions = vec!["order".to_string(), "panic_first".to_string()];
+    let results = call_each_export("op_order_impure", src, &functions);
+    assert_eq!(results.get("order").map(String::as_str), Some("13"));
+    assert_eq!(results.get("panic_first").map(String::as_str), Some("crash"));
+}
+
+/// Shapes around the sibling lifting: a function head that is itself
+/// computed, an ascribed operation, and the right operand of `&&`/`||`,
+/// which runs only when the left operand does not decide the result. Each
+/// function runs under a recording handler and under handlers aborting at
+/// the first, second and third operation.
+#[test]
+fn lifted_heads_ascriptions_and_short_circuit_operands_keep_order() {
+    let src = r#"module Main
+
+effect Mark { fun mark : Int -> Int }
+effect Flag { fun flag : Int -> Bool }
+
+fun m : Int -> Int needs {Mark}
+m i = mark! i
+
+fun fl : Int -> Bool needs {Flag}
+fl i = flag! i
+
+fun inc : Int -> Int -> Int needs {Mark}
+inc a b = {
+  let z = mark! 8
+  a * 10 + b
+}
+
+fun dec : Int -> Int -> Int needs {Mark}
+dec a b = {
+  let z = mark! 9
+  a * 100 + b
+}
+
+fun head_if : Unit -> String needs {Mark}
+head_if () = {
+  let r = (if m 1 == 1 then inc else dec) (m 2) (mark! 3)
+  "=" <> show r
+}
+
+fun ascribed : Unit -> String needs {Mark}
+ascribed () = {
+  let r = m 1 + (mark! 2 : Int)
+  "=" <> show r
+}
+
+fun sc_skipped : Unit -> String needs {Flag}
+sc_skipped () = {
+  let a = False && flag! 1
+  let b = True || flag! 2
+  "=" <> show a <> show b
+}
+
+fun sc_if : Unit -> String needs {Mark, Flag}
+sc_if () = {
+  let r = if fl 1 && flag! 2 then m 3 else mark! 4
+  let s = if flag! 5 || fl 6 then 1 else 2
+  "=" <> show r <> show s
+}
+
+fun sc_arg : Unit -> String needs {Mark, Flag}
+sc_arg () = {
+  let r = inc (if (False && flag! 1) || flag! 2 then 1 else 0) (mark! 3)
+  "=" <> show r
+}
+
+fun run : (Unit -> String needs {Mark, Flag}) -> Int -> String
+run f stop = f () with {
+  mark i = if i == stop then "A" else {
+    let rest = resume i
+    show i <> rest
+  },
+  flag i = if i == stop then "A" else {
+    let rest = resume (i % 2 == 0)
+    show i <> rest
+  },
+}
+
+fun one : (Unit -> String needs {Mark, Flag}) -> String
+one f = run f 0 <> " " <> run f 1 <> " " <> run f 2 <> " " <> run f 3
+
+pub fun result : Unit -> String
+result () = one head_if <> "|" <> one ascribed <> "|" <> one sc_skipped <> "|" <> one sc_if <> "|" <> one sc_arg
+"#;
+    check_result_string(
+        "op_order_heads_short_circuit",
+        src,
+        "1238=23 A 1A 12A|12=3 A 1A 12=3|=FalseTrue =FalseTrue =FalseTrue =FalseTrue|1456=41 A 1456=41 1456=41|238=13 238=13 A 2A",
+    );
+}
+
+/// A callback argument of an operation that is lifted because an operation
+/// follows it keeps its type, so it is still wrapped to run against the
+/// perform-site handlers.
+#[test]
+fn lifted_callback_argument_of_operation_keeps_perform_site_handlers() {
+    let src = r#"module Main
+
+effect Inner { fun inner : Unit -> Int }
+effect Mark { fun mark : Int -> Int }
+effect Scope {
+  fun scope : (Unit -> Int needs {Inner, ..r}) -> Int -> Int needs {..r}
+}
+
+fun cb_a : Unit -> Int needs {Inner, Mark}
+cb_a () = inner! () + mark! 5
+
+fun choose : Int -> (Unit -> Int needs {Inner, Mark})
+choose i = cb_a
+
+fun lifted : Unit -> Int needs {Scope, Mark}
+lifted () = scope! (choose 1) (mark! 2)
+
+pub fun result : Unit -> Int
+result () = {
+  lifted () with {
+    scope body n = resume ((body () with { inner () = resume 100 }) + n),
+  }
+} with { mark i = resume i }
+"#;
+    check_result_int("op_order_lifted_callback", src, 107);
 }
 
 /// The nested-argument chaining holds across a module boundary: the outer
