@@ -581,7 +581,8 @@ impl<'a> Lowerer<'a> {
             self.current_handler_source_module = Some(source_module.to_string());
         }
         if let Some(ref fb) = arm.finally_block {
-            self.current_handler_finally = Some(fb.as_ref().clone());
+            self.current_handler_finally =
+                Some(self.effect_normal_body(fb, "finally block").into_owned());
         }
 
         // Recovered handler factories are lowered at the call site. Their
@@ -638,6 +639,7 @@ impl<'a> Lowerer<'a> {
         // body-local variables is unlikely. If it does reference arm params, those
         // are in scope via the param bindings above.
         if let (Some(fb), false) = (&arm.finally_block, has_resume) {
+            let fb = &*self.effect_normal_body(fb, "finally block");
             let cleanup_ce = self.lower_expr(fb);
             let result_var = self.fresh();
             body_ce = CExpr::Let(
@@ -746,10 +748,14 @@ impl<'a> Lowerer<'a> {
 
         let mut case_arms = Vec::new();
         for arm in arms {
-            self.current_handler_finally = arm.finally_block.as_ref().map(|fb| fb.as_ref().clone());
+            self.current_handler_finally = arm
+                .finally_block
+                .as_ref()
+                .map(|fb| self.effect_normal_body(fb, "finally block").into_owned());
             let mut body_ce = self.lower_handler_owned_expr(&arm.body);
             if let (Some(fb), false) = (&arm.finally_block, arm.body.contains_resume()) {
-                let cleanup_ce = self.lower_expr(fb);
+                let fb = &*self.effect_normal_body(fb, "finally block");
+            let cleanup_ce = self.lower_expr(fb);
                 let result_var = self.fresh();
                 body_ce = CExpr::Let(
                     result_var.clone(),

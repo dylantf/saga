@@ -314,6 +314,7 @@ impl<'a> Lowerer<'a> {
         let saved_function = self.current_function.clone();
         self.current_evidence = None;
         self.current_function = specialization.entry_name.clone();
+        let body = &*self.effect_normal_body(body, "direct-callback variant");
         let body = self.lower_expr_with_installed_return_k(body, None);
         self.current_function = saved_function;
         self.current_evidence = saved_evidence;

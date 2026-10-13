@@ -1,5 +1,6 @@
 pub(crate) mod beam_interop;
 mod builtins;
+mod anf;
 mod calls;
 mod effects;
 pub mod errors;
@@ -745,10 +746,22 @@ impl<'a> Lowerer<'a> {
     /// Check if an expression is or contains an effectful call — either a direct
     /// effect op (`!` call), an effectful function call, or nested branches
     /// containing either.
+    ///
+    /// Composition over sub-expressions is `effect_position::is_effectful`;
+    /// this supplies the nodes that perform by themselves as the lowering
+    /// routines see them: a `with` counts only when it takes the enclosing
+    /// continuation, and a `resume` only through its value.
     fn branch_is_effectful(&self, expr: &Expr) -> bool {
-        collect_effect_call(expr).is_some()
-            || self.expr_is_effectful_call(expr)
-            || self.has_nested_effectful_expr(expr)
+        super::effect_position::is_effectful(expr, &|node| match &node.kind {
+            ExprKind::App { .. } => {
+                collect_effect_call(node).is_some() || self.expr_is_effectful_call(node)
+            }
+            ExprKind::With {
+                expr: inner,
+                handler,
+            } => self.with_handler_chains_continuation(handler) && self.branch_is_effectful(inner),
+            _ => false,
+        })
     }
 
     fn contains_direct_effect_call(expr: &Expr) -> bool {

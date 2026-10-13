@@ -47,7 +47,8 @@ impl<'a> Lowerer<'a> {
             }
         }
         if let Some(rc) = &body.return_clause {
-            let ret_body = self.lower_expr(&rc.body);
+            let rc_body = self.effect_normal_body(&rc.body, "handler value return clause");
+            let ret_body = self.lower_expr(&rc_body);
             let (param, body) = if rc.params.is_empty() {
                 (self.fresh(), ret_body)
             } else {
@@ -87,7 +88,8 @@ impl<'a> Lowerer<'a> {
             }
         }
         if let Some(rc) = &info.return_clause {
-            let ret_body = self.lower_expr(&rc.body);
+            let rc_body = self.effect_normal_body(&rc.body, "handler value return clause");
+            let ret_body = self.lower_expr(&rc_body);
             let (param, body) = if rc.params.is_empty() {
                 (self.fresh(), ret_body)
             } else {

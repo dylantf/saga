@@ -510,6 +510,21 @@ impl<'a> Lowerer<'a> {
 
         for (name, arity, clauses, fun_span) in clause_groups {
             self.current_function = name.clone();
+            // Clause guards and bodies are lowering roots.
+            let normal_clauses: Vec<(Option<Box<Expr>>, std::borrow::Cow<'_, Expr>)> = clauses
+                .iter()
+                .map(|&(_, guard, body)| {
+                    let guard = guard.as_deref().map(|guard| {
+                        Box::new(self.effect_normal_body(guard, "clause guard").into_owned())
+                    });
+                    (guard, self.effect_normal_body(body, "function clause"))
+                })
+                .collect();
+            let clauses: Vec<Clause> = clauses
+                .iter()
+                .zip(&normal_clauses)
+                .map(|(&(params, _, _), (guard, body))| (params, guard, body.as_ref()))
+                .collect();
             // Export every function in the emitted Core, not just `pub` ones.
             // Privacy is a front-end concern (the typechecker/resolver already
             // rejected illegal cross-module references in source); at the Core
@@ -799,6 +814,7 @@ impl<'a> Lowerer<'a> {
                         self.forced_lambda_cps = Some((m.id, is_cps));
                         is_cps
                     };
+                let m = &*self.effect_normal_body(m, "dictionary method");
                 let ce = self.lower_expr(m);
                 // Phase 2: if this method is a planned specialization target,
                 // hoist the lowered closure into a top-level function and put a

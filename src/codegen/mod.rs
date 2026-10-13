@@ -1,5 +1,6 @@
 pub mod call_effects;
 pub mod cerl;
+pub(crate) mod effect_position;
 pub mod generic_fold;
 pub mod handler_analysis;
 pub mod lower;

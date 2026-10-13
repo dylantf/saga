@@ -70,7 +70,8 @@ impl<'a> Lowerer<'a> {
         );
 
         self.helper_inline_stack.push(helper_key);
-        let body = self.lower_expr_with_installed_return_k(&helper.body, return_k);
+        let helper_body = self.effect_normal_body(&helper.body, "inlined helper");
+        let body = self.lower_expr_with_installed_return_k(&helper_body, return_k);
         self.helper_inline_stack.pop();
 
         let body = params
@@ -184,7 +185,8 @@ impl<'a> Lowerer<'a> {
             self.resolved = module_semantics.resolution.clone();
         }
         self.helper_inline_stack.push(helper_key);
-        let body = self.lower_expr_with_installed_return_k(&helper.body, None);
+        let helper_body = self.effect_normal_body(&helper.body, "imported helper variant");
+        let body = self.lower_expr_with_installed_return_k(&helper_body, None);
         self.helper_inline_stack.pop();
         self.resolved = saved_resolved;
         self.static_tail_resume_ops = saved_static_tail_resume_ops;

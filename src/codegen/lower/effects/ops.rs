@@ -352,6 +352,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
+        let expr = &*self.effect_normal_body(expr, "handler arm");
         // For abort handler arm bodies inside an effectful host context
         // (e.g. an impl method that has its own `_ReturnK`), the abort
         // value must flow through the with's outer K — not just return
