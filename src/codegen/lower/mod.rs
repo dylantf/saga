@@ -17,7 +17,7 @@ mod tagged;
 mod trait_spec_stats;
 pub mod util;
 
-use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
+use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat};
 use crate::codegen::call_effects::CallEffectInfo;
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::runtime_shape::CallableAbi;
@@ -513,7 +513,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn dict_method_performs(&self, method: &Expr) -> bool {
         self.effect_abi_plan
             .dict_method_performing(method.id)
-            .unwrap_or_else(|| Self::contains_direct_effect_call(method))
+            .unwrap_or_else(|| super::effect_position::mentions_operation(method))
     }
 
     pub(super) fn planned_declaration(&self, node_id: NodeId) -> Option<&CallableAbi> {
@@ -685,87 +685,6 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    fn contains_direct_effect_call(expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::EffectCall { .. } => true,
-            ExprKind::App { func, arg } => {
-                Self::contains_direct_effect_call(func) || Self::contains_direct_effect_call(arg)
-            }
-            ExprKind::Lambda { body, .. } => Self::contains_direct_effect_call(body),
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::contains_direct_effect_call(cond)
-                    || Self::contains_direct_effect_call(then_branch)
-                    || Self::contains_direct_effect_call(else_branch)
-            }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                Self::contains_direct_effect_call(scrutinee)
-                    || arms.iter().any(|arm| {
-                        arm.node
-                            .guard
-                            .as_ref()
-                            .is_some_and(Self::contains_direct_effect_call)
-                            || Self::contains_direct_effect_call(&arm.node.body)
-                    })
-            }
-            ExprKind::Block { stmts, .. } => stmts.iter().any(|stmt| match &stmt.node {
-                Stmt::Let { value, .. } => Self::contains_direct_effect_call(value),
-                Stmt::LetFun { body, guard, .. } => {
-                    guard
-                        .as_ref()
-                        .is_some_and(|guard| Self::contains_direct_effect_call(guard))
-                        || Self::contains_direct_effect_call(body)
-                }
-                Stmt::Expr(e) => Self::contains_direct_effect_call(e),
-            }),
-            ExprKind::With { expr, handler } => {
-                Self::contains_direct_effect_call(expr)
-                    || handler.inline_arms().any(|arm| {
-                        Self::contains_direct_effect_call(&arm.body)
-                            || arm
-                                .finally_block
-                                .as_ref()
-                                .is_some_and(|body| Self::contains_direct_effect_call(body))
-                    })
-                    || handler
-                        .return_clause()
-                        .is_some_and(|rc| Self::contains_direct_effect_call(&rc.body))
-            }
-            ExprKind::Tuple { elements, .. } => {
-                elements.iter().any(Self::contains_direct_effect_call)
-            }
-            ExprKind::ListLit { elements, .. } => elements
-                .iter()
-                .any(|element| Self::contains_direct_effect_call(&element.node)),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
-                .iter()
-                .any(|(_, _, field)| Self::contains_direct_effect_call(field)),
-            ExprKind::RecordUpdate { record, fields, .. } => {
-                Self::contains_direct_effect_call(record)
-                    || fields
-                        .iter()
-                        .any(|(_, _, field)| Self::contains_direct_effect_call(field))
-            }
-            ExprKind::FieldAccess { expr, .. } | ExprKind::UnaryMinus { expr } => {
-                Self::contains_direct_effect_call(expr)
-            }
-            ExprKind::BinOp { left, right, .. } => {
-                Self::contains_direct_effect_call(left) || Self::contains_direct_effect_call(right)
-            }
-            ExprKind::StringInterp { parts, .. } => parts.iter().any(|part| match part {
-                ast::StringPart::Expr(e) => Self::contains_direct_effect_call(e),
-                ast::StringPart::Lit(_) => false,
-            }),
-            _ => false,
-        }
-    }
-
     /// Canonical predicate for "is this a saturated effectful function call?"
     ///
     /// Reads from the pre-populated `CallEffectMap`. Returns true when the
@@ -897,10 +816,6 @@ impl<'a> Lowerer<'a> {
         let info = matches.next()?;
         matches.next().is_none().then_some(info)
     }
-}
-
-pub(crate) fn contains_direct_effect_call(expr: &Expr) -> bool {
-    Lowerer::contains_direct_effect_call(expr)
 }
 
 pub(crate) fn precompute_call_effects(

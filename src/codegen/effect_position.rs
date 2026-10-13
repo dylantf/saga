@@ -252,6 +252,16 @@ pub(crate) fn children(expr: &Expr) -> Vec<(Position, &Expr)> {
     out
 }
 
+/// Whether an operation is written anywhere in `expr`, bodies that run
+/// later included. Purely syntactic, so it can be asked before calls are
+/// classified.
+pub(crate) fn mentions_operation(expr: &Expr) -> bool {
+    matches!(app_spine(expr).0.kind, ExprKind::EffectCall { .. })
+        || children(expr)
+            .into_iter()
+            .any(|(_, child)| mentions_operation(child))
+}
+
 /// Whether `expr` itself has to be in `let`/tail position: it is a
 /// performing leaf, or a branch or statement inside it performs effects.
 /// Its operands are not looked at; those are positions of their own.
@@ -416,6 +426,18 @@ mod tests {
             &leaf
         ));
         assert!(!is_effectful(&body("f x = g x 1"), &leaf));
+    }
+
+    #[test]
+    fn an_operation_is_found_wherever_it_is_written() {
+        assert!(mentions_operation(&body("f x = g (log! x)")));
+        assert!(mentions_operation(&body("f x = fun y -> log! y")));
+        assert!(mentions_operation(&body(
+            "f x = do {\n  Ok y <- log! x\n  Ok y\n} else {\n  _ -> x\n}"
+        )));
+        assert!(mentions_operation(&body("f x = <<(log! x):8>>")));
+        assert!(mentions_operation(&body("f x = resume (log! x)")));
+        assert!(!mentions_operation(&body("f x = g (eff x) 1")));
     }
 
     #[test]

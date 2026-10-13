@@ -635,7 +635,7 @@ impl<'a> Populator<'a> {
                 for m in methods {
                     self.plan.record_dict_method_performing(
                         m.id,
-                        crate::codegen::lower::contains_direct_effect_call(m),
+                        crate::codegen::effect_position::mentions_operation(m),
                     );
                     self.push_scope();
                     self.walk_expr(m);
