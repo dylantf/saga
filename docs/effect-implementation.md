@@ -792,6 +792,48 @@ assuming each layer defines a `return` clause and completes normally. If an op
 handler aborts instead of resuming, outer `return` clauses still run only when
 their own surrounding handled expression completes.
 
+### The Continuation of a `with`
+
+Everything after a `with` in the enclosing body is the continuation of the
+whole `with` expression: of its `return` clause applied to the handled
+computation's result, and of any arm that aborts. How that continuation
+reaches the handled computation depends on the handler
+(`with_handler_chains_continuation`):
+
+- **No arm uses the value `resume` returns** (arms that never resume, and arms
+  whose every `resume` is in tail position; no `finally`; handler statically
+  known). The `with` is CPS-chained like an effectful call. The handled
+  computation's return continuation is the `return` clause, whose body is
+  lowered with the outer continuation as its own (or the outer continuation
+  itself); aborting arms apply the outer continuation to their value. An
+  operation performed inside and handled further out therefore captures the
+  rest of the enclosing body, and a handler that aborts it skips that rest.
+  This holds in tail position (the outer continuation is `_ReturnK`) and in
+  every other position (`let v = e with h`, an operand, an argument, a
+  condition or scrutinee: the outer continuation is the rest of the body).
+- **An arm uses the value of `resume`** (`let r = resume x`,
+  `resume a + resume b`, state-passing and collecting handlers), has a
+  `finally` block, or the handler is a runtime value. `resume` must return the
+  value of the `with`, so the handled computation cannot be given the rest of
+  the body: when the `with` is not in tail position it is lowered as a
+  delimiter that returns a plain value, to which the rest is then applied.
+
+The second form is not complete. An operation performed inside such a `with`
+and handled further out captures a continuation that ends at the `with`, so a
+handler that aborts it (or uses the value of its own `resume`) sees the wrong
+extent: the abort value becomes the value of the `with` and the rest of the
+body runs. And in tail position of a body that has a `_ReturnK`, such a `with`
+is still given that continuation, so `resume` returns the caller's answer.
+Both need the arm's code after `resume` to be a continuation rather than
+Erlang stack frames; see the ignored tests
+`non_tail_with_delimited_handler_under_aborting_outer_handler` and
+`tail_with_delimited_handler_resume_returns_value_of_with`.
+
+A handled block that ends in an expression with an effectful sub-expression
+and has no return continuation at all (`{ g 3 + 100 } with h` in a pure
+function) is given an identity continuation, so that expression is chained
+like the same expression in an effectful function.
+
 ### Lowering Structure
 
 Effect ABI metadata is computed once by a pre-pass and stored in

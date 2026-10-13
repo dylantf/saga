@@ -313,7 +313,7 @@ impl<'a> Lowerer<'a> {
             NamedHandlerItem::Static { info, .. } => info
                 .return_clause
                 .as_ref()
-                .map(|ret| self.build_return_lambda(ret, info.source_module.as_deref())),
+                .map(|ret| self.build_return_lambda(ret, info.source_module.as_deref(), None)),
             NamedHandlerItem::Conditional {
                 cond_var,
                 then_info,
@@ -325,14 +325,14 @@ impl<'a> Lowerer<'a> {
                         .return_clause
                         .as_ref()
                         .map(|ret| {
-                            self.build_return_lambda(ret, then_info.source_module.as_deref())
+                            self.build_return_lambda(ret, then_info.source_module.as_deref(), None)
                         })
                         .unwrap_or_else(|| self.identity_return_lambda());
                     let else_fun = else_info
                         .return_clause
                         .as_ref()
                         .map(|ret| {
-                            self.build_return_lambda(ret, else_info.source_module.as_deref())
+                            self.build_return_lambda(ret, else_info.source_module.as_deref(), None)
                         })
                         .unwrap_or_else(|| self.identity_return_lambda());
                     let param = self.fresh();

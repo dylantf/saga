@@ -5852,9 +5852,16 @@ enum HandlerBodyHost {
 }
 
 fn check_handler_body_cells(fixture: &str, host: HandlerBodyHost) {
+    check_handler_body_cells_where(fixture, host, |_| true);
+}
+
+fn check_handler_body_cells_where(fixture: &str, host: HandlerBodyHost, keep: fn(&str) -> bool) {
     let mut src = String::from(HANDLER_BODY_PRELUDE);
     let mut functions = Vec::new();
-    for (idx, (_, expr, _)) in HANDLER_BODY_CELLS.iter().enumerate() {
+    for (idx, (label, expr, _)) in HANDLER_BODY_CELLS.iter().enumerate() {
+        if !keep(label) {
+            continue;
+        }
         if let HandlerBodyHost::EffectfulFunction = host {
             src.push_str(&format!(
                 "\nfun c{idx} : Unit -> Int needs {{Stop}}\nc{idx} () = {expr}\n"
@@ -5883,6 +5890,9 @@ fn check_handler_body_cells(fixture: &str, host: HandlerBodyHost) {
     };
     let mut failures = Vec::new();
     for (idx, (label, _, resume_value)) in HANDLER_BODY_CELLS.iter().enumerate() {
+        if !keep(label) {
+            continue;
+        }
         let abort = results.get(&format!("c{idx}_abort")).map(String::as_str);
         if abort != Some("1000") {
             failures.push(format!(
@@ -5916,16 +5926,30 @@ fn effectful_handler_bodies_under_outer_handler() {
     check_handler_body_cells("handler_body_under", HandlerBodyHost::UnderOuterHandler);
 }
 
-/// Known gap: a `with` whose handler resumes (or is a named handler) is a
-/// delimiter with no continuation of its own. Bound by a `let`, the rest of
-/// the block is not its continuation, so when an arm (or the handled
-/// computation) performs an outer effect and that handler aborts, the abort
-/// value is bound to `v` and the block carries on. 19 of the 28 cells fail;
-/// the inline abort-only handlers and the impl methods pass.
+/// The same cells bound by a `let` with more of the block after them: the
+/// rest of the block is the continuation of the whole `with`, so the outer
+/// handler's abort skips it.
 #[test]
-#[ignore = "non-tail `with` with a resuming or named handler gets no continuation"]
 fn effectful_handler_bodies_let_bound_under_outer_handler() {
-    check_handler_body_cells("handler_body_let", HandlerBodyHost::LetUnderOuterHandler);
+    check_handler_body_cells_where(
+        "handler_body_let",
+        HandlerBodyHost::LetUnderOuterHandler,
+        |label| label != "inline_resume_in_tuple",
+    );
+}
+
+/// Known gap: `ask () = addp (resume (g 3), 1)` uses the value `resume`
+/// returns, so its `with` stays a delimiter with no continuation of its own
+/// (see `non_tail_with_delimited_handler_under_aborting_outer_handler`).
+/// Expected 1000; gives 1100.
+#[test]
+#[ignore = "non-tail `with` whose handler uses the value of `resume` gets no continuation"]
+fn effectful_handler_body_using_resume_value_let_bound_under_outer_handler() {
+    check_handler_body_cells_where(
+        "handler_body_let_resume_value",
+        HandlerBodyHost::LetUnderOuterHandler,
+        |label| label == "inline_resume_in_tuple",
+    );
 }
 
 /// Every remaining expression form that can hold an effectful
@@ -6141,10 +6165,9 @@ fn effectful_subexpressions_in_receive() {
     );
 }
 
-/// Known gap, smallest form of the one above: the handled computation itself
-/// performs an effect handled further out. Expected 1000; gives 1100.
+/// The handled computation of a `let`-bound `with` performs an effect handled
+/// further out; that handler's abort skips the rest of the block.
 #[test]
-#[ignore = "non-tail `with` with a resuming or named handler gets no continuation"]
 fn let_bound_with_under_outer_aborting_handler() {
     let src = r#"module Main
 
@@ -6625,5 +6648,405 @@ result () = run direct <> " " <> run qualified <> " " <> run hof
         &[("Nested/Lib.saga", lib)],
         main_src,
         "1000/112 1000/106 1000/105",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A `with` that is not in tail position, under an outer handler. Everything
+// after the `with` in the enclosing body is its continuation, so an outer
+// handler that aborts an operation performed inside it (by the handled
+// computation, a handler arm or the return clause) skips that rest.
+// ---------------------------------------------------------------------------
+
+const NON_TAIL_WITH_PRELUDE: &str = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+effect Tell { fun tell : Int -> Unit }
+effect Go { fun go : Unit -> Int }
+
+fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+fun both : Unit -> Int needs {Stop, Ask}
+both () = {
+  let a = stop! 3
+  a + ask! ()
+}
+
+fun both3 : Unit -> Int needs {Stop, Ask, Tell}
+both3 () = {
+  let a = stop! 3
+  tell! a
+  a + ask! ()
+}
+
+fun user : Unit -> Int needs {Ask}
+user () = ask! () + 1
+
+fun inc : Int -> Int
+inc x = x + 1
+
+fun eadd : Int -> Int needs {Stop}
+eadd x = if x > 5000 then stop! x else x + 100
+
+handler n_tail for Ask {
+  ask () = resume 1
+}
+
+handler n_nontail for Ask {
+  ask () = (resume 1) + 10
+}
+
+handler n_abort for Ask {
+  ask () = 50
+}
+
+handler n_return for Ask {
+  ask () = resume 1
+  return v = v * 2
+}
+
+handler n_finally for Ask {
+  ask () = {
+    resume 1
+  } finally {
+    ()
+  }
+}
+
+handler n_tell for Tell {
+  tell _ = resume ()
+}
+
+handler n_needs for Ask needs {Stop} {
+  ask () = resume (g 1)
+}
+
+handler n_needs_abort for Ask needs {Stop} {
+  ask () = g 3 + 1
+}
+
+handler n_needs_return for Ask needs {Stop} {
+  ask () = resume 1
+  return v = g v + 1
+}
+"#;
+
+/// `(label, expression of type Int that performs Stop, value when Stop resumes)`.
+///
+/// Labels starting with `delimited/` are handlers that use the value `resume`
+/// returns, or have a `finally` block. Their `with` cannot take the rest of
+/// the enclosing body as the handled computation's return continuation (the
+/// value of `resume` would then be the answer of that rest), so it stays a
+/// delimiter that produces a plain value.
+const NON_TAIL_WITH_HANDLERS: &[(&str, &str, i64)] = &[
+    // The handled computation performs the outer effect.
+    (
+        "comp/inline_tail_resume",
+        "both () with { ask () = resume 1 }",
+        4,
+    ),
+    ("comp/inline_abort", "both () with { ask () = 50 }", 50),
+    (
+        "comp/inline_return",
+        "both () with { ask () = resume 1, return v = v * 2 }",
+        8,
+    ),
+    ("comp/named_tail_resume", "both () with n_tail", 4),
+    ("comp/named_abort", "both () with n_abort", 50),
+    ("comp/named_return", "both () with n_return", 8),
+    ("comp/named_needs", "both () with n_needs", 4),
+    ("comp/two_named", "both3 () with {n_tail, n_tell}", 4),
+    (
+        "comp/named_and_inline",
+        "both3 () with {n_tail, tell _ = resume ()}",
+        4,
+    ),
+    ("comp/two_withs", "(both3 () with n_tell) with n_tail", 4),
+    // A handler arm performs the outer effect.
+    (
+        "arm/inline_tail_resume",
+        "user () with { ask () = resume (g 3) }",
+        4,
+    ),
+    ("arm/inline_abort", "user () with { ask () = g 3 + 1 }", 4),
+    ("arm/named_tail_resume", "user () with n_needs", 2),
+    ("arm/named_abort", "user () with n_needs_abort", 4),
+    // The return clause performs the outer effect.
+    (
+        "ret/inline",
+        "user () with { ask () = resume 1, return v = g v + 1 }",
+        3,
+    ),
+    ("ret/named", "user () with n_needs_return", 3),
+    // Handlers that use the value of `resume`.
+    (
+        "delimited/comp_inline_resume_value",
+        "both () with { ask () = (resume 1) + 10 }",
+        14,
+    ),
+    (
+        "delimited/comp_inline_multishot",
+        "both () with { ask () = (resume 1) + (resume 2) }",
+        9,
+    ),
+    (
+        "delimited/comp_named_resume_value",
+        "both () with n_nontail",
+        14,
+    ),
+    ("delimited/comp_named_finally", "both () with n_finally", 4),
+    (
+        "delimited/comp_two_withs",
+        "(both3 () with n_tell) with n_nontail",
+        14,
+    ),
+    (
+        "delimited/arm_inline_resume_value",
+        "user () with { ask () = (resume (g 3)) + 1 }",
+        5,
+    ),
+    (
+        "delimited/arm_inline_after_resume",
+        "user () with { ask () = {\n    let r = resume 1\n    r + g 3\n  } }",
+        5,
+    ),
+];
+
+type NonTailWithPosition = (&'static str, fn(&str) -> String, fn(i64) -> i64);
+
+/// `(label, body built around the expression, value of the body)`.
+const NON_TAIL_WITH_POSITIONS: &[NonTailWithPosition] = &[
+    ("tail", |e| e.to_string(), |r| r),
+    ("let", |e| format!("let v = {e}\n  v + 100"), |r| r + 100),
+    ("binop_left", |e| format!("({e}) + 100"), |r| r + 100),
+    ("binop_right", |e| format!("100 + ({e})"), |r| r + 100),
+    ("pure_call_arg", |e| format!("inc ({e})"), |r| r + 1),
+    ("effectful_call_arg", |e| format!("eadd ({e})"), |r| r + 100),
+    (
+        "if_condition",
+        |e| format!("if ({e}) > 0 then 100 else 200"),
+        |_| 100,
+    ),
+    (
+        "case_scrutinee",
+        |e| format!("case ({e}) {{\n    1000 -> 7\n    _ -> 100\n  }}"),
+        |_| 100,
+    ),
+    ("statement", |e| format!("let _ = {e}\n  100"), |_| 100),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NonTailWithHost {
+    /// A pure function; the body is the outer handler's handled block.
+    UnderOuterHandler,
+    /// A function declaring `needs {Stop}`, called with more work after it.
+    EffectfulFunction,
+    /// A lambda called with more work after it.
+    Lambda,
+    /// The body of an aborting handler arm.
+    AbortingArm,
+    /// A handler arm that resumes with the body's value.
+    ResumingArm,
+}
+
+const NON_TAIL_WITH_HOSTS: &[NonTailWithHost] = &[
+    NonTailWithHost::UnderOuterHandler,
+    NonTailWithHost::EffectfulFunction,
+    NonTailWithHost::Lambda,
+    NonTailWithHost::AbortingArm,
+    NonTailWithHost::ResumingArm,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum OuterStop {
+    Aborts,
+    Resumes,
+}
+
+/// Runs every selected handler x position cell in every host, under the
+/// outer handlers in `outer`, and asserts that none fails.
+/// `keep(handler label, position label, host)` selects the cells.
+fn check_non_tail_with(
+    fixture: &str,
+    outer: &[OuterStop],
+    keep: fn(&str, &str, NonTailWithHost) -> bool,
+) {
+    let mut failures = Vec::new();
+    for host in NON_TAIL_WITH_HOSTS {
+        let mut src = String::from(NON_TAIL_WITH_PRELUDE);
+        let mut cells = Vec::new();
+        let mut functions = Vec::new();
+        let mut idx = 0;
+        for (h_label, expr, resume_value) in NON_TAIL_WITH_HANDLERS {
+            for (p_label, build, value) in NON_TAIL_WITH_POSITIONS {
+                if !keep(h_label, p_label, *host) {
+                    continue;
+                }
+                let body = build(expr);
+                let inner = value(*resume_value);
+                if *host == NonTailWithHost::EffectfulFunction {
+                    src.push_str(&format!(
+                        "\nfun c{idx} : Unit -> Int needs {{Stop}}\nc{idx} () = {{\n  {body}\n}}\n"
+                    ));
+                }
+                let (block, want) = match host {
+                    NonTailWithHost::UnderOuterHandler => (format!("{{\n  {body}\n}}"), inner),
+                    NonTailWithHost::EffectfulFunction => {
+                        (format!("{{\n  let x = c{idx} ()\n  x * 2\n}}"), inner * 2)
+                    }
+                    NonTailWithHost::Lambda => (
+                        format!(
+                            "{{\n  let f = fun () -> {{\n  {body}\n}}\n  let x = f ()\n  x * 2\n}}"
+                        ),
+                        inner * 2,
+                    ),
+                    NonTailWithHost::AbortingArm => (
+                        format!(
+                            "{{\n  {{\n    let x = go! ()\n    x * 2\n  }} with {{ go () = {{\n  {body}\n}} }}\n}}"
+                        ),
+                        inner,
+                    ),
+                    NonTailWithHost::ResumingArm => (
+                        format!(
+                            "{{\n  {{\n    let x = go! ()\n    x * 2\n  }} with {{ go () = {{\n  let y = {{\n  {body}\n}}\n  resume y\n}} }}\n}}"
+                        ),
+                        inner * 2,
+                    ),
+                };
+                for stop in outer {
+                    let (suffix, stop_arm, want) = match stop {
+                        OuterStop::Aborts => ("abort", "stop i = 1000", 1000),
+                        OuterStop::Resumes => ("resume", "stop i = resume i", want),
+                    };
+                    src.push_str(&format!(
+                        "\npub fun c{idx}_{suffix} : Unit -> Int\nc{idx}_{suffix} () = {block} with {{ {stop_arm} }}\n"
+                    ));
+                    functions.push(format!("c{idx}_{suffix}"));
+                    cells.push((
+                        format!("c{idx}_{suffix}"),
+                        format!("{host:?} / {h_label} @ {p_label} / outer {stop:?}"),
+                        want,
+                    ));
+                }
+                idx += 1;
+            }
+        }
+        if cells.is_empty() {
+            continue;
+        }
+        let results = call_each_export(&format!("{fixture}_{host:?}"), &src, &functions);
+        for (function, label, want) in cells {
+            let got = results.get(&function).map(String::as_str);
+            if got != Some(want.to_string().as_str()) {
+                failures.push(format!(
+                    "{label}: gave {}, expected {want}",
+                    got.unwrap_or("nothing")
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "[{fixture}] {} cells failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+fn is_delimited_handler(label: &str) -> bool {
+    label.starts_with("delimited/")
+}
+
+/// Whether the `with` is the last thing its host's body does. In
+/// `ResumingArm` the body is itself bound by a `let`.
+fn with_is_last(position: &str, host: NonTailWithHost) -> bool {
+    position == "tail" && host != NonTailWithHost::ResumingArm
+}
+
+/// Whether the host's body has a return continuation of its own, which a
+/// `with` in its tail position inherits.
+fn host_has_continuation(host: NonTailWithHost) -> bool {
+    matches!(
+        host,
+        NonTailWithHost::EffectfulFunction | NonTailWithHost::Lambda
+    )
+}
+
+/// Handlers that never use the value of `resume`: in every position and
+/// host, the outer handler's abort skips everything after the `with`, and
+/// its resume gives the ordinary value.
+#[test]
+fn non_tail_with_takes_rest_of_body_as_continuation() {
+    check_non_tail_with(
+        "non_tail_with",
+        &[OuterStop::Aborts, OuterStop::Resumes],
+        |handler, _, _| !is_delimited_handler(handler),
+    );
+}
+
+/// Handlers that use the value of `resume` get the value of the handled
+/// computation (after the return clause) from it, not the value of the rest
+/// of the enclosing body, when the `with` is not in tail position.
+#[test]
+fn non_tail_with_delimited_handler_resume_returns_value_of_with() {
+    check_non_tail_with(
+        "non_tail_with_delimited_resume",
+        &[OuterStop::Resumes],
+        |handler, position, host| {
+            is_delimited_handler(handler)
+                && !(with_is_last(position, host) && host_has_continuation(host))
+        },
+    );
+}
+
+/// The same handlers as the last thing their host does: nothing of the
+/// host's body is left to skip, so the outer handler's abort is the result.
+#[test]
+fn tail_with_delimited_handler_under_aborting_outer_handler() {
+    check_non_tail_with(
+        "tail_with_delimited_abort",
+        &[OuterStop::Aborts],
+        |handler, position, host| is_delimited_handler(handler) && with_is_last(position, host),
+    );
+}
+
+/// Known gap: a `with` whose handler uses the value of `resume` (or has a
+/// `finally` block) is lowered as a delimiter that produces a plain value.
+/// An operation performed inside it and handled further out captures a
+/// continuation that ends at the `with`, so when that handler aborts, the
+/// abort value becomes the value of the `with` and the rest of the body
+/// runs. Expected 1000 everywhere; gives e.g. 1100 for the `let` position.
+#[test]
+#[ignore = "non-tail `with` whose handler uses the value of `resume` gets no continuation"]
+fn non_tail_with_delimited_handler_under_aborting_outer_handler() {
+    check_non_tail_with(
+        "non_tail_with_delimited_abort",
+        &[OuterStop::Aborts],
+        |handler, position, host| is_delimited_handler(handler) && !with_is_last(position, host),
+    );
+}
+
+/// Known gap, the other side of the one above: in tail position of a body
+/// that has a continuation (an effectful function, a lambda), the `with`
+/// does get that continuation as the handled computation's return
+/// continuation, so `resume` returns the answer of the caller's rest
+/// instead of the value of the `with`. `c () = user () with { ask () = {
+/// let r = resume 1; r + g 3 } }` called as `let x = c (); x * 2` gives 7,
+/// not 10. (The multishot cell passes only because `+` commutes with the
+/// caller's `* 2`.)
+#[test]
+#[ignore = "tail `with` in an effectful body: `resume` returns the caller's answer"]
+fn tail_with_delimited_handler_resume_returns_value_of_with() {
+    check_non_tail_with(
+        "tail_with_delimited_resume",
+        &[OuterStop::Resumes],
+        |handler, position, host| {
+            is_delimited_handler(handler)
+                && handler != "delimited/comp_named_finally"
+                && with_is_last(position, host)
+                && host_has_continuation(host)
+        },
     );
 }

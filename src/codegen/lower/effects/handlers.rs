@@ -232,6 +232,63 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The statically known handler declarations a named `with` layer can
+    /// resolve to, or `None` for a handler value only known at runtime.
+    /// Unlike [`Self::resolve_named_handler_item`] this never panics, so it
+    /// can be asked before a handler bound later in the block is registered.
+    fn static_named_handler_infos(
+        &self,
+        reference: &crate::ast::NamedHandlerRef,
+    ) -> Option<Vec<&crate::codegen::lower::HandlerInfo>> {
+        let name = &reference.name;
+        if self.handle_dynamic_vars.contains_key(name) {
+            return None;
+        }
+        if let Some((_, _, then_canonical, else_canonical)) = self.handle_cond_vars.get(name) {
+            return Some(vec![
+                self.handler_defs.get(then_canonical)?,
+                self.handler_defs.get(else_canonical)?,
+            ]);
+        }
+        if let Some(info) = self
+            .handler_canonical
+            .get(name)
+            .and_then(|canonical| self.handler_defs.get(canonical))
+        {
+            return Some(vec![info]);
+        }
+        let canonical = self.resolved_handler_binding_name(reference.id)?;
+        Some(vec![self.handler_defs.get(&canonical)?])
+    }
+
+    /// Whether a `with` using `handler` may be given the continuation of the
+    /// whole `with` expression (the rest of the enclosing body) as the
+    /// return continuation of its handled computation.
+    ///
+    /// That is only right when no arm uses the value `resume` returns: the
+    /// continuation an arm resumes then ends in the enclosing body's rest,
+    /// so `resume` returns the answer of everything after the `with`, not
+    /// the value of the `with`. Arms that never resume, and arms whose every
+    /// `resume` is in tail position, never look at that value. An arm that
+    /// does (`let r = resume x`, `resume a + resume b`), an arm with a
+    /// `finally` block (cleanup must run when the `with` is done, not after
+    /// the rest of the body) and a handler value only known at runtime keep
+    /// the handled computation delimited.
+    pub(crate) fn with_handler_chains_continuation(&self, handler: &Handler) -> bool {
+        use crate::codegen::handler_analysis::{ResumptionKind, classify_body};
+        let arm_chains = |arm: &HandlerArm| {
+            arm.finally_block.is_none()
+                && (!arm.body.contains_resume()
+                    || classify_body(&arm.body) == ResumptionKind::TailResumptive)
+        };
+        match handler {
+            Handler::Inline { .. } => handler.inline_arms().all(arm_chains),
+            Handler::Named(reference) => self
+                .static_named_handler_infos(reference)
+                .is_some_and(|infos| infos.iter().all(|info| info.arms.iter().all(arm_chains))),
+        }
+    }
+
     pub(crate) fn effect_for_handler_arm(
         &self,
         arm: &HandlerArm,

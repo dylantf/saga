@@ -727,36 +727,17 @@ impl<'a> Lowerer<'a> {
             ExprKind::BitString { segments } => segments
                 .iter()
                 .any(|seg| self.branch_is_effectful(&seg.value)),
-            // A `with` with an *inline, abort-only* handler over effectful
-            // inner work needs CPS-aware routing in enclosing contexts so
-            // the handler closure receives the host's return K and the
-            // inner effectful calls get handler-arg threading. We restrict
-            // this to inline + abort-only because:
-            //
-            // - Named handlers (`with collect`) keep their own
-            //   return-clause / resume-chain composition that breaks
-            //   under inherited-K composition (would short-circuit
-            //   resume-based accumulators like Std.Test's `collect`).
-            // - Inline resume handlers similarly route values through
-            //   captured `resume` continuations; inheriting K would
-            //   double-route. Leave them as before.
-            //
-            // The repro shape — `Ctor (eff_call) with { fail e = ... }`
-            // inside a case arm — is the abort-only case, which is the
-            // shape that drops K silently today.
+            // A `with` over effectful work whose handler never needs the
+            // value of the handled computation back (see
+            // `with_handler_chains_continuation`) takes the rest of the
+            // enclosing body as its continuation, like an effectful call.
+            // An outer handler that aborts an operation performed inside
+            // it then skips that rest. Other handlers stay delimiters that
+            // produce a plain value.
             ExprKind::With {
                 expr: inner,
                 handler,
-            } => {
-                let inline_abort_only = match handler.as_ref() {
-                    ast::Handler::Inline { .. } => {
-                        handler.inline_arms().all(|arm| !arm.body.contains_resume())
-                            && handler.return_clause().is_none()
-                    }
-                    ast::Handler::Named(_) => false,
-                };
-                inline_abort_only && self.branch_is_effectful(inner)
-            }
+            } => self.with_handler_chains_continuation(handler) && self.branch_is_effectful(inner),
             _ => false,
         }
     }
