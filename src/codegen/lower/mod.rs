@@ -496,6 +496,26 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Whether a lambda's innermost body is an effectful call or an applied
+    /// operation, as recorded when the plan was made.
+    pub(super) fn planned_lambda_body_effectful(&self, lambda_id: NodeId) -> Option<bool> {
+        self.effect_abi_plan
+            .lambda_body_effectful(lambda_id)
+            .or_else(|| {
+                self.semantic_effect_abi_plan()
+                    .and_then(|plan| plan.lambda_body_effectful(lambda_id))
+            })
+    }
+
+    /// Whether a dictionary method performs an operation directly. Read
+    /// from the plan once it exists; before that the tree is still in the
+    /// shape the plan will be made from.
+    pub(super) fn dict_method_performs(&self, method: &Expr) -> bool {
+        self.effect_abi_plan
+            .dict_method_performing(method.id)
+            .unwrap_or_else(|| Self::contains_direct_effect_call(method))
+    }
+
     pub(super) fn planned_declaration(&self, node_id: NodeId) -> Option<&CallableAbi> {
         self.effect_abi_plan.declaration(node_id).or_else(|| {
             self.semantic_effect_abi_plan()
@@ -973,6 +993,10 @@ impl<'a> Lowerer<'a> {
         let info = matches.next()?;
         matches.next().is_none().then_some(info)
     }
+}
+
+pub(crate) fn contains_direct_effect_call(expr: &Expr) -> bool {
+    Lowerer::contains_direct_effect_call(expr)
 }
 
 pub(crate) fn precompute_call_effects(

@@ -148,6 +148,17 @@ pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
 pub struct EffectAbiPlan {
     declarations: HashMap<NodeId, CallableAbi>,
     calls: CallEffectMap,
+    /// Facts read off the shape of the tree when the plan was made. Passes
+    /// that run after planning move expressions into `let`s, so the lowerer
+    /// reads these instead of looking at the shape again.
+    ///
+    /// Lambda id -> whether its innermost body is an effectful call or an
+    /// applied operation. Decides the representation of a lambda that has no
+    /// type of its own.
+    lambda_bodies_effectful: HashMap<NodeId, bool>,
+    /// Dictionary method id -> whether it performs an operation directly,
+    /// which gives its slot the impl's own effects.
+    dict_methods_performing: HashMap<NodeId, bool>,
     frozen: bool,
 }
 
@@ -195,6 +206,24 @@ impl EffectAbiPlan {
         }
     }
 
+    pub fn record_lambda_body_effectful(&mut self, lambda_id: NodeId, effectful: bool) {
+        self.assert_mutable();
+        self.lambda_bodies_effectful.insert(lambda_id, effectful);
+    }
+
+    pub fn lambda_body_effectful(&self, lambda_id: NodeId) -> Option<bool> {
+        self.lambda_bodies_effectful.get(&lambda_id).copied()
+    }
+
+    pub fn record_dict_method_performing(&mut self, method_id: NodeId, performs: bool) {
+        self.assert_mutable();
+        self.dict_methods_performing.insert(method_id, performs);
+    }
+
+    pub fn dict_method_performing(&self, method_id: NodeId) -> Option<bool> {
+        self.dict_methods_performing.get(&method_id).copied()
+    }
+
     /// Merge a separately planned module, rejecting conflicting facts rather
     /// than silently retaining whichever plan happened to be visited first.
     pub fn merge_checked(&mut self, other: &Self) {
@@ -205,6 +234,10 @@ impl EffectAbiPlan {
         for (node_id, info) in &other.calls {
             self.record_call(*node_id, info.clone());
         }
+        self.lambda_bodies_effectful
+            .extend(&other.lambda_bodies_effectful);
+        self.dict_methods_performing
+            .extend(&other.dict_methods_performing);
     }
 }
 
@@ -536,6 +569,10 @@ impl<'a> Populator<'a> {
                     self.walk_expr(super_dict);
                 }
                 for m in methods {
+                    self.plan.record_dict_method_performing(
+                        m.id,
+                        crate::codegen::lower::contains_direct_effect_call(m),
+                    );
                     self.push_scope();
                     self.walk_expr(m);
                     self.pop_scope();
@@ -693,6 +730,10 @@ impl<'a> Populator<'a> {
             info.debug_check();
             self.trace.push(self.trace_entry(expr, &info));
             self.plan.record_call(expr.id, info);
+        }
+        if matches!(expr.kind, ExprKind::Lambda { .. }) {
+            let effectful = self.untyped_lambda_head_is_effectful(expr);
+            self.plan.record_lambda_body_effectful(expr.id, effectful);
         }
     }
 

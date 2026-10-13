@@ -126,7 +126,11 @@ impl<'a> Lowerer<'a> {
             None => {
                 // An elaboration-made wrapper such as `fun dict x -> dict.m x`
                 // has no type of its own; it is effectful when the call it
-                // wraps is.
+                // wraps is. The plan recorded that from the tree it was made
+                // from; only a lambda made later is looked at here.
+                if let Some(effectful) = self.planned_lambda_body_effectful(expr.id) {
+                    return effectful;
+                }
                 let mut body = expr;
                 while let ExprKind::Lambda { body: inner, .. } = &body.kind {
                     body = inner.as_ref();

@@ -273,7 +273,7 @@ impl<'a> Lowerer<'a> {
             for (idx, method) in methods.iter().enumerate() {
                 let mut effects =
                     self.canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
-                if Self::contains_direct_effect_call(method) {
+                if self.dict_method_performs(method) {
                     effects.extend(impl_effects.iter().cloned());
                 }
                 effects.sort();
@@ -1008,7 +1008,7 @@ impl<'a> Lowerer<'a> {
     ) -> (bool, Vec<String>, bool) {
         let mut static_effects =
             self.canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
-        if Self::contains_direct_effect_call(m) {
+        if self.dict_method_performs(m) {
             static_effects.extend(self.canonicalize_effects(impl_effects.to_vec()));
         }
         static_effects.sort();
