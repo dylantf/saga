@@ -748,6 +748,72 @@ Roughly 700 to 900 lines removed and 150 to 250 added across 15 to 20 files,
 about a tenth of Stage A. Nothing exported names a position, but all modules,
 the stdlib and the bridge must agree on the representation.
 
+## One rule for effect routing (branch `effect-anf`)
+
+Decided 2026-10-13, after eight miscompiles in one day were each fixed by
+adding a missing expression shape to the lowerer. `effect-ir` is frozen at
+`c174e32b`; this work is on `effect-anf`.
+
+### The rule
+
+A pass that runs after call classification and immediately before lowering
+moves every expression that can perform an effect into one of two positions:
+the value of a block-level `let`, or the tail of a body (function, lambda,
+handler arm, branch). Earlier siblings are lifted first so evaluation order
+is kept. Lowering then has two rules for effectful code: in tail position
+pass the current continuation; for `let x = e; rest` the continuation of `e`
+is `fun x -> rest`. An always-on checker rejects any effectful expression
+found elsewhere, so a missed case is a compiler error and not a wrong
+answer. Pure code is not touched.
+
+"Effectful" is compositional: an application classified CPS by the call
+plan, an applied effect operation, `with`, `resume`, or any expression with
+such a child, stopping at lambdas and handler values.
+
+### Decisions (one line each; overrule any of them)
+
+- Drive the pass from the per-application call plan, not from `expr_types`
+  (which holds value types, not effect rows).
+- Run it inside lowering at tail-context roots, after the plan is frozen.
+  The existing pre-fold normalize stays until the last step.
+- The checker is on in release builds too.
+- Record fields: evaluate in written order everywhere (today the lowerer
+  uses declared order unless a field contains an operation).
+- `a && b` / `a || b` with an effectful right operand becomes an `if`.
+- Not in scope: `with` chain-versus-delimit and `finally` (handler-dependent,
+  see "The Continuation of a `with`" in `docs/effect-implementation.md`);
+  over-application; classification defaulting an unknown call head to pure
+  (separate track, step 9).
+
+### Steps (each merges on its own; each after step 3 removes more than it adds)
+
+1. Exhaustive effect predicate and position checker, in report mode.
+2. Freeze shape-derived facts (lambda taggedness, dict-method CPS shape)
+   into the plan so lifting cannot change them.
+3. The pass; checker switched to a hard error.
+4. Delete argument chaining (`calls.rs`, `effects/call.rs`, the "decline if
+   an argument is effectful" guards).
+5. Delete the composite `*_with_k` family (`values.rs`, `blocks.rs`,
+   `CpsSlot`).
+6. Delete the small special cases (resume value, unary minus, bit string,
+   receive timeout, do binding).
+7. One tail lowering and one block lowerer.
+8. Remove `has_nested_effectful_expr` from the lowerer and the pre-fold
+   normalize calls; update docs.
+9. Separate: the generic fold carries types and operation resolution through
+   inlining; elaboration's eta parameters get types; an unknown call head is
+   an internal error.
+
+Estimated net change to the lowerer: 500 to 700 lines fewer.
+
+### Open bugs this is expected to close (unverified, from reading)
+
+A local function inside a continuation-threaded block reaching
+`unreachable!`; `assert` ignored on a `let` in such a block; a block ending
+in `let x = <effectful call>` lowered with an identity continuation; an
+effectful condition in `let h = if c then h1 else h2`; return clauses of
+handler values lowered in value mode.
+
 ## Appendix A: reproductions
 
 All fail on `87e68150`. Shared declarations:
