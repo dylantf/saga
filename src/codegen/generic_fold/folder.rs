@@ -317,47 +317,44 @@ impl Folder<'_> {
         self.note_freshened(None);
         freshen_expr_ids(&mut new_body);
         let freshened = self.note_freshened(source);
-        match resolution {
-            Some(producer_res) => {
-                for (old, new) in &freshened {
-                    if let Some(sym) = producer_res.get(old) {
-                        // Anchor producer-local `BeamFunction`s (`erlang_mod: None`)
-                        // to the producer module so they lower as remote calls in
-                        // the consumer instead of unbound variables.
-                        let anchored = sym.anchored_to_source_module();
-                        if is_fn_ref(&anchored.kind) {
-                            self.carried_names
-                                .entry(anchored.name.clone())
-                                .or_insert_with(|| anchored.clone());
-                        }
-                        self.carried.insert(*new, anchored);
+        if let Some(producer_res) = resolution {
+            for (old, new) in &freshened {
+                if let Some(sym) = producer_res.get(old) {
+                    // Anchor producer-local `BeamFunction`s (`erlang_mod: None`)
+                    // to the producer module so they lower as remote calls in
+                    // the consumer instead of unbound variables.
+                    let anchored = sym.anchored_to_source_module();
+                    if is_fn_ref(&anchored.kind) {
+                        self.carried_names
+                            .entry(anchored.name.clone())
+                            .or_insert_with(|| anchored.clone());
                     }
-                    if let Some(producer_record_types) = record_types
-                        && let Some(record_type) = producer_record_types.get(old)
-                    {
-                        self.carried_record_types.insert(*new, record_type.clone());
-                    }
-                    if let Some(producer_constructors) = constructors
-                        && let Some(constructor) = producer_constructors.get(old)
-                    {
-                        self.carried_constructors.insert(*new, constructor.clone());
-                    } else if let Some(module) = source_module {
-                        self.carried_constructors
-                            .entry(*new)
-                            .or_insert_with(|| format!("{module}.__origin"));
-                    }
+                    self.carried.insert(*new, anchored);
                 }
-                if let Some(module) = source_module {
-                    let mut ctor_names = Vec::new();
-                    collect_constructor_names(&mut new_body, &mut ctor_names);
-                    for name in ctor_names {
-                        self.carried_constructor_names
-                            .entry(name)
-                            .or_insert_with(|| module.to_string());
-                    }
+                if let Some(producer_record_types) = record_types
+                    && let Some(record_type) = producer_record_types.get(old)
+                {
+                    self.carried_record_types.insert(*new, record_type.clone());
+                }
+                if let Some(producer_constructors) = constructors
+                    && let Some(constructor) = producer_constructors.get(old)
+                {
+                    self.carried_constructors.insert(*new, constructor.clone());
+                } else if let Some(module) = source_module {
+                    self.carried_constructors
+                        .entry(*new)
+                        .or_insert_with(|| format!("{module}.__origin"));
                 }
             }
-            None => {}
+            if let Some(module) = source_module {
+                let mut ctor_names = Vec::new();
+                collect_constructor_names(&mut new_body, &mut ctor_names);
+                for name in ctor_names {
+                    self.carried_constructor_names
+                        .entry(name)
+                        .or_insert_with(|| module.to_string());
+                }
+            }
         }
         new_body
     }
