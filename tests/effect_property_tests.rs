@@ -5644,11 +5644,9 @@ result () = {
     check_result_string("let_poly_dict_open_row", &src, "1 True 5 aborted");
 }
 
-// Known bug, not fixed here: a `let` inside a block expression stays in scope
-// after the block, in the typechecker. Below, the last `x` resolves to the
-// inner binding and `x + 1` is rejected as `String + Int`.
+// A block is a lexical scope: a `let` inside a block expression ends with the
+// block. Below, the last `x` is the outer Int again.
 #[test]
-#[ignore = "typechecker: a let inside a nested block leaks into the enclosing scope"]
 fn let_inside_nested_block_does_not_leak() {
     let_poly_int(
         "nested_block_let_scope",
@@ -5659,6 +5657,105 @@ fn let_inside_nested_block_does_not_leak() {
   }
   if b == "inner" then x + 1 else 0"#,
         2,
+    );
+}
+
+// The same when the inner blocks perform operations, so that the rest of the
+// enclosing block is a continuation, and when the block is an operand or an
+// argument that normalization lifts out.
+#[test]
+fn let_inside_effectful_nested_block_does_not_leak() {
+    let_poly_int(
+        "nested_block_let_scope_effectful",
+        r#"  let run = fun u -> {
+    let x = 1
+    let b = {
+      let x = skip! ()
+      let y = skip! () + x
+      y * 10
+    }
+    let c = ident ({ let x = skip! (); x + 100 })
+    let d = if b > 0 then { let x = skip! () + 1000; x } else 0
+    let s = x + { let x = skip! (); x * 2 } + x
+    {
+      let x = "stmt"
+      let _ = skip! ()
+      ()
+    }
+    x + b + c + d + s
+  }
+  run () with { skip () = resume 7 }"#,
+        1 + 140 + 107 + 1007 + 16,
+    );
+}
+
+// The handler clause of a `with` is checked (and lowered) in the scope of the
+// block it wraps. A handler bound inside the block and attached by the outer
+// `with` is documented (docs/handler-bindings.md). Inline arm bodies seeing
+// the block's values is existing behaviour kept deliberately, pending a
+// language decision.
+#[test]
+fn with_clause_sees_the_wrapped_block_bindings() {
+    let src = repro_src(
+        r#"fun mk : Int -> Handler Skip
+mk n = handler for Skip { skip () = resume n }
+
+fun bound_handler : Unit -> Int
+bound_handler () = {
+  let h = mk 5
+  {
+    skip! () + 1
+  }
+} with {h}
+
+fun arm_body : Unit -> Int
+arm_body () = {
+  let y = 2
+  skip! () + y
+} with { skip () = resume (y * 10) }
+
+pub fun result : Unit -> Int
+result () = bound_handler () * 100 + arm_body ()
+"#,
+    );
+    check_result_int("with_clause_wrapped_block_scope", &src, 622);
+}
+
+// Known codegen bug, not fixed here: a local function that shadows a value
+// bound earlier in the same block. The call `x 2` lowers to the variable `X`
+// (the value 1) instead of the letrec-bound 'x'/1, and fails at runtime with
+// "tried to call a value that is not a function: 1". No nested block needed.
+#[test]
+#[ignore = "codegen: a local function shadowing an earlier value of the same name is called as that value"]
+fn local_function_shadowing_a_value_is_called() {
+    let_poly_int(
+        "local_fun_shadows_value",
+        r#"  let x = 1
+  let x n = n + 1
+  x 2"#,
+        3,
+    );
+}
+
+// Known codegen bug, not fixed here: the lowerer's handler-name maps
+// (`handler_canonical`, `handle_cond_vars`) are keyed by name and not scoped
+// to blocks, so the inner `h` is still the one attached after its block ends.
+// The typechecker resolves the second `with h` to the outer handler; the
+// lowered program answers 100 for it, giving 200. The same leak is what
+// lowers `{ let h = ...; ... } with h`, so it needs a deliberate fix.
+#[test]
+#[ignore = "codegen: a let-bound handler in a nested block replaces the outer handler of the same name after the block (200, not 101)"]
+fn let_bound_handler_in_nested_block_does_not_replace_outer_one() {
+    let_poly_int(
+        "nested_block_handler_scope",
+        r#"  let h = handler for Skip { skip () = resume 1 }
+  let inner = {
+    let h = handler for Skip { skip () = resume 100 }
+    skip! () with h
+  }
+  let outer = skip! () with h
+  inner + outer"#,
+        101,
     );
 }
 

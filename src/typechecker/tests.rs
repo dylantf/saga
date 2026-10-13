@@ -8866,3 +8866,290 @@ fn multi_param_effectful_lambda_matches_its_annotation() {
         err.message
     );
 }
+
+// --- Block scoping: a block's bindings end with the block ---
+
+const BLOCK_SCOPE_PRELUDE: &str = "effect Ask { fun ask : Unit -> Int }\n\
+     fun idf : Int -> Int\n\
+     idf n = n\n";
+
+/// `go`'s body is `body`, one statement per element.
+fn block_scope_src(body: &[&str]) -> String {
+    format!(
+        "{BLOCK_SCOPE_PRELUDE}fun go : Unit -> Int needs {{Ask}}\ngo () = {{\n  {}\n}}\n",
+        body.join("\n  ")
+    )
+}
+
+/// Each entry puts a block in one position. The block binds `x` as a String
+/// (the outer `x` is an Int) and binds `y`, which exists nowhere else.
+const BLOCK_POSITIONS: &[(&str, &str)] = &[
+    ("let value", "let b = { let x = \"s\"; let y = 2; y }"),
+    (
+        "call argument",
+        "let b = idf ({ let x = \"s\"; let y = 2; y })",
+    ),
+    (
+        "if branch",
+        "let b = if True then { let x = \"s\"; let y = 2; y } else 4",
+    ),
+    ("statement", "let b = 0\n  { let x = \"s\"; let y = 2; () }"),
+    (
+        "with body",
+        "let b = { let x = \"s\"; let y = 2; ask! () + y } with { ask () = resume 3 }",
+    ),
+    (
+        "case arm body",
+        "let b = case 5 {\n    _ -> { let x = \"s\"; let y = 2; y }\n  }",
+    ),
+    (
+        "inline handler arm body",
+        "let b = (ask! ()) with { ask () = { let x = \"s\"; let y = 2; resume y } }",
+    ),
+    (
+        "lambda body",
+        "let b = (fun u -> { let x = \"s\"; let y = 2; y + u }) 1",
+    ),
+    (
+        "local function body",
+        "let f u = { let x = \"s\"; let y = 2; y + u }\n  let b = f 1",
+    ),
+    ("pattern binding", "let b = { let (x, y) = (\"s\", 2); y }"),
+    (
+        "local function",
+        "let b = {\n    let x n = n + 1\n    let y n = x n\n    y 2\n  }",
+    ),
+    (
+        "block performing an effect",
+        "let b = { let x = \"s\"; let y = ask! (); y }",
+    ),
+    (
+        "block inside a block",
+        "let b = { let c = { let x = \"s\"; let y = 2; y }; c }",
+    ),
+];
+
+#[test]
+fn block_binding_does_not_shadow_after_the_block() {
+    for (position, block) in BLOCK_POSITIONS {
+        let src = block_scope_src(&["let x = 1", block, "x + b"]);
+        if let Err(e) = check(&src) {
+            panic!(
+                "{position}: outer `x` should be the Int again after the block: {}",
+                e.message
+            );
+        }
+    }
+}
+
+#[test]
+fn block_binding_is_unbound_after_the_block() {
+    for (position, block) in BLOCK_POSITIONS {
+        let src = block_scope_src(&[block, "y + b"]);
+        let err = check(&src)
+            .err()
+            .unwrap_or_else(|| panic!("{position}: `y` should not be in scope after the block"));
+        assert!(
+            err.message.contains("undefined variable: y"),
+            "{position}: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn block_binding_is_visible_to_the_rest_of_its_own_block() {
+    check(&block_scope_src(&[
+        "let x = 1",
+        "let b = { let y = x + 1; let z = { let w = y + 1; w + y }; z + y }",
+        "x + b",
+    ]))
+    .unwrap();
+}
+
+#[test]
+fn block_result_type_survives_the_block() {
+    // The block's value is typed by bindings that are gone once it ends,
+    // including a polymorphic binding used at two types inside it. (A lambda:
+    // a local function `let id2 v = v` is not let-polymorphic, block or not.)
+    check(&block_scope_src(&[
+        "let p = { let id2 = fun v -> v; let s = id2 \"s\"; (id2 3, s) }",
+        "let (n, s) = p",
+        "if s == \"s\" then n else 0",
+    ]))
+    .unwrap();
+    // A function built inside a block keeps its type outside it.
+    check(&block_scope_src(&[
+        "let f = { let k = 2; fun n -> n + k }",
+        "f 1",
+    ]))
+    .unwrap();
+}
+
+#[test]
+fn let_bound_handler_ends_with_its_block() {
+    let h = "let h = handler for Ask { ask () = resume 100 }";
+    let src = block_scope_src(&[
+        &format!("let b = {{ {h}; ask! () with h }}"),
+        "b + (ask! () with h)",
+    ]);
+    let err = check(&src)
+        .err()
+        .expect("`h` is bound only inside the block");
+    assert!(
+        err.message.contains("undefined handler: h"),
+        "{}",
+        err.message
+    );
+
+    // An outer handler of the same name is the one in scope again afterwards.
+    check(&block_scope_src(&[
+        h,
+        &format!("let b = {{ {h}; ask! () with h }}"),
+        "b + (ask! () with h)",
+    ]))
+    .unwrap();
+}
+
+#[test]
+fn finally_block_sees_the_arm_body_bindings() {
+    // Inline handler.
+    check(&block_scope_src(&[
+        "(ask! ()) with { ask () = { let held = 2; resume held } finally { let _ = held + 1; () } }",
+    ]))
+    .unwrap();
+    // Named handler.
+    check(&format!(
+        "{BLOCK_SCOPE_PRELUDE}handler h for Ask {{\n  \
+           ask () = {{ let held = 2; resume held }} finally {{ let _ = held + 1; () }}\n\
+         }}\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn finally_block_does_not_see_into_nested_blocks_or_other_arms() {
+    let err = check(&block_scope_src(&[
+        "(ask! ()) with { ask () = { let held = { let deep = 2; deep }; resume held } finally { let _ = deep + 1; () } }",
+    ]))
+    .err()
+    .expect("`deep` is bound in a block nested in the arm body");
+    assert!(
+        err.message.contains("undefined variable: deep"),
+        "{}",
+        err.message
+    );
+
+    let err = check(
+        "effect Two {\n  fun one : Unit -> Int\n  fun two : Unit -> Int\n}\n\
+         handler h for Two {\n  \
+           one () = { let held = 2; resume held } finally { () }\n  \
+           two () = resume held\n\
+         }\n",
+    )
+    .err()
+    .expect("`held` belongs to the other arm");
+    assert!(
+        err.message.contains("undefined variable: held"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn use_after_a_block_references_the_outer_definition() {
+    let src = block_scope_src(&["let x = 1", "let b = { let x = 2; x }", "x + b"]);
+    let checker = check(&src).unwrap();
+    let result = &checker.lsp;
+    let mut x_defs: Vec<_> = result
+        .definitions
+        .iter()
+        .filter(|(_, name, _)| name == "x")
+        .map(|(id, _, span)| (span.start, *id))
+        .collect();
+    x_defs.sort_by_key(|(start, _)| *start);
+    assert_eq!(x_defs.len(), 2, "outer and inner `x`");
+    let uses_of = |def: crate::ast::NodeId| {
+        let mut starts: Vec<usize> = result
+            .references
+            .iter()
+            .filter(|(_, d)| **d == def)
+            .filter_map(|(usage, _)| result.node_spans.get(usage).map(|s| s.start))
+            .collect();
+        starts.sort();
+        starts
+    };
+    let (outer, inner) = (uses_of(x_defs[0].1), uses_of(x_defs[1].1));
+    assert_eq!(
+        inner.len(),
+        1,
+        "the inner `x` is used once, inside the block"
+    );
+    assert_eq!(outer.len(), 1, "the `x` after the block is the outer one");
+    assert!(inner[0] < outer[0]);
+}
+
+#[test]
+fn with_handler_clause_sees_the_wrapped_block_bindings() {
+    let mk = "fun mk : Int -> Handler Ask\nmk n = handler for Ask { ask () = resume n }\n";
+    let go =
+        |body: &str| format!("{BLOCK_SCOPE_PRELUDE}{mk}fun go : Unit -> Int\ngo () = {body}\n");
+    // Documented (docs/handler-bindings.md): a handler bound inside the
+    // wrapped block is attached by the outer `with`, by name or in a list.
+    check(&go("{\n  let h = mk 5\n  { ask! () + 1 }\n} with h")).unwrap();
+    check(&go("{\n  let h = mk 5\n  { ask! () + 1 }\n} with {h}")).unwrap();
+    // Each name in a list is its own `with` layer around the same block.
+    check(&go(
+        "{\n  let a = mk 5\n  let b = mk 6\n  let c = mk 7\n  { ask! () + 1 }\n} with {a, b, c}",
+    ))
+    .unwrap();
+    // Existing behaviour kept deliberately, pending a language decision:
+    // inline arm bodies and `return` clauses see the wrapped block's values.
+    check(&go(
+        "{\n  let y = 2\n  ask! () + y\n} with { ask () = resume (y * 10) }",
+    ))
+    .unwrap();
+    check(&go(
+        "{\n  let y = 2\n  ask! () + y\n} with {\n  ask () = resume 1\n  return v = v + y\n}",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn wrapped_block_bindings_end_with_the_with_expression() {
+    let err = check(&block_scope_src(&[
+        "let b = { let y = 2; ask! () + y } with { ask () = resume (y * 10) }",
+        "b + y",
+    ]))
+    .err()
+    .expect("`y` is bound inside the wrapped block");
+    assert!(
+        err.message.contains("undefined variable: y"),
+        "{}",
+        err.message
+    );
+
+    let err = check(&block_scope_src(&[
+        "let b = { let h = handler for Ask { ask () = resume 1 }; ask! () } with h",
+        "b + (ask! () with h)",
+    ]))
+    .err()
+    .expect("`h` is bound inside the wrapped block");
+    assert!(
+        err.message.contains("undefined handler: h"),
+        "{}",
+        err.message
+    );
+
+    // A block nested inside the wrapped block is closed before the clause.
+    let err = check(&block_scope_src(&[
+        "{ let y = { let deep = 2; deep }; ask! () + y } with { ask () = resume deep }",
+    ]))
+    .err()
+    .expect("`deep` is bound in a nested block");
+    assert!(
+        err.message.contains("undefined variable: deep"),
+        "{}",
+        err.message
+    );
+}

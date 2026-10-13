@@ -573,7 +573,15 @@ impl Checker {
             // unique and never appear at call sites (those instantiate fresh).
             self.add_op_constraint_where_bounds(&op_sig.constraints);
 
-            let body_ty = self.infer_expr(&arm.body)?;
+            // A `finally` block sees what the arm body's block binds, so with
+            // one present that block's scope stays open until the `finally`
+            // block has been checked.
+            let mut body_handlers = Vec::new();
+            let body_ty = if arm.finally_block.is_some() {
+                self.infer_expr_keeping_block_scope(&arm.body, &mut body_handlers)?
+            } else {
+                self.infer_expr(&arm.body)?
+            };
             if let Err(e) =
                 self.coerce_expected_first_at(&answer_ty, &body_ty, arm.span, Some(&arm.body))
             {
@@ -624,6 +632,7 @@ impl Checker {
                     self.collected_diagnostics.push(e);
                 }
             }
+            self.restore_shadowed_handlers(body_handlers);
 
             self.resume_type = saved_resume;
             self.resume_return_type = saved_resume_ret;

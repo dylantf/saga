@@ -5,6 +5,10 @@ use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, P
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
 use crate::token::Span;
 
+/// The `self.handlers` entries a block's `let` bindings replaced, with what
+/// each name held before (`None` if it was unbound), in binding order.
+pub(crate) type ShadowedHandlers = Vec<(String, Option<super::HandlerInfo>)>;
+
 fn collect_app_spine<'a>(
     expr: &'a Expr,
     args: &mut Vec<&'a Expr>,
@@ -1580,7 +1584,78 @@ impl Checker {
         }
     }
 
+    /// Infer a block expression. A block is a lexical scope: the names its
+    /// statements bind (`let` values, pattern variables, local functions, and
+    /// the handler entries registered for `let`-bound handlers) end with it,
+    /// in whatever position the block appears. The resolver already scopes
+    /// blocks this way (`push_value_scope`/`pop_value_scope`); the environment
+    /// here is keyed by name, so it has to be put back explicitly or an inner
+    /// binding shadows (or stands in for) an outer one after the block.
+    ///
+    /// The block's type stays valid after the restore: it lives in the
+    /// substitution, not the environment, and dropping the block's bindings
+    /// only removes them from the set of types that hold a variable
+    /// monomorphic, which is right once nothing can name them.
     pub(crate) fn infer_block(&mut self, stmts: &[Annotated<Stmt>]) -> Result<Type, Diagnostic> {
+        let saved_env = self.env.clone();
+        let mut shadowed_handlers = Vec::new();
+        let result = self.infer_block_stmts(stmts, &mut shadowed_handlers);
+        self.env = saved_env;
+        self.restore_shadowed_handlers(shadowed_handlers);
+        result
+    }
+
+    /// Infer `expr` and, if it is a block, leave that block's scope open.
+    /// Two constructs are checked in the scope of a block that precedes them:
+    /// a handler arm's `finally` block (`let handle = ...; resume handle` then
+    /// `finally { close handle }`) and the handler clause of a `with` around a
+    /// block. The caller restores the environment once that construct has
+    /// been checked and hands `shadowed_handlers` to
+    /// `restore_shadowed_handlers`.
+    pub(crate) fn infer_expr_keeping_block_scope(
+        &mut self,
+        expr: &Expr,
+        shadowed_handlers: &mut ShadowedHandlers,
+    ) -> Result<Type, Diagnostic> {
+        match &expr.kind {
+            ExprKind::Block { stmts, .. } => {
+                let ty = self.infer_block_stmts(stmts, shadowed_handlers)?;
+                self.record_expr_type(expr.id, &ty);
+                Ok(ty)
+            }
+            // `{ ... } with {a, b}` is one `with` layer per handler; each
+            // layer's clause is in the scope of the innermost block.
+            ExprKind::With {
+                expr: inner,
+                handler,
+                ..
+            } => {
+                let ty =
+                    self.infer_with_open(inner, handler, expr.span, expr.id, shadowed_handlers)?;
+                self.record_expr_type(expr.id, &ty);
+                Ok(ty)
+            }
+            _ => self.infer_expr(expr),
+        }
+    }
+
+    /// Put back the handler entries a block's `let`s replaced. Only the names
+    /// the block bound: handler expressions register themselves under
+    /// synthetic per-node names that are not scoped to the block.
+    pub(crate) fn restore_shadowed_handlers(&mut self, shadowed: ShadowedHandlers) {
+        for (name, previous) in shadowed.into_iter().rev() {
+            match previous {
+                Some(info) => self.handlers.insert(name, info),
+                None => self.handlers.remove(&name),
+            };
+        }
+    }
+
+    fn infer_block_stmts(
+        &mut self,
+        stmts: &[Annotated<Stmt>],
+        shadowed_handlers: &mut ShadowedHandlers,
+    ) -> Result<Type, Diagnostic> {
         let mut last_ty = Type::unit();
         let mut errors: Vec<Diagnostic> = Vec::new();
         let mut i = 0;
@@ -1639,10 +1714,12 @@ impl Checker {
                             if let Some(typed) = self.handler_info_from_type(&ty) {
                                 info.effect_entries = typed.effect_entries;
                             }
-                            self.handlers.insert(name.clone(), info.clone());
+                            let previous = self.handlers.insert(name.clone(), info.clone());
+                            shadowed_handlers.push((name.clone(), previous));
                             self.let_binding_handlers.insert(*pat_id, info);
                         } else if let Some(info) = self.handler_info_from_type(&ty) {
-                            self.handlers.insert(name.clone(), info.clone());
+                            let previous = self.handlers.insert(name.clone(), info.clone());
+                            shadowed_handlers.push((name.clone(), previous));
                             self.let_binding_handlers.insert(*pat_id, info);
                         }
                     } else {

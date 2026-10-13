@@ -248,12 +248,43 @@ impl Checker {
     }
 
     /// Infer the type of a `with` expression: `expr with handler`
+    ///
+    /// The handler clause is checked in the scope of the wrapped block:
+    /// `{ let db = connect (); ... } with db` names a handler the block bound
+    /// (docs/handler-bindings.md), and inline arms and `return` clauses see
+    /// the block's values the same way. That scope ends with the `with`
+    /// expression as a whole.
     pub(crate) fn infer_with(
+        &mut self,
+        expr: &Expr,
+        handler: &ast::Handler,
+        with_span: Span,
+        with_node_id: crate::ast::NodeId,
+    ) -> Result<Type, Diagnostic> {
+        let saved_env = self.env.clone();
+        let mut wrapped_handlers = Vec::new();
+        let result = self.infer_with_open(
+            expr,
+            handler,
+            with_span,
+            with_node_id,
+            &mut wrapped_handlers,
+        );
+        self.env = saved_env;
+        self.restore_shadowed_handlers(wrapped_handlers);
+        result
+    }
+
+    /// `infer_with` leaving the wrapped block's scope open, for a `with` that
+    /// is itself wrapped by another (`{ ... } with {a, b}` is one `with`
+    /// layer per handler) or followed by a `finally` block.
+    pub(crate) fn infer_with_open(
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
         _with_span: Span,
         with_node_id: crate::ast::NodeId,
+        wrapped_handlers: &mut super::infer::ShadowedHandlers,
     ) -> Result<Type, Diagnostic> {
         // Check if this with-expression uses handlers that require runtime resource init.
         let handler_names: Vec<String> = match handler {
@@ -322,7 +353,7 @@ impl Checker {
             };
         self.lsp.with_arm_stacks.push(arm_stack_entry);
 
-        let result = self.infer_with_inner(expr, handler, with_node_id)?;
+        let result = self.infer_with_inner(expr, handler, with_node_id, wrapped_handlers)?;
         self.lsp.with_arm_stacks.pop();
 
         Ok(result)
@@ -333,11 +364,12 @@ impl Checker {
         expr: &Expr,
         handler: &ast::Handler,
         with_node_id: crate::ast::NodeId,
+        wrapped_handlers: &mut super::infer::ShadowedHandlers,
     ) -> Result<Type, Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
         let inner_scope = self.enter_scope();
         let saved_effs = self.save_effects();
-        let expr_ty = self.infer_expr(expr)?;
+        let expr_ty = self.infer_expr_keeping_block_scope(expr, wrapped_handlers)?;
         // What the handler is installed around includes the effects of any
         // open-row trait method the expression used as a value.
         self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Keep);
@@ -706,7 +738,15 @@ impl Checker {
                     // Arm body effects propagate outward (no sibling subtraction
                     // under nested handler semantics).
                     let saved_effs = self.save_effects();
-                    let arm_ty = self.infer_expr(&arm.body)?;
+                    // A `finally` block sees what the arm body's block binds,
+                    // so with one present that block's scope stays open until
+                    // the `finally` block has been checked.
+                    let mut body_handlers = Vec::new();
+                    let arm_ty = if arm.finally_block.is_some() {
+                        self.infer_expr_keeping_block_scope(&arm.body, &mut body_handlers)?
+                    } else {
+                        self.infer_expr(&arm.body)?
+                    };
                     let raw_arm_effs = self.restore_effects(saved_effs);
                     let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
                     self.emit_effects(&arm_effs, arm.span)?;
@@ -744,6 +784,7 @@ impl Checker {
                         let finally_effs = self.sub.apply_effect_row(&finally_effs);
                         self.emit_effects(&finally_effs, finally_expr.span)?;
                     }
+                    self.restore_shadowed_handlers(body_handlers);
 
                     self.resume_type = saved_resume;
                     self.resume_return_type = saved_resume_ret;
