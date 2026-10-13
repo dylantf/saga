@@ -6286,33 +6286,27 @@ result () = {
     check_result_int("let_bound_with_outer_abort", src, 1000);
 }
 
-/// Known gap: a `case` guard that performs effects is lowered as a plain
-/// value. Expected 1000; gives 106 (the abort value fails the guard and the
-/// next arm runs).
-///
-/// The typechecker means guards to be pure: `check_guard` rejects a direct
-/// `op!` and then discards whatever effects the guard inferred, so a call to
-/// an effectful function in a guard is accepted and its effects are not
-/// charged to the enclosing function. A function declared pure can therefore
-/// perform effects from a guard and fail at run time with no handler in
-/// scope; a function-clause guard of that shape does not compile at all.
-/// Threading a continuation through guards would not close that hole. This
-/// stays ignored until the typechecker either rejects such guards or tracks
-/// their effects.
+/// Guards are pure. A guard that calls an effectful function is a type error
+/// in a `case` arm and on a function clause, whether or not the enclosing
+/// function declares the effect: the typechecker used to drop the guard's
+/// effects, so the first form ran with no handler in scope and the second
+/// did not compile. (`typechecker::guard_purity_tests` covers every guard
+/// position.)
 #[test]
-#[ignore = "effectful guards: typechecker drops their effects; lowering has no continuation"]
-fn effectful_case_guard_under_aborting_handler() {
-    check_expression_form_cells(
-        "expr_forms_guard",
-        &[(
-            "case_guard",
-            "case 3 {\n    n when g n == 3 -> 5\n    _ -> 6\n  }",
-            1000,
-            105,
-        )],
-        "Stop",
-        "",
-    );
+fn effectful_guard_is_a_type_error() {
+    let decls = "module Main\n\neffect Stop { fun stop : Int -> Int }\n\nfun g : Int -> Int needs {Stop}\ng i = stop! i\n";
+    for (fixture, needs) in [("declared", " needs {Stop}"), ("pure", "")] {
+        check_type_error(
+            &format!("effectful_case_guard_{fixture}"),
+            &format!(
+                "{decls}\npub fun f : Int -> Int{needs}\nf x = case x {{\n  n when g n == 3 -> 5\n  _ -> 6\n}}\n"
+            ),
+        );
+        check_type_error(
+            &format!("effectful_clause_guard_{fixture}"),
+            &format!("{decls}\npub fun f : Int -> Int{needs}\nf n when g n == 3 = 5\nf _ = 6\n"),
+        );
+    }
 }
 
 /// An operation call nested in an expression is lifted into a `let` ahead of

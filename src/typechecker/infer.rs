@@ -732,18 +732,66 @@ impl Checker {
     }
 
     /// Check that a guard expression is a pure Bool.
-    fn check_guard(&mut self, guard: &Expr) -> Result<(), Diagnostic> {
+    ///
+    /// Every guard position goes through here: `case` and `receive` arms,
+    /// top-level function clauses and local (`let`) function clauses.
+    ///
+    /// The guard is inferred under its own effect accumulator and the row it
+    /// accumulates must be the empty row:
+    ///
+    /// - a named effect in it (a direct `op!`, or a call to a function or
+    ///   function value that needs one) is an error;
+    /// - an open tail that is a row variable of an enclosing declared
+    ///   signature (`..e`, or the row of an open-row trait method on a
+    ///   where-bound type) is an error, since the caller chooses what it
+    ///   holds;
+    /// - any other open tail is an inference variable, and is bound to the
+    ///   empty row, so whatever the guard called is pure from here on (an
+    ///   unannotated parameter called in a guard gets a pure function type).
+    pub(crate) fn check_guard(&mut self, guard: &Expr) -> Result<(), Diagnostic> {
         if let Some(span) = super::find_effect_call(guard) {
             return Err(Diagnostic::error_at(
                 span,
                 "Effect calls are not allowed in guard expressions".to_string(),
             ));
         }
-        // Guards must be pure: isolate effects so they don't leak
         let saved = self.save_effects();
-        let guard_ty = self.infer_expr(guard)?;
-        self.restore_effects(saved);
-        self.unify_at(&guard_ty, &Type::bool(), guard.span)
+        let inferred = self.infer_expr(guard);
+        let guard_effs = self.restore_effects(saved);
+        let guard_ty = inferred?;
+        self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
+
+        let row = self.normalize_row_at(&guard_effs, guard.span)?;
+        let mut found: Vec<String> = row
+            .effects
+            .iter()
+            .map(|e| self.prettify_effect_entry(e))
+            .collect();
+        found.sort();
+        let tails = row.tail_var_ids();
+        let mut rigid: Vec<String> = tails
+            .iter()
+            .filter_map(|tail| self.rigid_row_var_for(*tail))
+            .map(|r| format!("..{}", r.name))
+            .collect();
+        rigid.sort();
+        rigid.dedup();
+        found.extend(rigid);
+        if !found.is_empty() {
+            return Err(Diagnostic::error_at(
+                guard.span,
+                format!(
+                    "Effect calls are not allowed in guard expressions: this guard needs {{{}}}",
+                    found.join(", ")
+                ),
+            ));
+        }
+        // What is left is inference variables: close them.
+        for tail in tails {
+            self.bind_row_checked(tail, EffectRow::empty())
+                .map_err(|e| e.with_span(guard.span))?;
+        }
+        Ok(())
     }
 
     fn infer_lambda(&mut self, params: &[Pat], body: &Expr) -> Result<Type, Diagnostic> {
@@ -1813,10 +1861,7 @@ impl Checker {
                             param_types.push(ty);
                         }
                         if let Some(g) = guard {
-                            let saved = self.save_effects();
-                            let guard_ty = self.infer_expr(g)?;
-                            self.restore_effects(saved);
-                            self.unify_at(&guard_ty, &Type::bool(), g.span)?;
+                            self.check_guard(g)?;
                         }
                         // Isolate body effects for local fun
                         let saved_effs = self.save_effects();

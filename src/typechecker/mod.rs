@@ -40,6 +40,8 @@ mod effect_row_rule_tests;
 #[cfg(test)]
 mod expr_types_tests;
 #[cfg(test)]
+mod guard_purity_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};

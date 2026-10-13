@@ -209,7 +209,7 @@ For each function, it roughly does the following:
 4. Enter an isolated inference scope for effects and ambiguity tracking
 5. Check each clause:
    - bind clause patterns
-   - check the guard
+   - check the guard (must be pure; see "Effect checking")
    - infer the body
    - unify clause result with the function result type
 6. Merge and normalize the effects used by all clauses
@@ -304,6 +304,7 @@ Key behavior:
 - lambdas isolate body effects, then attach them to the resulting function type
 - `with` subtracts handled effects and re-emits escaping ones
 - function and handler bodies are checked against declared `needs` rows using `check_effects_via_row`
+- guards are pure: every guard (`case` arm, `receive` arm, top-level function clause, local `let` function clause) goes through `check_guard` in `infer.rs`, which infers the guard under its own effect accumulator and requires the resulting row to be the empty row. A named effect in it is an error ("Effect calls are not allowed in guard expressions: this guard needs {...}"), whether it comes from an `op!`, an effectful function, or an effectful function value; so is an open tail that belongs to an enclosing declared signature (`..e`), since the caller chooses what it holds. Any other open tail is an inference variable and is bound to the empty row, so an unannotated parameter called in a guard is inferred as a pure function. An effect handled inside the guard (`when (f x with h) == 1`) never reaches the guard's row and is allowed.
 
 ### Handler checking
 

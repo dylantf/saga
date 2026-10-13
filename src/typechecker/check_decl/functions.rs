@@ -174,16 +174,7 @@ impl Checker {
             }
 
             if let Some(guard) = guard {
-                if let Some(span) = crate::typechecker::find_effect_call(guard) {
-                    return Err(Diagnostic::error_at(
-                        span,
-                        "Effect calls are not allowed in guard expressions".to_string(),
-                    ));
-                }
-                let guard_saved = self.save_effects();
-                let guard_ty = self.infer_expr(guard)?;
-                self.restore_effects(guard_saved);
-                self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
+                self.check_guard(guard)?;
             }
 
             let body_ty = if annotation.is_some() {
