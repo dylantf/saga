@@ -911,6 +911,7 @@ out that aborts returns there.
 | --- | --- |
 | the body of a pure lambda or local function inside an arm, when it resumes (`fun s -> (resume s) s`; `lower_fun_body`) | its type is pure, so its caller is an ordinary call |
 | `finally`: the resumed computation, the cleanup, and the `with` itself outside tail position | above |
+| `catch_panic`, and the thunk a spawned process runs | native code calling a function value |
 | `saga_runtime:apply_n/2` on a tagged closure | a callback passed to an operation keeps its perform-site frame; an arm that sees its row as empty calls it as a pure function |
 
 The lowerer itself has no such site: an expression that performs is the

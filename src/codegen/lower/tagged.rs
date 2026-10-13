@@ -217,7 +217,8 @@ impl<'a> Lowerer<'a> {
 
     /// Call a function value of effectful type from code that is itself not
     /// in CPS (a compiler-native bridge such as `spawn` or `catch_panic`):
-    /// the given evidence and an identity continuation.
+    /// the given evidence and an identity continuation. The caller needs a
+    /// plain value, so what the call leaves suspended is run.
     pub(super) fn tagged_cps_apply_value(
         &mut self,
         func: CExpr,
@@ -238,7 +239,7 @@ impl<'a> Lowerer<'a> {
         bindings.push((ev_var.clone(), evidence));
         bindings.push((k_var.clone(), identity_fun(k_param)));
         let call = self.tagged_cps_apply(&func_var, &arg_vars, &ev_var, &k_var);
-        self.wrap_let_bindings(bindings, call)
+        self.wrap_let_bindings(bindings, super::evidence::meta_run(call))
     }
 
     /// Plan a named function (or a partial application of one) as a function

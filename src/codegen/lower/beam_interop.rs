@@ -411,9 +411,11 @@ pub fn build_native_call(
                     && let Some(evidence) = callback_evidence
                 {
                     let result = fresh();
+                    // The callback is the whole computation of the new
+                    // process: nothing there binds what it leaves suspended.
                     CExpr::Fun(
                         vec![],
-                        Box::new(CExpr::Call(
+                        Box::new(super::evidence::meta_run(CExpr::Call(
                             "saga_runtime".to_string(),
                             "apply_cps".to_string(),
                             vec![
@@ -425,7 +427,7 @@ pub fn build_native_call(
                                 evidence.clone(),
                                 CExpr::Fun(vec![result.clone()], Box::new(CExpr::Var(result))),
                             ],
-                        )),
+                        ))),
                     )
                 } else if i == *idx {
                     CExpr::Fun(

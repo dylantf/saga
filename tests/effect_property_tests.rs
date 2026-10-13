@@ -7769,7 +7769,6 @@ result () = {
 /// computation of the new process, so an operation of the lifted frame it
 /// performs has nothing behind it but the rest of the callback.
 #[test]
-#[ignore = "the thunk of a spawned process does not run what its callback leaves suspended"]
 fn spawn_inside_delimited_with_runs_lifted_operations() {
     let src = r#"module Main
 
@@ -7855,6 +7854,70 @@ counter () = {
             [1000, 140, 280, 140 + 141],
         )],
     );
+}
+
+/// Code that is not CPS calling code that is, inside a `with` that lifted
+/// the frame: what the call leaves suspended is run to a plain value. Here a
+/// local function in an arm that resumes, the thunk of `catch_panic`, and a
+/// process spawned by a handler installed inside the `with`.
+#[test]
+fn pure_callers_inside_a_lifting_with_get_plain_values() {
+    let src = r#"module Main
+
+import Std.Actor (Actor, Process, beam_actor)
+import Std.Process (catch_panic)
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+
+fun local_fun_resumes : Unit -> Int needs {Stop}
+local_fun_resumes () = {
+  let v = { let a = ask! (); a + stop! 3 } with {
+    ask () = {
+      let go n = (resume n) + 10
+      go 1 + go 2
+    }
+  }
+  v + 100
+}
+
+fun panics_caught : Unit -> Int needs {Stop}
+panics_caught () = {
+  let v = {
+    let r = catch_panic (fun () -> stop! 5 + 1)
+    let n = case r {
+      Ok n -> n
+      Err _ -> 0
+    }
+    n + ask! ()
+  } with { ask () = (resume 1) + 10 }
+  v + 100
+}
+
+fun recv : Unit -> Int needs {Actor Int}
+recv () = receive { n -> n }
+
+fun spawned : Unit -> Int needs {Stop}
+spawned () = {
+  let v = {
+    let me = self! ()
+    let _ = spawn! (fun () -> send! me (stop! 5 + 1))
+    let got = recv ()
+    got + ask! ()
+  } with {beam_actor, ask () = (resume 1) + 10}
+  v + 100
+}
+
+pub fun result : Unit -> String
+result () = {
+  let a = local_fun_resumes () with { stop i = resume i }
+  let b = panics_caught () with { stop i = resume i }
+  let c = spawned () with { stop i = resume i }
+  show a <> " " <> show b <> " " <> show c
+}
+"#;
+    // a: go 1 = (1 + 3) + 10, go 2 = (2 + 3) + 10.
+    check_result_string("pure_callers_in_lifting_with", src, "129 117 117");
 }
 
 /// An inline handler with several arms for one operation: an arm that
