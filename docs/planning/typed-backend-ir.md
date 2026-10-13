@@ -1,6 +1,6 @@
 # Typed back-end tree
 
-Status: approved 2026-10-13. Branch `typed-ir`, off `effect-anf` (`c27ba1d4`).
+Status: **paused after step 3** (2026-10-13), see "Paused" below. Approved 2026-10-13. Branch `typed-ir`, off `effect-anf` (`c27ba1d4`).
 From a read-only survey; nothing in it was built or run, and every size is an
 estimate from reading. Follows
 [sound-function-representation.md](sound-function-representation.md) ("One
@@ -389,3 +389,41 @@ one `lower_call`. `src/`: 698 lines added, 1,005 removed. Snapshot unchanged.
   codegen unit tests or the effect property tests.
 - A missing plan entry is now an internal error wherever an application is
   built. The known-function path used to read a missing entry as "pure".
+
+## Paused
+
+Paused at `85c13e5b` after an independent read-only audit of steps 2 to 4.
+Full suite at that commit: 1,766 passed, 0 failed, 5 ignored; release build
+compiles the seven user projects and runs 62 of 62 examples.
+
+What the audit found:
+
+- Steps 2 to 4 were about 20% simplification and 80% relocation: of 2,361
+  lines removed, 450 to 500 are logic that no longer exists anywhere.
+- Calls (step 3) are a real simplification: about eight places deciding a
+  call's convention became three, and two rule ladders that ordered the
+  rules differently became one. Values (step 2) are a modest win. Bodies and
+  patterns (step 4) were the same algorithm retyped, with transitional
+  scaffolding.
+- No side table or pass has been deleted; the builder reads all of them.
+  Side-table reads from the lowerer are flat.
+- Realistic final net if finished: about 3,000 lines fewer, not the 5,700
+  the table implies, and nothing before step 8. Estimated one in three
+  chance of stalling in steps 5 to 7.
+- Pinning resolved facts on AST nodes at elaboration would address the
+  stated motivation (entries lost when a tree is rebuilt) without rewriting
+  the lowerer. The AST already does this for `record_name` and for
+  `trait_name` / `method_index`.
+
+Kept on `typed-ir`: steps 0 to 3. Parked on `typed-ir-wip`: step 4, the
+operator forms, and an unfinished step 5 (may not build). Step 4 contains
+three local improvements not extracted: a shorter `lower_pat`, one shared
+record-layout function for literals and patterns, one shared multi-clause
+lowering.
+
+If resumed, the audit's advice: make `Call::new` compute the convention from
+the callee and assert it equals the plan entry over the snapshot corpus
+before anything else; extract the builder from `Lowerer` into its own pass
+with explicit inputs; settle the fast paths with handler unification rather
+than porting them; do not present steps 5 to 7 as shrinking; treat step 10
+as required for step 9.
