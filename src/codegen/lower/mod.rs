@@ -248,6 +248,9 @@ pub(super) struct LowererResolution {
 
 pub struct Lowerer<'a> {
     counter: usize,
+    /// Numbers the temporaries effect normalization introduces, across all
+    /// the bodies of the module.
+    anf_counter: usize,
     /// The lambda with this id is lowered as a raw fun with
     /// the given convention (CPS or direct) instead of deciding from its own
     /// type. Set by dictionary-method lowering, which owns the slot's
@@ -420,6 +423,7 @@ impl<'a> Lowerer<'a> {
     ) -> Self {
         Lowerer {
             counter: 0,
+            anf_counter: 0,
             forced_lambda_cps: None,
             ctx,
             source_info,

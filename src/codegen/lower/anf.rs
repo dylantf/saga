@@ -1,24 +1,24 @@
-//! Effect positions at the lowering roots.
+//! Effect-normal form at the lowering roots.
 //!
-//! Every body the lowerer starts on (a function clause, a dictionary
-//! method, a handler arm or return clause, a `finally` block, an inlined
-//! helper) passes through `effect_normal_body` first. It checks the body
-//! against the position rule in `codegen::effect_position`.
+//! Every body the lowerer starts on (a function clause or its guard, a
+//! dictionary method, a handler arm or return clause, a `finally` block, an
+//! inlined helper) passes through `effect_normal_body` first. A body that
+//! already satisfies the position rule in `codegen::effect_position` is
+//! lowered as it is. Any other body is normalized by
+//! `normalize::normalize_body` and checked again; a violation that survives
+//! is a compiler bug and stops compilation.
+//!
+//! This runs after call classification on purpose: which calls perform
+//! effects is only known from the frozen plan, and the plan's entries are
+//! keyed by node ids that normalization keeps.
 
 use std::borrow::Cow;
-use std::sync::OnceLock;
 
 use super::Lowerer;
 use super::util::collect_effect_call;
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::effect_position::{self, Violation};
-
-/// `SAGA_ANF_REPORT=1`: print every position violation to stderr instead of
-/// acting on it.
-fn report_mode() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("SAGA_ANF_REPORT").is_some())
-}
+use crate::codegen::normalize;
 
 impl<'a> Lowerer<'a> {
     /// Whether `expr` performs an effect by itself, for the position rule:
@@ -67,11 +67,19 @@ impl<'a> Lowerer<'a> {
         body: &'e Expr,
         root: &'static str,
     ) -> Cow<'e, Expr> {
-        if report_mode() {
-            for violation in self.effect_position_violations(body) {
-                eprintln!("anf-report: {}", self.describe_violation(&violation, root));
-            }
+        if self.effect_position_violations(body).is_empty() {
+            return Cow::Borrowed(body);
         }
-        Cow::Borrowed(body)
+        let mut counter = self.anf_counter;
+        let normalized =
+            normalize::normalize_body(body, &|node| self.performs_effect(node), &mut counter);
+        self.anf_counter = counter;
+        if let Some(violation) = self.effect_position_violations(&normalized).first() {
+            panic!(
+                "internal compiler error: effect normalization left {}",
+                self.describe_violation(violation, root)
+            );
+        }
+        Cow::Owned(normalized)
     }
 }

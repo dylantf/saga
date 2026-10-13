@@ -7141,3 +7141,211 @@ fn tail_with_delimited_handler_resume_returns_value_of_with() {
         },
     );
 }
+
+// ---------------------------------------------------------------------------
+// Effect normalization at the lowering roots (`codegen::lower::anf`): an
+// effectful expression in operand position is moved into a `let` before
+// lowering. These shapes had no lowering routine of their own and were
+// lowered as plain values, so an outer handler's abort value was used as the
+// operand's value and the rest of the body ran.
+// ---------------------------------------------------------------------------
+
+const ANF_PRELUDE: &str = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+
+fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+handler one for Ask { ask () = resume 1 }
+handler two for Ask { ask () = resume 2 }
+"#;
+
+fn anf_int(fixture: &str, body: &str, expected: i64) {
+    check_result_int(fixture, &format!("{ANF_PRELUDE}\n{body}"), expected);
+}
+
+/// The condition that picks a `let`-bound handler performs an effect. It
+/// answered 102: the abort value 1000 was compared with 0 and `two` chosen.
+#[test]
+fn effectful_condition_selecting_a_let_bound_handler() {
+    anf_int(
+        "anf_handler_condition",
+        r#"
+fun f : Unit -> Int needs {Stop}
+f () = {
+  let h = if g 0 == 0 then one else two
+  let v = ask! () with h
+  v + 100
+}
+
+pub fun result : Unit -> Int
+result () = f () with { stop i = 1000 }
+"#,
+        1000,
+    );
+}
+
+/// The return clause of a handler value has an effectful call as an operand.
+/// It answered 1100: the abort value went through `+ 100`.
+#[test]
+fn effectful_operand_in_return_clause_of_a_handler_value() {
+    anf_int(
+        "anf_handler_value_return",
+        r#"
+fun mk : Unit -> Handler Ask needs {Stop}
+mk () = handler for Ask needs {Stop} {
+  ask () = resume 1
+  return v = g v + 100
+}
+
+fun body : Unit -> Int needs {Stop}
+body () = {
+  let h = mk ()
+  ask! () with h
+}
+
+pub fun result : Unit -> Int
+result () = body () with { stop i = 1000 }
+"#,
+        1000,
+    );
+}
+
+/// The size of a bit string segment performs an effect. It answered 100:
+/// the abort value was used as the size and the rest of the block ran.
+#[test]
+fn effectful_bit_string_segment_size() {
+    anf_int(
+        "anf_bit_string_size",
+        r#"
+fun f : Unit -> Int needs {Stop}
+f () = {
+  let b = <<1:(g 8)>>
+  let _ = b
+  100
+}
+
+pub fun result : Unit -> Int
+result () = f () with { stop i = 1000 }
+"#,
+        1000,
+    );
+}
+
+// Known gaps that normalization does not close. Each one is an effectful
+// expression already in `let` or tail position, so the position rule holds;
+// what is missing is in the block lowering itself.
+
+/// A block that is the value of a `let`, has effects in it and defines a
+/// local function: the continuation-threaded block lowering has no case for
+/// a local function and reaches `unreachable!` (`lower_block_with_k`).
+#[test]
+#[ignore = "codegen: a local function in a block lowered with a continuation panics the compiler"]
+fn local_function_in_a_block_lowered_with_a_continuation() {
+    anf_int(
+        "anf_local_fun_in_k_block",
+        r#"
+fun f : Unit -> Int needs {Stop}
+f () = {
+  let x = {
+    let h y = y + 1
+    h (g 5)
+  }
+  x + 100
+}
+
+pub fun result : Unit -> Int
+result () = f () with { stop i = resume i }
+"#,
+        106,
+    );
+}
+
+/// `let assert` on the value of an effectful call: the rest of the block
+/// becomes the call's continuation and binds the pattern with an ordinary
+/// match, so a mismatch is a `case_clause` error, not an assertion failure.
+#[test]
+#[ignore = "codegen: `let assert` on an effectful call loses the assertion"]
+fn let_assert_on_an_effectful_call_keeps_the_assertion() {
+    let src = format!(
+        "{ANF_PRELUDE}{}",
+        r#"
+fun mk : Int -> Maybe Int needs {Stop}
+mk i = if stop! i == 0 then Nothing else Just 1
+
+fun f : Unit -> Int needs {Stop}
+f () = {
+  let assert Just(x) = mk 0
+  x + 100
+}
+
+pub fun result : Unit -> Int
+result () = f () with { stop i = resume i }
+"#
+    );
+    let root = fixtures_root_for_main_only();
+    let mut checker = make_checker(root.clone());
+    let program = typecheck_source(&src, &mut checker, "anf_let_assert");
+    let core = emit_program(&program, "main", &checker, Some("main"));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        core.contains("'assert_fail'"),
+        "the assertion is not in the lowered program"
+    );
+}
+
+/// A block that ends in `let x = <effectful call>`: the call is lowered as a
+/// plain value with an identity continuation, so the abort value becomes the
+/// value of the block and the caller's rest runs. Answers 100.
+#[test]
+#[ignore = "codegen: a block ending in a `let` of an effectful call gives the call no continuation"]
+fn block_ending_in_let_of_an_effectful_call() {
+    anf_int(
+        "anf_trailing_let",
+        r#"
+fun f : Unit -> Unit needs {Stop}
+f () = {
+  let x = g 5
+}
+
+fun h : Unit -> Int needs {Stop}
+h () = {
+  f ()
+  100
+}
+
+pub fun result : Unit -> Int
+result () = h () with { stop i = 1000 }
+"#,
+        1000,
+    );
+}
+
+/// A nullary operation (`number!`) performs when it is evaluated, but it is
+/// lowered as a plain value with an identity continuation wherever it
+/// stands, a `let` included. The handler's abort value becomes the value of
+/// the operation and the rest of the block runs. Normalization does not
+/// count it as effectful for that reason: a `let` would not help.
+#[test]
+#[ignore = "codegen: a nullary operation never gets the rest of the block as its continuation"]
+fn nullary_operation_aborted_by_its_handler() {
+    check_result_int(
+        "anf_nullary_op",
+        r#"module Main
+
+effect Config { fun number : Int }
+
+fun compute : Unit -> Int needs {Config}
+compute () = {
+  let n = number!
+  n + 1
+}
+
+pub fun result : Unit -> Int
+result () = compute () with { number = 1000 }
+"#,
+        1000,
+    );
+}

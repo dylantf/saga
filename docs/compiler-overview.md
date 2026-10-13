@@ -117,6 +117,24 @@ parts (`if`/`case` branches, the right operand of `&&`/`||`, lambda bodies,
 handler arms) are separate scopes. An expression with no nested operation call
 is left unchanged.
 
+The same pass runs a second time inside lowering, once the call plan is
+frozen (`normalize_body`, called from `src/codegen/lower/anf.rs` for each body
+the lowerer starts on: function clauses and guards, dictionary methods,
+handler arms and return clauses, `finally` blocks, inlined helpers). There it
+knows which calls perform effects and lifts every expression that needs a
+continuation out of operand position: calls the plan classified CPS, `with`,
+`resume`, and any `if`/`case`/block/`do`/`receive` with such a thing in a
+branch. `a && b` / `a || b` with an effectful right operand becomes an `if`.
+The rule it establishes, and the check that it holds, are in
+`src/codegen/effect_position.rs`: an expression that performs effects is the
+value of a block-level `let`/statement or is in tail position. A body that
+already satisfies the rule is lowered untouched; a violation left after
+normalizing is an internal compiler error. Facts the lowerer used to read off
+the tree's shape (whether an untyped lambda is a tagged closure, whether a
+dictionary method performs an operation directly) are recorded in the plan
+before this runs. A nullary operation (`number!`) is not yet counted as
+performing.
+
 ### Backend Resolve (`src/codegen/resolve.rs`)
 
 This phase is now a **backend-oriented projection layer**, not a second

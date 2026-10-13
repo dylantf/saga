@@ -18,23 +18,47 @@
 //! Parts that are evaluated conditionally or later (`if`/`case` branches, the
 //! right operand of `&&`/`||`, lambda bodies, handler arms) are their own
 //! scope: what is lifted out of them stays inside them.
+//!
+//! The pass runs twice, with two notions of what has to be lifted:
+//!
+//! - `normalize_effects`, before call classification, knows only syntax and
+//!   lifts applied operations (`op! x`).
+//! - `normalize_body`, at each lowering root once the call plan is frozen,
+//!   is given the nodes that perform an effect by themselves and lifts
+//!   every expression that needs a continuation (see
+//!   `effect_position::needs_continuation`) out of operand position: calls
+//!   the plan classified CPS, `with`, `resume`, and any `if`/`case`/block/
+//!   `do`/`receive` with such a thing in a branch. A short-circuit operator
+//!   whose right operand performs effects becomes an `if`. Its output
+//!   satisfies `effect_position::check_body`, and it leaves that output and
+//!   code that performs no effects as they are.
 
+use super::effect_position;
 use crate::ast::*;
 
 /// Counter for generating unique temporary variable names.
-struct Normalizer {
+struct Normalizer<'a> {
     counter: usize,
+    /// The nodes that perform an effect by themselves, when known. `None`
+    /// before call classification: then only applied operations are lifted.
+    performs: Option<&'a dyn Fn(&Expr) -> bool>,
 }
 
-impl Normalizer {
+impl<'a> Normalizer<'a> {
     fn new() -> Self {
-        Self { counter: 0 }
+        Self {
+            counter: 0,
+            performs: None,
+        }
     }
 
     fn fresh(&mut self) -> String {
         let n = self.counter;
         self.counter += 1;
-        format!("__eff{}", n)
+        match self.performs {
+            None => format!("__eff{}", n),
+            Some(_) => format!("__anf{}", n),
+        }
     }
 
     /// Normalize a block's statements: lift nested effect calls to their own
@@ -105,7 +129,7 @@ impl Normalizer {
         } else {
             // Not an effect call at root: walk sub-expressions, lifting any
             // nested effect calls.
-            self.normalize_and_lift(expr, lifted)
+            self.walk_expr(expr, lifted)
         }
     }
 
@@ -113,14 +137,23 @@ impl Normalizer {
     /// into `lifted` as let-bindings. This is called for sub-expressions where
     /// effect calls must not remain nested.
     fn normalize_and_lift(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        if is_effect_call(expr) {
-            // This effect call is nested inside another expression.
-            // Normalize its args, then lift the whole thing.
-            let normalized = self.normalize_effect_args(expr, lifted);
-            self.lift_to_let(normalized, lifted)
-        } else {
-            self.walk_expr(expr, lifted)
+        // Its own operands first, then the expression itself if it still
+        // needs a continuation.
+        let normalized = self.normalize_top(expr, lifted);
+        match self.performs {
+            None if is_effect_call(&normalized) => self.lift_to_let(normalized, lifted),
+            Some(performs) if effect_position::needs_continuation(&normalized, performs) => {
+                self.lift_sibling_to_let(normalized, lifted)
+            }
+            _ => normalized,
         }
+    }
+
+    /// Whether `expr`, already normalized, performs effects. Always false
+    /// before call classification.
+    fn is_effectful(&self, expr: &Expr) -> bool {
+        self.performs
+            .is_some_and(|performs| effect_position::is_effectful(expr, performs))
     }
 
     /// Normalize the arguments of an effect call (or App-chain around one),
@@ -133,7 +166,7 @@ impl Normalizer {
             args: op_args,
         } = &head.kind
         else {
-            return self.normalize_and_lift(expr, lifted);
+            return self.walk_expr(expr, lifted);
         };
         let parts: Vec<&Expr> = op_args
             .iter()
@@ -227,14 +260,35 @@ impl Normalizer {
             } => {
                 let new_left = self.normalize_and_lift(left, lifted);
                 let new_right = self.normalize_expr(right);
-                Expr::rebuild_like(
-                    expr,
+                let kind = if self.is_effectful(&new_right) {
+                    // The right operand needs a continuation, and an
+                    // operand cannot have one: `a && b` is
+                    // `if a then b else False`, `a || b` is
+                    // `if a then True else b`.
+                    let decided = Box::new(Expr::synth(
+                        expr.span,
+                        ExprKind::Lit {
+                            value: Lit::Bool(matches!(op, BinOp::Or)),
+                        },
+                    ));
+                    let (then_branch, else_branch) = match op {
+                        BinOp::And => (Box::new(new_right), decided),
+                        _ => (decided, Box::new(new_right)),
+                    };
+                    ExprKind::If {
+                        cond: Box::new(new_left),
+                        then_branch,
+                        else_branch,
+                        multiline: false,
+                    }
+                } else {
                     ExprKind::BinOp {
                         op: op.clone(),
                         left: Box::new(new_left),
                         right: Box::new(new_right),
-                    },
-                )
+                    }
+                };
+                Expr::rebuild_like(expr, kind)
             }
 
             // Binary op: left-to-right normalization of operands.
@@ -558,10 +612,13 @@ impl Normalizer {
                         .collect(),
                     dangling_trivia: vec![],
                     after_clause: after_clause.as_ref().map(|(timeout, body)| {
-                        (
-                            Box::new(self.normalize_expr(timeout)),
-                            Box::new(self.normalize_expr(body)),
-                        )
+                        // The timeout is an operand of the receive. Before
+                        // classification it is left as its own scope.
+                        let timeout = match self.performs {
+                            Some(_) => self.normalize_and_lift(timeout, lifted),
+                            None => self.normalize_expr(timeout),
+                        };
+                        (Box::new(timeout), Box::new(self.normalize_expr(body)))
                     }),
                 },
             ),
@@ -672,13 +729,16 @@ impl Normalizer {
             // Wrap in a block with the lifted bindings.
             let mut stmts: Vec<Annotated<Stmt>> = lifted.into_iter().map(Annotated::bare).collect();
             stmts.push(Annotated::bare(Stmt::Expr(new_expr)));
-            Expr::synth(
-                expr.span,
-                ExprKind::Block {
-                    stmts,
-                    dangling_trivia: vec![],
-                },
-            )
+            let kind = ExprKind::Block {
+                stmts,
+                dangling_trivia: vec![],
+            };
+            match self.performs {
+                None => Expr::synth(expr.span, kind),
+                // The block stands where `expr` stood and has its value, so
+                // it keeps its id: lookups keyed on the id still answer.
+                Some(_) => Expr::rebuild_like(expr, kind),
+            }
         }
     }
 }
@@ -767,6 +827,24 @@ fn is_atomic(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Bring one body (an expression in tail position) into the form
+/// `effect_position::check_body` accepts, given the nodes that perform an
+/// effect by themselves. `counter` numbers the temporaries and is advanced,
+/// so bodies normalized one after another do not reuse a name.
+pub(crate) fn normalize_body(
+    body: &Expr,
+    performs: &dyn Fn(&Expr) -> bool,
+    counter: &mut usize,
+) -> Expr {
+    let mut normalizer = Normalizer {
+        counter: *counter,
+        performs: Some(performs),
+    };
+    let normalized = normalizer.normalize_expr(body);
+    *counter = normalizer.counter;
+    normalized
 }
 
 /// Public entry point: normalize a program's declarations, lifting nested
