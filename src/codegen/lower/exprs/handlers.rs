@@ -205,21 +205,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_tuple_elems(&mut self, elems: &[Expr]) -> CExpr {
-        let mut vars: Vec<String> = Vec::new();
-        let mut bindings: Vec<(String, CExpr)> = Vec::new();
-        for elem in elems {
-            let var = self.fresh();
-            let val = self.lower_operand(elem, "a tuple");
-            vars.push(var.clone());
-            bindings.push((var, val));
-        }
-        let tuple = CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect());
-        bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
-            CExpr::Let(var, Box::new(val), Box::new(body))
-        })
-    }
-
     /// Lower a handle binding statement. Routes the binding into one of four
     /// metadata stores depending on the RHS shape; `lower_with` later picks
     /// the matching compilation strategy based on which store the name is in.

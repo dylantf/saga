@@ -136,7 +136,8 @@ other guard is a body of its own.
 The rule and the check that it holds are in
 `src/codegen/effect_position.rs`. A body that already satisfies the rule is
 lowered untouched; a violation left after normalizing is an internal compiler
-error, and so is a non-value operand met while lowering (`lower_operand`).
+error, and so is a non-value operand met while lowering (`Lowerer::operand`,
+the one place the back-end tree's operands are made).
 Facts the lowerer used to read off the tree's shape (whether an untyped
 lambda is a tagged closure, whether a dictionary method performs an operation
 directly) are recorded in the plan before this runs.

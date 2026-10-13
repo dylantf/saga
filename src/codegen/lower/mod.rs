@@ -1,6 +1,7 @@
 pub(crate) mod beam_interop;
-mod builtins;
 mod anf;
+mod build;
+mod builtins;
 mod calls;
 mod effects;
 pub mod errors;
@@ -784,11 +785,6 @@ impl<'a> Lowerer<'a> {
             trait_method_effects_by_key: &trait_method_effects_by_key,
         })
         .populate_with_trace(program)
-    }
-
-    /// Get a function's arity.
-    fn fun_arity(&self, name: &str) -> Option<usize> {
-        self.fun_info.get(name).map(FunInfo::arity)
     }
 
     /// Whether the trait method at `(trait_name, method_index)` takes no

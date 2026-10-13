@@ -6,25 +6,6 @@ use crate::codegen::lower::*;
 use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
-    /// Lower the field values of a record literal, binding each to a fresh
-    /// variable in the order the fields are written (the order they are
-    /// evaluated in, whatever the record's layout). Returns the bindings and
-    /// the variable of each field.
-    fn lower_record_fields<'e>(
-        &mut self,
-        fields: &'e [(String, crate::token::Span, Expr)],
-    ) -> (Vec<(String, CExpr)>, HashMap<&'e str, String>) {
-        let mut bindings = Vec::new();
-        let mut field_vars = HashMap::new();
-        for (name, _, value) in fields {
-            let var = self.fresh();
-            let ce = self.lower_operand(value, "a record literal");
-            field_vars.insert(name.as_str(), var.clone());
-            bindings.push((var, ce));
-        }
-        (bindings, field_vars)
-    }
-
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
     pub(crate) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
         use crate::codegen::lower::util::{
@@ -229,57 +210,23 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
         match &expr.kind {
-            ExprKind::Lit { value, .. } => match value {
-                Lit::String(s, kind) => {
-                    let resolved = if kind.is_multiline() {
-                        process_string_escapes(s)
-                    } else {
-                        s.clone()
-                    };
-                    lower_string_to_binary(&resolved)
-                }
-                _ => CExpr::Lit(lower_lit(value)),
-            },
-
-            ExprKind::Var { name, .. } => {
-                match self.resolved.get(&expr.id).cloned() {
-                    Some(resolved) => self.lower_resolved_value_ref(expr.id, resolved),
-                    _ => {
-                        // Not in resolution map: this is a local variable
-                        // (function param, let binding, lambda param, case binding, etc.).
-                        // The resolver is authoritative — if it didn't resolve the name,
-                        // it's not a module-level or imported function.
-                        let handler_name = self
-                            .known_handler_binding_name(expr.id, name)
-                            .unwrap_or_else(|| name.clone());
-                        if let Some(tuple) = self.lower_handler_def_to_tuple(&handler_name) {
-                            // Handler used as a value (e.g. returned from a function,
-                            // passed as argument): convert to tuple-of-lambdas.
-                            tuple
-                        } else {
-                            CExpr::Var(core_var(name))
-                        }
-                    }
-                }
+            // The value forms: built, then lowered from the node.
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::Tuple { .. }
+            | ExprKind::RecordCreate { .. }
+            | ExprKind::AnonRecordCreate { .. }
+            | ExprKind::FieldAccess { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::DictMethodAccess { .. }
+            | ExprKind::DictSuperAccess { .. } => {
+                let val = self.build_val(expr);
+                self.lower_val(&val)
             }
 
             ExprKind::App { .. } => self.lower_app_expr(expr),
-
-            ExprKind::Constructor { name, .. } => {
-                let ctor_name = self.resolved_constructor_name_for(expr.id, name);
-                if let Some(ty) = self.value_type(expr.id)
-                    && matches!(ty, crate::typechecker::Type::Fun(..))
-                {
-                    // A constructor used as a function value: one bare fun
-                    // taking every field.
-                    let arity = arity_and_effects_from_type(&ty).0;
-                    return self.constructor_function_value(&ctor_name, arity);
-                }
-                let origin = self
-                    .constructor_origin_module_for(expr.id, &ctor_name)
-                    .map(str::to_string);
-                self.lower_ctor_with_origin(&ctor_name, vec![], origin.as_deref())
-            }
 
             ExprKind::BinOp {
                 op, left, right, ..
@@ -471,136 +418,6 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
-
-            ExprKind::QualifiedName { name, .. } => {
-                // Check if this node resolved to a qualified constructor with no args.
-                if let Some(ctor_name) = self.maybe_resolved_constructor_name_for(expr.id)
-                    && self.is_known_constructor(&ctor_name)
-                {
-                    let origin = self
-                        .constructor_origin_module_for(expr.id, &ctor_name)
-                        .map(str::to_string);
-                    return self.lower_ctor_with_origin(&ctor_name, vec![], origin.as_deref());
-                }
-                // Named handlers are values, not zero-arity functions. In
-                // particular, an imported `Module.handler` passed as an
-                // argument must materialize its tuple of operation closures;
-                // ordinary callable resolution would otherwise emit a remote
-                // `handler/0` call that no module defines or exports.
-                if let Some(handler_name) = self.known_handler_binding_name(expr.id, name)
-                    && let Some(tuple) = self.lower_handler_def_to_tuple(&handler_name)
-                {
-                    return tuple;
-                }
-                if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
-                    self.lower_resolved_value_ref(expr.id, resolved)
-                } else {
-                    CExpr::Var(core_var(name))
-                }
-            }
-
-            ExprKind::RecordCreate {
-                name,
-                fields,
-                record_name,
-            } => {
-                // The field *order* (the tuple slot layout) must come from the
-                // record's declared type. If it can't be resolved we must NOT fall
-                // back to an empty order — that silently emits a fieldless `{tag}`
-                // tuple, and any later field access (`element(2, …)`) crashes at
-                // runtime with `bad argument`. Fail loudly at compile time instead.
-                let order = self
-                    .record_create_field_order(record_name.as_deref(), expr.id, name)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "codegen: cannot resolve field layout for record `{name}` \
-                             (node {:?}, module `{}`). The record's type could not be \
-                             determined here, so its tuple layout is unknown.",
-                            expr.id,
-                            self.current_semantic_module_name(),
-                        )
-                    });
-                let (bindings, field_vars) = self.lower_record_fields(fields);
-                let vars: Vec<String> = order
-                    .iter()
-                    .map(|field_name| {
-                        field_vars
-                            .get(field_name.as_str())
-                            .expect("field missing in RecordCreate")
-                            .clone()
-                    })
-                    .collect();
-                let ctor_name = self
-                    .current_record_type_name(expr.id)
-                    .and_then(|name| self.canonical_constructor_key_for(name))
-                    .unwrap_or_else(|| self.resolved_constructor_name_for(expr.id, name));
-                let atom = util::mangle_ctor_atom(
-                    &ctor_name,
-                    &self.constructor_atoms,
-                    self.handler_origin_module(),
-                );
-                let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-                elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                let tuple = CExpr::Tuple(elems);
-                bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
-                    CExpr::Let(var, Box::new(val), Box::new(body))
-                })
-            }
-
-            ExprKind::AnonRecordCreate { fields, .. } => {
-                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                let tag = crate::ast::anon_record_tag(&names);
-                let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-                sorted_names.sort();
-                let (bindings, field_vars) = self.lower_record_fields(fields);
-                let vars: Vec<String> = sorted_names
-                    .iter()
-                    .map(|field_name| {
-                        field_vars
-                            .get(field_name.as_str())
-                            .expect("field missing in AnonRecordCreate")
-                            .clone()
-                    })
-                    .collect();
-                let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-                elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                let tuple = CExpr::Tuple(elems);
-                bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
-                    CExpr::Let(var, Box::new(val), Box::new(body))
-                })
-            }
-
-            ExprKind::FieldAccess {
-                expr,
-                field,
-                record_name: resolved_name,
-            } => {
-                let idx = resolved_name
-                    .as_deref()
-                    .and_then(|rname| self.record_fields.get(rname))
-                    .and_then(|fields| fields.iter().position(|f| f == field))
-                    .map(|pos| pos + 2) // +1 for tag, +1 for 1-based
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "codegen: could not resolve record type for field access '.{}' at node {:?} (record_name={:?})",
-                            field, expr.id, resolved_name
-                        )
-                    }) as i64;
-                let v = self.fresh();
-                let ce = self.lower_operand(expr, "field access");
-                CExpr::Let(
-                    v.clone(),
-                    Box::new(ce),
-                    Box::new(cerl_call(
-                        "erlang",
-                        "element",
-                        vec![CExpr::Lit(CLit::Int(idx)), CExpr::Var(v)],
-                    )),
-                )
-            }
-
             ExprKind::RecordUpdate {
                 record,
                 fields,
@@ -653,58 +470,6 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(rec_var, Box::new(rec_ce), Box::new(destructured))
             }
 
-            // --- Elaboration-only constructs ---
-            ExprKind::DictMethodAccess {
-                dict,
-                method_index,
-                trait_name,
-            } => {
-                // Lower to: let D = <dict> in element(idx+1, D)
-                let dict_var = self.fresh();
-                let dict_ce = self.lower_expr(dict);
-                let tuple_index = self.trait_method_tuple_index(trait_name, *method_index);
-                let extract_method = cerl_call(
-                    "erlang",
-                    "element",
-                    vec![
-                        CExpr::Lit(CLit::Int(tuple_index as i64 + 1)),
-                        CExpr::Var(dict_var.clone()),
-                    ],
-                );
-                // A nullary trait method (`fun default : a`) is stored in the dict
-                // as a zero-arity thunk (`fun () -> 0`) and is never the head of an
-                // `App`, so nothing else applies it. Apply it here so the call
-                // yields the value, not the closure.
-                let body = if self.trait_method_is_nullary(trait_name, *method_index) {
-                    CExpr::Apply(Box::new(extract_method), vec![])
-                } else if let Some(arity) =
-                    self.pure_view_of_effectful_method(dict, trait_name, *method_index)
-                {
-                    self.bare_view_of_function_value(extract_method, arity)
-                } else {
-                    extract_method
-                };
-                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body))
-            }
-
-            ExprKind::DictSuperAccess {
-                dict,
-                supertrait_index,
-                ..
-            } => {
-                let dict_var = self.fresh();
-                let dict_ce = self.lower_expr(dict);
-                let body = cerl_call(
-                    "erlang",
-                    "element",
-                    vec![
-                        CExpr::Lit(CLit::Int(*supertrait_index as i64 + 1)),
-                        CExpr::Var(dict_var.clone()),
-                    ],
-                );
-                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body))
-            }
-
             ExprKind::ForeignCall {
                 module, func, args, ..
             } => {
@@ -747,32 +512,6 @@ impl<'a> Lowerer<'a> {
                 bindings.into_iter().rev().fold(call, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
-            }
-
-            ExprKind::DictRef { name, .. } => {
-                if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
-                    match &resolved.kind {
-                        crate::codegen::resolve::ResolvedCodegenKind::BeamFunction { .. }
-                        | crate::codegen::resolve::ResolvedCodegenKind::ExternalFunction {
-                            ..
-                        } => self.lower_resolved_value_ref(expr.id, resolved),
-                        crate::codegen::resolve::ResolvedCodegenKind::Intrinsic { .. } => {
-                            panic!(
-                                "dict ref resolved to non-dictionary codegen kind: {}",
-                                resolved.canonical_name
-                            )
-                        }
-                    }
-                } else if let Some(arity) = self.fun_arity(name) {
-                    if arity == 0 {
-                        CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
-                    } else {
-                        CExpr::FunRef(name.clone(), arity)
-                    }
-                } else {
-                    // Dict param variable (passed as function argument)
-                    CExpr::Var(core_var(name))
-                }
             }
 
             // --- Effect system (CPS transform) ---

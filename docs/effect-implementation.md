@@ -890,7 +890,7 @@ in evaluation order, and turns `a && b` / `a || b` whose right operand is
 not a value into an `if`. A guard that is a BEAM guard expression is exempt
 and left as written. A violation that survives is an internal compiler
 error, and so is an operand that is not a value when the lowerer evaluates
-it (`lower_operand`): a body that bypassed normalization fails loudly.
+it (`Lowerer::operand`): a body that bypassed normalization fails loudly.
 
 The lowerer then has two rules, each with one implementation:
 

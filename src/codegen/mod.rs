@@ -3,6 +3,7 @@ pub mod cerl;
 pub(crate) mod effect_position;
 pub mod generic_fold;
 pub mod handler_analysis;
+pub(crate) mod ir;
 pub mod lower;
 pub mod normalize;
 pub mod optimize;

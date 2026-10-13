@@ -289,3 +289,46 @@ Does not shrink: `beam_interop.rs`, `evidence.rs`, `effects/analysis.rs`,
   function-shape matrix fixtures are unchanged. Clippy: the same 4 warnings.
 - Stdlib `.core`: 401,111 bytes before, 426,357 after (+6.3%); the whole
   corpus 1,494,360 to 1,574,141 (+5.3%).
+
+### Step 2 (2026-10-13)
+
+`src/codegen/ir.rs` (the types) and `src/codegen/lower/build.rs` (the shallow
+builder, methods on the `Lowerer`). `src/`: 725 lines added, 601 removed.
+Snapshot unchanged.
+
+- Through the builder and the one `lower_val`: literals, variables,
+  references to top-level, imported, external and block-local functions,
+  constants, intrinsics, constructors (nullary, applied, as functions),
+  tuples, record literals, field access, `DictRef`, `DictMethodAccess`,
+  `DictSuperAccess`, and a named handler used as a value (`HandlerRef`, whose
+  lowering is still `lower_handler_def_to_tuple`). Left for later steps:
+  lambdas (step 5, body and `repr` together), operation references (5),
+  handler literals (6), `DictApp` (with calls, step 3).
+- Deleted: `lower_resolved_value_ref`, `tagged_resolved_value_ref`,
+  `lower_local_fun_ref`, `lower_ctor_with_origin`,
+  `constructor_function_value`, `lower_record_fields`, `fun_arity`,
+  `constructor_origin_module_for`, `assert_operand`, and the `lower_expr` arms
+  of the migrated kinds.
+- The operand check is in `Lowerer::operand`, the only function that makes
+  a `Val::Ast`. `lower_operand` is `operand` then `lower_val`. Three sites
+  that are not migrated yet call `operand` for the check alone (call
+  arguments in `calls.rs` and `function_values.rs`, operation arguments in
+  `effects/call.rs`). The dictionary of a method or superclass access is now
+  checked too; it was lowered unchecked.
+- Deviations from the draft, all because nothing reads the missing part yet:
+  `Val` is the enum itself, with no `ty` or `span`. Names are `String`.
+  `Local` is the Core Erlang variable name, without an id. `FnRef` is
+  `{ module, name, abi }` where `module` is the Erlang module (`None` for the
+  module being emitted) and `abi` is the existing `CallableAbi`; there is no
+  `external` field because the builder settles wrapper or Erlang target, and
+  no `FnAbi`/`Conv`/`Row` yet. `LocalFn` holds an `FnRef` like `Fn`.
+  `Record` is `{ tag, arity, fields: Vec<(slot, Val)> }` with the fields in
+  written order, since that is the order they are evaluated in.
+  `Intrinsic` is `{ name, arity }`. `CtorRef::Atom` is a `&'static str`.
+- One theoretical difference: a bare reference to a function of the module
+  being emitted took its arity from `fun_info[name]` when present, else from
+  the resolved ABI. It is now always the declared ABI. They differ only for
+  an `@external` function whose name a block-local function elsewhere in the
+  module reuses (block-local functions overwrite `fun_info` by bare name and
+  are never removed). A check that they agree did not fire on the snapshot
+  corpus, the codegen unit tests or the effect property tests.

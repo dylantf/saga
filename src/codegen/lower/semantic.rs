@@ -202,16 +202,6 @@ impl<'a> Lowerer<'a> {
             .filter(|module| *module != self.current_source_module)
     }
 
-    pub(super) fn constructor_origin_module_for(
-        &self,
-        node_id: crate::ast::NodeId,
-        name: &str,
-    ) -> Option<&str> {
-        self.carried_constructor_origin_module(node_id)
-            .or_else(|| self.carried_constructor_name_origin_module(name))
-            .or_else(|| self.handler_origin_module())
-    }
-
     pub(super) fn resolved_constructor_name_for(
         &self,
         node_id: crate::ast::NodeId,

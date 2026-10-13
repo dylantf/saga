@@ -1,76 +1,166 @@
-use crate::ast::{BinOp, Expr, Pat};
+use crate::ast::{BinOp, Expr, Lit, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::ir::{CtorRef, FnRef, FnRepr, Val};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
 use crate::token::Span;
 
 impl<'a> Lowerer<'a> {
-    /// Lower a saturated constructor call to the appropriate Core Erlang form.
-    pub(crate) fn lower_ctor_with_origin(
-        &mut self,
-        name: &str,
-        args: Vec<&Expr>,
-        origin_module: Option<&str>,
-    ) -> CExpr {
-        let bare_name = name.rsplit('.').next().unwrap_or(name);
-        match bare_name {
-            "Nil" if args.is_empty() => return CExpr::Nil,
-            "True" if args.is_empty() => return CExpr::Lit(CLit::Atom("true".to_string())),
-            "False" if args.is_empty() => return CExpr::Lit(CLit::Atom("false".to_string())),
-            _ if args.is_empty()
-                && crate::codegen::lower::beam_interop::exit_reason_bare_atom(bare_name)
-                    .is_some() =>
-            {
-                return CExpr::Lit(CLit::Atom(
-                    crate::codegen::lower::beam_interop::exit_reason_bare_atom(bare_name)
-                        .unwrap()
-                        .to_string(),
-                ));
+    /// Lower a value. A child still in AST form goes back through
+    /// `lower_expr`, which hands the value forms to the builder.
+    pub(crate) fn lower_val(&mut self, val: &Val<'_>) -> CExpr {
+        match val {
+            Val::Ast(expr) => self.lower_expr(expr),
+            Val::Lit(Lit::String(s, kind)) if kind.is_multiline() => {
+                lower_string_to_binary(&process_string_escapes(s))
             }
-            _ => {}
-        }
-        match bare_name {
-            "Cons" if args.len() == 2 => {
-                let head_var = self.fresh();
-                let tail_var = self.fresh();
-                let head_ce = self.lower_operand(args[0], "a constructor");
-                let tail_ce = self.lower_operand(args[1], "a constructor");
-                CExpr::Let(
-                    head_var.clone(),
-                    Box::new(head_ce),
-                    Box::new(CExpr::Let(
-                        tail_var.clone(),
-                        Box::new(tail_ce),
-                        Box::new(CExpr::Cons(
-                            Box::new(CExpr::Var(head_var)),
-                            Box::new(CExpr::Var(tail_var)),
-                        )),
-                    )),
-                )
+            Val::Lit(Lit::String(s, _)) => lower_string_to_binary(s),
+            Val::Lit(lit) => CExpr::Lit(lower_lit(lit)),
+            Val::Local(var) | Val::DictParam(var) => CExpr::Var(var.clone()),
+            Val::Intrinsic { name, arity } => CExpr::FunRef(name.clone(), *arity),
+            Val::Const(target) | Val::Dict(target) => Self::call_fn(target, Vec::new()),
+            Val::Fn { target, repr } | Val::LocalFn { target, repr } => {
+                self.lower_fn_value(target, *repr)
             }
-            _ => {
-                // ADT constructor: tagged tuple {name, arg1, arg2, ...}
-                let mut vars: Vec<String> = Vec::new();
-                let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for arg in &args {
-                    let var = self.fresh();
-                    let val = self.lower_operand(arg, "a constructor");
-                    vars.push(var.clone());
-                    bindings.push((var, val));
+            Val::HandlerRef(name) => self
+                .lower_handler_def_to_tuple(name)
+                .expect("a handler reference names a handler definition"),
+            Val::Ctor { ctor, args } => match ctor {
+                CtorRef::Nil => CExpr::Nil,
+                CtorRef::Bool(value) => CExpr::Lit(CLit::Atom(value.to_string())),
+                CtorRef::Atom(atom) => CExpr::Lit(CLit::Atom(atom.to_string())),
+                CtorRef::Cons => {
+                    let head_var = self.fresh();
+                    let tail_var = self.fresh();
+                    let head_ce = self.lower_val(&args[0]);
+                    let tail_ce = self.lower_val(&args[1]);
+                    let cons = CExpr::Cons(
+                        Box::new(CExpr::Var(head_var.clone())),
+                        Box::new(CExpr::Var(tail_var.clone())),
+                    );
+                    self.wrap_let_bindings(vec![(head_var, head_ce), (tail_var, tail_ce)], cons)
                 }
-                let atom = mangle_ctor_atom(
-                    name,
-                    &self.constructor_atoms,
-                    origin_module.or_else(|| self.handler_origin_module()),
-                );
-                let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-                elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                let tuple = CExpr::Tuple(elems);
-                bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
-                    CExpr::Let(var, Box::new(val), Box::new(body))
-                })
+                CtorRef::Tagged(atom) => self.lower_tuple_elems(Some(atom), args),
+            },
+            Val::CtorFn { ctor, arity } => {
+                let params: Vec<String> = (0..*arity).map(|_| self.fresh()).collect();
+                let mut fields = params.iter().cloned().map(CExpr::Var);
+                let value = match ctor {
+                    CtorRef::Cons => CExpr::Cons(
+                        Box::new(fields.next().expect("cons head")),
+                        Box::new(fields.next().expect("cons tail")),
+                    ),
+                    CtorRef::Tagged(atom) => CExpr::Tuple(
+                        std::iter::once(CExpr::Lit(CLit::Atom(atom.clone())))
+                            .chain(fields)
+                            .collect(),
+                    ),
+                    nullary => unreachable!("{nullary:?} takes no fields"),
+                };
+                CExpr::Fun(params, Box::new(value))
+            }
+            Val::Tuple(elems) => self.lower_tuple_elems(None, elems),
+            Val::Record { tag, arity, fields } => {
+                let mut slots: Vec<Option<String>> = vec![None; *arity];
+                let mut bindings = Vec::with_capacity(fields.len());
+                for (slot, value) in fields {
+                    let var = self.fresh();
+                    let ce = self.lower_val(value);
+                    slots[*slot] = Some(var.clone());
+                    bindings.push((var, ce));
+                }
+                let filled = (slots.into_iter())
+                    .map(|var| CExpr::Var(var.expect("a record literal fills every slot")));
+                let tuple = std::iter::once(CExpr::Lit(CLit::Atom(tag.clone()))).chain(filled);
+                self.wrap_let_bindings(bindings, CExpr::Tuple(tuple.collect()))
+            }
+            Val::Field { base, slot } => self.lower_element(base, *slot + 2, |_, field| field),
+            Val::DictSuper { dict, slot } => self.lower_element(dict, *slot, |_, dict| dict),
+            Val::DictMethod {
+                dict,
+                slot,
+                nullary,
+                pure_view,
+            } => self.lower_element(dict, *slot, |this, method| match pure_view {
+                // A method that takes no parameters is stored as a thunk
+                // and is never the head of a call: force it here.
+                _ if *nullary => CExpr::Apply(Box::new(method), vec![]),
+                Some(arity) => this.bare_view_of_function_value(method, *arity),
+                None => method,
+            }),
+        }
+    }
+
+    /// `let V = <tuple> in <then>(element(index, V))`, `index` 1-based.
+    fn lower_element(
+        &mut self,
+        tuple: &Val<'_>,
+        index: usize,
+        then: impl FnOnce(&mut Self, CExpr) -> CExpr,
+    ) -> CExpr {
+        let var = self.fresh();
+        let tuple_ce = self.lower_val(tuple);
+        let element = cerl_call(
+            "erlang",
+            "element",
+            vec![CExpr::Lit(CLit::Int(index as i64)), CExpr::Var(var.clone())],
+        );
+        let body = then(self, element);
+        CExpr::Let(var, Box::new(tuple_ce), Box::new(body))
+    }
+
+    /// Bind each element to a fresh variable, then build the tuple, tagged
+    /// with `tag` when there is one.
+    fn lower_tuple_elems(&mut self, tag: Option<&String>, elems: &[Val<'_>]) -> CExpr {
+        let mut vars: Vec<String> = Vec::new();
+        let mut bindings: Vec<(String, CExpr)> = Vec::new();
+        for elem in elems {
+            let var = self.fresh();
+            let val = self.lower_val(elem);
+            vars.push(var.clone());
+            bindings.push((var, val));
+        }
+        let tag = tag.map(|atom| CExpr::Lit(CLit::Atom(atom.clone())));
+        let tuple = CExpr::Tuple(
+            tag.into_iter()
+                .chain(vars.into_iter().map(CExpr::Var))
+                .collect(),
+        );
+        self.wrap_let_bindings(bindings, tuple)
+    }
+
+    /// A direct call of a known function.
+    pub(crate) fn call_fn(target: &FnRef, args: Vec<CExpr>) -> CExpr {
+        match &target.module {
+            Some(module) => CExpr::Call(module.clone(), target.name.clone(), args),
+            None => {
+                let fun = CExpr::FunRef(target.name.clone(), target.abi.expanded_arity());
+                CExpr::Apply(Box::new(fun), args)
             }
         }
+    }
+
+    /// A known function used as a value: a bare reference when it is pure,
+    /// otherwise a closure over the direct call (`named_function_value`).
+    fn lower_fn_value(&mut self, target: &FnRef, repr: FnRepr) -> CExpr {
+        if repr == FnRepr::Bare {
+            let arity = target.abi.expanded_arity();
+            return match &target.module {
+                Some(module) => cerl_call(
+                    "erlang",
+                    "make_fun",
+                    vec![
+                        CExpr::Lit(CLit::Atom(module.clone())),
+                        CExpr::Lit(CLit::Atom(target.name.clone())),
+                        CExpr::Lit(CLit::Int(arity as i64)),
+                    ],
+                ),
+                None => CExpr::FunRef(target.name.clone(), arity),
+            };
+        }
+        let value = self.named_function_value(&target.abi, target.abi.user_arity, repr);
+        let call = Self::call_fn(target, value.call_args.clone());
+        value.finish(call)
     }
 
     /// Build `case rec_var of <{TagVar, ...field pats...}> when 'true' -> body`,

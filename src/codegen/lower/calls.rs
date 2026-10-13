@@ -4,8 +4,8 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use super::errors::ErrorKind;
 use super::evidence;
 use super::util::{
-    cerl_call, collect_ctor_call_with_head, collect_effect_call_expr, collect_fun_call,
-    collect_qualified_call, core_var, lower_string_to_binary,
+    cerl_call, collect_effect_call_expr, collect_fun_call, collect_qualified_call, core_var,
+    lower_string_to_binary,
 };
 use super::{Lowerer, QualifiedCallSite, ResolvedCallSite};
 
@@ -186,8 +186,8 @@ impl<'a> Lowerer<'a> {
             // over the supplied arguments that reframes the evidence it is
             // eventually called with into the callee's declared layout.
             let (arg_vars, bindings) = self.lower_call_args(args);
-            let own_repr = self.value_repr_of(app_id);
-            let value = self.named_function_value(&abi, abi.user_arity - args.len(), own_repr);
+            let repr = self.fn_repr(&abi, app_id);
+            let value = self.named_function_value(&abi, abi.user_arity - args.len(), repr);
             let mut call_args: Vec<CExpr> = arg_vars.into_iter().map(CExpr::Var).collect();
             call_args.extend(value.call_args.iter().cloned());
             let call = self.emit_call(
@@ -258,7 +258,7 @@ impl<'a> Lowerer<'a> {
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
         for arg in args {
             let v = self.fresh();
-            self.assert_operand(arg, "an effectful call");
+            let _ = self.operand(arg, "an effectful call");
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr(arg));
@@ -378,7 +378,7 @@ impl<'a> Lowerer<'a> {
             .planned_call(expr.id)
             .and_then(|info| info.cps_call_abi().cloned())
             .expect("effectful call is missing its CPS plan");
-        self.assert_operand(head, "an effectful call");
+        let _ = self.operand(head, "an effectful call");
         let func_ce = self.lower_expr(head);
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
@@ -844,12 +844,10 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn lower_app_expr(&mut self, expr: &Expr) -> CExpr {
-        if let Some((head, ctor_name, args)) = collect_ctor_call_with_head(expr) {
-            let resolved_ctor = self.resolved_constructor_name_for(head.id, ctor_name);
-            let origin = self
-                .constructor_origin_module_for(head.id, &resolved_ctor)
-                .map(str::to_string);
-            return self.lower_ctor_with_origin(&resolved_ctor, args, origin.as_deref());
+        if matches!(expr.kind, ExprKind::App { .. })
+            && let Some(ctor) = self.build_ctor_app(expr)
+        {
+            return self.lower_val(&ctor);
         }
 
         if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
@@ -864,14 +862,6 @@ impl<'a> Lowerer<'a> {
 
         let qualified_call = collect_qualified_call(expr);
         if let Some((module, func_name, head, args)) = qualified_call {
-            if let Some(ctor_name) = self.maybe_resolved_constructor_name_for(head.id)
-                && self.is_known_constructor(&ctor_name)
-            {
-                let origin = self
-                    .constructor_origin_module_for(head.id, &ctor_name)
-                    .map(str::to_string);
-                return self.lower_ctor_with_origin(&ctor_name, args, origin.as_deref());
-            }
             if let Some(resolved) = self.resolved.get(&head.id)
                 && let super::super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } =
                     &resolved.kind
@@ -1007,41 +997,6 @@ impl<'a> Lowerer<'a> {
             fallback_erlang_module: Some(erlang_module.as_str()),
         })
     }
-    fn lower_local_fun_ref(
-        &mut self,
-        name: &str,
-        abi: crate::codegen::runtime_shape::CallableAbi,
-        source_module: Option<&str>,
-    ) -> CExpr {
-        let arity = abi.expanded_arity();
-        if let Some(source_module) =
-            source_module.filter(|source| *source != self.current_source_module)
-        {
-            let (erlang_mod, target_name) = self
-                .imported_handler_external_target(source_module, name, arity)
-                .unwrap_or_else(|| (Self::module_name_to_erlang(source_module), name.to_string()));
-            if arity == 0 {
-                return CExpr::Call(erlang_mod, target_name, vec![]);
-            }
-            return CExpr::Call(
-                "erlang".to_string(),
-                "make_fun".to_string(),
-                vec![
-                    CExpr::Lit(CLit::Atom(erlang_mod)),
-                    CExpr::Lit(CLit::Atom(target_name)),
-                    CExpr::Lit(CLit::Int(arity as i64)),
-                ],
-            );
-        }
-
-        if arity == 0 {
-            CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), 0)), vec![])
-        } else {
-            let lowered_arity = self.fun_arity(name).unwrap_or(arity);
-            CExpr::FunRef(name.to_string(), lowered_arity)
-        }
-    }
-
     fn lower_local_fun_call(
         &self,
         name: &str,
@@ -1143,130 +1098,6 @@ impl<'a> Lowerer<'a> {
             }
         };
         self.annotate(call, span)
-    }
-
-    pub(super) fn lower_resolved_value_ref(
-        &mut self,
-        node_id: crate::ast::NodeId,
-        resolved: super::super::resolve::ResolvedSymbol,
-    ) -> CExpr {
-        if let Some(value) = self.tagged_resolved_value_ref(node_id, &resolved) {
-            return value;
-        }
-        match resolved.kind {
-            super::super::resolve::ResolvedCodegenKind::Intrinsic { arity, .. } => {
-                CExpr::FunRef(resolved.name, arity)
-            }
-            super::super::resolve::ResolvedCodegenKind::ExternalFunction {
-                erlang_mod,
-                name,
-                target_erlang_mod,
-                target_name,
-                abi,
-                ..
-            } => {
-                if resolved.source_module.as_deref() == Some(&self.current_source_module) {
-                    return self.lower_local_fun_ref(&name, abi, resolved.source_module.as_deref());
-                }
-                let arity = abi.expanded_arity();
-                let (erlang_mod, name) = if self.current_handler_source_module.as_deref()
-                    == resolved.source_module.as_deref()
-                {
-                    (target_erlang_mod, target_name)
-                } else {
-                    (erlang_mod, name)
-                };
-                if arity == 0 {
-                    CExpr::Call(erlang_mod, name, vec![])
-                } else {
-                    CExpr::Call(
-                        "erlang".to_string(),
-                        "make_fun".to_string(),
-                        vec![
-                            CExpr::Lit(CLit::Atom(erlang_mod)),
-                            CExpr::Lit(CLit::Atom(name)),
-                            CExpr::Lit(CLit::Int(arity as i64)),
-                        ],
-                    )
-                }
-            }
-            super::super::resolve::ResolvedCodegenKind::BeamFunction {
-                erlang_mod: Some(erlang_mod),
-                name,
-                abi,
-                ..
-            } => {
-                let arity = abi.expanded_arity();
-                if arity == 0 {
-                    CExpr::Call(erlang_mod, name, vec![])
-                } else {
-                    CExpr::Call(
-                        "erlang".to_string(),
-                        "make_fun".to_string(),
-                        vec![
-                            CExpr::Lit(CLit::Atom(erlang_mod)),
-                            CExpr::Lit(CLit::Atom(name)),
-                            CExpr::Lit(CLit::Int(arity as i64)),
-                        ],
-                    )
-                }
-            }
-            super::super::resolve::ResolvedCodegenKind::BeamFunction { name, abi, .. } => {
-                let abi = if abi.evidence.is_some() {
-                    abi
-                } else {
-                    self.resolved_fun_info(node_id, &name)
-                        .map(|f| f.abi.clone())
-                        .unwrap_or(abi)
-                };
-                self.lower_local_fun_ref(&name, abi, resolved.source_module.as_deref())
-            }
-        }
-    }
-
-    /// Tagged closures: a named effectful function used as a value. Returns
-    /// `None` for a pure function, a constant or an intrinsic, which keep
-    /// their bare reference.
-    fn tagged_resolved_value_ref(
-        &mut self,
-        node_id: crate::ast::NodeId,
-        resolved: &super::super::resolve::ResolvedSymbol,
-    ) -> Option<CExpr> {
-        use super::super::resolve::ResolvedCodegenKind;
-        let (name, abi) = match &resolved.kind {
-            ResolvedCodegenKind::Intrinsic { .. } => return None,
-            ResolvedCodegenKind::ExternalFunction { name, abi, .. } => (name, abi.clone()),
-            ResolvedCodegenKind::BeamFunction {
-                erlang_mod: Some(_),
-                name,
-                abi,
-                ..
-            } => (name, abi.clone()),
-            ResolvedCodegenKind::BeamFunction { name, abi, .. } => {
-                let abi = if abi.evidence.is_some() {
-                    abi.clone()
-                } else {
-                    self.resolved_fun_info(node_id, name)
-                        .map(|f| f.abi.clone())
-                        .unwrap_or_else(|| abi.clone())
-                };
-                (name, abi)
-            }
-        };
-        if abi.evidence.is_none() || abi.user_arity == 0 {
-            return None;
-        }
-        let own_repr = self.value_repr_of(node_id);
-        let value = self.named_function_value(&abi, abi.user_arity, own_repr);
-        let call = self.emit_call(
-            name,
-            node_id,
-            abi.expanded_arity(),
-            value.call_args.clone(),
-            None,
-            None,
-        );
-        Some(value.finish(call))
     }
 
     fn effectful_call_return_k_binding(&mut self, return_k: Option<CExpr>) -> (String, CExpr) {

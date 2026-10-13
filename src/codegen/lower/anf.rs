@@ -7,9 +7,9 @@
 //! `codegen::effect_position` (every operand is a value) is lowered as it
 //! is. Any other body is normalized by `normalize::normalize_body` and
 //! checked again; a violation that survives is a compiler bug and stops
-//! compilation. `lower_operand` checks the same rule again where an operand
-//! is lowered, so a body that reached the lowerer without passing through
-//! here stops compilation too.
+//! compilation. `Lowerer::operand` (the builder) checks the same rule again
+//! where an operand is made, so a body that reached the lowerer without
+//! passing through here stops compilation too.
 //!
 //! This runs after call classification on purpose: which calls perform
 //! effects is only known from the frozen plan, and the plan's entries are
@@ -80,26 +80,6 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    /// `expr` is about to be lowered as a plain value, as an operand of
-    /// `operand_of`. If it is not a value, the body it is in was not
-    /// normalized (it did not pass through `effect_normal_body`); stop
-    /// instead of lowering it where it stands (with an identity
-    /// continuation, if it performs).
-    pub(super) fn assert_operand(&self, expr: &Expr, operand_of: &str) {
-        if self.in_beam_guard {
-            return;
-        }
-        if !effect_position::is_operand(expr, &|node| self.performs_effect(node)) {
-            panic!(
-                "internal compiler error: {} reached lowering as an operand of {operand_of} \
-                 in {}.{}: its body was not normalized",
-                effect_position::construct_name(expr, &|node| self.performs_effect(node)),
-                self.current_semantic_module_name(),
-                self.current_function,
-            );
-        }
-    }
-
     /// Lower a guard into guard position. A BEAM guard expression is not
     /// normalized (its operators nest), so the operand rule is off inside
     /// one.
@@ -115,8 +95,8 @@ impl<'a> Lowerer<'a> {
 
     /// Lower an operand of `operand_of` as a plain value.
     pub(super) fn lower_operand(&mut self, expr: &Expr, operand_of: &str) -> CExpr {
-        self.assert_operand(expr, operand_of);
-        self.lower_expr(expr)
+        let operand = self.operand(expr, operand_of);
+        self.lower_val(&operand)
     }
 
     /// The guard the lowerer is about to lower: as written when it is a

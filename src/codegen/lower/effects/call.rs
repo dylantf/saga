@@ -67,7 +67,7 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
-            self.assert_operand(arg, "an operation call");
+            let _ = self.operand(arg, "an operation call");
             // Effect call args are generally not CPS-expanded — the handler
             // arm receives the callback as a plain value. However, if the op's
             // parameter declares absorbed effects, the lambda always gets its

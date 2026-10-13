@@ -11,6 +11,7 @@
 
 use crate::ast::{Expr, ExprKind, NodeId};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::ir::FnRepr;
 use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi, ValueRepr, value_repr};
 use crate::typechecker::Type;
 
@@ -250,14 +251,14 @@ impl<'a> Lowerer<'a> {
     /// A pure callee stays a bare fun. An effectful one becomes a tagged
     /// closure whose evidence parameter is reframed from the tag-only frame
     /// into the callee's declared layout. When the occurrence's own type is
-    /// pure (an open-row callee instantiated at the empty row), the value is
-    /// a bare fun that supplies empty evidence, so it can be called at a pure
-    /// type like any other pure value.
+    /// pure (an open-row callee instantiated at the empty row,
+    /// `FnRepr::BareEmptyRow`), the value is a bare fun that supplies empty
+    /// evidence, so it can be called at a pure type like any other pure value.
     pub(super) fn named_function_value(
         &mut self,
         abi: &CallableAbi,
         remaining: usize,
-        own_repr: Option<ValueRepr>,
+        repr: FnRepr,
     ) -> NamedFunctionValue {
         let mut params: Vec<String> = Vec::with_capacity(remaining + 2);
         for _ in 0..remaining {
@@ -272,7 +273,7 @@ impl<'a> Lowerer<'a> {
                 tagged: false,
             };
         };
-        if own_repr == Some(ValueRepr::Bare) && target.static_slots().is_empty() {
+        if repr == FnRepr::BareEmptyRow {
             let k_param = self.fresh();
             call_args.push(CExpr::Tuple(Vec::new()));
             call_args.push(identity_fun(k_param));
@@ -357,29 +358,6 @@ impl<'a> Lowerer<'a> {
             Box::new(value),
             Box::new(CExpr::Fun(params, Box::new(call))),
         )
-    }
-
-    /// A constructor used as a function value: one bare fun taking every
-    /// field. Constructors are always pure.
-    pub(super) fn constructor_function_value(&mut self, name: &str, arity: usize) -> CExpr {
-        let params: Vec<String> = (0..arity).map(|_| self.fresh()).collect();
-        let bare = name.rsplit('.').next().unwrap_or(name);
-        let value = if bare == "Cons" && arity == 2 {
-            CExpr::Cons(
-                Box::new(CExpr::Var(params[0].clone())),
-                Box::new(CExpr::Var(params[1].clone())),
-            )
-        } else {
-            let atom = super::util::mangle_ctor_atom(
-                name,
-                &self.constructor_atoms,
-                self.handler_origin_module(),
-            );
-            let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-            elems.extend(params.iter().cloned().map(CExpr::Var));
-            CExpr::Tuple(elems)
-        };
-        CExpr::Fun(params, Box::new(value))
     }
 
     /// The user arity and convention of `head` when it names a function the
