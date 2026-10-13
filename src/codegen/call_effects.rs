@@ -356,6 +356,9 @@ pub struct FunSig {
 /// struct so the constructor doesn't carry a half-dozen reference parameters
 /// that all lifetime-tie back to the same lowering invocation.
 pub struct PopulatorInputs<'a> {
+    /// The module being classified and its source, for reports and errors.
+    pub module: &'a str,
+    pub source_info: Option<&'a crate::codegen::lower::errors::SourceInfo>,
     pub resolved: &'a ResolutionMap,
     pub check_result: &'a CheckResult,
     pub ctx: &'a CodegenContext,
@@ -402,6 +405,15 @@ pub struct Populator<'a> {
     local_fun_sigs: Vec<HashMap<String, FunSig>>,
     /// Resolved call head NodeId -> whether the callee's effect row is open.
     head_open_row: HashMap<NodeId, bool>,
+    /// Name of the declaration being walked, for reports and errors.
+    current_decl: String,
+}
+
+/// `SAGA_CLASSIFY_REPORT=1`: print to stderr every call whose classification
+/// was not decided by a positive rule (see `Populator::report`).
+fn classify_report_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SAGA_CLASSIFY_REPORT").is_some())
 }
 
 impl<'a> Populator<'a> {
@@ -415,7 +427,40 @@ impl<'a> Populator<'a> {
             open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
             head_open_row,
+            current_decl: String::new(),
         }
+    }
+
+    /// Where `expr` is: `Module.function at file:line` (or a byte offset
+    /// when the source text is not at hand).
+    fn location(&self, expr: &Expr) -> String {
+        let at = match self.inputs.source_info {
+            Some(info) => format!("{}:{}", info.file, info.line_number(&expr.span)),
+            None => format!("offset {}", expr.span.start),
+        };
+        format!("{}.{} at {at}", self.inputs.module, self.current_decl)
+    }
+
+    /// Report a call classified by `path`, a path that is not a positive
+    /// rule: `default-pure:*` (nothing is known about the head, so the call
+    /// was assumed pure) or `lexical-scope:*` (the head is an unresolved
+    /// name looked up in the scope stack filled from `type_at_span`).
+    /// A head with no entry in the type table was made after typechecking
+    /// (by elaboration, the generic fold or normalization).
+    fn report(&self, path: &str, head: &Expr) {
+        if !classify_report_enabled() {
+            return;
+        }
+        let origin = if self.inputs.check_result.expr_types.contains_key(&head.id) {
+            "typed"
+        } else {
+            "untyped"
+        };
+        eprintln!(
+            "classify-report: {path} head={} origin={origin} in {}",
+            head_debug_label(head),
+            self.location(head)
+        );
     }
 
     fn canonicalize(&self, bare: &str) -> String {
@@ -502,6 +547,13 @@ impl<'a> Populator<'a> {
     }
 
     fn walk_decl(&mut self, decl: &Decl) {
+        self.current_decl = match decl {
+            Decl::FunBinding { name, .. }
+            | Decl::Let { name, .. }
+            | Decl::HandlerDef { name, .. }
+            | Decl::DictConstructor { name, .. } => name.clone(),
+            _ => String::new(),
+        };
         match decl {
             Decl::FunBinding {
                 id,
@@ -1126,21 +1178,23 @@ impl<'a> Populator<'a> {
                             .plan
                             .call(inner.id)
                             .is_some_and(CallEffectInfo::is_cps_call);
-                        let rest_is_cps = self
-                            .classify_value_call_from_type(inner.id, supplied - arity)
-                            .is_some_and(|info| info.is_cps_call());
+                        let rest = self.classify_value_call_from_type(inner.id, supplied - arity);
+                        if rest.is_none() && !inner_is_cps {
+                            self.report("default-pure:over-application-result", head);
+                        }
+                        let rest_is_cps = rest.is_some_and(|info| info.is_cps_call());
                         if inner_is_cps || rest_is_cps {
                             Self::tagged_value_call(supplied)
                         } else {
                             CallEffectInfo::pure()
                         }
                     }
-                    Some(arity) if arity > 0 => self.classify_named_call(head.id, name, supplied),
+                    Some(arity) if arity > 0 => self.classify_named_call(head, name, supplied),
                     // A constant holding a function, or anything that is not a
                     // known function: a function value.
                     _ => self
                         .classify_value_call_from_type(head.id, supplied)
-                        .unwrap_or_else(|| self.classify_named_call(head.id, name, supplied)),
+                        .unwrap_or_else(|| self.classify_named_call(head, name, supplied)),
                 }
             }
             ExprKind::DictMethodAccess {
@@ -1154,7 +1208,10 @@ impl<'a> Populator<'a> {
                     return declared;
                 }
                 self.classify_value_call_from_type(head.id, supplied)
-                    .unwrap_or(declared)
+                    .unwrap_or_else(|| {
+                        self.report_untyped_dict_method(head, dict, trait_name, *method_index);
+                        declared
+                    })
             }
             _ => self
                 .classify_value_call_from_type(head.id, supplied)
@@ -1162,6 +1219,7 @@ impl<'a> Populator<'a> {
                     if self.untyped_lambda_head_is_effectful(head) {
                         Self::tagged_value_call(supplied)
                     } else {
+                        self.report("default-pure:untyped-head", head);
                         CallEffectInfo::pure()
                     }
                 }),
@@ -1251,7 +1309,32 @@ impl<'a> Populator<'a> {
         }
     }
 
-    fn classify_named_call(&self, head_id: NodeId, name: &str, supplied: usize) -> CallEffectInfo {
+    /// A dictionary method call that is pure by its declared signature and
+    /// has no type of its own: report it unless the declaration is known.
+    fn report_untyped_dict_method(
+        &self,
+        head: &Expr,
+        dict: &Expr,
+        trait_name: &str,
+        method_index: usize,
+    ) {
+        let mut dict_head = dict;
+        while let ExprKind::App { func, .. } = &dict_head.kind {
+            dict_head = func;
+        }
+        let key = (trait_name.to_string(), method_index);
+        if !self.inputs.trait_method_effects_by_key.contains_key(&key) {
+            self.report("default-pure:dict-method-without-signature", head);
+        } else if !matches!(
+            dict_head.kind,
+            ExprKind::DictRef { .. } | ExprKind::Var { .. }
+        ) {
+            self.report("default-pure:dict-method-on-computed-dict", head);
+        }
+    }
+
+    fn classify_named_call(&self, head: &Expr, name: &str, supplied: usize) -> CallEffectInfo {
+        let head_id = head.id;
         let pure = CallEffectInfo::pure;
 
         if supplied == 0 {
@@ -1296,6 +1379,7 @@ impl<'a> Populator<'a> {
                         // Either the var carried no effects, or the effects
                         // didn't canonicalize against `effect_ops`. Either
                         // way the call is Pure and carries no callable ABI.
+                        self.report("lexical-scope:pure", head);
                         return pure();
                     }
                     let kind = if is_open_row {
@@ -1305,9 +1389,11 @@ impl<'a> Populator<'a> {
                     };
                     // Effectful-var calls don't carry a precise user_arity;
                     // supplied > 0 is the gate (already checked above).
+                    self.report("lexical-scope:cps", head);
                     return CallEffectInfo::cps(kind, supplied);
                 }
                 if is_open_row {
+                    self.report("lexical-scope:cps", head);
                     return CallEffectInfo::cps(
                         CallEffectKind::RowForwarded {
                             static_ops: Vec::new(),
@@ -1315,6 +1401,7 @@ impl<'a> Populator<'a> {
                         supplied,
                     );
                 }
+                self.report("default-pure:unresolved-name", head);
                 return pure();
             }
         };
@@ -1335,6 +1422,7 @@ impl<'a> Populator<'a> {
             // to known ops or the callee has an open row; supplied is the
             // best-effort user arity. Pure calls carry no callable ABI.
             if ops.is_empty() && !is_open_row {
+                self.report("default-pure:resolved-name-without-signature", head);
                 return pure();
             }
             let kind = if is_open_row {

@@ -844,6 +844,8 @@ impl<'a> Lowerer<'a> {
             .collect();
 
         Populator::new(super::call_effects::PopulatorInputs {
+            module: &self.current_source_module,
+            source_info: self.source_info.as_ref(),
             resolved: &self.resolved,
             check_result,
             ctx: self.ctx,
