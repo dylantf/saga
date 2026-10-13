@@ -5172,3 +5172,492 @@ c{idx}_run () = c{idx} m fin2 n noted2 () with {{
         failures.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Let-generalised function values
+//
+// `let run = fun g -> g ()` has the scheme
+// `(Unit -> a needs {..e}) -> a needs {..e}`, so the closure is built as a
+// tagged CPS closure. A use that instantiates `e` to the empty row has a pure
+// type, so a tagged closure legitimately reaches a pure call site. At that
+// instance it performs nothing of its own: `saga_runtime:apply_n/2` runs it
+// with an empty evidence frame and an identity continuation. The same holds
+// for any value whose type quantifies a row variable, `let` or not.
+// ---------------------------------------------------------------------------
+
+fn let_poly_int(fixture: &str, body: &str, expected: i64) {
+    let src = repro_src(&format!(
+        "pub fun result : Unit -> Int\nresult () = {{\n{body}\n}}\n"
+    ));
+    check_result_int(fixture, &src, expected);
+}
+
+#[test]
+fn let_poly_called_at_pure_instance() {
+    let_poly_int(
+        "let_poly_called_pure",
+        r#"  let run = fun g -> g ()
+  run (fun () -> 3)"#,
+        3,
+    );
+}
+
+#[test]
+fn let_poly_called_at_effectful_instance() {
+    let_poly_int(
+        "let_poly_called_effectful",
+        r#"  let run = fun g -> g ()
+  run (fun () -> skip! () + 1) with { skip () = resume 10 }"#,
+        11,
+    );
+}
+
+#[test]
+fn let_poly_passed_where_pure_function_expected() {
+    let src = repro_src(
+        r#"fun use_pure : ((Unit -> Int) -> Int) -> Int
+use_pure h = h (fun () -> 4)
+
+pub fun result : Unit -> Int
+result () = {
+  let run = fun g -> g ()
+  use_pure run
+}
+"#,
+    );
+    check_result_int("let_poly_passed_pure", &src, 4);
+}
+
+#[test]
+fn let_poly_passed_where_effectful_function_expected() {
+    let src = repro_src(
+        r#"fun use_eff : ((Unit -> Int needs {Skip}) -> Int needs {Skip}) -> Int needs {Skip}
+use_eff h = h eff
+
+pub fun result : Unit -> Int
+result () = {
+  let run = fun g -> g ()
+  use_eff run with { skip () = resume 20 }
+}
+"#,
+    );
+    check_result_int("let_poly_passed_effectful", &src, 20);
+}
+
+#[test]
+fn let_poly_passed_where_open_row_function_expected() {
+    let src = repro_src(
+        r#"fun use_open : ((Unit -> Int needs {..e}) -> Int needs {..e}) -> (Unit -> Int needs {..e}) -> Int needs {..e}
+use_open h g = h g
+
+pub fun result : Unit -> Int
+result () = {
+  let run = fun g -> g ()
+  let a = use_open run (fun () -> 1)
+  let b = use_open run eff with { skip () = resume 20 }
+  a + b
+}
+"#,
+    );
+    check_result_int("let_poly_passed_open", &src, 21);
+}
+
+#[test]
+fn let_poly_passed_to_pure_stdlib_callback() {
+    let src = r#"module Main
+
+import Std.List
+
+pub fun result : Unit -> Int
+result () = {
+  let app = fun f x -> f x
+  let ys = List.map (app (fun n -> n + 1)) [1, 2, 3]
+  List.foldl (fun acc n -> acc + n) 0 ys
+}
+"#;
+    check_result_int("let_poly_stdlib_callback", src, 9);
+}
+
+#[test]
+fn let_poly_stored_in_list_at_pure_instance() {
+    let src = repro_src(
+        r#"fun first : List ((Unit -> Int) -> Int) -> Int
+first fs = case fs {
+  f :: _ -> f (fun () -> 5)
+  [] -> 0
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let run = fun g -> g ()
+  first [run]
+}
+"#,
+    );
+    check_result_int("let_poly_stored_list", &src, 5);
+}
+
+#[test]
+fn let_poly_stored_in_record_at_pure_instance() {
+    let src = repro_src(
+        r#"record Holder { run : (Unit -> Int) -> Int }
+
+pub fun result : Unit -> Int
+result () = {
+  let run = fun g -> g ()
+  let h = Holder { run: run }
+  h.run (fun () -> 6)
+}
+"#,
+    );
+    check_result_int("let_poly_stored_record", &src, 6);
+}
+
+#[test]
+fn let_poly_returned_at_pure_instance() {
+    let src = repro_src(
+        r#"fun mk : Unit -> ((Unit -> Int) -> Int)
+mk () = {
+  let run = fun g -> g ()
+  run
+}
+
+pub fun result : Unit -> Int
+result () = (mk ()) (fun () -> 7)
+"#,
+    );
+    check_result_int("let_poly_returned_pure", &src, 7);
+}
+
+#[test]
+fn let_poly_returned_at_effectful_instance() {
+    let src = repro_src(
+        r#"fun mk : Unit -> ((Unit -> Int needs {Skip}) -> Int needs {Skip})
+mk () = {
+  let run = fun g -> g ()
+  run
+}
+
+pub fun result : Unit -> Int
+result () = (mk ()) eff with { skip () = resume 8 }
+"#,
+    );
+    check_result_int("let_poly_returned_effectful", &src, 8);
+}
+
+#[test]
+fn let_poly_used_at_two_instances_in_one_scope() {
+    let_poly_int(
+        "let_poly_two_instances",
+        r#"  let run = fun g -> g ()
+  let a = run (fun () -> 1)
+  let b = run (fun () -> skip! ()) with { skip () = resume 10 }
+  let c = run (fun () -> 100)
+  a + b + c"#,
+        111,
+    );
+}
+
+// A local function definition (`let run g = ...`) is not generalised at all:
+// it is checked against one monomorphic type, so each use below gets its own
+// definition. It is compiled like a named function, with a direct entry
+// point.
+#[test]
+fn let_poly_local_function_definition_at_pure_instance() {
+    let src = repro_src(
+        r#"fun use_pure : ((Unit -> Int) -> Int) -> Int
+use_pure h = h (fun () -> 4)
+
+pub fun result : Unit -> Int
+result () = {
+  let run g = g ()
+  let again g = g ()
+  run (fun () -> 1) + use_pure again
+}
+"#,
+    );
+    check_result_int("let_poly_letfun_pure", &src, 5);
+}
+
+#[test]
+fn let_poly_local_function_definition_at_effectful_instance() {
+    let src = repro_src(
+        r#"fun use_eff : ((Unit -> Int needs {Skip}) -> Int needs {Skip}) -> Int needs {Skip}
+use_eff h = h eff
+
+pub fun result : Unit -> Int
+result () = {
+  let run g = g ()
+  let again g = g ()
+  { run (fun () -> skip! ()) + use_eff again } with { skip () = resume 10 }
+}
+"#,
+    );
+    check_result_int("let_poly_letfun_effectful", &src, 20);
+}
+
+#[test]
+fn let_poly_nested_capture() {
+    let_poly_int(
+        "let_poly_nested",
+        r#"  let run = fun g -> g ()
+  let twice = fun g -> run g + run g
+  let a = twice (fun () -> 2)
+  let b = twice (fun () -> skip! ()) with { skip () = resume 10 }
+  a + b"#,
+        24,
+    );
+}
+
+#[test]
+fn let_poly_alias_of_generalised_binding() {
+    let_poly_int(
+        "let_poly_alias",
+        r#"  let run = fun g -> g ()
+  let again = run
+  let a = again (fun () -> 2)
+  let b = again eff with { skip () = resume 10 }
+  a + b"#,
+        12,
+    );
+}
+
+#[test]
+fn let_poly_two_parameters() {
+    let_poly_int(
+        "let_poly_two_params",
+        r#"  let app = fun f x -> f x
+  let a = app (fun n -> n + 1) 1
+  let inc = app (fun n -> n + 1)
+  let b = inc 10
+  let c = app (fun n -> n + skip! ()) 100 with { skip () = resume 1000 }
+  a + b + c"#,
+        1113,
+    );
+}
+
+#[test]
+fn let_poly_binding_of_open_row_named_function() {
+    let src = repro_src(
+        r#"fun call : (Unit -> Int needs {..e}) -> Int needs {..e}
+call g = g ()
+
+pub fun result : Unit -> Int
+result () = {
+  let run = call
+  let a = run (fun () -> 3)
+  let b = run eff with { skip () = resume 40 }
+  a + b
+}
+"#,
+    );
+    check_result_int("let_poly_named_alias", &src, 43);
+}
+
+#[test]
+fn let_poly_effect_reaches_innermost_handler() {
+    let_poly_int(
+        "let_poly_innermost_handler",
+        r#"  let run = fun g -> g ()
+  let outer = {
+    let inner = run (fun () -> skip! ()) with { skip () = resume 1 }
+    inner + run (fun () -> skip! ())
+  } with { skip () = resume 10 }
+  outer + run (fun () -> 100)"#,
+        111,
+    );
+}
+
+#[test]
+fn let_poly_aborting_handler_still_aborts() {
+    let_poly_int(
+        "let_poly_abort",
+        r#"  let run = fun g -> g () + 1000
+  let a = run (fun () -> 1)
+  let b = { run (fun () -> skip! ()) + 5000 } with { skip () = 7 }
+  a + b"#,
+        1008,
+    );
+}
+
+// The first arrow of `f` is pure at this instance and the second is not.
+#[test]
+fn let_poly_pure_prefix_before_an_effectful_arrow() {
+    let_poly_int(
+        "let_poly_pure_prefix",
+        r#"  let f = fun g -> {
+    let r = g ()
+    fun h -> r + h ()
+  }
+  let a = f (fun () -> 1) (fun () -> skip! ()) with { skip () = resume 10 }
+  let p = f (fun () -> 2)
+  let b = p (fun () -> skip! ()) with { skip () = resume 20 }
+  let c = f (fun () -> 3) (fun () -> 4)
+  let d = { f (fun () -> skip! ()) (fun () -> 1000) } with { skip () = 500 }
+  a + b + c + d"#,
+        540,
+    );
+}
+
+#[test]
+fn let_poly_shadowed_by_a_monomorphic_binding() {
+    let_poly_int(
+        "let_poly_shadowed",
+        r#"  let run = fun g -> g ()
+  let a = run (fun () -> 1)
+  let b = (fun run -> run 10) (fun n -> n + 1)
+  let c = run (fun () -> 100)
+  let run = fun n -> n + 1000
+  a + b + c + run 0"#,
+        1112,
+    );
+}
+
+// The closure sits inside a data structure, so no reference to a binding
+// could have converted it.
+#[test]
+fn let_poly_closure_held_in_tuple() {
+    let_poly_int(
+        "let_poly_tuple",
+        r#"  let run = fun g -> g ()
+  let p = (run, 1)
+  let (f, n) = p
+  let a = f (fun () -> 2) + n
+  let (h, _) = p
+  let b = h eff with { skip () = resume 10 }
+  a + b"#,
+        13,
+    );
+}
+
+#[test]
+fn let_poly_closure_held_in_generalised_list() {
+    let_poly_int(
+        "let_poly_generalised_list",
+        r#"  let run = fun g -> g ()
+  let fs = [run]
+  let a = case fs {
+    f :: _ -> f (fun () -> 5)
+    [] -> 0
+  }
+  let b = case fs {
+    f :: _ -> f eff
+    [] -> 0
+  } with { skip () = resume 30 }
+  a + b"#,
+        35,
+    );
+}
+
+const OPEN_ROW_LIST: &str = r#"fun mk : Unit -> List ((Unit -> Int needs {..e}) -> Int needs {..e})
+mk () = [fun g -> g () + 1000]
+"#;
+
+// No `let` generalisation at all: the caller of `mk` picks the row.
+#[test]
+fn open_row_closure_from_function_used_at_pure_instance() {
+    let src = repro_src(&format!(
+        r#"{OPEN_ROW_LIST}
+pub fun result : Unit -> Int
+result () = case mk () {{
+  f :: _ -> f (fun () -> 1)
+  [] -> 0
+}}
+"#
+    ));
+    check_result_int("open_row_list_pure", &src, 1001);
+}
+
+#[test]
+fn open_row_closure_from_function_used_at_effectful_instance() {
+    let src = repro_src(&format!(
+        r#"{OPEN_ROW_LIST}
+pub fun result : Unit -> Int
+result () = {{
+  let resumed = case mk () {{
+    f :: _ -> f eff
+    [] -> 0
+  }} with {{ skip () = resume 10 }}
+  let aborted = {{
+    case mk () {{
+      f :: _ -> f eff + 50000
+      [] -> 0
+    }}
+  }} with {{ skip () = 7 }}
+  resumed + aborted
+}}
+"#
+    ));
+    check_result_int("open_row_list_effectful", &src, 1017);
+}
+
+// Erlang code calls a callback as a plain fun. The wrapper of an `@external`
+// function passes pure callback arguments through `saga_runtime:bare_fun/2`,
+// so a tagged closure used at a pure instance still works there.
+#[test]
+fn tagged_closure_at_pure_instance_passed_to_external_callback() {
+    let src = r#"module Main
+
+import Std.List
+
+fun mk : Unit -> List ((Int -> Int needs {..e}) -> Int -> Int needs {..e})
+mk () = [fun g n -> g (0 - n)]
+
+fun first : List Int -> Int
+first xs = case xs {
+  x :: _ -> x
+  [] -> 0
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let app = fun f x -> f x
+  let a = first (List.sort_by (app (fun n -> 0 - n)) [1, 3, 2])
+  let b = case mk () {
+    f :: _ -> first (List.sort_by (f (fun x -> x)) [10, 30, 20])
+    [] -> 0
+  }
+  a + b
+}
+"#;
+    check_result_int("tagged_closure_external_callback", src, 33);
+}
+
+// A `let` that is both dictionary-abstracted and row-polymorphic. The
+// elaborated wrapper `fun (dict, arg) -> value arg` must stay un-reduced:
+// `arg` is made after typechecking and has no type, so substituting it for
+// the value's parameter `g` would turn `g ()` into a pure call.
+#[test]
+fn let_poly_dictionary_abstracted_with_open_row() {
+    let src = repro_src(
+        r#"pub fun result : Unit -> String
+result () = {
+  let show_run = fun g -> show (g ())
+  let a = show_run (fun () -> 1)
+  let b = show_run (fun () -> True)
+  let c = show_run (fun () -> skip! ()) with { skip () = resume 5 }
+  let d = { show_run (fun () -> skip! ()) <> "unreached" } with { skip () = "aborted" }
+  a <> " " <> b <> " " <> c <> " " <> d
+}
+"#,
+    );
+    check_result_string("let_poly_dict_open_row", &src, "1 True 5 aborted");
+}
+
+// Known bug, not fixed here: a `let` inside a block expression stays in scope
+// after the block, in the typechecker. Below, the last `x` resolves to the
+// inner binding and `x + 1` is rejected as `String + Int`.
+#[test]
+#[ignore = "typechecker: a let inside a nested block leaks into the enclosing scope"]
+fn let_inside_nested_block_does_not_leak() {
+    let_poly_int(
+        "nested_block_let_scope",
+        r#"  let x = 1
+  let b = {
+    let x = "inner"
+    x
+  }
+  if b == "inner" then x + 1 else 0"#,
+        2,
+    );
+}

@@ -3,10 +3,10 @@
 
 %% Slow path of the arity-checked call emitted for function values whose
 %% arity the compiler does not know statically.
--export([apply_n/2]).
+-export([apply_n/2, bare_fun/2]).
 
 %% Call of a function value at an effectful type, where the value may be
-%% either a bare fun or a tagged CPS closure. Not yet emitted by the compiler.
+%% either a bare fun or a tagged CPS closure.
 -export([apply_cps/4]).
 
 %% gen_event callbacks for the per-await signal handler installed below.
@@ -44,25 +44,39 @@ await_signal(Kind) ->
 %%     result to the rest
 %%   - arity > N: build a partial application closure for the remainder
 %%
-%% Effectful function values are bare funs with trailing `_Evidence' and
-%% `_ReturnK' parameters; a partial application simply leaves those in place.
+%% An effectful function value is a tagged closure `{'$saga_cps', G}'; see the
+%% first clause.
 %%
 %% Anything that is not a fun raises the same `badfun' a direct call would.
 %% A zero-arity fun is never a Saga function value, so it is a `badarity'
 %% rather than something to call and re-apply.
 apply_n({'$saga_cps', G} = F, Args) when is_function(G) ->
-    %% A tagged CPS closure at a pure call site. That is legitimate only when
-    %% too few arguments are supplied (generic code partially applying an
-    %% effectful function): the result is a tagged closure awaiting the rest.
-    %% Saturating it here is impossible, as a pure call site has neither
-    %% evidence nor a continuation to pass.
+    %% A tagged CPS closure at a pure call site. A value whose type has an
+    %% open effect row is built tagged, and whoever instantiates that row to
+    %% the empty row sees a pure function: `let run = fun g -> g ()' used as
+    %% `run (fun () -> 3)', or an element of a `List (a -> b needs {..e})'
+    %% used at `e = {}'. At that instance it performs no effects of its own,
+    %% so it runs with an empty evidence frame and an identity continuation.
+    %% This mirrors `apply_cps/4' accepting a bare fun at an effectful site.
+    %%
+    %%   - user arity = N: call it with the empty frame.
+    %%   - user arity > N: a tagged partial application, as in `apply_cps/4'.
+    %%     Whoever saturates it supplies the frame: an effectful site its own,
+    %%     a pure site (back here) the empty one.
+    %%   - user arity < N: call with the arguments it takes, then apply the
+    %%     result to the rest.
     UserArity = cps_user_arity(F, G),
     N = length(Args),
     if
-        UserArity > N ->
-            {'$saga_cps', cps_partial(G, Args, UserArity - N)};
+        UserArity =:= N ->
+            erlang:apply(G, Args ++ [{}, fun(R) -> R end]);
+        UserArity =:= 0 ->
+            erlang:error({badarity, {F, Args}});
+        UserArity < N ->
+            {Now, Later} = lists:split(UserArity, Args),
+            apply_n(erlang:apply(G, Now ++ [{}, fun(R) -> R end]), Later);
         true ->
-            erlang:error({saga_effectful_call_at_pure_site, G, Args})
+            {'$saga_cps', cps_partial(G, Args, UserArity - N)}
     end;
 apply_n(F, Args) when is_function(F) ->
     {arity, Arity} = erlang:fun_info(F, arity),
@@ -116,6 +130,20 @@ partial(F, Args, 12) ->
 partial(F, Args, Remaining) ->
     {arity, Arity} = erlang:fun_info(F, arity),
     erlang:error({saga_partial_application_limit, Arity, length(Args), Remaining}).
+
+%% A function value of pure type as the plain fun of arity `N' that Erlang
+%% code will call. Wrappers of `@external' functions pass their callback
+%% arguments through here: a bridge calls `F(A)' directly, with no arity test
+%% and no knowledge of tagged closures. A fun of the right arity is returned
+%% as is; anything else (a tagged closure used at a pure instance of its
+%% type, or a fun of another arity) is called through `apply_n/2'. Callbacks
+%% of more than four arguments are passed through unchanged.
+bare_fun(F, N) when is_function(F, N) -> F;
+bare_fun(F, 1) -> fun(A) -> apply_n(F, [A]) end;
+bare_fun(F, 2) -> fun(A, B) -> apply_n(F, [A, B]) end;
+bare_fun(F, 3) -> fun(A, B, C) -> apply_n(F, [A, B, C]) end;
+bare_fun(F, 4) -> fun(A, B, C, D) -> apply_n(F, [A, B, C, D]) end;
+bare_fun(F, _N) -> F.
 
 %% Apply a function value to `Args' at an effectful call site, with evidence
 %% `Ev' and continuation `K'.
@@ -333,12 +361,13 @@ format_reason(error, {saga_partial_application_limit, Arity, Supplied, Remaining
         "~B would remain, and partial applications built at runtime support at most 12",
         [Arity, Supplied, Remaining]
     );
-format_reason(error, {saga_effectful_call_at_pure_site, Fun, Args}) ->
-    {arity, Arity} = erlang:fun_info(Fun, arity),
+format_reason(error, {evidence_tag_not_found, Tag}) when is_atom(Tag) ->
+    %% Unreachable in a well-typed program: an effect was performed where no
+    %% handler for it is in the evidence frame (for instance by a function
+    %% value run at a pure call site, which gets an empty frame).
     io_lib:format(
-        "an effectful function of ~B parameter(s) was called with ~B argument(s) "
-        "where a pure function was expected, so there are no handlers to run it with",
-        [max(Arity - 2, 0), length(Args)]
+        "effect ~ts was performed where no handler for it is installed",
+        [Tag]
     );
 format_reason(error, undef) ->
     "called a function that does not exist";

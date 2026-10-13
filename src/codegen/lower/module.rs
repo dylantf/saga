@@ -8,7 +8,7 @@ use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 
 use super::init::{PendingAnnotation, extract_external};
 use super::pats::lower_params;
-use super::util::{self, core_var};
+use super::util::{self, cerl_call, core_var};
 use super::{EvidenceFrame, FunInfo, GeneratedHelperVariant, HoistedDictMethod, Lowerer};
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -67,6 +67,31 @@ fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
         ast::TypeExpr::Labeled { inner, .. } => is_unit_type_expr(inner),
         _ => false,
     }
+}
+
+/// The number of arguments an external function's parameter takes when its
+/// declared type is a pure function type, which the Erlang side calls as a
+/// plain fun of that arity.
+fn pure_callback_arity(ty: &ast::TypeExpr) -> Option<usize> {
+    let mut current = ty;
+    while let ast::TypeExpr::Labeled { inner, .. } = current {
+        current = inner;
+    }
+    let mut arity = 0;
+    while let ast::TypeExpr::Arrow {
+        to,
+        effects,
+        effect_row_var,
+        ..
+    } = current
+    {
+        if !effects.is_empty() || !effect_row_var.is_empty() {
+            return None;
+        }
+        arity += 1;
+        current = to;
+    }
+    (arity > 0).then_some(arity)
 }
 
 impl<'a> Lowerer<'a> {
@@ -460,7 +485,17 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .zip(params.iter())
                     .filter(|(_, (_, ty))| !is_unit_type_expr(ty))
-                    .map(|(v, _)| CExpr::Var(v.clone()))
+                    .map(|(v, (_, ty))| match pure_callback_arity(ty) {
+                        // Erlang code calls a callback as a plain fun, so a
+                        // tagged closure used at a pure type (or a fun of
+                        // another arity) is wrapped at this boundary.
+                        Some(arity) => cerl_call(
+                            "saga_runtime",
+                            "bare_fun",
+                            vec![CExpr::Var(v.clone()), CExpr::Lit(CLit::Int(arity as i64))],
+                        ),
+                        None => CExpr::Var(v.clone()),
+                    })
                     .collect();
                 let call = CExpr::Call(erl_module.clone(), erl_func.clone(), call_args);
                 fun_defs.push(CFunDef {

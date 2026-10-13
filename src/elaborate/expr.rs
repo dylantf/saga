@@ -497,8 +497,24 @@ impl Elaborator {
                                             .get(let_name)
                                             .copied()
                                             .unwrap_or(1);
+                                        // The eta parameters are made here, so they
+                                        // have no entry in the type table. If the
+                                        // value's type has an effect row anywhere, a
+                                        // call through one of its parameters may need
+                                        // evidence, which is decided from that
+                                        // parameter's type: such a redex must not be
+                                        // beta-reduced (see `LET_EFFECT_ARG_PREFIX`).
+                                        let prefix = if self
+                                            .type_at_node
+                                            .get(&value.id)
+                                            .is_none_or(type_mentions_effect_row)
+                                        {
+                                            super::LET_EFFECT_ARG_PREFIX
+                                        } else {
+                                            "__let_arg"
+                                        };
                                         let eta_params: Vec<String> =
-                                            (0..arity).map(|i| format!("__let_arg{}", i)).collect();
+                                            (0..arity).map(|i| format!("{prefix}{i}")).collect();
                                         for p in &eta_params {
                                             lambda_params.push(Pat::Var {
                                                 id: NodeId::fresh(),
@@ -1226,4 +1242,20 @@ fn curried_constructor_lambda(field_order: &[String], body: Expr, span: Span) ->
             },
         )
     })
+}
+
+/// Whether any function type inside `ty` has a non-empty effect row.
+fn type_mentions_effect_row(ty: &crate::typechecker::Type) -> bool {
+    use crate::typechecker::Type;
+    match ty {
+        Type::Fun(param, ret, row) => {
+            !row.effects.is_empty()
+                || !row.tails.is_empty()
+                || type_mentions_effect_row(param)
+                || type_mentions_effect_row(ret)
+        }
+        Type::Con(_, args) => args.iter().any(type_mentions_effect_row),
+        Type::Record(fields) => fields.iter().any(|(_, ty)| type_mentions_effect_row(ty)),
+        Type::Var(_) | Type::Error => false,
+    }
 }

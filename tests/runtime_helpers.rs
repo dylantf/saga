@@ -354,30 +354,89 @@ fn apply_n_bare_over_application_reaching_a_tagged_partial() {
     );
 }
 
+// A tagged closure at a pure call site is a row-polymorphic function used at
+// the empty row: it runs with an empty evidence frame and an identity
+// continuation.
 #[test]
-fn apply_n_tagged_saturated_or_over_applied_is_an_error() {
+fn apply_n_tagged_saturated_runs_with_an_empty_frame() {
+    assert_eval(
+        "saga_runtime:apply_n(EAdd, [1, 2])",
+        // Returned as is: the identity continuation, not `K`.
+        "{3,{}}",
+    );
+}
+
+#[test]
+fn apply_n_tagged_over_applied_applies_the_result_to_the_rest() {
     assert_eval(
         r#"
-        {'$saga_cps', G} = EAdd,
-        Tagged0 = {'$saga_cps', fun(_Ev, K0) -> K0(ok) end},
-        {'$saga_cps', G0} = Tagged0,
-        NotCps = {'$saga_cps', fun(A) -> A end},
+        Bare = {'$saga_cps', fun(A, Ev, K0) -> K0(fun(B) -> {A + B, Ev} end) end},
+        Tagged = {'$saga_cps', fun(A, _Ev, K0) -> K0({'$saga_cps', fun(B, Ev, K1) ->
+            K1({A + B, Ev}) end}) end},
+        Partial = {'$saga_cps', fun(A, _Ev, K0) -> K0(fun(B, C) -> A + B + C end) end},
         [
-            Caught(fun() -> saga_runtime:apply_n(EAdd, [1, 2]) end)
-                =:= {saga_effectful_call_at_pure_site, G, [1, 2]},
-            Caught(fun() -> saga_runtime:apply_n(EAdd, [1, 2, 3]) end)
-                =:= {saga_effectful_call_at_pure_site, G, [1, 2, 3]},
-            Caught(fun() -> saga_runtime:apply_n(Tagged0, [1]) end)
-                =:= {saga_effectful_call_at_pure_site, G0, [1]},
-            Caught(fun() -> saga_runtime:apply_n(NotCps, [1]) end) =:= {badfun, NotCps},
-            Caught(fun() -> saga_runtime:apply_n({'$saga_cps', 42}, [1]) end),
-            saga_runtime:format_caught_panic(
-                error, {saga_effectful_call_at_pure_site, G, [1, 2, 3]})
+            saga_runtime:apply_n(Bare, [1, 2]),
+            saga_runtime:apply_n(Tagged, [1, 2]),
+            (saga_runtime:apply_n(Partial, [1, 2]))(3)
         ]
         "#,
-        "[true,true,true,true,{badfun,{'$saga_cps',42}},\
-         <<\"an effectful function of 2 parameter(s) was called with 3 argument(s) \
-         where a pure function was expected, so there are no handlers to run it with\">>]",
+        "[{3,{}},{3,{}},6]",
+    );
+}
+
+#[test]
+fn apply_n_tagged_partial_saturated_at_a_pure_site() {
+    assert_eval(
+        r#"
+        P1 = saga_runtime:apply_n(EAdd3, [1]),
+        saga_runtime:apply_n(P1, [2, 3])
+        "#,
+        "{6,{}}",
+    );
+}
+
+#[test]
+fn apply_n_tagged_values_that_cannot_be_called() {
+    assert_eval(
+        r#"
+        Tagged0 = {'$saga_cps', fun(_Ev, K0) -> K0(ok) end},
+        NotCps = {'$saga_cps', fun(A) -> A end},
+        [
+            Caught(fun() -> saga_runtime:apply_n(Tagged0, [1]) end) =:= {badarity, {Tagged0, [1]}},
+            Caught(fun() -> saga_runtime:apply_n(NotCps, [1]) end) =:= {badfun, NotCps},
+            Caught(fun() -> saga_runtime:apply_n({'$saga_cps', 42}, [1]) end)
+        ]
+        "#,
+        "[true,true,{badfun,{'$saga_cps',42}}]",
+    );
+}
+
+// Unreachable under sound typing: a closure run with the empty frame of a
+// pure call site looks an effect up. The crash names the effect.
+#[test]
+fn missing_evidence_is_reported_by_effect_name() {
+    assert_eval(
+        "saga_runtime:format_caught_panic(error, {evidence_tag_not_found, 'Main.Skip'})",
+        "<<\"effect Main.Skip was performed where no handler for it is installed\">>",
+    );
+}
+
+// bare_fun: what an `@external` wrapper hands to Erlang code as a callback.
+#[test]
+fn bare_fun_returns_a_fun_of_the_right_arity_and_wraps_the_rest() {
+    assert_eval(
+        r#"
+        Curried = fun(A) -> fun(B) -> A + B end end,
+        W = saga_runtime:bare_fun(EAdd, 2),
+        C = saga_runtime:bare_fun(Curried, 2),
+        [
+            saga_runtime:bare_fun(Add, 2) =:= Add,
+            is_function(W, 2), W(1, 2),
+            is_function(C, 2), C(1, 2),
+            saga_runtime:bare_fun(EWide, 14) =:= EWide
+        ]
+        "#,
+        "[true,true,{3,{}},true,3,true]",
     );
 }
 

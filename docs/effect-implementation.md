@@ -555,12 +555,31 @@ A call through a function value is classified from the callee's type:
 
 - **Pure:** `apply F(Args)` when `F` visibly lowers to a fun of that arity;
   otherwise a guard `is_function(F, N)` selects the direct apply and
-  `saga_runtime:apply_n/2` handles partial and over-application.
+  `saga_runtime:apply_n/2` handles partial and over-application. A tagged
+  closure can arrive here too: a value whose type has an open row is built
+  tagged, and a consumer that instantiates the row to the empty row sees a
+  pure function (`let run = fun g -> g ()` used as `run (fun () -> 3)`, or an
+  element of a `List (a -> b needs {..e})` used at `e = {}`). At that
+  instance it performs nothing of its own, so `apply_n` runs it with an empty
+  evidence frame and an identity continuation. This is the mirror image of a
+  bare fun arriving at an effectful site. An under-applied tagged closure
+  stays a tagged partial application, and whoever saturates it supplies the
+  frame. If a closure run this way did perform an effect (impossible in a
+  well-typed program), the lookup fails with "effect E was performed where no
+  handler for it is installed".
 - **Effectful or open-row:** a `case` on the value. `{'$saga_cps', G}` with
   `is_function(G, N + 2)` is applied to the arguments, the caller's frame and
   the continuation. Anything else (a bare fun, which a pure function used at
   an effectful type remains, or an arity mismatch) goes to
   `saga_runtime:apply_cps/4`.
+
+Erlang code does not go through these call shapes: a bridge calls its
+callback as `F(A)`. The wrapper generated for an `@external` function
+therefore passes every parameter declared with a pure function type through
+`saga_runtime:bare_fun(F, N)`, which returns a fun of arity `N` unchanged and
+wraps anything else (a tagged closure at a pure instance, or a fun of another
+arity) in a fun that calls `apply_n`. Callbacks of more than four arguments
+are passed through as they are.
 
 ### Evidence Vector Representation
 

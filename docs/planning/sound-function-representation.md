@@ -180,6 +180,20 @@ expects. Call sites:
   equals the argument count, call it; this is the fast path and costs the same
   as today. Otherwise the D1 helper builds a partial application or applies in
   stages.
+
+  *Correction (2026-10-13):* a tagged closure does arrive at a pure static
+  type, and legitimately. A value whose type quantifies a row variable is
+  built tagged (the row is open), and any consumer may instantiate that row
+  to the empty row without seeing the definition: a generalised `let`
+  (`let run = fun g -> g ()` then `run (fun () -> 3)`), a closure inside a
+  data structure returned by a row-polymorphic function, a partial
+  application made by generic code. At that instance the closure performs no
+  effects of its own, so the pure-site slow path (`apply_n`) runs it with an
+  empty frame and an identity continuation; the inline `is_function(F, N)`
+  fast path is unchanged. The earlier runtime error
+  (`saga_effectful_call_at_pure_site`) is retired. Erlang bridges, which call
+  callbacks as plain funs, get the same treatment at the `@external` wrapper
+  (`saga_runtime:bare_fun/2`).
 - **Static type is effectful or open-row.** Either representation can arrive.
   `{cps, F}` is called with evidence and continuation. A bare fun is called
   directly and its result passed to the continuation.
@@ -251,6 +265,11 @@ Call through a variable with `n` user arguments, at a pure static type:
   the rest
 
 At an effectful static type the helper also handles `{cps, F}` at each step.
+
+A tagged closure can also reach a pure static type (see the correction under
+D2b): the pure-site helper then runs it with an empty evidence frame and an
+identity continuation, or builds a tagged partial application when too few
+arguments are supplied.
 The slow paths live in one runtime module. Lambdas keep their syntactic arity;
 `fun a -> fun b -> ...` and `fun a b -> ...` need not agree.
 
