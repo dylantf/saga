@@ -1,0 +1,58 @@
+# Benchmark: one effect operation per iteration through an OPEN row.
+#
+# Same workload as closed_row_hot_op.saga, but the operation is performed by
+# a lambda passed to `repeat`, whose row is `{..e}`. A closure body does not
+# know the layout of the frame it runs under, so each `tick!` finds its
+# handler by searching the evidence frame for the effect's tag.
+
+# Edit this to change the workload.
+fun iterations : Unit -> Int
+iterations () = 10000000
+
+effect Counter {
+  fun tick : Int -> Int
+}
+
+effect Log {
+  fun log : String -> Unit
+}
+
+effect Trace {
+  fun trace : Int -> Unit
+}
+
+# The step is a run-time value captured by the handler closure.
+fun make_counter : (step: Int) -> Handler Counter
+make_counter step = handler for Counter {
+  tick n = resume (n + step)
+}
+
+handler quiet_log for Log {
+  log _ = resume ()
+}
+
+handler quiet_trace for Trace {
+  trace _ = resume ()
+}
+
+# Open row: `repeat` knows nothing about the effects its callback performs.
+fun repeat : Int -> Int -> (f: Int -> Int needs {..e}) -> Int needs {..e}
+repeat n acc f =
+  if n == 0 then acc
+  else repeat (n - 1) ((acc + f n) % 1000003) f
+
+# Three effects in scope; only Counter is used in the hot path.
+fun run : Int -> Int needs {Counter, Log, Trace}
+run n = {
+  let result = repeat n 0 (fun i -> tick! i)
+  log! "done"
+  trace! result
+  result
+}
+
+main () = {
+  let n = iterations ()
+  let counter = make_counter (1 + n % 2)
+  let result = run n with {counter, quiet_log, quiet_trace}
+  dbg $"open_row_hot_op: {result}"
+}

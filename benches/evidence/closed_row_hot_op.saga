@@ -1,0 +1,52 @@
+# Benchmark: one effect operation per iteration through a CLOSED row.
+#
+# `loop` is a self-recursive named function whose declared row is closed, so
+# each `tick!` finds its handler by position in the evidence frame. The
+# handler is built at run time by a factory and installed in `main`, a different function
+# from the loop, so the static tail-resume fast path cannot bypass the lookup.
+
+# Edit this to change the workload.
+fun iterations : Unit -> Int
+iterations () = 10000000
+
+effect Counter {
+  fun tick : Int -> Int
+}
+
+effect Log {
+  fun log : String -> Unit
+}
+
+effect Trace {
+  fun trace : Int -> Unit
+}
+
+# The step is a run-time value captured by the handler closure.
+fun make_counter : (step: Int) -> Handler Counter
+make_counter step = handler for Counter {
+  tick n = resume (n + step)
+}
+
+handler quiet_log for Log {
+  log _ = resume ()
+}
+
+handler quiet_trace for Trace {
+  trace _ = resume ()
+}
+
+# Closed row with three entries; only Counter is used in the hot path.
+fun loop : Int -> Int -> Int needs {Counter, Log, Trace}
+loop n acc =
+  if n == 0 then {
+    log! "done"
+    trace! acc
+    acc
+  } else loop (n - 1) ((acc + tick! n) % 1000003)
+
+main () = {
+  let n = iterations ()
+  let counter = make_counter (1 + n % 2)
+  let result = loop n 0 with {counter, quiet_log, quiet_trace}
+  dbg $"closed_row_hot_op: {result}"
+}
