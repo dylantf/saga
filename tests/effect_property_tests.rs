@@ -4312,3 +4312,81 @@ result () = {
     // (3), once per `scoped!`: 2 * 30000
     check_result_int("callback_overlay_nested_operations", &src, 60211);
 }
+
+/// Compile a single module and call its entry point `main:main(unit)`.
+fn check_main_int(fixture: &str, src: &str, expected: i64) {
+    let root = fixtures_root_for_main_only();
+    let mut checker = make_checker(root.clone());
+    let program = typecheck_source(src, &mut checker, fixture);
+    let core = emit_program(&program, "main", &checker, Some("main"));
+    let dir = fresh_dir(fixture);
+    compile_with_erlc(&dir, &core, "main", fixture);
+    let stdout = run_erl(
+        &dir,
+        "io:format(\"~p\", [main:main(unit)]), init:stop().",
+        fixture,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        stdout.trim(),
+        expected.to_string(),
+        "[{fixture}] result mismatch\nexpected: {expected}\nactual:   {stdout:?}"
+    );
+}
+
+/// `f` is a function taken out of an empty list, so nothing fixes the effect
+/// row of its type and the row `main` infers for itself stays open. `main`
+/// has no caller to choose that row or supply handlers for it, so it is the
+/// empty row and `main` keeps its one-argument entry point.
+#[test]
+fn unannotated_main_with_unresolved_row_variable_is_pure() {
+    let src = r#"module Main
+
+main () = case [] {
+  f :: _ -> f ()
+  [] -> 7
+}
+"#;
+    check_main_int("unannotated_main_open_row", src, 7);
+}
+
+/// The same through an open-row higher-order function.
+#[test]
+fn unannotated_main_forwarding_an_unresolved_row_variable_is_pure() {
+    let src = r#"module Main
+
+fun apply : (Unit -> a needs {..e}) -> a needs {..e}
+apply f = f ()
+
+main () = {
+  let fs = []
+  case fs {
+    f :: _ -> apply f
+    [] -> 7
+  }
+}
+"#;
+    check_main_int("unannotated_main_open_row_forwarded", src, 7);
+}
+
+/// Closing the leftover row variable does not hide a real effect: `Log` is
+/// still unhandled in `main` and still an error.
+#[test]
+fn unannotated_main_with_unresolved_row_variable_still_rejects_named_effects() {
+    let message = typecheck_error(
+        r#"module Main
+
+effect Log { fun log : Unit -> Int }
+
+main () = case [] {
+  f :: _ -> f () + log! ()
+  [] -> 7
+}
+"#,
+    );
+    assert!(
+        message.contains("`main` cannot use `needs`") && message.contains("Log"),
+        "{message}"
+    );
+}

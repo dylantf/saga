@@ -570,6 +570,18 @@ impl Checker {
             self.handler_funs.remove(name);
         }
 
+        // `main` is the program entry: nothing calls it, so nothing chooses a
+        // row variable left in its inferred row and nothing can handle what
+        // that variable stands for. Close each one to the empty row before
+        // the type is built, so `main` and the calls in its body that
+        // mention the variable are pure rather than open-row. Named effects
+        // are left alone and reported by `validate_main`.
+        if name == "main" && annotation.is_none() && declared_effect_row.is_none() {
+            for id in self.sub.apply_effect_row(&all_body_effs).tail_var_ids() {
+                self.bind_row_checked(id, EffectRow::empty())?;
+            }
+        }
+
         // Build curried function type. Effect row comes from:
         // 1. The annotation's EffectRow (for annotated functions)
         // 2. The inferred body effects (for unannotated functions)

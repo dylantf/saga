@@ -686,9 +686,14 @@ in `cerl.rs` has no map node yet.
   `..r`. `append_tail` keeps the whole call-time frame, not only the named
   effects. Fix before this stage: once callees stop narrowing their frame, the
   bug becomes easier to reach.
+  **Fixed:** `append_tail/3` takes only the named effects from the call-time
+  frame (`callback_overlay_*` in `tests/effect_property_tests.rs`).
 - **An unannotated `main` whose row stays open** is emitted with two extra
   parameters and fails at run time with "called a function that does not
   exist".
+  **Fixed** in the typechecker: `check_fun_clauses` closes the row variables
+  left in an unannotated `main`'s inferred row, so the calls in its body are
+  pure as well (`unannotated_main_*` in the same file).
 
 ### Benchmarks to write first
 
