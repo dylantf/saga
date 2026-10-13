@@ -849,6 +849,40 @@ Not done, with reasons:
 - Step 9 (types and resolution through the generic fold, typed eta
   parameters, unknown call heads as an internal error) is untouched.
 
+### Outcome (2026-10-13)
+
+Steps 1 to 8 are done on `effect-anf` (`cc03ba11`). Step 9 is not started.
+
+- The position checker reported about 2,800 distinct violations in the test
+  suite before the pass and none after. It is a hard error in all builds.
+- Compiler source against `effect-ir`: 1,187 lines added, 1,879 removed.
+  Steps 4 to 8 alone: 424 added, 1,858 removed.
+- Suite: 1,756 passed, 0 failed, 5 ignored. Release build: the seven user
+  projects typecheck, the four compile-only builds succeed, 62 of 62
+  examples run.
+- Benchmarks against `effect-ir`, same machine, same session: the two
+  `json_bench` combinator programs are within 1% except wide encode, about
+  2.5% slower (864 to 886 ms); `closed_row_hot_op` unchanged (about 785 ms);
+  `open_row_hot_op` about 25% faster (1,810 to 1,345 ms);
+  `deep_call_chain` within noise.
+
+Not as planned:
+
+- The pre-fold normalize calls stay. Without them the generic fold copies
+  an argument that still contains an operation and the node-keyed effect
+  resolution is lost. Removing them belongs with step 9.
+- A `do` binding is a let position, so its chaining stays inside `lower_do`.
+- Two leaf notions remain with one definition: an expression that performs
+  an effect, and one that takes the rest of the block as its continuation
+  (the first minus `resume` and a delimiting `with`). That difference is the
+  chain-versus-delimit gap.
+
+Parked: branch `stageb-delim` (`d11b9c7e`) makes handlers that use the value
+of `resume` correct under an outer handler by adding a third `with` mode and
+a runtime-tagged suspension. Not merged; to be redone on top of this branch
+as the let rule applied to `resume`. Its two rejected simpler alternatives
+and its 297-cell acceptance tests are the parts to keep.
+
 ## Appendix A: reproductions
 
 All fail on `87e68150`. Shared declarations:
