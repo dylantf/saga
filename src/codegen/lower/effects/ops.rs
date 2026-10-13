@@ -362,6 +362,16 @@ impl<'a> Lowerer<'a> {
         // closure's Erlang return value.
         if let Some(k) = self.current_handler_inherited_k.clone() {
             self.lower_expr_with_installed_return_k(expr, Some(k))
+        } else if self.branch_is_effectful(expr) {
+            // The body performs effects of its own (handled further out)
+            // somewhere inside an expression: `resume (g x) + 1`,
+            // `if g x == 0 then resume 1 else resume 2`. Thread an identity
+            // continuation through it, so each effectful sub-expression is
+            // called in tail position with the rest of the body as its
+            // continuation, and a handler that aborts it skips that rest.
+            let param = self.fresh();
+            let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
+            self.lower_expr_tail(expr, identity)
         } else {
             self.lower_expr_value(expr)
         }

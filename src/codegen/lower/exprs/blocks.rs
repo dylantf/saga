@@ -440,6 +440,42 @@ impl<'a> Lowerer<'a> {
             {
                 self.lower_binop_with_k(op, left, right, Some(&expr.span), k_var)
             }
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
+                self.lower_do(bindings, success, &else_arms, Some(k_var))
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => self.lower_receive(arms, after_clause.as_ref(), Some(k_var)),
+            ExprKind::BitString { segments }
+                if segments
+                    .iter()
+                    .any(|seg| self.branch_is_effectful(&seg.value)) =>
+            {
+                // Segment values that perform effects are bound first, left
+                // to right, with building the bitstring as their continuation.
+                let effectful: Vec<usize> = (0..segments.len())
+                    .filter(|&i| self.branch_is_effectful(&segments[i].value))
+                    .collect();
+                let slots: Vec<CpsSlot<'_>> = effectful
+                    .iter()
+                    .map(|&i| CpsSlot::Expr {
+                        expr: &segments[i].value,
+                    })
+                    .collect();
+                self.lower_with_cps_slots(slots, k_var, |this, vars| {
+                    let mut bound: Vec<Option<String>> = vec![None; segments.len()];
+                    for (&i, var) in effectful.iter().zip(vars) {
+                        bound[i] = Some(var.clone());
+                    }
+                    this.lower_bitstring_with_values(segments, &bound)
+                })
+            }
             ExprKind::Resume { value } if self.branch_is_effectful(value) => {
                 let v = self.fresh();
                 let result = self.fresh();

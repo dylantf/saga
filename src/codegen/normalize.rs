@@ -295,7 +295,7 @@ impl Normalizer {
                 expr,
                 ExprKind::With {
                     expr: Box::new(self.normalize_expr(inner)),
-                    handler: handler.clone(),
+                    handler: Box::new(self.normalize_handler(handler)),
                 },
             ),
 
@@ -501,8 +501,17 @@ impl Normalizer {
                 },
             ),
 
-            // Handler expressions: clone as-is (arm bodies are normalized when lowered).
-            ExprKind::HandlerExpr { .. } => expr.clone(),
+            // Handler expressions: normalize each arm body in its own scope.
+            ExprKind::HandlerExpr { body } => {
+                let mut body = body.clone();
+                for arm in &mut body.arms {
+                    self.normalize_handler_arm(&mut arm.node);
+                }
+                if let Some(rc) = body.return_clause.as_mut() {
+                    self.normalize_handler_arm(rc);
+                }
+                Expr::rebuild_like(expr, ExprKind::HandlerExpr { body })
+            }
 
             // BitString: normalize segment values and sizes.
             ExprKind::BitString { segments } => {
@@ -540,6 +549,31 @@ impl Normalizer {
                 unreachable!("surface syntax should be desugared before normalization")
             }
         }
+    }
+
+    /// Normalize a handler arm (or return clause) body in its own scope.
+    fn normalize_handler_arm(&mut self, arm: &mut HandlerArm) {
+        *arm.body = self.normalize_expr(&arm.body);
+        if let Some(fb) = arm.finally_block.as_mut() {
+            **fb = self.normalize_expr(fb);
+        }
+    }
+
+    /// Normalize the arms and return clause written inline in a `with`, the
+    /// same way the arms of a `handler` declaration are.
+    fn normalize_handler(&mut self, handler: &Handler) -> Handler {
+        let mut handler = handler.clone();
+        if let Handler::Inline { items, .. } = &mut handler {
+            for item in items {
+                match &mut item.node {
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        self.normalize_handler_arm(arm)
+                    }
+                    HandlerItem::Named(_) => {}
+                }
+            }
+        }
+        handler
     }
 
     /// Normalize an expression that starts its own scope (branches, lambda bodies, etc.).
@@ -665,6 +699,21 @@ pub fn normalize_effects(program: &Program) -> Program {
                     span: *span,
                     dangling_trivia: vec![],
                 }
+            }
+            // Impl method bodies live here after elaboration.
+            Decl::DictConstructor { methods, .. } => {
+                let mut decl = decl.clone();
+                if let Decl::DictConstructor {
+                    methods: new_methods,
+                    ..
+                } = &mut decl
+                {
+                    *new_methods = methods
+                        .iter()
+                        .map(|m| normalizer.normalize_expr(m))
+                        .collect();
+                }
+                decl
             }
             other => other.clone(),
         })

@@ -5661,3 +5661,609 @@ fn let_inside_nested_block_does_not_leak() {
         2,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Effectful sub-expressions inside handler arms, return clauses and impl
+// methods, under an outer handler that aborts the effect they perform.
+// ---------------------------------------------------------------------------
+
+const HANDLER_BODY_PRELUDE: &str = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+
+fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+fun user : Unit -> Int needs {Ask}
+user () = ask! () + 1
+
+fun addp : (Int, Int) -> Int
+addp p = case p {
+  (a, b) -> a + b
+}
+
+type Wrap = Wrap(Int)
+
+fun unwrap : Wrap -> Int
+unwrap w = case w {
+  Wrap(v) -> v
+}
+
+handler h_resume_call for Ask needs {Stop} {
+  ask () = resume (g 3)
+}
+
+handler h_resume_nested for Ask needs {Stop} {
+  ask () = resume (1 + g 3)
+}
+
+handler h_resume_then_op for Ask needs {Stop} {
+  ask () = resume (g 3) + 1
+}
+
+handler h_resume_op for Ask needs {Stop} {
+  ask () = resume (1 + stop! 3)
+}
+
+handler h_abort_call for Ask needs {Stop} {
+  ask () = g 3
+}
+
+handler h_abort_nested for Ask needs {Stop} {
+  ask () = g 3 + 1
+}
+
+handler h_abort_op for Ask needs {Stop} {
+  ask () = 1 + stop! 3
+}
+
+handler h_return_nested for Ask needs {Stop} {
+  ask () = resume 1
+  return v = g v + 1
+}
+
+handler h_return_call for Ask needs {Stop} {
+  ask () = resume 1
+  return v = g v
+}
+
+trait Run a {
+  fun run : a -> Int needs {Stop}
+  fun run_op : a -> Int needs {Stop}
+  fun run_tuple : a -> Int needs {Stop}
+}
+
+impl Run for Int needs {Stop} {
+  run a = a + g 3
+  run_op a = a + stop! 3
+  run_tuple a = addp (stop! 3, a)
+}
+"#;
+
+/// `(label, expression of type Int performing Stop, value when Stop resumes)`.
+const HANDLER_BODY_CELLS: &[(&str, &str, i64)] = &[
+    // Inline handler arms.
+    (
+        "inline_resume_call",
+        "user () with { ask () = resume (g 3) }",
+        4,
+    ),
+    (
+        "inline_resume_nested",
+        "user () with { ask () = resume (1 + g 3) }",
+        5,
+    ),
+    (
+        "inline_resume_op",
+        "user () with { ask () = resume (1 + stop! 3) }",
+        5,
+    ),
+    (
+        "inline_resume_then_operator",
+        "user () with { ask () = resume (g 3) + 1 }",
+        5,
+    ),
+    (
+        "inline_resume_in_tuple",
+        "user () with { ask () = addp (resume (g 3), 1) }",
+        5,
+    ),
+    (
+        "inline_resume_in_if_condition",
+        "user () with { ask () = if g 3 == 3 then resume 1 else resume 5 }",
+        2,
+    ),
+    (
+        "inline_resume_in_case_scrutinee",
+        "user () with { ask () = case g 3 {\n    3 -> resume 1\n    _ -> resume 5\n  } }",
+        2,
+    ),
+    ("inline_abort_call", "user () with { ask () = g 3 }", 3),
+    (
+        "inline_abort_nested",
+        "user () with { ask () = g 3 + 1 }",
+        4,
+    ),
+    (
+        "inline_abort_op",
+        "user () with { ask () = 1 + stop! 3 }",
+        4,
+    ),
+    (
+        "inline_abort_constructor",
+        "user () with { ask () = unwrap (Wrap(g 3)) }",
+        3,
+    ),
+    (
+        "inline_abort_tuple_op",
+        "user () with { ask () = addp (stop! 3, 1) }",
+        4,
+    ),
+    (
+        "inline_abort_if_condition",
+        "user () with { ask () = if g 3 == 3 then 7 else 8 }",
+        7,
+    ),
+    (
+        "inline_return_nested",
+        "user () with { ask () = resume 1, return v = g v + 1 }",
+        3,
+    ),
+    (
+        "inline_return_call",
+        "user () with { ask () = resume 1, return v = g v }",
+        2,
+    ),
+    (
+        "inline_return_op",
+        "user () with { ask () = resume 1, return v = 1 + stop! v }",
+        3,
+    ),
+    // Named handlers that declare `needs {Stop}`.
+    ("named_resume_call", "user () with h_resume_call", 4),
+    ("named_resume_nested", "user () with h_resume_nested", 5),
+    ("named_resume_op", "user () with h_resume_op", 5),
+    (
+        "named_resume_then_operator",
+        "user () with h_resume_then_op",
+        5,
+    ),
+    ("named_abort_call", "user () with h_abort_call", 3),
+    ("named_abort_nested", "user () with h_abort_nested", 4),
+    ("named_abort_op", "user () with h_abort_op", 4),
+    ("named_return_nested", "user () with h_return_nested", 3),
+    ("named_return_call", "user () with h_return_call", 2),
+    // Impl methods.
+    ("impl_method_call", "run 1", 4),
+    ("impl_method_op", "run_op 1", 4),
+    ("impl_method_tuple_op", "run_tuple 1", 4),
+];
+
+/// Where the expression sits relative to the outer `Stop` handler.
+#[derive(Clone, Copy, Debug)]
+enum HandlerBodyHost {
+    /// In a function that declares `needs {Stop}`, so it has a `_ReturnK`.
+    EffectfulFunction,
+    /// Directly under the outer handler, in a pure function.
+    UnderOuterHandler,
+    /// Under the outer handler with more of the block after it.
+    LetUnderOuterHandler,
+}
+
+fn check_handler_body_cells(fixture: &str, host: HandlerBodyHost) {
+    let mut src = String::from(HANDLER_BODY_PRELUDE);
+    let mut functions = Vec::new();
+    for (idx, (_, expr, _)) in HANDLER_BODY_CELLS.iter().enumerate() {
+        if let HandlerBodyHost::EffectfulFunction = host {
+            src.push_str(&format!(
+                "\nfun c{idx} : Unit -> Int needs {{Stop}}\nc{idx} () = {expr}\n"
+            ));
+        }
+        for (suffix, stop_arm) in [("abort", "stop i = 1000"), ("resume", "stop i = resume i")] {
+            let body = match host {
+                HandlerBodyHost::EffectfulFunction => format!("c{idx} () with {{ {stop_arm} }}"),
+                HandlerBodyHost::UnderOuterHandler => {
+                    format!("{{\n  {expr}\n}} with {{ {stop_arm} }}")
+                }
+                HandlerBodyHost::LetUnderOuterHandler => {
+                    format!("{{\n  let v = {expr}\n  v + 100\n}} with {{ {stop_arm} }}")
+                }
+            };
+            src.push_str(&format!(
+                "\npub fun c{idx}_{suffix} : Unit -> Int\nc{idx}_{suffix} () = {body}\n"
+            ));
+            functions.push(format!("c{idx}_{suffix}"));
+        }
+    }
+    let results = call_each_export(fixture, &src, &functions);
+    let offset = match host {
+        HandlerBodyHost::LetUnderOuterHandler => 100,
+        _ => 0,
+    };
+    let mut failures = Vec::new();
+    for (idx, (label, _, resume_value)) in HANDLER_BODY_CELLS.iter().enumerate() {
+        let abort = results.get(&format!("c{idx}_abort")).map(String::as_str);
+        if abort != Some("1000") {
+            failures.push(format!(
+                "{host:?} / {label}: aborting handler gave {abort:?}, expected 1000"
+            ));
+        }
+        let resume = results.get(&format!("c{idx}_resume")).map(String::as_str);
+        let want = (resume_value + offset).to_string();
+        if resume != Some(want.as_str()) {
+            failures.push(format!(
+                "{host:?} / {label}: resuming handler gave {resume:?}, expected {want}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "[{fixture}] {} of {} cells failed:\n{}",
+        failures.len(),
+        HANDLER_BODY_CELLS.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn effectful_handler_bodies_in_effectful_function() {
+    check_handler_body_cells("handler_body_fn", HandlerBodyHost::EffectfulFunction);
+}
+
+#[test]
+fn effectful_handler_bodies_under_outer_handler() {
+    check_handler_body_cells("handler_body_under", HandlerBodyHost::UnderOuterHandler);
+}
+
+/// Known gap: a `with` whose handler resumes (or is a named handler) is a
+/// delimiter with no continuation of its own. Bound by a `let`, the rest of
+/// the block is not its continuation, so when an arm (or the handled
+/// computation) performs an outer effect and that handler aborts, the abort
+/// value is bound to `v` and the block carries on. 19 of the 28 cells fail;
+/// the inline abort-only handlers and the impl methods pass.
+#[test]
+#[ignore = "non-tail `with` with a resuming or named handler gets no continuation"]
+fn effectful_handler_bodies_let_bound_under_outer_handler() {
+    check_handler_body_cells("handler_body_let", HandlerBodyHost::LetUnderOuterHandler);
+}
+
+/// Every remaining expression form that can hold an effectful
+/// sub-expression. Each cell's expression is bound by a `let` with more of
+/// the block after it, so a sub-expression lowered without a continuation
+/// shows up as the abort value flowing into `v + 100`.
+///
+/// `(label, expression, value under the aborting handler, value under the
+/// resuming handler)`.
+const EXPRESSION_FORM_CELLS: &[(&str, &str, i64, i64)] = &[
+    (
+        "do_binding_call",
+        "do {\n    Ok(x) <- gr 3\n    x + 1\n  } else {\n    Err(_) -> 0\n  }",
+        1000,
+        104,
+    ),
+    (
+        "do_binding_nested",
+        "do {\n    Ok(x) <- Ok(g 3)\n    x + 1\n  } else {\n    Err(_) -> 0\n  }",
+        1000,
+        104,
+    ),
+    (
+        "do_binding_op",
+        "do {\n    Ok(x) <- Ok(stop! 3)\n    x + 1\n  } else {\n    Err(_) -> 0\n  }",
+        1000,
+        104,
+    ),
+    (
+        "do_second_binding",
+        "do {\n    Ok(x) <- mkok 1\n    Ok(y) <- gr (x + 2)\n    x + y\n  } else {\n    Err(_) -> 0\n  }",
+        1000,
+        104,
+    ),
+    (
+        "do_success",
+        "do {\n    Ok(x) <- mkok 1\n    g x + 1\n  } else {\n    Err(_) -> 0\n  }",
+        1000,
+        102,
+    ),
+    (
+        "do_else_arm",
+        "do {\n    Ok(x) <- mkerr ()\n    x\n  } else {\n    Err(_) -> g 3 + 1\n  }",
+        1000,
+        104,
+    ),
+    (
+        "do_binding_fails_to_else",
+        "do {\n    Ok(x) <- gerr 3\n    x\n  } else {\n    Err(_) -> 7\n  }",
+        1000,
+        107,
+    ),
+    (
+        "bitstring_segment",
+        "case <<(g 3)>> {\n    <<x>> -> x\n    _ -> 0\n  }",
+        1000,
+        103,
+    ),
+    (
+        "bitstring_second_segment",
+        "case <<1, (1 + g 3)>> {\n    <<x, y>> -> x + y\n    _ -> 0\n  }",
+        1000,
+        105,
+    ),
+    (
+        "and_short_circuits",
+        "if False && g 3 == 3 then 1 else 2",
+        102,
+        102,
+    ),
+    (
+        "and_evaluates_right",
+        "if True && g 3 == 3 then 1 else 2",
+        1000,
+        101,
+    ),
+    (
+        "or_short_circuits",
+        "if True || g 3 == 3 then 1 else 2",
+        101,
+        101,
+    ),
+    (
+        "or_evaluates_right",
+        "if False || g 3 == 4 then 1 else 2",
+        1000,
+        102,
+    ),
+    ("and_left", "if g 3 == 3 && True then 1 else 2", 1000, 101),
+    ("ascription", "(g 3 : Int) + 1", 1000, 104),
+    ("ascription_nested", "((1 + g 3) : Int)", 1000, 104),
+    ("lambda_called_in_place", "(fun x -> x + g 3) 1", 1000, 104),
+    (
+        "block_in_operand",
+        "1 + {\n    let t = g 3\n    t\n  }",
+        1000,
+        104,
+    ),
+    (
+        "inline_abort_with",
+        "{\n    let a = g 3\n    a + ask! ()\n  } with { ask () = 5 }",
+        1000,
+        105,
+    ),
+];
+
+/// Receive needs the actor effects and a running process.
+const RECEIVE_FORM_CELLS: &[(&str, &str, i64, i64)] = &[
+    (
+        "receive_arm",
+        "{\n    send! (self! ()) 5\n    receive {\n      n -> g n\n    }\n  }",
+        1000,
+        105,
+    ),
+    (
+        "receive_arm_nested",
+        "{\n    send! (self! ()) 5\n    receive {\n      n -> 1 + g n\n    }\n  }",
+        1000,
+        106,
+    ),
+    (
+        "receive_after_body",
+        "receive {\n    n -> n\n    after 0 -> g 3\n  }",
+        1000,
+        103,
+    ),
+    (
+        "receive_timeout",
+        "receive {\n    n -> n\n    after g 0 -> 7\n  }",
+        1000,
+        107,
+    ),
+];
+
+fn check_expression_form_cells(
+    fixture: &str,
+    cells: &[(&str, &str, i64, i64)],
+    needs: &str,
+    extra_handler: &str,
+) {
+    let mut src = String::from(
+        r#"module Main
+
+import Std.Actor (Process, Actor, beam_actor)
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+
+fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+fun gr : Int -> Result Int String needs {Stop}
+gr i = Ok(stop! i)
+
+fun gerr : Int -> Result Int String needs {Stop}
+gerr i = {
+  let v = stop! i
+  Err("e")
+}
+
+fun mkok : Int -> Result Int String
+mkok i = Ok(i)
+
+fun mkerr : Unit -> Result Int String
+mkerr () = Err("e")
+"#,
+    );
+    let mut functions = Vec::new();
+    for (idx, (_, expr, _, _)) in cells.iter().enumerate() {
+        src.push_str(&format!(
+            "\nfun c{idx} : Unit -> Int needs {{{needs}}}\nc{idx} () = {{\n  let v = {expr}\n  v + 100\n}}\n"
+        ));
+        for (suffix, stop_arm) in [("abort", "stop i = 1000"), ("resume", "stop i = resume i")] {
+            src.push_str(&format!(
+                "\npub fun c{idx}_{suffix} : Unit -> Int\nc{idx}_{suffix} () = c{idx} () with {{ {extra_handler}{stop_arm} }}\n"
+            ));
+            functions.push(format!("c{idx}_{suffix}"));
+        }
+    }
+    let results = call_each_export(fixture, &src, &functions);
+    let mut failures = Vec::new();
+    for (idx, (label, _, abort_value, resume_value)) in cells.iter().enumerate() {
+        for (suffix, want) in [("abort", abort_value), ("resume", resume_value)] {
+            let got = results.get(&format!("c{idx}_{suffix}")).map(String::as_str);
+            if got != Some(want.to_string().as_str()) {
+                failures.push(format!(
+                    "{label}: {suffix} handler gave {got:?}, expected {want}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "[{fixture}] {} of {} cells failed:\n{}",
+        failures.len(),
+        cells.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn effectful_subexpressions_in_every_expression_form() {
+    check_expression_form_cells("expr_forms", EXPRESSION_FORM_CELLS, "Stop", "");
+}
+
+#[test]
+fn effectful_subexpressions_in_receive() {
+    check_expression_form_cells(
+        "expr_forms_receive",
+        RECEIVE_FORM_CELLS,
+        "Stop, Process, Actor Int",
+        "beam_actor, ",
+    );
+}
+
+/// Known gap, smallest form of the one above: the handled computation itself
+/// performs an effect handled further out. Expected 1000; gives 1100.
+#[test]
+#[ignore = "non-tail `with` with a resuming or named handler gets no continuation"]
+fn let_bound_with_under_outer_aborting_handler() {
+    let src = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+
+fun both : Unit -> Int needs {Stop, Ask}
+both () = {
+  let a = stop! 3
+  a + ask! ()
+}
+
+pub fun result : Unit -> Int
+result () = {
+  let v = both () with { ask () = resume 1 }
+  v + 100
+} with { stop i = 1000 }
+"#;
+    check_result_int("let_bound_with_outer_abort", src, 1000);
+}
+
+/// Known gap: a `case` guard that performs effects is lowered as a plain
+/// value. Expected 1000; gives 106 (the abort value fails the guard and the
+/// next arm runs).
+#[test]
+#[ignore = "effectful case guards are lowered without a continuation"]
+fn effectful_case_guard_under_aborting_handler() {
+    check_expression_form_cells(
+        "expr_forms_guard",
+        &[(
+            "case_guard",
+            "case 3 {\n    n when g n == 3 -> 5\n    _ -> 6\n  }",
+            1000,
+            105,
+        )],
+        "Stop",
+        "",
+    );
+}
+
+/// Known gap: the normalize pass lifts a direct operation call into a `let`
+/// ahead of the whole statement, so it runs before an effectful function
+/// call written to its left. Expected "12=3"; gives "21=3".
+#[test]
+#[ignore = "normalize lifts `op!` ahead of effectful function calls to its left"]
+fn operation_after_effectful_call_in_one_expression_keeps_order() {
+    let src = r#"module Main
+
+effect Mark { fun mark : Int -> Int }
+
+fun m : Int -> Int needs {Mark}
+m i = mark! i
+
+fun run : Unit -> String needs {Mark}
+run () = {
+  let r = m 1 + mark! 2
+  "=" <> show r
+}
+
+pub fun result : Unit -> String
+result () = run () with {
+  mark i = {
+    let rest = resume i
+    show i <> rest
+  },
+}
+"#;
+    check_result_string("op_after_call_order", src, "12=3");
+}
+
+/// The nested-argument chaining holds across a module boundary: the outer
+/// callee, the inner effectful call and the effect are all imported.
+#[test]
+fn nested_effectful_arg_of_cross_module_call() {
+    let lib = r#"module Nested.Lib
+
+pub effect Stop { fun stop : Int -> Int }
+pub effect Tick { fun tick : Unit -> Unit }
+
+pub fun g : Int -> Int needs {Stop}
+g i = stop! i
+
+pub fun fin : Int -> Int -> Int needs {Tick}
+fin a b = {
+  tick! ()
+  a + b + 100
+}
+
+pub fun each : (Int -> Int needs {Tick}) -> Int -> Int needs {Tick}
+each f x = f x + 100
+"#;
+    let main_src = r#"module Main
+
+import Nested.Lib (Stop, Tick, g, fin, each)
+import Nested.Lib as L
+
+fun direct : Unit -> Int needs {Stop, Tick}
+direct () = fin (1 + g 3) (g 4 * 2)
+
+fun qualified : Unit -> Int needs {Stop, Tick}
+qualified () = L.fin (1 + L.g 3) 2
+
+fun hof : Unit -> Int needs {Stop, Tick}
+hof () = each (fun x -> x + 1) (1 + g 3)
+
+fun run : (Unit -> Int needs {Stop, Tick}) -> String
+run f = {
+  let aborted = f () with { stop i = 1000, tick () = resume () }
+  let resumed = f () with { stop i = resume i, tick () = resume () }
+  show aborted <> "/" <> show resumed
+}
+
+pub fun result : Unit -> String
+result () = run direct <> " " <> run qualified <> " " <> run hof
+"#;
+    check_cross_module(
+        "nested_arg_cross_module",
+        &[("Nested/Lib.saga", lib)],
+        main_src,
+        "1000/112 1000/106 1000/105",
+    );
+}

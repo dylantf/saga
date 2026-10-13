@@ -8,12 +8,22 @@ use std::collections::HashMap;
 impl<'a> Lowerer<'a> {
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
     pub(crate) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
+        self.lower_bitstring_with_values(segments, &[])
+    }
+
+    /// [`Self::lower_bitstring_expr`] where some segment values are already
+    /// bound: `bound[i]` names the variable holding segment `i`'s value.
+    pub(crate) fn lower_bitstring_with_values(
+        &mut self,
+        segments: &[BitSegment<Expr>],
+        bound: &[Option<String>],
+    ) -> CExpr {
         use crate::codegen::lower::util::{
             resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
         };
 
         let mut segs = Vec::new();
-        for seg in segments {
+        for (idx, seg) in segments.iter().enumerate() {
             // String literal sugar: expand to byte segments
             if let ExprKind::Lit {
                 value: Lit::String(s, kind),
@@ -32,7 +42,10 @@ impl<'a> Lowerer<'a> {
             }
 
             let is_binary = seg.specs.contains(&ast::BitSegSpec::Binary);
-            let value = self.lower_expr_value(&seg.value);
+            let value = match bound.get(idx).cloned().flatten() {
+                Some(var) => CExpr::Var(var),
+                None => self.lower_expr_value(&seg.value),
+            };
 
             if is_binary && seg.size.is_none() {
                 segs.push(CBinSeg::BinaryAll(value));
@@ -53,6 +66,115 @@ impl<'a> Lowerer<'a> {
             });
         }
         CExpr::Binary(segs)
+    }
+
+    /// Lower `receive { Pat -> body, after N -> timeout_body }`.
+    ///
+    /// With `k_var`, the value of the whole expression is passed to that
+    /// continuation instead of returned, and arm bodies (and the timeout)
+    /// that perform effects are CPS-chained into it.
+    pub(crate) fn lower_receive(
+        &mut self,
+        arms: &[ast::Annotated<ast::CaseArm>],
+        after_clause: Option<&(Box<Expr>, Box<Expr>)>,
+        k_var: Option<&str>,
+    ) -> CExpr {
+        let lower_body = |this: &mut Self, body: &Expr| match k_var {
+            Some(k) => this.lower_branch_with_k(body, k),
+            None => this.lower_expr(body),
+        };
+        // Lower arms: same pattern/guard/body as case, but for receive
+        // there is no scrutinee variable to fall through to.
+        let lowered_arms: Vec<CArm> = arms
+            .iter()
+            .map(|annotated| {
+                let arm = &annotated.node;
+                // System message patterns (Down/Exit): match raw Erlang
+                // tuple shapes and convert the reason field.
+                let (pat, reason_wrapper) =
+                    if let Pat::Constructor { name, args, .. } = &arm.pattern {
+                        if beam_interop::is_system_msg(name) && args.len() == 2 {
+                            let (reason_pat, wrapper) =
+                                if let Pat::Var { name: var_name, .. } = &args[1] {
+                                    let raw = self.fresh();
+                                    (CPat::Var(raw.clone()), Some((core_var(var_name), raw)))
+                                } else {
+                                    (
+                                        self.lower_pat(
+                                            &args[1],
+                                            &self.constructor_atoms,
+                                            self.handler_origin_module(),
+                                        ),
+                                        None,
+                                    )
+                                };
+                            let pid_pat = self.lower_pat(
+                                &args[0],
+                                &self.constructor_atoms,
+                                self.handler_origin_module(),
+                            );
+                            let tuple_pat =
+                                beam_interop::build_system_msg_pattern(name, pid_pat, reason_pat);
+                            (tuple_pat, wrapper)
+                        } else {
+                            (
+                                self.lower_pat(
+                                    &arm.pattern,
+                                    &self.constructor_atoms,
+                                    self.handler_origin_module(),
+                                ),
+                                None,
+                            )
+                        }
+                    } else {
+                        (
+                            self.lower_pat(
+                                &arm.pattern,
+                                &self.constructor_atoms,
+                                self.handler_origin_module(),
+                            ),
+                            None,
+                        )
+                    };
+
+                let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
+                let raw_body = lower_body(self, &arm.body);
+                let body = if let Some((user_var, raw_var)) = reason_wrapper {
+                    let ctor_atoms = self.constructor_atoms.clone();
+                    let conversion = beam_interop::build_exit_reason_from_erlang(
+                        &raw_var,
+                        &ctor_atoms,
+                        &mut || self.fresh(),
+                    );
+                    CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
+                } else {
+                    raw_body
+                };
+                CArm { pat, guard, body }
+            })
+            .collect();
+
+        let Some((timeout_expr, timeout_body)) = after_clause else {
+            return CExpr::Receive(
+                lowered_arms,
+                Box::new(CExpr::Lit(CLit::Atom("infinity".into()))),
+                Box::new(CExpr::Lit(CLit::Atom("true".into()))),
+            );
+        };
+        let timeout_body = lower_body(self, timeout_body);
+        // A timeout that performs effects is evaluated first, with the
+        // receive as its continuation.
+        if k_var.is_some() && self.branch_is_effectful(timeout_expr) {
+            let timeout_var = self.fresh();
+            let receive = CExpr::Receive(
+                lowered_arms,
+                Box::new(CExpr::Var(timeout_var.clone())),
+                Box::new(timeout_body),
+            );
+            return self.lower_bind_effectful_expr(timeout_expr, timeout_var, receive);
+        }
+        let timeout = self.lower_expr_value(timeout_expr);
+        CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
     }
 
     /// `resume v` for an already-bound value: call the handler arm's
@@ -409,91 +531,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => {
-                // Lower arms: same pattern/guard/body as case, but for receive
-                // there is no scrutinee variable to fall through to.
-                let lowered_arms: Vec<CArm> = arms
-                    .iter()
-                    .map(|annotated| {
-                        let arm = &annotated.node;
-                        // System message patterns (Down/Exit): match raw Erlang
-                        // tuple shapes and convert the reason field.
-                        let (pat, reason_wrapper) = if let Pat::Constructor { name, args, .. } =
-                            &arm.pattern
-                        {
-                            if beam_interop::is_system_msg(name) && args.len() == 2 {
-                                let (reason_pat, wrapper) =
-                                    if let Pat::Var { name: var_name, .. } = &args[1] {
-                                        let raw = self.fresh();
-                                        (CPat::Var(raw.clone()), Some((core_var(var_name), raw)))
-                                    } else {
-                                        (
-                                            self.lower_pat(
-                                                &args[1],
-                                                &self.constructor_atoms,
-                                                self.handler_origin_module(),
-                                            ),
-                                            None,
-                                        )
-                                    };
-                                let pid_pat = self.lower_pat(
-                                    &args[0],
-                                    &self.constructor_atoms,
-                                    self.handler_origin_module(),
-                                );
-                                let tuple_pat = beam_interop::build_system_msg_pattern(
-                                    name, pid_pat, reason_pat,
-                                );
-                                (tuple_pat, wrapper)
-                            } else {
-                                (
-                                    self.lower_pat(
-                                        &arm.pattern,
-                                        &self.constructor_atoms,
-                                        self.handler_origin_module(),
-                                    ),
-                                    None,
-                                )
-                            }
-                        } else {
-                            (
-                                self.lower_pat(
-                                    &arm.pattern,
-                                    &self.constructor_atoms,
-                                    self.handler_origin_module(),
-                                ),
-                                None,
-                            )
-                        };
-
-                        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
-                        let raw_body = self.lower_expr(&arm.body);
-                        let body = if let Some((user_var, raw_var)) = reason_wrapper {
-                            let ctor_atoms = self.constructor_atoms.clone();
-                            let conversion = beam_interop::build_exit_reason_from_erlang(
-                                &raw_var,
-                                &ctor_atoms,
-                                &mut || self.fresh(),
-                            );
-                            CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
-                        } else {
-                            raw_body
-                        };
-                        CArm { pat, guard, body }
-                    })
-                    .collect();
-
-                let (timeout, timeout_body) = if let Some((t, b)) = after_clause {
-                    (self.lower_expr_value(t), self.lower_expr(b))
-                } else {
-                    (
-                        CExpr::Lit(CLit::Atom("infinity".into())),
-                        CExpr::Lit(CLit::Atom("true".into())),
-                    )
-                };
-
-                CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
-            }
+            } => self.lower_receive(arms, after_clause.as_ref(), None),
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
@@ -690,7 +728,7 @@ impl<'a> Lowerer<'a> {
                 ..
             } => {
                 let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
-                self.lower_do(bindings, success, &else_arms)
+                self.lower_do(bindings, success, &else_arms, None)
             }
 
             // --- Elaboration-only constructs ---

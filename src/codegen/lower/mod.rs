@@ -703,6 +703,30 @@ impl<'a> Lowerer<'a> {
                     || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
             }
             ExprKind::Resume { value } => self.branch_is_effectful(value),
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                bindings.iter().any(|(_, e)| self.branch_is_effectful(e))
+                    || self.branch_is_effectful(success)
+                    || else_arms
+                        .iter()
+                        .any(|arm| self.branch_is_effectful(&arm.node.body))
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                arms.iter()
+                    .any(|arm| self.branch_is_effectful(&arm.node.body))
+                    || after_clause.as_ref().is_some_and(|(timeout, body)| {
+                        self.branch_is_effectful(timeout) || self.branch_is_effectful(body)
+                    })
+            }
+            ExprKind::BitString { segments } => segments
+                .iter()
+                .any(|seg| self.branch_is_effectful(&seg.value)),
             // A `with` with an *inline, abort-only* handler over effectful
             // inner work needs CPS-aware routing in enclosing contexts so
             // the handler closure receives the host's return K and the
