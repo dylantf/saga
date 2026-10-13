@@ -745,17 +745,10 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body)))
     }
 
-    /// Apply the function value `callee` to already-evaluated arguments at a
-    /// pure-typed call site: a plain `apply` when the callee's arity is
-    /// statically known to equal the argument count, the arity-checked call
-    /// otherwise.
-    pub(super) fn lower_pure_apply_to_vars(&mut self, callee: &Expr, arg_vars: &[String]) -> CExpr {
-        let func_ce = self.lower_expr(callee);
-        self.apply_function_value(func_ce, arg_vars)
-    }
-
-    /// Like [`Self::lower_pure_apply_to_vars`], for a caller that has already
-    /// lowered the callee to `func_ce`.
+    /// Apply the already-lowered function value `func_ce` to
+    /// already-evaluated arguments at a pure-typed call site: a plain `apply`
+    /// when its arity is statically known to equal the argument count, the
+    /// arity-checked call otherwise.
     pub(super) fn apply_function_value(&mut self, func_ce: CExpr, arg_vars: &[String]) -> CExpr {
         if Self::callee_has_exact_arity(&func_ce, arg_vars.len()) {
             return CExpr::Apply(

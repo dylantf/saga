@@ -32,23 +32,6 @@ impl Lowerer<'_> {
         }
     }
 
-    pub(super) fn lower_intrinsic_values(
-        &mut self,
-        intrinsic: crate::intrinsics::IntrinsicId,
-        args: Vec<CExpr>,
-    ) -> Option<CExpr> {
-        match intrinsic {
-            crate::intrinsics::IntrinsicId::PrintStdout => {
-                self.lower_builtin_print_values(args, false, false)
-            }
-            crate::intrinsics::IntrinsicId::PrintStderr => {
-                self.lower_builtin_print_values(args, true, false)
-            }
-            crate::intrinsics::IntrinsicId::Dbg => self.lower_builtin_dbg_values(args),
-            crate::intrinsics::IntrinsicId::CatchPanic => None,
-        }
-    }
-
     /// Lower print/println/eprint/eprintln to io:format.
     /// `x` is always a String.
     pub(super) fn lower_builtin_print(

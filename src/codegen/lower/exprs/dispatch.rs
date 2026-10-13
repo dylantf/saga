@@ -296,7 +296,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::UnaryMinus { expr, .. } => {
                 let v = self.fresh();
-                let ce = self.lower_expr_value(expr);
+                let ce = self.lower_operand(expr, "unary minus");
                 CExpr::Let(
                     v.clone(),
                     Box::new(ce),
@@ -315,7 +315,7 @@ impl<'a> Lowerer<'a> {
                 ..
             } => {
                 let cond_var = self.fresh();
-                let cond_ce = self.lower_expr_value(cond);
+                let cond_ce = self.lower_operand(cond, "if");
                 let then_ce = self.lower_expr(then_branch);
                 let else_ce = self.lower_expr(else_branch);
                 CExpr::Let(
@@ -520,7 +520,7 @@ impl<'a> Lowerer<'a> {
                 scrutinee, arms, ..
             } => {
                 let scrut_var = self.fresh();
-                let scrut_ce = self.lower_expr_value(scrutinee);
+                let scrut_ce = self.lower_operand(scrutinee, "case");
                 let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
                 CExpr::Let(
                     scrut_var.clone(),
@@ -593,7 +593,7 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in RecordCreate");
-                    let ce = self.lower_expr_value(e);
+                    let ce = self.lower_operand(e, "a record literal");
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -628,7 +628,7 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in AnonRecordCreate");
-                    let ce = self.lower_expr_value(e);
+                    let ce = self.lower_operand(e, "a record literal");
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -657,7 +657,7 @@ impl<'a> Lowerer<'a> {
                         )
                     }) as i64;
                 let v = self.fresh();
-                let ce = self.lower_expr_value(expr);
+                let ce = self.lower_operand(expr, "field access");
                 CExpr::Let(
                     v.clone(),
                     Box::new(ce),
@@ -675,7 +675,7 @@ impl<'a> Lowerer<'a> {
                 record_name: resolved_name,
             } => {
                 let rec_var = self.fresh();
-                let rec_ce = self.lower_expr_value(record);
+                let rec_ce = self.lower_operand(record, "a record update");
                 let order = resolved_name
                     .as_deref()
                     .and_then(|rname| self.record_fields.get(rname))
@@ -702,7 +702,7 @@ impl<'a> Lowerer<'a> {
                     let v = self.fresh();
                     if let Some(new_expr) = field_map.get(field_name.as_str()) {
                         pat_vars.push(None);
-                        let ce = self.lower_expr_value(new_expr);
+                        let ce = self.lower_operand(new_expr, "a record update");
                         bindings.push((v.clone(), ce));
                     } else {
                         // Untouched field: bound directly by the destructure.
@@ -790,7 +790,7 @@ impl<'a> Lowerer<'a> {
                 let mut bindings = Vec::new();
                 for arg in args {
                     let v = self.fresh();
-                    let ce = self.lower_expr_value(arg);
+                    let ce = self.lower_operand(arg, "a foreign call");
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }

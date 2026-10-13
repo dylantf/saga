@@ -5,15 +5,13 @@
 //! - `return_k`  — continuation / installed-return-k machinery and tail lowering
 //! - `cases`     — `case` expression and pattern-arm lowering
 //! - `values`    — constructors, tuples, binops, field/record access, destructuring
-//! - `blocks`    — block and `*_with_k` CPS lowering
+//! - `blocks`    — block lowering, with and without a continuation
 //! - `handlers`  — `do`-notation and handler-expression lowering
 //! - `dispatch`  — bitstrings and the top-level `lower_expr` dispatch
 //!
-//! `CpsSlot` and `is_guard_safe` are shared here and reach the submodules via
-//! `use super::*`.
+//! `is_guard_safe` is shared here and reaches the submodules via `use super::*`.
 
 use crate::ast::{Expr, ExprKind};
-use crate::codegen::cerl::CExpr;
 
 mod blocks;
 mod cases;
@@ -21,19 +19,6 @@ mod dispatch;
 mod handlers;
 mod return_k;
 mod values;
-
-/// One "hole" in a composite expression being assembled by
-/// [`Lowerer::lower_with_cps_slots`]. The slot kind controls whether the
-/// value comes from a pre-lowered CExpr or from CPS-chained lowering of a
-/// source expression that may be effectful.
-pub(crate) enum CpsSlot<'e> {
-    /// Already-lowered value. Bound to a plain `let`. Use for values
-    /// computed by the caller (e.g. `element(idx, rec_var)`).
-    Pure(CExpr),
-    /// Source expression to lower. CPS-chained if effectful; otherwise
-    /// lowered as a value.
-    Expr { expr: &'e Expr },
-}
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.

@@ -1,4 +1,3 @@
-use super::*;
 use crate::ast::{Expr, ExprKind, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::lower::util::*;
@@ -371,7 +370,8 @@ impl<'a> Lowerer<'a> {
                         },
                     ],
                 );
-                self.lower_bind_expr_with_cps(cond, cond_var, case)
+                let cond_ce = self.lower_operand(cond, "if");
+                CExpr::Let(cond_var, Box::new(cond_ce), Box::new(case))
             }
             ExprKind::Case {
                 scrutinee, arms, ..
@@ -399,7 +399,8 @@ impl<'a> Lowerer<'a> {
                     })
                     .collect();
                 let case = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms_ce);
-                self.lower_bind_expr_with_cps(scrutinee, scrut_var, case)
+                let scrut_ce = self.lower_operand(scrutinee, "case");
+                CExpr::Let(scrut_var, Box::new(scrut_ce), Box::new(case))
             }
             ExprKind::Block { stmts, .. } => {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
@@ -410,36 +411,6 @@ impl<'a> Lowerer<'a> {
                 handler,
                 Some(CExpr::Var(k_var.to_string())),
             ),
-            ExprKind::RecordCreate {
-                name,
-                fields,
-                record_name,
-            } => self.lower_record_create_with_k(
-                Some(name.as_str()),
-                record_name.as_deref(),
-                expr.id,
-                fields,
-                k_var,
-            ),
-            ExprKind::AnonRecordCreate { fields } => {
-                self.lower_record_create_with_k(None, None, expr.id, fields, k_var)
-            }
-            ExprKind::Tuple { elements, .. }
-                if elements.iter().any(|e| {
-                    self.expr_is_effectful_call(e) || self.has_nested_effectful_expr(e)
-                }) =>
-            {
-                self.lower_tuple_with_k(elements, k_var)
-            }
-            ExprKind::BinOp {
-                op, left, right, ..
-            } if self.expr_is_effectful_call(left)
-                || self.has_nested_effectful_expr(left)
-                || self.expr_is_effectful_call(right)
-                || self.has_nested_effectful_expr(right) =>
-            {
-                self.lower_binop_with_k(op, left, right, Some(&expr.span), k_var)
-            }
             ExprKind::Do {
                 bindings,
                 success,
@@ -452,30 +423,6 @@ impl<'a> Lowerer<'a> {
             ExprKind::Receive {
                 arms, after_clause, ..
             } => self.lower_receive(arms, after_clause.as_ref(), Some(k_var)),
-            ExprKind::BitString { segments }
-                if segments
-                    .iter()
-                    .any(|seg| self.branch_is_effectful(&seg.value)) =>
-            {
-                // Segment values that perform effects are bound first, left
-                // to right, with building the bitstring as their continuation.
-                let effectful: Vec<usize> = (0..segments.len())
-                    .filter(|&i| self.branch_is_effectful(&segments[i].value))
-                    .collect();
-                let slots: Vec<CpsSlot<'_>> = effectful
-                    .iter()
-                    .map(|&i| CpsSlot::Expr {
-                        expr: &segments[i].value,
-                    })
-                    .collect();
-                self.lower_with_cps_slots(slots, k_var, |this, vars| {
-                    let mut bound: Vec<Option<String>> = vec![None; segments.len()];
-                    for (&i, var) in effectful.iter().zip(vars) {
-                        bound[i] = Some(var.clone());
-                    }
-                    this.lower_bitstring_with_values(segments, &bound)
-                })
-            }
             ExprKind::Resume { value } if self.branch_is_effectful(value) => {
                 let v = self.fresh();
                 let result = self.fresh();
@@ -490,207 +437,10 @@ impl<'a> Lowerer<'a> {
                 );
                 self.lower_bind_effectful_expr(value, v, body)
             }
-            ExprKind::UnaryMinus { expr: operand } if self.branch_is_effectful(operand) => self
-                .lower_with_cps_slots(vec![CpsSlot::Expr { expr: operand }], k_var, |_, vars| {
-                    cerl_call(
-                        "erlang",
-                        "-",
-                        vec![CExpr::Lit(CLit::Int(0)), CExpr::Var(vars[0].clone())],
-                    )
-                }),
-            ExprKind::FieldAccess {
-                expr: rec_expr,
-                field,
-                record_name: resolved_name,
-            } if self.expr_is_effectful_call(rec_expr)
-                || self.has_nested_effectful_expr(rec_expr) =>
-            {
-                let idx = resolved_name
-                    .as_deref()
-                    .and_then(|rname| self.record_fields.get(rname))
-                    .and_then(|fields| fields.iter().position(|f| f == field))
-                    .map(|pos| pos + 2)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "codegen: could not resolve record type for field access '.{}' at node {:?} (record_name={:?})",
-                            field, rec_expr.id, resolved_name
-                        )
-                    }) as i64;
-                self.lower_field_access_with_k(rec_expr, idx, k_var)
-            }
-            ExprKind::RecordUpdate {
-                record: rec_expr,
-                fields,
-                record_name: resolved_name,
-            } if self.expr_is_effectful_call(rec_expr)
-                || self.has_nested_effectful_expr(rec_expr)
-                || fields.iter().any(|(_, _, e)| {
-                    self.expr_is_effectful_call(e) || self.has_nested_effectful_expr(e)
-                }) =>
-            {
-                let order = resolved_name
-                    .as_deref()
-                    .and_then(|rname| self.record_fields.get(rname))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "codegen: could not resolve record type for record update at node {:?} (record_name={:?})",
-                            expr.id, resolved_name
-                        )
-                    });
-                self.lower_record_update_with_k(rec_expr, order, fields, k_var)
-            }
-            _ => {
-                if let Some((head, ctor_name, args)) =
-                    crate::codegen::lower::util::collect_ctor_call_with_head(expr)
-                    && args.iter().any(|a| {
-                        self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
-                    })
-                {
-                    let resolved_ctor = self.resolved_constructor_name_for(head.id, ctor_name);
-                    let origin = self
-                        .constructor_origin_module_for(head.id, &resolved_ctor)
-                        .map(str::to_string);
-                    return self.lower_ctor_with_k_origin(
-                        &resolved_ctor,
-                        args,
-                        k_var,
-                        origin.as_deref(),
-                    );
-                }
-                // Non-constructor App whose outer call is pure but whose
-                // args contain effectful sub-calls — e.g. `from (decode x)`
-                // where `from` is pure and `decode x` is effectful. Without
-                // this branch the inner effectful call would get lowered as
-                // a plain value (no handler-arg threading), since the
-                // value-mode path never receives a return continuation to
-                // wrap around it. CPS-chain each argument via slot bindings
-                // so effectful args run in CPS with handlers, and the
-                // pure outer call assembles them through `k_var`.
-                if matches!(expr.kind, ExprKind::App { .. }) && !self.expr_is_effectful_call(expr) {
-                    let mut current: &Expr = expr;
-                    let mut args_rev: Vec<&Expr> = Vec::new();
-                    while let ExprKind::App { func, arg, .. } = &current.kind {
-                        args_rev.push(arg);
-                        current = func;
-                    }
-                    args_rev.reverse();
-                    let callee = current;
-                    let any_eff = args_rev.iter().any(|a| {
-                        self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
-                    });
-                    // The function itself may be produced effectfully:
-                    // `(if g n == 0 then f else h) x`. It is evaluated
-                    // first, with the arguments and the call as its
-                    // continuation.
-                    if self.expr_is_effectful_call(callee) || self.has_nested_effectful_expr(callee)
-                    {
-                        let slots: Vec<CpsSlot<'_>> = std::iter::once(callee)
-                            .chain(args_rev.iter().copied())
-                            .map(|expr| CpsSlot::Expr { expr })
-                            .collect();
-                        return self.lower_with_cps_slots(slots, k_var, |this, vars| {
-                            this.apply_function_value(CExpr::Var(vars[0].clone()), &vars[1..])
-                        });
-                    }
-                    if any_eff {
-                        let slots: Vec<CpsSlot<'_>> =
-                            args_rev.iter().map(|a| CpsSlot::Expr { expr: a }).collect();
-                        return self.lower_with_cps_slots(slots, k_var, move |this, arg_vars| {
-                            if let Some(resolved) = this.resolved.get(&callee.id).cloned()
-                                && let crate::codegen::resolve::ResolvedCodegenKind::Intrinsic {
-                                    id,
-                                    ..
-                                } = resolved.kind
-                                && let Some(ce) = this.lower_intrinsic_values(
-                                    id,
-                                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                                )
-                            {
-                                return ce;
-                            }
-                            this.lower_pure_apply_to_vars(callee, arg_vars)
-                        });
-                    }
-                }
-                self.lower_value_to_k(expr, k_var)
-            }
+            // Everything else is evaluated to a value: effect normalization
+            // has left nothing in its operands that needs a continuation.
+            _ => self.lower_value_to_k(expr, k_var),
         }
-    }
-
-    /// Lower a record-creation expression and apply `k_var` to the constructed
-    /// tuple. Effectful field values are CPS-chained so an aborting handler
-    /// skips the rest of the construction (and `k_var`) instead of leaking its
-    /// abort tuple into a record slot.
-    pub(crate) fn lower_record_create_with_k(
-        &mut self,
-        name: Option<&str>,
-        record_name: Option<&str>,
-        node_id: crate::ast::NodeId,
-        fields: &[(String, crate::token::Span, Expr)],
-        k_var: &str,
-    ) -> CExpr {
-        use std::collections::HashMap;
-
-        let order: Vec<String> = match name {
-            // Must use the declared field order, not source order: a record
-            // literal that lists its fields in a different order than the type
-            // declares would otherwise build a tuple with values in the wrong
-            // slots — a silent miscompile. Fail loudly if the type is unresolvable.
-            Some(rname) => self
-                .record_create_field_order(record_name, node_id, rname)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "codegen: cannot resolve field layout for record `{rname}` \
-                         (node {node_id:?}, module `{}`). The record's type could not \
-                         be determined here, so its tuple layout is unknown.",
-                        self.current_semantic_module_name(),
-                    )
-                }),
-            None => {
-                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                let mut sorted: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-                sorted.sort();
-                sorted
-            }
-        };
-        let field_map: HashMap<&str, &Expr> =
-            fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-
-        let tag = match name {
-            Some(rname) => {
-                let ctor_name = self
-                    .current_record_type_name(node_id)
-                    .and_then(|name| self.canonical_constructor_key_for(name))
-                    .unwrap_or_else(|| self.resolved_constructor_name_for(node_id, rname));
-                crate::codegen::lower::util::mangle_ctor_atom(
-                    &ctor_name,
-                    &self.constructor_atoms,
-                    self.handler_origin_module(),
-                )
-            }
-            None => {
-                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                crate::ast::anon_record_tag(&names)
-            }
-        };
-
-        let slots: Vec<CpsSlot<'_>> = order
-            .iter()
-            .map(|field_name| CpsSlot::Expr {
-                expr: field_map
-                    .get(field_name.as_str())
-                    .copied()
-                    .expect("field missing in record-create"),
-            })
-            .collect();
-
-        self.lower_with_cps_slots(slots, k_var, |_, vars| {
-            let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-            elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-            CExpr::Tuple(elems)
-        })
     }
 
     /// Lower a branch expression with an outer continuation K.

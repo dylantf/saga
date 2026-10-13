@@ -215,7 +215,7 @@ impl<'a> Lowerer<'a> {
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
         for elem in elems {
             let var = self.fresh();
-            let val = self.lower_expr_value(elem);
+            let val = self.lower_operand(elem, "a tuple");
             vars.push(var.clone());
             bindings.push((var, val));
         }

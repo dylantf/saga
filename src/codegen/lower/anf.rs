@@ -17,6 +17,7 @@ use std::borrow::Cow;
 use super::Lowerer;
 use super::util::collect_effect_call;
 use crate::ast::{Expr, ExprKind};
+use crate::codegen::cerl::CExpr;
 use crate::codegen::effect_position::{self, Violation};
 use crate::codegen::normalize;
 
@@ -74,6 +75,12 @@ impl<'a> Lowerer<'a> {
                 self.current_function,
             );
         }
+    }
+
+    /// Lower an operand of `operand_of` as a plain value.
+    pub(super) fn lower_operand(&mut self, expr: &Expr, operand_of: &str) -> CExpr {
+        self.assert_operand(expr, operand_of);
+        self.lower_expr_value(expr)
     }
 
     /// The body the lowerer is about to lower, in effect-normal form.
