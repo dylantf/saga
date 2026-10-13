@@ -31,7 +31,7 @@ Isolates the positional lookup of an operation in a closed row: three
 `element` loads today, against one map get after the change. This is the gate.
 
 `loop` is a self-recursive named function declared `needs {Counter, Log,
-Trace}`, ten million iterations, one `tick!` each. The `Counter` handler comes
+Trace}`, one hundred million iterations, one `tick!` each. The `Counter` handler comes
 from a handler factory that captures a run-time value, and is installed in
 `main` and not in `loop`, so no static fast path applies. `Counter` sorts
 first, so it is slot 1 of a three-entry frame.
@@ -77,7 +77,7 @@ recursive call, so the lookup is the only evidence work in the loop.
 ## deep_call_chain.saga
 
 Isolates reframing at calls. No operation is performed in the hot path; the
-five operations run once after the last iteration. Two million iterations of
+five operations run once after the last iteration. Five million iterations of
 `drive`, each calling a chain of six named functions whose rows alternate
 between closed rows narrower than the caller's and open rows.
 
@@ -108,3 +108,22 @@ a closed row to an open row with an empty prefix does not reframe.
 
 The compiler warns that `level1`, `level3` and `level5` declare effects they
 never use. That is intended: the declared rows are what force the reframing.
+
+## Timing
+
+Each program prints `elapsed_ms`, measured inside the VM around the workload,
+so compile time and VM start are excluded. Compare that number, not the wall
+time of `saga run`: the workloads take one to two seconds and start-up noise
+is of the same order.
+
+Baseline on the positional tuple representation (commit `0d35fea3`, one
+machine, seven runs each, while other builds were running, so treat as rough):
+
+| Benchmark | Median `elapsed_ms` |
+|-----------|---------------------|
+| `closed_row_hot_op` | 836 |
+| `open_row_hot_op` | 1724 |
+| `deep_call_chain` | 2280 |
+
+Re-measure the baseline alongside any change being compared; do not compare
+against these numbers from a different machine or a different day.
