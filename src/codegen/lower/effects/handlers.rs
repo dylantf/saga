@@ -263,32 +263,46 @@ impl<'a> Lowerer<'a> {
         Some(vec![self.handler_defs.get(&canonical)?])
     }
 
-    /// Whether a `with` using `handler` may be given the continuation of the
-    /// whole `with` expression (the rest of the enclosing body) as the
-    /// return continuation of its handled computation.
+    /// The arms a `with` using `handler` installs, when the handler is known
+    /// where the `with` is lowered.
+    fn static_with_arms<'h>(&'h self, handler: &'h Handler) -> Option<Vec<&'h HandlerArm>> {
+        match handler {
+            Handler::Inline { .. } => Some(handler.inline_arms().collect()),
+            Handler::Named(reference) => Some(
+                self.static_named_handler_infos(reference)?
+                    .into_iter()
+                    .flat_map(|info| info.arms.iter())
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Whether a `with` using `handler` keeps its handled computation on the
+    /// Erlang stack instead of taking a meta continuation: an arm has a
+    /// `finally` block, whose cleanup must see an abort from further out
+    /// return, or the handler is only known at runtime and may have one.
+    pub(crate) fn with_handler_keeps_stack(&self, handler: &Handler) -> bool {
+        self.static_with_arms(handler)
+            .is_none_or(|arms| arms.iter().any(|arm| arm.finally_block.is_some()))
+    }
+
+    /// Whether the general lowering of a `with` using `handler` may be fused:
+    /// the continuation of the whole `with` (the rest of the enclosing body)
+    /// becomes the return continuation of its handled computation.
     ///
-    /// That is only right when no arm uses the value `resume` returns: the
-    /// continuation an arm resumes then ends in the enclosing body's rest,
-    /// so `resume` returns the answer of everything after the `with`, not
-    /// the value of the `with`. Arms that never resume, and arms whose every
-    /// `resume` is in tail position, never look at that value. An arm that
-    /// does (`let r = resume x`, `resume a + resume b`), an arm with a
-    /// `finally` block (cleanup must run when the `with` is done, not after
-    /// the rest of the body) and a handler value only known at runtime keep
-    /// the handled computation delimited.
+    /// That is equivalent only when no arm looks at the value `resume`
+    /// returns, which would then be the answer of everything after the
+    /// `with` and not the value of the `with`: arms that never resume, and
+    /// arms whose every `resume` is in tail position.
     pub(crate) fn with_handler_chains_continuation(&self, handler: &Handler) -> bool {
         use crate::codegen::handler_analysis::{ResumptionKind, classify_body};
-        let arm_chains = |arm: &HandlerArm| {
-            arm.finally_block.is_none()
-                && (!arm.body.contains_resume()
-                    || classify_body(&arm.body) == ResumptionKind::TailResumptive)
-        };
-        match handler {
-            Handler::Inline { .. } => handler.inline_arms().all(arm_chains),
-            Handler::Named(reference) => self
-                .static_named_handler_infos(reference)
-                .is_some_and(|infos| infos.iter().all(|info| info.arms.iter().all(arm_chains))),
-        }
+        !self.with_handler_keeps_stack(handler)
+            && self.static_with_arms(handler).is_some_and(|arms| {
+                arms.iter().all(|arm| {
+                    !arm.body.contains_resume()
+                        || classify_body(&arm.body) == ResumptionKind::TailResumptive
+                })
+            })
     }
 
     pub(crate) fn effect_for_handler_arm(

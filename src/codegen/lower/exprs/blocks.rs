@@ -100,7 +100,7 @@ impl<'a> Lowerer<'a> {
                         params_ce.push("_ReturnK".to_string());
                     }
                     let body = clauses[0].2;
-                    let body_ce = self.lower_tail(body, effect_return_k.clone());
+                    let body_ce = self.lower_fun_body(body, effect_return_k.clone());
                     CExpr::Fun(params_ce, Box::new(body_ce))
                 } else {
                     // Multi-clause: build case expression over params
@@ -132,7 +132,7 @@ impl<'a> Lowerer<'a> {
                                 )
                             };
                             let guard_ce = guard.as_ref().map(|g| self.lower_guard(g));
-                            let body_ce = self.lower_tail(body, effect_return_k.clone());
+                            let body_ce = self.lower_fun_body(body, effect_return_k.clone());
                             CArm {
                                 pat,
                                 guard: guard_ce,

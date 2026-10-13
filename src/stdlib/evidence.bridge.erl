@@ -1,7 +1,8 @@
 -module(std_evidence_bridge).
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
          select_evidence/2, reframe_evidence/3,
-         append_tail/3]).
+         append_tail/3,
+         lift_evidence/1, bind/2, mbind/2, run/1]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -118,3 +119,67 @@ entry_position(Evidence, Tag, I, N) ->
         {Tag, _} -> {ok, I};
         _ -> entry_position(Evidence, Tag, I + 1, N)
     end.
+
+
+%% ---------------------------------------------------------------------------
+%% The continuation of a `with` (see docs/effect-implementation.md).
+%%
+%% Inside a `with`, CPS code returns a plain value or a suspension
+%% {'$saga_meta', M}: an operation handled further out was performed, and M
+%% takes the meta continuation, everything that happens once the handled
+%% computation has a value (the code after `resume` in the arms that resumed,
+%% then the code after the `with`).
+
+%% The frame a `with` inherits, with every operation suspending instead of
+%% calling its handler. Tags and positions are unchanged. This is the only
+%% function that knows the frame's representation.
+lift_evidence(Evidence) ->
+    list_to_tuple([{Tag, list_to_tuple([lift_op(Op) || Op <- tuple_to_list(Ops)])}
+                   || {Tag, Ops} <- tuple_to_list(Evidence)]).
+
+%% An operation closure takes its arguments and then the continuation. Once
+%% the meta continuation is known, the handler gets a continuation that runs
+%% the rest of the handled computation and then the meta continuation.
+%%
+%% An operation given a callback (a tagged closure) is not suspended: its
+%% handler's arm runs the callback and then resumes, and the meta continuation
+%% current at that resume cannot be passed through the arm's code. It is
+%% performed where it stands, as the handled computation would be by `run'.
+lift_op(Op) ->
+    {arity, N} = erlang:fun_info(Op, arity),
+    nary(N, Op, fun(All) ->
+        {Args, [K]} = lists:split(N - 1, All),
+        case lists:any(fun({'$saga_cps', _}) -> true; (_) -> false end, Args) of
+            true -> erlang:apply(Op, All);
+            false ->
+                {'$saga_meta',
+                 fun(Mk) -> erlang:apply(Op, Args ++ [fun(V) -> bind(K(V), Mk) end]) end}
+        end
+    end).
+
+%% A fun of N arguments that passes them to Body as a list. An operation of
+%% more arguments is left as it is.
+nary(1, _, Body) -> fun(A) -> Body([A]) end;
+nary(2, _, Body) -> fun(A, B) -> Body([A, B]) end;
+nary(3, _, Body) -> fun(A, B, C) -> Body([A, B, C]) end;
+nary(4, _, Body) -> fun(A, B, C, D) -> Body([A, B, C, D]) end;
+nary(5, _, Body) -> fun(A, B, C, D, E) -> Body([A, B, C, D, E]) end;
+nary(6, _, Body) -> fun(A, B, C, D, E, F) -> Body([A, B, C, D, E, F]) end;
+nary(7, _, Body) -> fun(A, B, C, D, E, F, G) -> Body([A, B, C, D, E, F, G]) end;
+nary(8, _, Body) -> fun(A, B, C, D, E, F, G, H) -> Body([A, B, C, D, E, F, G, H]) end;
+nary(_, Op, _) -> Op.
+
+%% The value of a handled computation goes to the continuation of its `with`.
+bind({'$saga_meta', M}, Mk) -> M(Mk);
+bind(Value, Mk) -> Mk(Value).
+
+%% `let r = resume x; F(r)' in a handler arm: F runs on the value of the
+%% handled computation, before the continuation of the `with'.
+mbind({'$saga_meta', M}, F) ->
+    {'$saga_meta', fun(Mk) -> M(fun(Value) -> bind(F(Value), Mk) end) end};
+mbind(Value, F) -> F(Value).
+
+%% `bind' with the identity continuation, where the caller is not CPS code
+%% and needs a plain value. A handler further out that aborts returns here.
+run({'$saga_meta', M}) -> run(M(fun(Value) -> Value end));
+run(Value) -> Value.

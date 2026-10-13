@@ -23,6 +23,18 @@ impl<'a> Lowerer<'a> {
             return rewritten;
         }
 
+        // One lowering, `bind(handled, k)` (see "The Continuation of a
+        // `with`" in docs/effect-implementation.md): the handled computation
+        // returns to the `with`, and the operations of the inherited frame
+        // are lifted so that they capture `k` as a meta continuation. It is
+        // fused when no arm needs the value of the handled computation back
+        // (`chains`: `k` goes into the handled computation and the arms that
+        // abort, and nothing is lifted). A handler that keeps the stack is
+        // the exception: its handled computation is run to a plain value.
+        let keeps_stack = self.with_handler_keeps_stack(handler);
+        let general = !keeps_stack && !self.with_handler_chains_continuation(handler);
+        let fused_k = if general { None } else { inherited_return_k.clone() };
+
         let normalized = self.normalize_with_handler(handler);
         let (inline_arms, explicit_return_clause) = match &normalized {
             WithHandlerLayer::Named { .. } => (Vec::new(), None),
@@ -151,6 +163,16 @@ impl<'a> Lowerer<'a> {
         // shape — see `evidence::build_evidence_entry`); `op_vars` is built
         // from `handler_ops`, which is already op-sorted.
         let saved_evidence = self.current_evidence.clone();
+        // The lifted frame has the inherited one's tags and layout. The
+        // handled computation and the arms both see it.
+        let lifted_evidence = saved_evidence.as_ref().filter(|_| general).map(|frame| {
+            let lifted = evidence::lift_evidence(CExpr::Var(frame.var.clone()));
+            (EvidenceFrame::new(self.fresh(), frame.abi.clone()), lifted)
+        });
+        let inherited_evidence = match &lifted_evidence {
+            Some((frame, _)) => Some(frame.clone()),
+            None => saved_evidence.clone(),
+        };
         let (evidence_binding, new_evidence_var) = {
             let mut effect_to_ops: std::collections::BTreeMap<String, Vec<&str>> =
                 std::collections::BTreeMap::new();
@@ -173,11 +195,11 @@ impl<'a> Lowerer<'a> {
             // bound. Non-dynamic withs install handlers that depend only on
             // outer-scope values, so their evidence binding can safely live
             // at the with boundary.
-            let mut acc = match &saved_evidence {
+            let mut acc = match &inherited_evidence {
                 Some(ctx) => CExpr::Var(ctx.var.clone()),
                 None => CExpr::Tuple(Vec::new()),
             };
-            let mut new_abi = saved_evidence
+            let mut new_abi = inherited_evidence
                 .as_ref()
                 .map(|frame| frame.abi.clone())
                 .unwrap_or_default();
@@ -229,17 +251,24 @@ impl<'a> Lowerer<'a> {
         };
         let (return_k_lambda, outer_return_k) = match (static_return_clause, &named_item) {
             (Some((ret, source_module)), _) => (
-                Some(self.build_return_lambda(
-                    &ret,
-                    source_module.as_deref(),
-                    inherited_return_k.clone(),
-                )),
+                Some(self.build_return_lambda(&ret, source_module.as_deref(), fused_k.clone())),
                 None,
             ),
-            (None, Some(item)) => (self.named_return_lambda(item), inherited_return_k.clone()),
-            (None, None) => (None, inherited_return_k.clone()),
+            (None, Some(item)) => (self.named_return_lambda(item), fused_k.clone()),
+            (None, None) => (None, fused_k.clone()),
         };
         let result = self.lower_handled_inner_expr(expr, return_k_lambda, outer_return_k);
+        // With no continuation the value of the `with` is returned: the
+        // continuation is the identity. Nothing suspends unless a frame was
+        // lifted.
+        let result = match &inherited_return_k {
+            Some(k) if general => evidence::meta_bind(result, k.clone()),
+            None if general && lifted_evidence.is_some() => {
+                evidence::meta_bind(result, self.identity_return_lambda())
+            }
+            None if keeps_stack => evidence::meta_run(result),
+            _ => result,
+        };
 
         // Handler arm bodies must see the *outer* evidence, not the new one
         // we just installed for the body of `with`. A re-perform of the same
@@ -247,7 +276,7 @@ impl<'a> Lowerer<'a> {
         // stack; if the arm body's effectful calls picked up the new evidence,
         // they'd recurse into the just-installed entry instead.
         let saved_evidence_for_arms =
-            std::mem::replace(&mut self.current_evidence, saved_evidence.clone());
+            std::mem::replace(&mut self.current_evidence, inherited_evidence);
 
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
@@ -261,10 +290,8 @@ impl<'a> Lowerer<'a> {
         //
         // Thread the with's outer K into abort-handler-arm bodies so their
         // terminal value flows through the host context's CPS chain.
-        let saved_handler_inherited_k = std::mem::replace(
-            &mut self.current_handler_inherited_k,
-            inherited_return_k.clone(),
-        );
+        let saved_handler_inherited_k =
+            std::mem::replace(&mut self.current_handler_inherited_k, fused_k);
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
@@ -366,7 +393,16 @@ impl<'a> Lowerer<'a> {
             handler_bindings.push(evidence_binding);
         }
 
-        self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings)
+        let attached =
+            self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings);
+        let mut used = HashSet::new();
+        Self::collect_var_refs(&attached, &mut used);
+        match lifted_evidence {
+            Some((frame, lifted)) if used.contains(&frame.var) => {
+                CExpr::Let(frame.var, Box::new(lifted), Box::new(attached))
+            }
+            _ => attached,
+        }
     }
 
     /// If a nested `with` chain uses handler values bound inside the wrapped
@@ -636,11 +672,11 @@ impl<'a> Lowerer<'a> {
         // are in scope via the param bindings above.
         if let (Some(fb), false) = (&arm.finally_block, has_resume) {
             let fb = &*self.effect_normal_body(fb, "finally block");
-            let cleanup_ce = self.lower_expr(fb);
+            let cleanup_ce = evidence::meta_run(self.lower_expr(fb));
             let result_var = self.fresh();
             body_ce = CExpr::Let(
                 result_var.clone(),
-                Box::new(body_ce),
+                Box::new(evidence::meta_run(body_ce)),
                 Box::new(CExpr::Let(
                     "_".to_string(),
                     Box::new(cleanup_ce),
@@ -748,14 +784,23 @@ impl<'a> Lowerer<'a> {
                 .finally_block
                 .as_ref()
                 .map(|fb| self.effect_normal_body(fb, "finally block").into_owned());
+            // As for a single arm: one that resumes reaches the rest through
+            // its own continuation, not the inherited one.
+            let saved_inherited = arm
+                .body
+                .contains_resume()
+                .then(|| self.current_handler_inherited_k.take());
             let mut body_ce = self.lower_handler_owned_expr(&arm.body);
+            if let Some(saved) = saved_inherited {
+                self.current_handler_inherited_k = saved;
+            }
             if let (Some(fb), false) = (&arm.finally_block, arm.body.contains_resume()) {
                 let fb = &*self.effect_normal_body(fb, "finally block");
-            let cleanup_ce = self.lower_expr(fb);
+                let cleanup_ce = evidence::meta_run(self.lower_expr(fb));
                 let result_var = self.fresh();
                 body_ce = CExpr::Let(
                     result_var.clone(),
-                    Box::new(body_ce),
+                    Box::new(evidence::meta_run(body_ce)),
                     Box::new(CExpr::Let(
                         "_".to_string(),
                         Box::new(cleanup_ce),

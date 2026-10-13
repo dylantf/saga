@@ -218,6 +218,30 @@ pub(super) fn append_tail(
     )
 }
 
+/// The inherited frame of a `with`, every operation suspending until the
+/// `with` supplies its continuation. Same tags and layout.
+pub(super) fn lift_evidence(evidence: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "lift_evidence", vec![evidence])
+}
+
+/// Give the result of a handled computation (a plain value or a suspension)
+/// to the continuation of its `with`.
+pub(super) fn meta_bind(result: CExpr, continuation: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "bind", vec![result, continuation])
+}
+
+/// `let r = resume x; rest`: `rest` gets the value of the handled
+/// computation and runs before the continuation of the `with`.
+pub(super) fn meta_mbind(resumed: CExpr, rest: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "mbind", vec![resumed, rest])
+}
+
+/// `meta_bind` with the identity continuation: a plain value for a caller
+/// that is not CPS code.
+pub(super) fn meta_run(result: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "run", vec![result])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

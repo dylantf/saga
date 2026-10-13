@@ -72,6 +72,19 @@ impl<'a> Lowerer<'a> {
                 this.lower_receive(arms, after_clause.as_ref(), k.as_ref())
             }),
             ExprKind::App { .. } => self.lower_app(expr, k),
+            // `resume v` calls the arm's continuation. What it returns is
+            // the value of the handled computation or a suspension, so the
+            // rest of the arm is bound to it, not applied to it.
+            ExprKind::Resume { value } => {
+                let v = self.fresh();
+                let ce = self.lower_operand(value, "resume");
+                let resumed = self.lower_resume_of_var(&v);
+                let resumed = match k {
+                    Some(k) => evidence::meta_mbind(resumed, k),
+                    None => resumed,
+                };
+                CExpr::Let(v, Box::new(ce), Box::new(resumed))
+            }
             _ => {
                 let Some(k) = k else {
                     return self.lower_expr(expr);

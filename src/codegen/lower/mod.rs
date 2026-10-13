@@ -638,21 +638,17 @@ impl<'a> Lowerer<'a> {
     ///
     /// It does when something in it performs (`Lowerer::performs_effect`,
     /// the one definition of that), composed over sub-expressions by
-    /// `effect_position::is_effectful`, with two exceptions that are about
-    /// the continuation and not about position. A `resume` is a call of the
-    /// handler's continuation that returns: only its value can perform. A
-    /// `with` takes the rest only when its handler never needs the value of
-    /// the handled computation back (`with_handler_chains_continuation`)
-    /// and that computation performs; otherwise it stays a delimiter that
-    /// produces a plain value. See "The Continuation of a `with`" in
+    /// `effect_position::is_effectful`. A `with` does when its handled
+    /// computation does, unless it keeps that computation on the Erlang
+    /// stack (`with_handler_keeps_stack`) and so produces a plain value.
+    /// See "The Continuation of a `with`" in
     /// `docs/effect-implementation.md`.
     fn takes_continuation(&self, expr: &Expr) -> bool {
         super::effect_position::is_effectful(expr, &|node| match &node.kind {
-            ExprKind::Resume { .. } => false,
             ExprKind::With {
                 expr: inner,
                 handler,
-            } => self.with_handler_chains_continuation(handler) && self.takes_continuation(inner),
+            } => !self.with_handler_keeps_stack(handler) && self.takes_continuation(inner),
             _ => self.performs_effect(node),
         })
     }

@@ -683,7 +683,20 @@ result () = {
   } with inner
 } with outer
 "#;
-    check_result_string("nested_same_effect_inner_shadows_outer", src, "INNER:x");
+    // `inner` takes the op and its `with` has the value "INNER:x"; that is
+    // the value of the computation `outer` handles, which `outer`'s return
+    // clause then replaces.
+    check_result_string("nested_same_effect_inner_shadows_outer", src, "");
+    let passing_on = src.replace(
+        "handler outer for Log {\n  log msg = \"OUTER:\" <> msg <> resume ()\n  return _ = \"\"",
+        "handler outer for Log {\n  log msg = \"OUTER:\" <> msg <> resume ()\n  return v = v",
+    );
+    assert_ne!(passing_on, src);
+    check_result_string(
+        "nested_same_effect_inner_shadows_outer_passing_on",
+        &passing_on,
+        "INNER:x",
+    );
 }
 
 #[test]
@@ -6035,12 +6048,11 @@ fn effectful_handler_bodies_let_bound_under_outer_handler() {
     );
 }
 
-/// Known gap: `ask () = addp (resume (g 3), 1)` uses the value `resume`
-/// returns, so its `with` stays a delimiter with no continuation of its own
-/// (see `non_tail_with_delimited_handler_under_aborting_outer_handler`).
-/// Expected 1000; gives 1100.
+/// `ask () = addp (resume (g 3), 1)` uses the value `resume` returns, so its
+/// `with` is delimited: the rest of the block reaches the outer handler
+/// through the lifted `Stop` operation (see
+/// `non_tail_with_delimited_handler_under_aborting_outer_handler`).
 #[test]
-#[ignore = "non-tail `with` whose handler uses the value of `resume` gets no continuation"]
 fn effectful_handler_body_using_resume_value_let_bound_under_outer_handler() {
     check_handler_body_cells_where(
         "handler_body_let_resume_value",
@@ -6829,8 +6841,10 @@ handler n_needs_return for Ask needs {Stop} {
 /// Labels starting with `delimited/` are handlers that use the value `resume`
 /// returns, or have a `finally` block. Their `with` cannot take the rest of
 /// the enclosing body as the handled computation's return continuation (the
-/// value of `resume` would then be the answer of that rest), so it stays a
-/// delimiter that produces a plain value.
+/// value of `resume` would then be the answer of that rest). The rest is
+/// supplied as a meta continuation instead, and the operations of the
+/// inherited frame are lifted to capture it; a `finally` handler still runs
+/// its handled computation to a plain value.
 const NON_TAIL_WITH_HANDLERS: &[(&str, &str, i64)] = &[
     // The handled computation performs the outer effect.
     (
@@ -7103,32 +7117,50 @@ fn tail_with_delimited_handler_under_aborting_outer_handler() {
     );
 }
 
-/// Known gap: a `with` whose handler uses the value of `resume` (or has a
-/// `finally` block) is lowered as a delimiter that produces a plain value.
-/// An operation performed inside it and handled further out captures a
-/// continuation that ends at the `with`, so when that handler aborts, the
-/// abort value becomes the value of the `with` and the rest of the body
-/// runs. Expected 1000 everywhere; gives e.g. 1100 for the `let` position.
+/// A `with` whose handler uses the value of `resume` and is not the last
+/// thing its host does. An operation performed inside it and handled further
+/// out must capture the rest of the host's body too, so that an outer
+/// handler that aborts skips it: the operations of the inherited frame are
+/// lifted to take that rest as a meta continuation.
 #[test]
-#[ignore = "non-tail `with` whose handler uses the value of `resume` gets no continuation"]
 fn non_tail_with_delimited_handler_under_aborting_outer_handler() {
     check_non_tail_with(
         "non_tail_with_delimited_abort",
         &[OuterStop::Aborts],
-        |handler, position, host| is_delimited_handler(handler) && !with_is_last(position, host),
+        |handler, position, host| {
+            is_delimited_handler(handler)
+                && handler != "delimited/comp_named_finally"
+                && !with_is_last(position, host)
+        },
     );
 }
 
-/// Known gap, the other side of the one above: in tail position of a body
-/// that has a continuation (an effectful function, a lambda), the `with`
-/// does get that continuation as the handled computation's return
-/// continuation, so `resume` returns the answer of the caller's rest
-/// instead of the value of the `with`. `c () = user () with { ask () = {
-/// let r = resume 1; r + g 3 } }` called as `let x = c (); x * 2` gives 7,
-/// not 10. (The multishot cell passes only because `+` commutes with the
-/// caller's `* 2`.)
+/// Known gap: a handler with a `finally` block runs its handled computation
+/// to a plain value on the Erlang stack, so that cleanup follows it. The
+/// cleanup has to run when an outer handler aborts as well, and before that
+/// handler's continuation; with CPS the only point at which an abort can be
+/// observed is the return of the resumed computation, so the outer abort
+/// returns its value there, it becomes the value of the `with`, and the rest
+/// of the body runs. Expected 1000 everywhere; gives e.g. 1100 for the `let`
+/// position.
 #[test]
-#[ignore = "tail `with` in an effectful body: `resume` returns the caller's answer"]
+#[ignore = "`finally`: an outer abort returns through the `with` so that cleanup runs, and becomes its value"]
+fn non_tail_with_finally_handler_under_aborting_outer_handler() {
+    check_non_tail_with(
+        "non_tail_with_finally_abort",
+        &[OuterStop::Aborts],
+        |handler, position, host| {
+            handler == "delimited/comp_named_finally" && !with_is_last(position, host)
+        },
+    );
+}
+
+/// The other side: in tail position of a body that has a continuation (an
+/// effectful function, a lambda), `resume` still returns the value of the
+/// `with`, not the answer of the caller's rest. `c () = user () with { ask ()
+/// = { let r = resume 1; r + g 3 } }` called as `let x = c (); x * 2` gives
+/// 10.
+#[test]
 fn tail_with_delimited_handler_resume_returns_value_of_with() {
     check_non_tail_with(
         "tail_with_delimited_resume",
@@ -7416,4 +7448,479 @@ result () = {
     assert!(!core.contains("__saga_direct_hof_apply_l"));
     // pure: (11 + 1) + (12 + 1) = 25; effectful: (100 + 1) + (200 + 1) = 302
     check_result_int("anf_hof_lambda", &src, 25_302);
+}
+
+// ---------------------------------------------------------------------------
+// Delimited `with`: a handler whose arms use the value `resume` returns. The
+// continuation of the `with` is a meta continuation; operations of the
+// inherited frame are lifted to capture it.
+// ---------------------------------------------------------------------------
+
+const DELIMITED_PRELUDE: &str = r#"module Main
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+effect Ask2 { fun ask2 : Unit -> Int }
+effect Scope { fun scope : (Unit -> Int needs {..r}) -> Int needs {..r} }
+
+fun ask_stop : Unit -> Int needs {Stop, Ask}
+ask_stop () = {
+  let a = ask! ()
+  let b = stop! a
+  a * 10 + b
+}
+
+fun comp_n : Unit -> Int needs {Stop, Ask, Ask2}
+comp_n () = {
+  let a = ask! ()
+  let b = ask2! ()
+  stop! (a + b)
+}
+"#;
+
+/// The outer `Stop` handlers every cell is run under, by name: one that
+/// aborts, one that resumes in tail position, one that uses the value of its
+/// `resume` and one that resumes twice. The last two are themselves
+/// delimited.
+const DELIMITED_OUTER_STOPS: &[(&str, &str)] = &[
+    ("abort", "stop i = 1000"),
+    ("resume", "stop i = resume i"),
+    ("nontail", "stop i = (resume i) * 2"),
+    ("twice", "stop i = (resume i) + (resume (i + 1))"),
+];
+
+/// Each cell is the body of a `Int -> Int needs {Stop}` function (or
+/// `needs {Stop, Scope}` when it uses `scope!`); `wants` are its values
+/// under [`DELIMITED_OUTER_STOPS`], in order.
+fn check_delimited_cells(fixture: &str, extra: &str, cells: &[(&str, &str, [i64; 4])]) {
+    let mut src = String::from(DELIMITED_PRELUDE);
+    src.push_str(extra);
+    let mut functions = Vec::new();
+    let mut wants = Vec::new();
+    for (label, body, values) in cells {
+        let uses_scope = body.contains("scope!");
+        let row = if uses_scope {
+            "{Stop, Scope}"
+        } else {
+            "{Stop}"
+        };
+        src.push_str(&format!(
+            "\nfun {label} : Int -> Int needs {row}\n{label} _ = {{\n{body}\n}}\n"
+        ));
+        for ((stop_label, stop_arm), want) in DELIMITED_OUTER_STOPS.iter().zip(values) {
+            let scope_arm = if uses_scope {
+                ", scope g = { let r = g (); resume (r + 1) }"
+            } else {
+                ""
+            };
+            let name = format!("{label}_{stop_label}");
+            src.push_str(&format!(
+                "\npub fun {name} : Unit -> Int\n{name} () = {label} 0 with {{ {stop_arm}{scope_arm} }}\n"
+            ));
+            functions.push(name.clone());
+            wants.push((name, *want));
+        }
+    }
+    let results = call_each_export(fixture, &src, &functions);
+    let failures: Vec<String> = wants
+        .iter()
+        .filter_map(|(name, want)| {
+            let got = results.get(name).map(String::as_str);
+            (got != Some(want.to_string().as_str()))
+                .then(|| format!("{name}: gave {}, expected {want}", got.unwrap_or("nothing")))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "[{fixture}] {} cells failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The operation handled outside is performed after the delimited handler
+/// has resumed, so the arm's `+ 10` is pending when the outer handler runs:
+/// an outer handler that uses the value of its own `resume` must get the
+/// answer of everything, the pending `+ 10` and the `+ 100` included.
+#[test]
+fn delimited_with_under_outer_handler_using_its_resume_value() {
+    check_delimited_cells(
+        "delimited_outer_kinds",
+        "",
+        &[
+            (
+                "one",
+                "  let v = ask_stop () with { ask () = (resume 1) + 10 }\n  v + 100",
+                [1000, 121, 242, 243],
+            ),
+            (
+                "multishot",
+                "  let v = ask_stop () with { ask () = (resume 1) + (resume 2) }\n  v + 100",
+                [1000, 133, 532, 536],
+            ),
+        ],
+    );
+}
+
+/// Two delimited `with`s (the inherited frame is lifted twice), and one
+/// inside or around a chained one.
+#[test]
+fn nested_delimited_withs() {
+    let nest = |inner: &str, outer: &str| {
+        format!(
+            "  let v = {{\n    let w = comp_n () with {{ ask2 () = {inner} }}\n    w + 7\n  }} with {{ ask () = {outer} }}\n  v + 100"
+        )
+    };
+    let dd = nest("(resume 5) * 3", "(resume 1) + 10");
+    let cd = nest("(resume 5) * 3", "resume 1");
+    let dc = nest("resume 5", "(resume 1) + 10");
+    check_delimited_cells(
+        "delimited_nested",
+        "",
+        &[
+            ("delimited_in_delimited", &dd, [1000, 135, 270, 273]),
+            ("delimited_in_chained", &cd, [1000, 125, 250, 253]),
+            ("chained_in_delimited", &dc, [1000, 123, 246, 247]),
+        ],
+    );
+}
+
+/// Function values and effect-polymorphic callees inside a delimited `with`
+/// run with the lifted frame; a closure built inside and called outside runs
+/// with the frame of its caller.
+#[test]
+fn delimited_with_and_function_values() {
+    check_delimited_cells(
+        "delimited_function_values",
+        r#"
+fun twice_apply : (Int -> Int needs {..e}) -> Int -> Int needs {..e}
+twice_apply f x = f (f x)
+
+fun poly : Unit -> Int needs {Stop, Ask}
+poly () = twice_apply (fun x -> x + stop! x + ask! ()) 1
+"#,
+        &[
+            // f 1 = 3, f 3 = 7, each `ask` adds 10; `Stop` is performed twice.
+            // Resumed twice: f 1 is 3 or 4, then f 3 is 7 or 8, f 4 is 9 or 10.
+            (
+                "polymorphic_callee",
+                "  let v = poly () with { ask () = (resume 1) + 10 }\n  v + 100",
+                [1000, 127, 508, 127 + 128 + 129 + 130],
+            ),
+            (
+                "closure_called_outside",
+                "  let f = { let a = ask! (); stop! a; fun x -> x + stop! (x + a) } with { ask () = { let r = resume 1; r } }\n  f 10 + 100",
+                [1000, 121, 484, 121 + 122 + 121 + 122],
+            ),
+            (
+                "closure_called_inside",
+                "  let f = fun x -> x + stop! x\n  let v = { let a = ask! (); f a + f (a + 1) } with { ask () = (resume 1) + 10 }\n  v + 100",
+                [1000, 116, 464, 116 + 117 + 117 + 118],
+            ),
+        ],
+    );
+}
+
+/// A callback passed to an operation. Handled by the delimited `with`
+/// itself, the arm runs the callback against the lifted frame. Handled
+/// further out, the outer arm runs a callback that was built inside the
+/// `with`: the operations it performs (of the lifted frame, and of the
+/// delimited handler) still reach their handlers with the rest of the
+/// callback, of the outer arm and of the enclosing body behind them.
+#[test]
+fn callbacks_across_a_delimited_with() {
+    check_delimited_cells(
+        "delimited_callbacks",
+        "",
+        &[
+            (
+                "own_arm_runs_callback",
+                "  let v = {\n    let s = scope! (fun () -> stop! 2 * 3)\n    s + ask! ()\n  } with {\n    ask () = (resume 1) + 10\n    scope f = { let r = f (); resume (r + 1) }\n  }\n  v + 100",
+                [1000, 118, 236, 118 + 121],
+            ),
+            (
+                "outer_arm_runs_callback",
+                "  let v = {\n    let s = scope! (fun () -> stop! 2 * 3)\n    s + ask! ()\n  } with { ask () = (resume 1) + 10 }\n  v + 100",
+                [1000, 118, 236, 118 + 121],
+            ),
+            (
+                "outer_arm_callback_uses_delimited_handler",
+                "  let v = {\n    let s = scope! (fun () -> ask! () * 3)\n    s * 2 + stop! 1\n  } with { ask () = (resume 1) * 5 }\n  v + 100",
+                [1000, 145, 290, 145 + 150],
+            ),
+        ],
+    );
+}
+
+/// Handlers the lowering knows statically but that are not a single arm
+/// using the value of `resume`: a conditional handler with one such branch,
+/// and an arm that resumes on one path and aborts on the other.
+#[test]
+fn conditional_and_mixed_handlers_are_delimited() {
+    check_delimited_cells(
+        "delimited_conditional",
+        r#"
+handler h_value for Ask { ask () = (resume 1) + 10 }
+handler h_tail for Ask { ask () = resume 2 }
+
+fun both : Unit -> Int needs {Stop, Ask}
+both () = {
+  let a = stop! 3
+  a + ask! ()
+}
+
+fun pick : Bool -> Int needs {Stop}
+pick c = {
+  let h = if c then h_value else h_tail
+  let v = both () with h
+  v + 100
+}
+
+fun mixed : Int -> Int needs {Stop}
+mixed n = {
+  let v = both () with { ask () = if n > 0 then resume 1 else 50 }
+  v + 100
+}
+"#,
+        &[
+            (
+                "conditional_value_branch",
+                "  pick True",
+                [1000, 114, 228, 114 + 115],
+            ),
+            (
+                "conditional_tail_branch",
+                "  pick False",
+                [1000, 105, 210, 105 + 106],
+            ),
+            (
+                "mixed_arm_resumes",
+                "  mixed 1",
+                [1000, 104, 208, 104 + 105],
+            ),
+            ("mixed_arm_aborts", "  mixed 0", [1000, 150, 300, 300]),
+        ],
+    );
+}
+
+/// A `finally` handler inside a delimited `with`: an operation of the lifted
+/// frame performed after `acquire!` suspends, which must not look like the
+/// end of the resumed computation, and the cleanup's own operation belongs to
+/// the lifted frame too.
+#[test]
+fn finally_inside_delimited_with_cleans_up_after_the_computation() {
+    let src = r#"module Main
+
+import Std.Ref (MutRef, Ref, beam_ref)
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+effect Res { fun acquire : String -> Int }
+effect Log { fun log : String -> Unit }
+
+handler managed for Res needs {Log} {
+  acquire name = {
+    log! ("open " <> name)
+    resume 7
+  } finally {
+    log! ("close " <> name)
+  }
+}
+
+fun work : Unit -> Int needs {Stop, Log}
+work () = {
+  let v = {
+    let w = {
+      let r = acquire! "db"
+      log! "work"
+      let s = stop! r
+      log! "more"
+      s + ask! ()
+    } with managed
+    w + 1
+  } with { ask () = (resume 1) + 10 }
+  v + 100
+}
+
+fun run : MutRef String -> Int needs {Ref}
+run out = work () with {
+  stop i = resume i
+  log m = {
+    let _ = modify! out (fun s -> s <> m <> ", ")
+    resume ()
+  }
+}
+
+pub fun result : Unit -> String
+result () = {
+  let out = new! ""
+  let v = run out
+  get! out <> show v
+} with beam_ref
+"#;
+    check_result_string(
+        "finally_inside_delimited",
+        src,
+        "open db, work, more, close db, 119",
+    );
+}
+
+/// A process spawned inside a delimited `with`: its callback is the whole
+/// computation of the new process, so an operation of the lifted frame it
+/// performs has nothing behind it but the rest of the callback.
+#[test]
+#[ignore = "the thunk of a spawned process does not run what its callback leaves suspended"]
+fn spawn_inside_delimited_with_runs_lifted_operations() {
+    let src = r#"module Main
+
+import Std.Actor (Actor, Process, beam_actor)
+
+effect Stop { fun stop : Int -> Int }
+effect Ask { fun ask : Unit -> Int }
+
+fun recv : Unit -> Int needs {Actor Int}
+recv () = receive { n -> n }
+
+fun work : Unit -> Int needs {Stop, Process, Actor Int}
+work () = {
+  let me = self! ()
+  let v = {
+    let _ = spawn! (fun () -> send! me (stop! 5 + 1))
+    let got = recv ()
+    got + ask! ()
+  } with { ask () = (resume 1) + 10 }
+  v + 100
+}
+
+pub fun result : Unit -> String
+result () = show ((work () with { stop i = resume i }) with beam_actor)
+"#;
+    check_result_string("spawn_inside_delimited", src, "117");
+}
+
+/// Known gap: a handler value only known at runtime (here a parameter)
+/// keeps its handled computation on the Erlang stack, like a `finally`
+/// handler: whether its arms use the value of `resume` or have a `finally`
+/// block is not known where the `with` is lowered. Under the aborting outer
+/// handler: expected 1000, gives 1100.
+#[test]
+#[ignore = "a `with` whose handler is only known at runtime is not given a continuation"]
+fn runtime_handler_value_under_aborting_outer_handler() {
+    check_delimited_cells(
+        "delimited_runtime_handler",
+        r#"
+fun with_h : Handler Ask -> Int needs {Stop}
+with_h h = {
+  let v = { let a = stop! 3; a + ask! () } with h
+  v + 100
+}
+
+fun make : Int -> Handler Ask
+make n = if n > 0 then handler for Ask { ask () = (resume n) + 10 } else handler for Ask { ask () = resume n }
+"#,
+        &[("runtime", "  with_h (make 1)", [1000, 114, 228, 114 + 115])],
+    );
+}
+
+/// Known gap: a `resume` inside a pure function (state passing: `get () =
+/// fun s -> (resume s) s`) runs when the function is called, by a caller that
+/// is not CPS code and has no continuation to bind into (`f 20` after the
+/// `with`). The resumed computation is run to a plain value there: an outer
+/// abort becomes the value of that `resume`, and an outer handler that uses
+/// the value of its own `resume` gets the value of the handled computation.
+/// Operations performed before the first such `resume` are fine. Expected
+/// 1000 under the aborting handler; gives 1100.
+#[test]
+#[ignore = "`resume` under a lambda runs the resumed computation to a plain value"]
+fn resume_under_lambda_under_aborting_outer_handler() {
+    check_delimited_cells(
+        "delimited_state_passing",
+        r#"
+effect State {
+  fun get : Unit -> Int
+  fun put : Int -> Unit
+}
+
+fun counter : Unit -> Int needs {Stop, State}
+counter () = {
+  let s = get! ()
+  let t = stop! s
+  put! (s + t)
+  get! ()
+}
+"#,
+        &[(
+            "state",
+            "  let f = counter () with {\n    get () = fun s -> (resume s) s\n    put n = fun _ -> (resume ()) n\n    return v = fun _ -> v\n  }\n  f 20 + 100",
+            [1000, 140, 280, 140 + 141],
+        )],
+    );
+}
+
+/// An inline handler with several arms for one operation: an arm that
+/// resumes reaches the rest of the host's body through its own continuation
+/// only. It used to apply the rest a second time.
+#[test]
+fn multi_arm_inline_handler_resumes_once() {
+    let src = r#"module Main
+
+effect Op { fun op : Int -> Int }
+effect Count { fun tick : Unit -> Unit }
+
+fun both : Unit -> Int needs {Op}
+both () = op! 1 + op! 0
+
+fun host : Unit -> Int needs {Count}
+host () = {
+  let v = both () with {
+    op 0 = resume 10
+    op n = resume n
+  }
+  tick! ()
+  v + 100
+}
+
+pub fun result : Unit -> String
+result () = {
+  let f = host () with {
+    tick () = fun n -> (resume ()) (n + 1)
+    return v = fun n -> v * 10 + n
+  }
+  show (f 0)
+}
+"#;
+    // 111, and one tick.
+    check_result_string("multi_arm_inline_resumes_once", src, "1111");
+}
+
+/// Known gap: an operation that is passed a callback is not lifted (the
+/// meta continuation current when its arm resumes, after running the
+/// callback, cannot reach the continuation built when it was performed
+/// without process state). It is performed inside the extent of the `with`,
+/// so an arm for it further out that aborts returns its value to the `with`.
+/// Expected 1000, gives 1100.
+#[test]
+#[ignore = "an operation carrying a callback is not lifted: an outer arm for it that aborts returns to the inner `with`"]
+fn callback_operation_aborted_by_outer_handler() {
+    let src = r#"module Main
+
+effect Ask { fun ask : Unit -> Int }
+effect Scope { fun scope : (Unit -> Int needs {..r}) -> Int needs {..r} }
+
+fun inner : Unit -> Int needs {Scope}
+inner () = {
+  let v = {
+    let s = scope! (fun () -> ask! ())
+    s + ask! ()
+  } with { ask () = (resume 1) + 10 }
+  v + 100
+}
+
+fun aborted : Unit -> Int
+aborted () = inner () with { scope g = 1000 }
+
+pub fun result : Unit -> String
+result () = show (aborted ())
+"#;
+    check_result_string("callback_operation_outer_abort", src, "1000");
 }

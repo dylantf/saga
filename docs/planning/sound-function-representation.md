@@ -920,11 +920,15 @@ check results is planned against the result the caller passed
 lowerer's own fallbacks for a function value with no type (for example
 `lambda_is_tagged` for a lambda made after planning) were not looked at.
 
-Parked: branch `stageb-delim` (`d11b9c7e`) makes handlers that use the value
-of `resume` correct under an outer handler by adding a third `with` mode and
-a runtime-tagged suspension. Not merged; to be redone on top of this branch
-as the let rule applied to `resume`. Its two rejected simpler alternatives
-and its 297-cell acceptance tests are the parts to keep.
+Done on `handler-resume`: handlers that use the value of `resume` are
+correct under an outer handler. A `with` is `bind(handled, k)` with a meta
+continuation and a lifted frame; the chained lowering is that with `k` fused
+in, and `resume` takes the rest of its arm by the let rule. `finally` (and a
+handler only known at runtime, which may have one) keeps the earlier
+lowering, so there are two paths. See "The Continuation of a `with`" in
+`docs/effect-implementation.md`, which lists the gaps left. It replaces the
+parked branch `stageb-delim` (`d11b9c7e`), whose rejected alternatives and
+acceptance tests it keeps.
 
 ## Appendix A: reproductions
 

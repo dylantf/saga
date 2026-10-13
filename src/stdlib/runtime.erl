@@ -69,12 +69,12 @@ apply_n({'$saga_cps', G} = F, Args) when is_function(G) ->
     N = length(Args),
     if
         UserArity =:= N ->
-            erlang:apply(G, Args ++ [{}, fun(R) -> R end]);
+            run_pure(G, Args);
         UserArity =:= 0 ->
             erlang:error({badarity, {F, Args}});
         UserArity < N ->
             {Now, Later} = lists:split(UserArity, Args),
-            apply_n(erlang:apply(G, Now ++ [{}, fun(R) -> R end]), Later);
+            apply_n(run_pure(G, Now), Later);
         true ->
             {'$saga_cps', cps_partial(G, Args, UserArity - N)}
     end;
@@ -94,6 +94,16 @@ apply_n(F, Args) when is_function(F) ->
     end;
 apply_n(F, _Args) ->
     erlang:error({badfun, F}).
+
+%% One exception to "performs no effects of its own": a callback passed to an
+%% effect operation keeps the frame of its perform site, which a `with' may
+%% have lifted, so what it returns may be a suspension. The caller is a pure
+%% call and needs a plain value: as `std_evidence_bridge:run/1'.
+run_pure(G, Args) ->
+    run_meta(erlang:apply(G, Args ++ [{}, fun(R) -> R end])).
+
+run_meta({'$saga_meta', M}) -> run_meta(M(fun(R) -> R end));
+run_meta(Value) -> Value.
 
 %% A closure taking the `Remaining' arguments `F' still needs. Erlang cannot
 %% build a fun of computed arity, hence one clause per arity.

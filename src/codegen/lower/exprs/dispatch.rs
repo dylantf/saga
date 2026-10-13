@@ -163,11 +163,14 @@ impl<'a> Lowerer<'a> {
         );
         if let Some(ref finally_expr) = self.current_handler_finally.clone() {
             // let Cleanup = fun() -> finally_body in
-            // try apply K(V)
+            // try run(apply K(V))
             // of OkVar -> let _ = apply Cleanup() in OkVar
             // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
+            // Cleanup follows the resumed computation on the Erlang stack,
+            // so a suspension is run to its end here.
+            let k_call = evidence::meta_run(k_call);
             let cleanup_var = self.fresh();
-            let cleanup_body = self.lower_expr(finally_expr);
+            let cleanup_body = evidence::meta_run(self.lower_expr(finally_expr));
             let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
             let cleanup_call_ok = CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
             let cleanup_call_catch =
@@ -205,6 +208,19 @@ impl<'a> Lowerer<'a> {
             )
         } else {
             k_call
+        }
+    }
+
+    /// The body of a lambda or local function. A pure function inside a
+    /// handler arm that resumes is called by code that is not CPS, which
+    /// needs a plain value: what its `resume`s leave suspended is run.
+    pub(crate) fn lower_fun_body(&mut self, body: &Expr, k: Option<CExpr>) -> CExpr {
+        let pure_and_resumes = k.is_none() && body.contains_resume();
+        let body_ce = self.lower_tail(body, k);
+        if pure_and_resumes {
+            evidence::meta_run(body_ce)
+        } else {
+            body_ce
         }
     }
 
@@ -351,7 +367,7 @@ impl<'a> Lowerer<'a> {
                 for param in &flattened_params {
                     saved_handler_vars.extend(self.register_dynamic_handler_pattern_vars(param));
                 }
-                let body_ce = self.lower_tail(flattened_body, effect_return_k.clone());
+                let body_ce = self.lower_fun_body(flattened_body, effect_return_k.clone());
                 let body_ce = match callback_tail_binding {
                     Some((var, value)) => CExpr::Let(var, Box::new(value), Box::new(body_ce)),
                     None => body_ce,
@@ -536,12 +552,7 @@ impl<'a> Lowerer<'a> {
             // so cleanup runs after K completes or panics. The cleanup is lowered
             // once into a lambda (at the resume site, where arm body variables are
             // in scope) and called in both the ok and catch branches.
-            ExprKind::Resume { value, .. } => {
-                let v = self.fresh();
-                let ce = self.lower_operand(value, "resume");
-                let resumed = self.lower_resume_of_var(&v);
-                CExpr::Let(v, Box::new(ce), Box::new(resumed))
-            }
+            ExprKind::Resume { .. } => self.lower_tail(expr, None),
 
             // Handler expression as a value (e.g. returned from a function).
             // Produce a tuple of per-op handler lambdas for runtime use.
