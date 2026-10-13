@@ -8,22 +8,12 @@ use std::collections::HashMap;
 impl<'a> Lowerer<'a> {
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
     pub(crate) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
-        self.lower_bitstring_with_values(segments, &[])
-    }
-
-    /// [`Self::lower_bitstring_expr`] where some segment values are already
-    /// bound: `bound[i]` names the variable holding segment `i`'s value.
-    pub(crate) fn lower_bitstring_with_values(
-        &mut self,
-        segments: &[BitSegment<Expr>],
-        bound: &[Option<String>],
-    ) -> CExpr {
         use crate::codegen::lower::util::{
             resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
         };
 
         let mut segs = Vec::new();
-        for (idx, seg) in segments.iter().enumerate() {
+        for seg in segments {
             // String literal sugar: expand to byte segments
             if let ExprKind::Lit {
                 value: Lit::String(s, kind),
@@ -42,10 +32,7 @@ impl<'a> Lowerer<'a> {
             }
 
             let is_binary = seg.specs.contains(&ast::BitSegSpec::Binary);
-            let value = match bound.get(idx).cloned().flatten() {
-                Some(var) => CExpr::Var(var),
-                None => self.lower_expr_value(&seg.value),
-            };
+            let value = self.lower_operand(&seg.value, "a bit string");
 
             if is_binary && seg.size.is_none() {
                 segs.push(CBinSeg::BinaryAll(value));
@@ -54,7 +41,7 @@ impl<'a> Lowerer<'a> {
 
             let (type_name, default_size, unit) = resolve_bit_segment_meta(&seg.specs);
             let flags = resolve_bit_segment_flags(&seg.specs);
-            let size = seg.size.as_ref().map(|s| self.lower_expr_value(s));
+            let size = seg.size.as_ref().map(|s| self.lower_operand(s, "a bit string"));
             let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
 
             segs.push(CBinSeg::Segment {
@@ -71,8 +58,8 @@ impl<'a> Lowerer<'a> {
     /// Lower `receive { Pat -> body, after N -> timeout_body }`.
     ///
     /// With `k_var`, the value of the whole expression is passed to that
-    /// continuation instead of returned, and arm bodies (and the timeout)
-    /// that perform effects are CPS-chained into it.
+    /// continuation instead of returned, and arm bodies (and the timeout
+    /// body) that perform effects are CPS-chained into it.
     pub(crate) fn lower_receive(
         &mut self,
         arms: &[ast::Annotated<ast::CaseArm>],
@@ -162,18 +149,7 @@ impl<'a> Lowerer<'a> {
             );
         };
         let timeout_body = lower_body(self, timeout_body);
-        // A timeout that performs effects is evaluated first, with the
-        // receive as its continuation.
-        if k_var.is_some() && self.branch_is_effectful(timeout_expr) {
-            let timeout_var = self.fresh();
-            let receive = CExpr::Receive(
-                lowered_arms,
-                Box::new(CExpr::Var(timeout_var.clone())),
-                Box::new(timeout_body),
-            );
-            return self.lower_bind_effectful_expr(timeout_expr, timeout_var, receive);
-        }
-        let timeout = self.lower_expr_value(timeout_expr);
+        let timeout = self.lower_operand(timeout_expr, "receive");
         CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
     }
 
@@ -880,17 +856,9 @@ impl<'a> Lowerer<'a> {
             // in scope) and called in both the ok and catch branches.
             ExprKind::Resume { value, .. } => {
                 let v = self.fresh();
-                // A resume value that performs effects (`resume (g n)`,
-                // `resume (1 + g n)`) has the resumption as its continuation,
-                // so a handler that aborts it does not resume.
-                if self.branch_is_effectful(value) {
-                    let resumed = self.lower_resume_of_var(&v);
-                    self.lower_bind_effectful_expr(value, v, resumed)
-                } else {
-                    let ce = self.lower_expr_value(value);
-                    let resumed = self.lower_resume_of_var(&v);
-                    CExpr::Let(v, Box::new(ce), Box::new(resumed))
-                }
+                let ce = self.lower_operand(value, "resume");
+                let resumed = self.lower_resume_of_var(&v);
+                CExpr::Let(v, Box::new(ce), Box::new(resumed))
             }
 
             // Handler expression as a value (e.g. returned from a function).

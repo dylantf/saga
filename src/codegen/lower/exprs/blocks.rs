@@ -423,20 +423,6 @@ impl<'a> Lowerer<'a> {
             ExprKind::Receive {
                 arms, after_clause, ..
             } => self.lower_receive(arms, after_clause.as_ref(), Some(k_var)),
-            ExprKind::Resume { value } if self.branch_is_effectful(value) => {
-                let v = self.fresh();
-                let result = self.fresh();
-                let resumed = self.lower_resume_of_var(&v);
-                let body = CExpr::Let(
-                    result.clone(),
-                    Box::new(resumed),
-                    Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var(k_var.to_string())),
-                        vec![CExpr::Var(result)],
-                    )),
-                );
-                self.lower_bind_effectful_expr(value, v, body)
-            }
             // Everything else is evaluated to a value: effect normalization
             // has left nothing in its operands that needs a continuation.
             _ => self.lower_value_to_k(expr, k_var),
