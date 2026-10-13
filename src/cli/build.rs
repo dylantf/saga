@@ -1412,22 +1412,17 @@ pub fn build_project_ext(
         });
         compiled_modules.insert(
             module_name.clone(),
-            codegen::CompiledModule {
-                codegen_info: codegen_info_map
+            codegen::CompiledModule::new(
+                codegen_info_map
                     .get(module_name)
                     .cloned()
                     .unwrap_or_default(),
-                elaborated: normalized,
+                normalized,
                 resolution,
-                origins: folded.origins,
-                front_resolution: mod_result.resolution.clone(),
-                effect_at_node: mod_result.effect_at_node.clone(),
-                type_at_node: mod_result.type_at_node.clone(),
-                expr_types: mod_result.expr_types.clone(),
-                effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
-                effect_abi_plan_ready: false,
+                folded.origins,
                 optimization,
-            },
+                Some(mod_result),
+            ),
         );
     }
 
@@ -1439,19 +1434,7 @@ pub fn build_project_ext(
         imports_by_module.insert("Main".to_string(), module_imports(main_program));
         compiled_modules.insert(
             "Main".to_string(),
-            codegen::CompiledModule {
-                codegen_info: Default::default(),
-                elaborated: main_elaborated,
-                resolution: codegen::resolve::ResolutionMap::new(),
-                origins: Default::default(),
-                front_resolution: result.resolution.clone(),
-                effect_at_node: result.effect_at_node.clone(),
-                type_at_node: result.type_at_node.clone(),
-                expr_types: result.expr_types.clone(),
-                effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
-                effect_abi_plan_ready: false,
-                optimization: codegen::optimize::OptimizationFacts::default(),
-            },
+            codegen::CompiledModule::entry(main_elaborated, &result),
         );
         let source_file = main_source
             .as_ref()
@@ -1693,19 +1676,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     });
     compiled_modules.insert(
         module_name.clone(),
-        codegen::CompiledModule {
-            codegen_info: Default::default(),
-            elaborated,
-            resolution: codegen::resolve::ResolutionMap::new(),
-            origins: Default::default(),
-            front_resolution: result.resolution.clone(),
-            effect_at_node: result.effect_at_node.clone(),
-            type_at_node: result.type_at_node.clone(),
-            expr_types: result.expr_types.clone(),
-            effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
-            effect_abi_plan_ready: false,
-            optimization: codegen::optimize::OptimizationFacts::default(),
-        },
+        codegen::CompiledModule::entry(elaborated, &result),
     );
 
     // Phase 3: Emit only the user module

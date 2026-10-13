@@ -286,19 +286,7 @@ pub fn cmd_emit(file: &str) {
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(
         module_name,
-        codegen::CompiledModule {
-            codegen_info: Default::default(),
-            elaborated: elaborated.clone(),
-            resolution: codegen::resolve::ResolutionMap::new(),
-            origins: Default::default(),
-            front_resolution: result.resolution.clone(),
-            effect_at_node: result.effect_at_node.clone(),
-            type_at_node: result.type_at_node.clone(),
-            expr_types: result.expr_types.clone(),
-            effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
-            effect_abi_plan_ready: false,
-            optimization: codegen::optimize::OptimizationFacts::default(),
-        },
+        codegen::CompiledModule::entry(elaborated.clone(), &result),
     );
     let ctx = codegen::CodegenContext {
         modules: compiled_modules,

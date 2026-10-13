@@ -99,10 +99,7 @@ fn emit_from_program(
             let info = result.codegen_info().get(name).cloned().unwrap_or_default();
             modules.insert(
                 name.clone(),
-                codegen::CompiledModule {
-                    codegen_info: info,
-                    ..Default::default()
-                },
+                codegen::CompiledModule::metadata_only(info),
             );
         }
     }

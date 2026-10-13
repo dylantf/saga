@@ -43,8 +43,9 @@ fn timed_codegen_phase<T>(module: &str, phase: &str, f: impl FnOnce() -> T) -> T
 }
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
-/// and pre-computed name resolution.
-#[derive(Clone, Default)]
+/// and pre-computed name resolution. Built only by `CompiledModule::new`
+/// (there is deliberately no `Default`).
+#[derive(Clone)]
 pub struct CompiledModule {
     pub codegen_info: std::sync::Arc<ModuleCodegenInfo>,
     pub elaborated: ast::Program,
@@ -70,6 +71,71 @@ pub struct CompiledModule {
     /// Post-classifier optimizer facts for this module. Empty facts mean
     /// lowering should take the normal direct-first/evidence path.
     pub optimization: optimize::OptimizationFacts,
+}
+
+impl CompiledModule {
+    /// The one way a `CompiledModule` is built. `checked` is the check
+    /// result of the module itself, from which the node-keyed tables are
+    /// taken; `None` for a module known only by its codegen metadata. The
+    /// effect-ABI plan starts empty and not ready
+    /// (`precompute_context_call_effects` fills it).
+    pub fn new(
+        codegen_info: std::sync::Arc<ModuleCodegenInfo>,
+        elaborated: ast::Program,
+        resolution: resolve::ResolutionMap,
+        origins: generic_fold::NodeOrigins,
+        optimization: optimize::OptimizationFacts,
+        checked: Option<&crate::typechecker::CheckResult>,
+    ) -> Self {
+        let (front_resolution, effect_at_node, type_at_node, expr_types) = match checked {
+            Some(result) => (
+                result.resolution.clone(),
+                result.effect_at_node.clone(),
+                result.type_at_node.clone(),
+                result.expr_types.clone(),
+            ),
+            None => Default::default(),
+        };
+        CompiledModule {
+            codegen_info,
+            elaborated,
+            resolution,
+            origins,
+            front_resolution,
+            effect_at_node,
+            type_at_node,
+            expr_types,
+            effect_abi_plan: call_effects::EffectAbiPlan::default(),
+            effect_abi_plan_ready: false,
+            optimization,
+        }
+    }
+
+    /// A module with no program of its own in this build: only its codegen
+    /// metadata is known.
+    pub fn metadata_only(codegen_info: std::sync::Arc<ModuleCodegenInfo>) -> Self {
+        Self::new(
+            codegen_info,
+            Vec::new(),
+            resolve::ResolutionMap::new(),
+            Default::default(),
+            Default::default(),
+            None,
+        )
+    }
+
+    /// A module that is emitted but never imported (`Main`, a script): its
+    /// elaborated program as it is, with no backend resolution or facts.
+    pub fn entry(elaborated: ast::Program, checked: &crate::typechecker::CheckResult) -> Self {
+        Self::new(
+            Default::default(),
+            elaborated,
+            resolve::ResolutionMap::new(),
+            Default::default(),
+            Default::default(),
+            Some(checked),
+        )
+    }
 }
 
 pub struct ModuleSemantics<'a> {
@@ -196,19 +262,14 @@ pub fn compile_module_from_result(
         &HashMap::new(),
     );
     let optimization = optimize::analyze(module_name, &normalized, &resolution);
-    Some(CompiledModule {
-        codegen_info: info,
-        elaborated: normalized,
+    Some(CompiledModule::new(
+        info,
+        normalized,
         resolution,
-        origins: folded.origins,
-        front_resolution: mod_result.resolution.clone(),
-        effect_at_node: mod_result.effect_at_node.clone(),
-        type_at_node: mod_result.type_at_node.clone(),
-        expr_types: mod_result.expr_types.clone(),
-        effect_abi_plan: call_effects::EffectAbiPlan::default(),
-        effect_abi_plan_ready: false,
+        folded.origins,
         optimization,
-    })
+        Some(mod_result),
+    ))
 }
 
 pub fn precompute_context_call_effects(

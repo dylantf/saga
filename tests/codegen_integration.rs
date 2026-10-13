@@ -79,19 +79,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     for (name, info) in codegen_info_map.iter() {
         modules.insert(
             name.clone(),
-            codegen::CompiledModule {
-                codegen_info: info.clone(),
-                elaborated: Vec::new(),
-                resolution: codegen::resolve::ResolutionMap::new(),
-                origins: Default::default(),
-                front_resolution: Default::default(),
-                effect_at_node: Default::default(),
-                type_at_node: Default::default(),
-                expr_types: Default::default(),
-                effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
-                effect_abi_plan_ready: false,
-                optimization: codegen::optimize::OptimizationFacts::default(),
-            },
+            codegen::CompiledModule::metadata_only(info.clone()),
         );
     }
     // Overlay elaborated modules with their resolution maps
@@ -110,7 +98,9 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
             &front_resolution,
             &std::collections::HashMap::new(),
         );
-        let entry = modules.entry(name.clone()).or_default();
+        let entry = modules
+            .entry(name.clone())
+            .or_insert_with(|| codegen::CompiledModule::metadata_only(Default::default()));
         entry.elaborated = normalized;
         entry.resolution = resolution;
         entry.front_resolution = front_resolution;
