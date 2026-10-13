@@ -342,11 +342,12 @@ pub fn build_stdlib() -> PathBuf {
             );
         }
     }
-    let ctx = codegen::CodegenContext {
+    let mut ctx = codegen::CodegenContext {
         modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
+    codegen::precompute_context_call_effects(&mut ctx, &result);
 
     let module_names: Vec<String> = ctx.modules.keys().cloned().collect();
     for name in module_names {
@@ -570,11 +571,14 @@ pub fn emit_program(
             );
         }
     }
-    let ctx = codegen::CodegenContext {
+    let mut ctx = codegen::CodegenContext {
         modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
+    // As the build does: plan every module against its own check result. A
+    // module's own result does not hold the results of its siblings.
+    codegen::precompute_context_call_effects(&mut ctx, &result);
     codegen::emit_module_with_context(
         module_name,
         &elaborated,

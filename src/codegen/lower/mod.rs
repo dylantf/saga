@@ -232,6 +232,7 @@ impl FunInfo {
 #[derive(Default)]
 pub(super) struct LowererResolution {
     pub(super) symbols: super::resolve::ResolutionMap,
+    pub(super) origins: super::generic_fold::NodeOrigins,
     pub(super) carried_record_types: HashMap<crate::ast::NodeId, String>,
     pub(super) carried_constructors: HashMap<crate::ast::NodeId, String>,
     pub(super) carried_constructor_names: HashMap<String, String>,
@@ -350,6 +351,9 @@ pub struct Lowerer<'a> {
     /// Pre-resolved name resolution map: NodeId -> ResolvedSymbol.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
+    /// Origins of the nodes of the module being lowered that the generic
+    /// fold copied. See `Lowerer::origin`.
+    origins: super::generic_fold::NodeOrigins,
     /// Record type facts carried for fresh cross-module inlined nodes.
     /// These mirror typechecker `record_types` entries that would otherwise be
     /// lost when generic folding freshens producer AST into the consumer module.
@@ -446,6 +450,7 @@ impl<'a> Lowerer<'a> {
             function_value_captured_evidence: HashMap::new(),
             constructor_atoms,
             resolved: resolution.symbols,
+            origins: resolution.origins,
             carried_record_types: resolution.carried_record_types,
             carried_constructors: resolution.carried_constructors,
             carried_constructor_names: resolution.carried_constructor_names,
@@ -847,6 +852,7 @@ impl<'a> Lowerer<'a> {
             module: &self.current_source_module,
             source_info: self.source_info.as_ref(),
             resolved: &self.resolved,
+            origins: &self.origins,
             check_result,
             ctx: self.ctx,
             fun_sigs: &fun_sigs,
@@ -909,6 +915,11 @@ pub(crate) fn precompute_call_effects(
         super::resolve::ConstructorAtoms::new(),
         LowererResolution {
             symbols: resolution,
+            origins: ctx
+                .modules
+                .get(module_name)
+                .map(|compiled| compiled.origins.clone())
+                .unwrap_or_default(),
             ..Default::default()
         },
         check_result,

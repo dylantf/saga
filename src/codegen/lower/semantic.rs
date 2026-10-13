@@ -132,6 +132,25 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(&self.current_source_module)
     }
 
+    /// The module and id under which the typechecker's tables hold
+    /// `node_id`, a node of `module`. They differ from the arguments for a
+    /// node the generic fold copied, possibly from another module.
+    pub(super) fn origin<'s>(
+        &'s self,
+        module: &'s str,
+        node_id: crate::ast::NodeId,
+    ) -> (&'s str, crate::ast::NodeId) {
+        let origins = if module == self.current_source_module {
+            Some(&self.origins)
+        } else {
+            self.ctx.modules.get(module).map(|m| &m.origins)
+        };
+        match origins.and_then(|origins| origins.get(&node_id)) {
+            Some((source, id)) => (source.as_deref().unwrap_or(module), *id),
+            None => (module, node_id),
+        }
+    }
+
     /// Resolve a source node's inferred type against the module whose code is
     /// currently being lowered. Imported handler arms retain their defining
     /// module's NodeIds, so consulting only the consumer's CheckResult loses
@@ -140,7 +159,7 @@ impl<'a> Lowerer<'a> {
         &self,
         node_id: crate::ast::NodeId,
     ) -> Option<&crate::typechecker::Type> {
-        let module_name = self.current_semantic_module_name();
+        let (module_name, node_id) = self.origin(self.current_semantic_module_name(), node_id);
         if module_name == self.current_source_module {
             self.check_result.type_at_node.get(&node_id)
         } else {
@@ -369,6 +388,7 @@ impl<'a> Lowerer<'a> {
         module_name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<String> {
+        let (module_name, node_id) = self.origin(module_name, node_id);
         self.front_resolution_for_module(module_name)
             .and_then(|r| r.effect_call(node_id))
             .map(|resolved| resolved.effect.as_str())

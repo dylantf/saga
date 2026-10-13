@@ -106,11 +106,14 @@ fn emit_from_program(
             );
         }
     }
-    let ctx = codegen::CodegenContext {
+    let mut ctx = codegen::CodegenContext {
         modules,
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
+    // As the build does: plan every module against its own check result. A
+    // module's own result does not hold the results of its siblings.
+    codegen::precompute_context_call_effects(&mut ctx, &result);
     codegen::emit_module_with_context(
         module_name,
         &elaborated,

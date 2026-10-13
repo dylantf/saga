@@ -87,7 +87,7 @@ impl<'a> Lowerer<'a> {
     /// The expression's own type from the complete per-expression table,
     /// against the module whose code is being lowered.
     pub(super) fn value_type(&self, node_id: NodeId) -> Option<Type> {
-        let module_name = self.current_semantic_module_name();
+        let (module_name, node_id) = self.origin(self.current_semantic_module_name(), node_id);
         if module_name == self.current_source_module {
             self.check_result
                 .expr_types

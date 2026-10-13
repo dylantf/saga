@@ -290,6 +290,7 @@ pub fn cmd_emit(file: &str) {
             codegen_info: Default::default(),
             elaborated: elaborated.clone(),
             resolution: codegen::resolve::ResolutionMap::new(),
+            origins: Default::default(),
             front_resolution: result.resolution.clone(),
             effect_at_node: result.effect_at_node.clone(),
             type_at_node: result.type_at_node.clone(),

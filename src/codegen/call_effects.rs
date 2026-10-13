@@ -360,6 +360,8 @@ pub struct PopulatorInputs<'a> {
     pub module: &'a str,
     pub source_info: Option<&'a crate::codegen::lower::errors::SourceInfo>,
     pub resolved: &'a ResolutionMap,
+    /// Origins of the nodes of the program that the generic fold copied.
+    pub origins: &'a crate::codegen::generic_fold::NodeOrigins,
     pub check_result: &'a CheckResult,
     pub ctx: &'a CodegenContext,
     pub fun_sigs: &'a HashMap<String, FunSig>,
@@ -410,10 +412,23 @@ pub struct Populator<'a> {
 }
 
 /// `SAGA_CLASSIFY_REPORT=1`: print to stderr every call whose classification
-/// was not decided by a positive rule (see `Populator::report`).
-fn classify_report_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SAGA_CLASSIFY_REPORT").is_some())
+/// was not decided by a positive rule (see `Populator::report`). Any other
+/// value is a file to append the lines to instead (for runs that spawn the
+/// compiler as a subprocess).
+fn classify_report(line: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let Some(target) = std::env::var_os("SAGA_CLASSIFY_REPORT") else {
+        return;
+    };
+    if target == "1" {
+        eprintln!("{line}");
+    } else if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target)
+    {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 impl<'a> Populator<'a> {
@@ -448,19 +463,16 @@ impl<'a> Populator<'a> {
     /// A head with no entry in the type table was made after typechecking
     /// (by elaboration, the generic fold or normalization).
     fn report(&self, path: &str, head: &Expr) {
-        if !classify_report_enabled() {
-            return;
-        }
-        let origin = if self.inputs.check_result.expr_types.contains_key(&head.id) {
+        let origin = if self.node_type(head.id).is_some() {
             "typed"
         } else {
             "untyped"
         };
-        eprintln!(
+        classify_report(format_args!(
             "classify-report: {path} head={} origin={origin} in {}",
             head_debug_label(head),
             self.location(head)
-        );
+        ));
     }
 
     fn canonicalize(&self, bare: &str) -> String {
@@ -1113,6 +1125,20 @@ impl<'a> Populator<'a> {
         ))
     }
 
+    /// The type of a node of the program: read from the module the generic
+    /// fold copied it from, when it did.
+    fn node_type(&self, node_id: NodeId) -> Option<&crate::typechecker::Type> {
+        let check = self.inputs.check_result;
+        match self.inputs.origins.get(&node_id) {
+            Some((Some(module), id)) => {
+                let compiled = self.inputs.ctx.modules.get(module.as_ref())?;
+                (compiled.expr_types.get(id)).or_else(|| compiled.type_at_node.get(id))
+            }
+            Some((None, id)) => (check.expr_types.get(id)).or_else(|| check.type_at_node.get(id)),
+            None => (check.expr_types.get(&node_id)).or_else(|| check.type_at_node.get(&node_id)),
+        }
+    }
+
     /// Tagged closures: classify a call through a function value from the
     /// callee's own type. The call is effectful when any arrow consumed by
     /// the supplied arguments carries effects or an open row.
@@ -1121,12 +1147,7 @@ impl<'a> Populator<'a> {
         callee_id: NodeId,
         supplied: usize,
     ) -> Option<CallEffectInfo> {
-        let ty = self
-            .inputs
-            .check_result
-            .expr_types
-            .get(&callee_id)
-            .or_else(|| self.inputs.check_result.type_at_node.get(&callee_id))?;
+        let ty = self.node_type(callee_id)?;
         Some(
             if crate::codegen::lower::tagged_consumed_arrows_effectful(ty, supplied) {
                 Self::tagged_value_call(supplied)

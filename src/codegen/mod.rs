@@ -49,6 +49,8 @@ pub struct CompiledModule {
     pub codegen_info: std::sync::Arc<ModuleCodegenInfo>,
     pub elaborated: ast::Program,
     pub resolution: resolve::ResolutionMap,
+    /// Origins of the nodes of `elaborated` that the generic fold copied.
+    pub origins: generic_fold::NodeOrigins,
     /// Front-end name resolution from the typechecker.
     pub front_resolution: crate::typechecker::ResolutionResult,
     /// Exact applied effect selected for effect calls and handler arms.
@@ -186,12 +188,13 @@ pub fn compile_module_from_result(
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
     // Local-only fold here (no cross-module context); the cross-module fold runs
     // at emit, which re-folds with `ctx.modules` supplied.
-    let normalized = generic_fold::fold_program(
+    let folded = generic_fold::fold_program(
         &normalize::normalize_effects(&elaborated),
         &generic_fold::ExternalCtors::new(),
         &generic_fold::ExternalFuns::new(),
-    )
-    .program;
+        &generic_fold::NodeOrigins::new(),
+    );
+    let normalized = folded.program;
     let resolution = resolve::resolve_names(
         module_name,
         &normalized,
@@ -205,6 +208,7 @@ pub fn compile_module_from_result(
         codegen_info: info,
         elaborated: normalized,
         resolution,
+        origins: folded.origins,
         front_resolution: mod_result.resolution.clone(),
         effect_at_node: mod_result.effect_at_node.clone(),
         type_at_node: mod_result.type_at_node.clone(),
@@ -300,15 +304,26 @@ pub fn emit_module_with_prepared_context(
     let normalized = timed_codegen_phase(module_name, "normalize_effects", || {
         normalize::normalize_effects(program)
     });
+    // The program may already have been folded once, on its own.
+    let source_module = program.iter().find_map(|decl| match decl {
+        ast::Decl::ModuleDecl { path, .. } => Some(path.join(".")),
+        _ => None,
+    });
+    let prior_origins = source_module
+        .and_then(|name| ctx.modules.get(&name))
+        .map(|compiled| compiled.origins.clone())
+        .unwrap_or_default();
     let fold_out = timed_codegen_phase(module_name, "generic_fold_cross_module", || {
         generic_fold::fold_program(
             &normalized,
             &prepared.external_ctors,
             &prepared.external_funs,
+            &prior_origins,
         )
     });
     let generic_fold::FoldOutput {
         program,
+        origins,
         carried_resolution,
         carried_record_types,
         carried_constructors,
@@ -366,6 +381,7 @@ pub fn emit_module_with_prepared_context(
             constructor_atoms,
             lower::LowererResolution {
                 symbols: resolution_map,
+                origins,
                 carried_record_types,
                 carried_constructors,
                 carried_constructor_names,

@@ -1392,14 +1392,15 @@ pub fn build_project_ext(
         let normalized_effects = timed_build_phase(module_name, "normalize_effects_local", || {
             codegen::normalize::normalize_effects(&elaborated)
         });
-        let normalized = timed_build_phase(module_name, "generic_fold_local", || {
+        let folded = timed_build_phase(module_name, "generic_fold_local", || {
             codegen::generic_fold::fold_program(
                 &normalized_effects,
                 &codegen::generic_fold::ExternalCtors::new(),
                 &codegen::generic_fold::ExternalFuns::new(),
+                &codegen::generic_fold::NodeOrigins::new(),
             )
-            .program
         });
+        let normalized = folded.program;
         let resolution = timed_build_phase(module_name, "resolve_codegen_names", || {
             codegen::resolve::resolve_names(
                 module_name,
@@ -1422,6 +1423,7 @@ pub fn build_project_ext(
                     .unwrap_or_default(),
                 elaborated: normalized,
                 resolution,
+                origins: folded.origins,
                 front_resolution: mod_result.resolution.clone(),
                 effect_at_node: mod_result.effect_at_node.clone(),
                 type_at_node: mod_result.type_at_node.clone(),
@@ -1446,6 +1448,7 @@ pub fn build_project_ext(
                 codegen_info: Default::default(),
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
+                origins: Default::default(),
                 front_resolution: result.resolution.clone(),
                 effect_at_node: result.effect_at_node.clone(),
                 type_at_node: result.type_at_node.clone(),
@@ -1701,6 +1704,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             codegen_info: Default::default(),
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
+            origins: Default::default(),
             front_resolution: result.resolution.clone(),
             effect_at_node: result.effect_at_node.clone(),
             type_at_node: result.type_at_node.clone(),

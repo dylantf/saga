@@ -4,11 +4,13 @@ use super::*;
 /// dict-constructor bodies, then collapse the constructors they expose
 /// (constant record projection, β-reduction, case-of-known-constructor).
 /// `externals`/`external_funs` supply cross-module impls and carryable plain
-/// functions; pass empty maps for local-only folding.
+/// functions; pass empty maps for local-only folding. `prior` holds the
+/// origins of nodes an earlier fold of this module copied.
 pub fn fold_program(
     program: &Program,
     externals: &ExternalCtors<'_>,
     external_funs: &ExternalFuns<'_>,
+    prior: &NodeOrigins,
 ) -> FoldOutput {
     let mut ctors: HashMap<&str, CtorView<'_>> = HashMap::new();
     // Externals first; a local impl of the same name (shouldn't happen — dict
@@ -21,6 +23,7 @@ pub fn fold_program(
                 dict_params: ext.dict_params,
                 methods: ext.methods,
                 resolution: Some(ext.resolution),
+                origins: Some(ext.origins),
                 record_types: Some(ext.record_types),
                 constructors: Some(ext.constructors),
             },
@@ -41,6 +44,7 @@ pub fn fold_program(
                     dict_params,
                     methods,
                     resolution: None,
+                    origins: None,
                     record_types: None,
                     constructors: None,
                 },
@@ -54,6 +58,7 @@ pub fn fold_program(
     if ctors.is_empty() {
         return FoldOutput {
             program: program.clone(),
+            origins: prior.clone(),
             carried_resolution: ResolutionMap::new(),
             carried_record_types: HashMap::new(),
             carried_constructors: HashMap::new(),
@@ -76,6 +81,7 @@ pub fn fold_program(
                 params: ext.params,
                 body: ext.body,
                 resolution: Some(ext.resolution),
+                origins: Some(ext.origins),
                 record_types: Some(ext.record_types),
                 constructors: Some(ext.constructors),
             },
@@ -97,6 +103,7 @@ pub fn fold_program(
                     params,
                     body,
                     resolution: None,
+                    origins: None,
                     record_types: None,
                     constructors: None,
                 },
@@ -108,17 +115,22 @@ pub fn fold_program(
         ctors,
         funs,
         carried: ResolutionMap::new(),
+        origins: prior.clone(),
         carried_record_types: HashMap::new(),
         carried_constructors: HashMap::new(),
         carried_constructor_names: HashMap::new(),
         carried_names: HashMap::new(),
     };
     let mut out = program.clone();
+    record_freshened_ids(true);
     for decl in &mut out {
         folder.fold_decl(decl);
     }
+    folder.note_freshened(None);
+    record_freshened_ids(false);
     FoldOutput {
         program: out,
+        origins: folder.origins,
         carried_resolution: folder.carried,
         carried_record_types: folder.carried_record_types,
         carried_constructors: folder.carried_constructors,
@@ -237,7 +249,7 @@ impl Folder<'_> {
     ) -> Option<Expr> {
         // Copy out the borrowed ctor fields (all `&'a`) so the `&self.ctors`
         // borrow ends before we mutate `self.carried` below.
-        let (dict_params, methods, resolution, record_types, constructors, source_module) = {
+        let (dict_params, methods, resolution, record_types, constructors, source) = {
             let ctor = self.ctors.get(name)?;
             (
                 ctor.dict_params,
@@ -245,9 +257,10 @@ impl Folder<'_> {
                 ctor.resolution,
                 ctor.record_types,
                 ctor.constructors,
-                ctor.source_module,
+                ctor.source_module.zip(ctor.origins),
             )
         };
+        let source_module = source.map(|(module, _)| module);
         if dict_params.len() != sub_dicts.len() {
             return None;
         }
@@ -262,7 +275,7 @@ impl Folder<'_> {
         // Clone the method body and freshen its NodeIds, carrying the producer's
         // resolution for a cross-module body.
         let mut new_body =
-            self.freshen_with_carry(body, resolution, record_types, constructors, source_module);
+            self.freshen_with_carry(body, resolution, record_types, constructors, source);
 
         // Substitute the `where`-bound dict params with the concrete sub-dicts.
         let subst: HashMap<&str, &Expr> = dict_params
@@ -296,22 +309,17 @@ impl Folder<'_> {
         resolution: Option<&ResolutionMap>,
         record_types: Option<&HashMap<NodeId, String>>,
         constructors: Option<&HashMap<NodeId, String>>,
-        source_module: Option<&str>,
+        source: Option<(&str, &NodeOrigins)>,
     ) -> Expr {
+        let source_module = source.map(|(module, _)| module);
         let mut new_body = body.clone();
+        // Ids freshened so far were of this module's own nodes.
+        self.note_freshened(None);
+        freshen_expr_ids(&mut new_body);
+        let freshened = self.note_freshened(source);
         match resolution {
             Some(producer_res) => {
-                let mut old_ids = Vec::new();
-                collect_carried_ids(&mut new_body, &mut old_ids);
-                freshen_expr_ids(&mut new_body);
-                let mut new_ids = Vec::new();
-                collect_carried_ids(&mut new_body, &mut new_ids);
-                debug_assert_eq!(
-                    old_ids.len(),
-                    new_ids.len(),
-                    "id collection must be structurally stable across freshening"
-                );
-                for (old, new) in old_ids.iter().zip(&new_ids) {
+                for (old, new) in &freshened {
                     if let Some(sym) = producer_res.get(old) {
                         // Anchor producer-local `BeamFunction`s (`erlang_mod: None`)
                         // to the producer module so they lower as remote calls in
@@ -349,9 +357,29 @@ impl Folder<'_> {
                     }
                 }
             }
-            None => freshen_expr_ids(&mut new_body),
+            None => {}
         }
         new_body
+    }
+
+    /// Record the origin of every id freshened since the last call, and
+    /// return the `(old, new)` pairs. `source` is the module the freshened
+    /// nodes were copied from and its own origins; `None` when they are
+    /// nodes of the module being folded.
+    fn note_freshened(&mut self, source: Option<(&str, &NodeOrigins)>) -> Vec<(NodeId, NodeId)> {
+        let freshened = take_freshened_ids();
+        let module = source.map(|(module, _)| std::sync::Arc::<str>::from(module));
+        for (old, new) in &freshened {
+            let origin = match self.origins.get(old) {
+                Some(origin) => origin.clone(),
+                None => match source.and_then(|(_, origins)| origins.get(old)) {
+                    Some((from, id)) => (from.clone().or_else(|| module.clone()), *id),
+                    None => (module.clone(), *old),
+                },
+            };
+            self.origins.insert(*new, origin);
+        }
+        freshened
     }
 
     /// Inline a saturated call to a known dispatch-shaped plain function when an
@@ -376,7 +404,7 @@ impl Folder<'_> {
             ExprKind::QualifiedName { name, .. } => base_name(name),
             _ => return None,
         };
-        let (params, body, resolution, record_types, constructors, source_module) = {
+        let (params, body, resolution, record_types, constructors, source) = {
             let fun = self.funs.get(name)?;
             (
                 fun.params,
@@ -384,9 +412,10 @@ impl Folder<'_> {
                 fun.resolution,
                 fun.record_types,
                 fun.constructors,
-                fun.source_module,
+                fun.source_module.zip(fun.origins),
             )
         };
+        let source_module = source.map(|(module, _)| module);
         if params.len() != args.len() {
             return None; // Partial/over-application — leave it.
         }
@@ -402,7 +431,7 @@ impl Folder<'_> {
             return None;
         }
         let fresh_body =
-            self.freshen_with_carry(body, resolution, record_types, constructors, source_module);
+            self.freshen_with_carry(body, resolution, record_types, constructors, source);
         self.carry_param_constructor_names(params, source_module);
         Some(bind_subpats(params, &args, &fresh_body))
     }
