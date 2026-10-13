@@ -10,13 +10,20 @@ impl<'a> Lowerer<'a> {
     /// Complex guards cannot be emitted directly in Core Erlang. When any arm
     /// contains one, we build a right-associated chain of one-arm cases so the
     /// fallthrough for each suffix is lowered exactly once.
-    pub(crate) fn lower_case_expr(&mut self, scrut_var: &str, arms: &[CaseArm]) -> CExpr {
+    ///
+    /// Arm bodies are in tail position: with `k`, their values go to it.
+    pub(crate) fn lower_case_expr(
+        &mut self,
+        scrut_var: &str,
+        arms: &[CaseArm],
+        k: Option<&CExpr>,
+    ) -> CExpr {
         let arms_ref: Vec<&CaseArm> = arms.iter().collect();
         if arms_ref
             .iter()
             .all(|arm| arm.guard.as_ref().is_none_or(is_guard_safe))
         {
-            let mut lowered = self.lower_case_arms_inner(scrut_var, &arms_ref);
+            let mut lowered = self.lower_case_arms_inner(&arms_ref, k);
             let has_total_catchall = arms_ref
                 .iter()
                 .any(|arm| arm.guard.is_none() && Self::is_catchall_pat(&arm.pattern));
@@ -30,14 +37,10 @@ impl<'a> Lowerer<'a> {
             return CExpr::Case(Box::new(CExpr::Var(scrut_var.to_string())), lowered);
         }
 
-        self.lower_case_expr_chain(scrut_var, &arms_ref)
+        self.lower_case_expr_chain(scrut_var, &arms_ref, k)
     }
 
-    pub(crate) fn lower_case_arms_inner(
-        &mut self,
-        _scrut_var: &str,
-        arms: &[&CaseArm],
-    ) -> Vec<CArm> {
+    fn lower_case_arms_inner(&mut self, arms: &[&CaseArm], k: Option<&CExpr>) -> Vec<CArm> {
         let mut result = Vec::new();
 
         for arm in arms {
@@ -52,12 +55,12 @@ impl<'a> Lowerer<'a> {
                 None => CArm {
                     pat,
                     guard: None,
-                    body: self.lower_expr(&arm.body),
+                    body: self.lower_tail(&arm.body, k.cloned()),
                 },
                 Some(guard) if is_guard_safe(guard) => CArm {
                     pat,
                     guard: Some(self.lower_expr(guard)),
-                    body: self.lower_expr(&arm.body),
+                    body: self.lower_tail(&arm.body, k.cloned()),
                 },
                 Some(_guard) => {
                     unreachable!("complex guards should be handled by lower_case_expr_chain");
@@ -70,7 +73,12 @@ impl<'a> Lowerer<'a> {
         result
     }
 
-    pub(crate) fn lower_case_expr_chain(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> CExpr {
+    fn lower_case_expr_chain(
+        &mut self,
+        scrut_var: &str,
+        arms: &[&CaseArm],
+        k: Option<&CExpr>,
+    ) -> CExpr {
         let mut rest = self.case_clause_error_expr();
 
         for arm in arms.iter().rev() {
@@ -82,7 +90,7 @@ impl<'a> Lowerer<'a> {
                 &self.constructor_atoms,
                 self.handler_origin_module(),
             );
-            let body_ce = self.lower_expr(&arm.body);
+            let body_ce = self.lower_tail(&arm.body, k.cloned());
 
             let current = match &arm.guard {
                 None => {

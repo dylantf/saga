@@ -23,20 +23,36 @@ use crate::codegen::normalize;
 
 impl<'a> Lowerer<'a> {
     /// Whether `expr` performs an effect by itself, for the position rule:
-    /// a call the plan classified CPS, an applied operation, a `with`, a
-    /// `resume`.
-    ///
-    /// A nullary operation (`number!`, a bare `EffectCall`) performs too but
-    /// is not counted: no lowering rule gives it the rest of a block as its
-    /// continuation yet, so moving it into a `let` would change nothing.
+    /// a call the plan classified CPS, an applied operation, a nullary
+    /// operation, a `with`, a `resume`.
     pub(super) fn performs_effect(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::App { .. } => {
                 collect_effect_call(expr).is_some() || self.expr_is_effectful_call(expr)
             }
+            ExprKind::EffectCall { .. } => self.nullary_operation(expr).is_some(),
             ExprKind::With { .. } | ExprKind::Resume { .. } => true,
             _ => false,
         }
+    }
+
+    /// The name and qualifier of `expr` if it is an operation written with
+    /// no arguments that performs where it stands: an operation that takes
+    /// no parameters (`number!`). An operation that takes parameters is,
+    /// unapplied, a reference to it as a function value.
+    pub(super) fn nullary_operation<'e>(&self, expr: &'e Expr) -> Option<(&'e str, Option<&'e str>)> {
+        let ExprKind::EffectCall {
+            name, qualifier, ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let qualifier = qualifier.as_deref();
+        let takes_parameters = self
+            .resolved_effect_call_name(expr.id, name, qualifier)
+            .and_then(|effect| self.effect_defs.get(&effect)?.ops.get(name.as_str()))
+            .is_some_and(|op| op.source_param_count > 0);
+        (!takes_parameters).then_some((name.as_str(), qualifier))
     }
 
     pub(super) fn effect_position_violations(&self, body: &Expr) -> Vec<Violation> {
@@ -80,7 +96,7 @@ impl<'a> Lowerer<'a> {
     /// Lower an operand of `operand_of` as a plain value.
     pub(super) fn lower_operand(&mut self, expr: &Expr, operand_of: &str) -> CExpr {
         self.assert_operand(expr, operand_of);
-        self.lower_expr_value(expr)
+        self.lower_expr(expr)
     }
 
     /// The body the lowerer is about to lower, in effect-normal form.

@@ -1,23 +1,26 @@
-use crate::ast::{Expr, ExprKind, Pat, Stmt};
+use crate::ast::{Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
 use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn lower_block_with_return_k(
-        &mut self,
-        stmts: &[Stmt],
-        return_k: Option<CExpr>,
-    ) -> CExpr {
+    /// The one block lowerer. With `k`, the value of the block is passed to
+    /// that continuation; without, it is returned.
+    ///
+    /// A statement that performs effects is lowered in tail position with
+    /// the rest of the block as its continuation (`lower_statement`).
+    pub(crate) fn lower_block(&mut self, stmts: &[Stmt], k: Option<CExpr>) -> CExpr {
         match stmts {
-            [] => self.apply_return_k_with(return_k, CExpr::Tuple(vec![])), // unit
-            [Stmt::Expr(e)] => self.lower_block_terminal_expr_with_return_k(e, return_k),
-            [Stmt::Let { pattern, value, .. }] => {
-                let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                let val_ce = self.lower_expr_value(value);
-                let body = self.apply_return_k_with(return_k, CExpr::Var(var.clone()));
-                CExpr::Let(var, Box::new(val_ce), Box::new(body))
+            [] => self.apply_return_k_with(k, CExpr::Tuple(vec![])), // unit
+            [Stmt::Expr(e)] => self.lower_tail(e, k),
+            // A block that ends in a `let` has the bound value as its value.
+            [first @ Stmt::Let { pattern, .. }] => {
+                let value = match pat_binding_var(pattern) {
+                    Some(var) => CExpr::Var(var),
+                    None => CExpr::Tuple(vec![]),
+                };
+                self.lower_statement(first, |this| this.apply_return_k_with(k, value))
             }
             [Stmt::LetFun { .. }, ..] => {
                 // Group consecutive LetFun clauses with the same name
@@ -99,14 +102,7 @@ impl<'a> Lowerer<'a> {
                         params_ce.push("_ReturnK".to_string());
                     }
                     let body = clauses[0].2;
-                    let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                        self.lower_terminal_effectful_expr_with_return_k(
-                            body,
-                            effect_return_k.clone(),
-                        )
-                    } else {
-                        self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
-                    };
+                    let body_ce = self.lower_tail(body, effect_return_k.clone());
                     CExpr::Fun(params_ce, Box::new(body_ce))
                 } else {
                     // Multi-clause: build case expression over params
@@ -138,18 +134,7 @@ impl<'a> Lowerer<'a> {
                                 )
                             };
                             let guard_ce = guard.as_ref().map(|g| self.lower_expr(g));
-                            let body_ce =
-                                if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                                    self.lower_terminal_effectful_expr_with_return_k(
-                                        body,
-                                        effect_return_k.clone(),
-                                    )
-                                } else {
-                                    self.lower_expr_with_installed_return_k(
-                                        body,
-                                        effect_return_k.clone(),
-                                    )
-                                };
+                            let body_ce = self.lower_tail(body, effect_return_k.clone());
                             CArm {
                                 pat,
                                 guard: guard_ce,
@@ -171,361 +156,99 @@ impl<'a> Lowerer<'a> {
                 };
                 self.current_evidence = saved_evidence;
 
-                let rest_ce = if rest.is_empty() {
-                    self.apply_return_k_with(return_k, CExpr::Tuple(vec![]))
-                } else {
-                    self.lower_block_with_return_k(rest, return_k)
-                };
+                let rest_ce = self.lower_block(rest, k);
 
                 CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
             }
-            [first, rest @ ..] => {
-                // Handle binding: register as a handler alias so `with name`
-                // resolves correctly. For static references, this is purely a
-                // compile-time alias. For conditionals, we lower the condition
-                // and register a synthetic handler that dispatches at runtime.
-                // Dynamic handlers lower the RHS and bind it to a variable.
-                // Let bindings with handler values: detect and register the
-                // handler so `with name` resolves correctly.
-                if let Stmt::Let { pattern, value, .. } = first
-                    && let Pat::Var {
-                        name, id: pat_id, ..
-                    } = pattern
-                    && self.is_handler_value(value)
-                {
-                    self.lower_handle_binding(name, Some(*pat_id), value);
-                    if let Some((var, _effects, _has_return)) =
-                        self.handle_dynamic_vars.get(name.as_str()).cloned()
-                    {
-                        // Handler factories may themselves be effectful. Their
-                        // result must be bound by the call continuation just
-                        // like any other CPS let; lowering with an identity K
-                        // leaves later first-class uses of the handler outside
-                        // the result's scope and loses abort semantics.
-                        if self.expr_is_effectful_call(value) {
-                            let rest_k = self.lower_rest_block_k_with_return_k(
-                                Some(pattern),
-                                rest,
-                                return_k,
-                            );
-                            return self.lower_expr_with_call_return_k(value, Some(rest_k));
-                        }
-                        let rhs_ce = self.lower_expr_value(value);
-                        let rest_ce = self.lower_block_with_return_k(rest, return_k);
-                        return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
-                    }
-                    return self.lower_block_with_return_k(rest, return_k);
-                }
-
-                // Check if the value is a call to an effectful function. If so,
-                // capture the rest of the block as _ReturnK so abort-style handlers
-                // skip subsequent statements (same CPS treatment as `with`).
-                {
-                    let value_expr = match first {
-                        Stmt::Let { value, .. } => value,
-                        Stmt::Expr(e) => e,
-                        Stmt::LetFun { .. } => unreachable!(),
-                    };
-                    if self.expr_is_effectful_call(value_expr) {
-                        let (pat_opt, value_expr) = match first {
-                            Stmt::Let { pattern, value, .. } => (Some(pattern), value),
-                            Stmt::Expr(e) => (None, e),
-                            Stmt::LetFun { .. } => unreachable!(),
-                        };
-                        let rest_k = self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
-                        return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
-                    }
-                }
-
-                // Check if the first statement contains an effect call -- if so, CPS transform:
-                // everything in `rest` becomes the continuation closure K.
-                // Effect calls may be bare (EffectCall) or wrapped in App nodes
-                // (App(EffectCall, arg1), arg2, ...).
-                let effect_info = match first {
-                    Stmt::Expr(e) => collect_effect_call_expr(e)
-                        .map(|(head, name, qual, args)| (None, head.id, name, qual, args)),
-                    Stmt::Let { pattern, value, .. } => collect_effect_call_expr(value)
-                        .map(|(head, name, qual, args)| (Some(pattern), head.id, name, qual, args)),
-                    Stmt::LetFun { .. } => None,
-                };
-
-                if let Some((pat, effect_call_id, op_name, qualifier, args)) = effect_info {
-                    let k = self.lower_rest_block_k_with_return_k(pat, rest, return_k);
-                    // We need to own the args for lower_effect_call
-                    let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                    self.lower_effect_call(effect_call_id, op_name, qualifier, &args_owned, Some(k))
-                } else {
-                    // Check if value expression has effect calls nested in branches.
-                    // If so, build a continuation K from the remaining statements and
-                    // thread it through branches so abort-style handlers skip the rest.
-                    let value_has_nested = match first {
-                        Stmt::Expr(e) => self.has_nested_effectful_expr(e),
-                        Stmt::Let { value, .. } => self.has_nested_effectful_expr(value),
-                        Stmt::LetFun { .. } => false,
-                    };
-
-                    if value_has_nested {
-                        let (pat_opt, value_expr) = match first {
-                            Stmt::Let { pattern, value, .. } => (Some(pattern), value),
-                            Stmt::Expr(e) => (None, e),
-                            Stmt::LetFun { .. } => unreachable!(),
-                        };
-                        let k = self.lower_rest_block_k_with_return_k(pat_opt, rest, return_k);
-                        let k_var = self.fresh();
-                        let body = self.lower_expr_with_k(value_expr, &k_var);
-                        CExpr::Let(k_var, Box::new(k), Box::new(body))
-                    } else {
-                        // Normal (non-effect) statement
-                        let (pat_opt, is_assert, let_span, val_ce) = match first {
-                            Stmt::Let {
-                                pattern,
-                                value,
-                                assert,
-                                span,
-                                ..
-                            } => {
-                                let val_ce = self.lower_expr_value(value);
-                                (Some(pattern), *assert, *span, val_ce)
-                            }
-                            Stmt::Expr(e) => (None, false, e.span, self.lower_expr_value(e)),
-                            Stmt::LetFun { .. } => unreachable!(),
-                        };
-                        let hof_binding = match first {
-                            Stmt::Let {
-                                pattern: Pat::Var { name, .. },
-                                value,
-                                ..
-                            } => self
-                                .hof_direct_binding_for_value_expr(value)
-                                .map(|binding| (name.clone(), binding)),
-                            _ => None,
-                        };
-                        let saved_hof_binding =
-                            hof_binding.as_ref().and_then(|(name, specialization)| {
-                                self.direct_hof_value_bindings
-                                    .insert(name.clone(), specialization.clone())
-                            });
-                        let saved_handler_vars = pat_opt
-                            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
-                            .unwrap_or_default();
-                        let rest_ce = self.lower_block_with_return_k(rest, return_k);
-                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
-                        if let Some((name, _)) = hof_binding {
-                            if let Some(saved) = saved_hof_binding {
-                                self.direct_hof_value_bindings.insert(name, saved);
-                            } else {
-                                self.direct_hof_value_bindings.remove(&name);
-                            }
-                        }
-                        let (var, rest_ce) = match pat_opt {
-                            Some(p) if is_assert => {
-                                self.destructure_pat_assert(p, rest_ce, let_span)
-                            }
-                            Some(p) => self.destructure_pat(p, rest_ce),
-                            None => (self.fresh(), rest_ce),
-                        };
-                        CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
-                    }
-                }
-            }
+            [first, rest @ ..] => self.lower_statement(first, |this| this.lower_block(rest, k)),
         }
     }
 
-    // --- Outer-K threading for nested effect calls in branches ---
-    //
-    // When an if/case/block has effect calls inside its branches and there is
-    // an outer continuation (more statements after it in the enclosing block),
-    // these methods thread K through the branches. Abort-style handlers that
-    // don't call K will skip the rest of the enclosing block, matching the
-    // interpreter's semantics.
-
-    /// Lower an expression with an outer continuation K threaded through branches.
-    pub(crate) fn lower_expr_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
-        self.lower_expr_tail(expr, CExpr::Var(k_var.to_string()))
-    }
-
-    pub(crate) fn lower_expr_with_k_inner(&mut self, expr: &Expr, k_var: &str) -> CExpr {
-        match &expr.kind {
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
+    /// Lower one `let` or expression statement followed by `rest`.
+    ///
+    /// If its value performs effects, the value is lowered in tail position
+    /// with `fun pattern -> rest` as its continuation, so a handler that
+    /// does not resume skips the rest. Otherwise the value is bound and
+    /// `rest` follows.
+    fn lower_statement(&mut self, stmt: &Stmt, rest: impl FnOnce(&mut Self) -> CExpr) -> CExpr {
+        let (pat_opt, value, is_assert, span) = match stmt {
+            Stmt::Let {
+                pattern,
+                value,
+                assert,
+                span,
                 ..
-            } => {
-                let cond_var = self.fresh();
-                let then_ce = self.lower_branch_with_k(then_branch, k_var);
-                let else_ce = self.lower_branch_with_k(else_branch, k_var);
-                let case = CExpr::Case(
-                    Box::new(CExpr::Var(cond_var.clone())),
-                    vec![
-                        CArm {
-                            pat: CPat::Lit(CLit::Atom("true".to_string())),
-                            guard: None,
-                            body: then_ce,
-                        },
-                        CArm {
-                            pat: CPat::Lit(CLit::Atom("false".to_string())),
-                            guard: None,
-                            body: else_ce,
-                        },
-                    ],
-                );
-                let cond_ce = self.lower_operand(cond, "if");
-                CExpr::Let(cond_var, Box::new(cond_ce), Box::new(case))
+            } => (Some(pattern), value, *assert, *span),
+            Stmt::Expr(e) => (None, e, false, e.span),
+            Stmt::LetFun { .. } => unreachable!("local functions are lowered by lower_block"),
+        };
+
+        // A `let` of a handler value registers the handler so `with name`
+        // resolves: a compile-time alias for a static reference, a synthetic
+        // dispatching handler for a conditional, a bound tuple otherwise.
+        if let Some(Pat::Var {
+            name, id: pat_id, ..
+        }) = pat_opt
+            && self.is_handler_value(value)
+        {
+            self.lower_handle_binding(name, Some(*pat_id), value);
+            let Some((var, _, _)) = self.handle_dynamic_vars.get(name.as_str()).cloned() else {
+                return rest(self);
+            };
+            if !self.branch_is_effectful(value) {
+                let rhs_ce = self.lower_expr(value);
+                let rest_ce = rest(self);
+                return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
             }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                let scrut_var = self.fresh();
-                let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
-                let arms_ce: Vec<CArm> = arms
-                    .iter()
-                    .map(|arm| {
-                        let saved_handler_vars =
-                            self.register_dynamic_handler_pattern_vars(&arm.pattern);
-                        let pat = self.lower_pat(
-                            &arm.pattern,
-                            &self.constructor_atoms,
-                            self.handler_origin_module(),
-                        );
-                        let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr_value(g));
-                        let body_ce = self.lower_branch_with_k(&arm.body, k_var);
-                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
-                        CArm {
-                            pat,
-                            guard: guard_ce,
-                            body: body_ce,
-                        }
-                    })
-                    .collect();
-                let case = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms_ce);
-                let scrut_ce = self.lower_operand(scrutinee, "case");
-                CExpr::Let(scrut_var, Box::new(scrut_ce), Box::new(case))
-            }
-            ExprKind::Block { stmts, .. } => {
-                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
-                self.lower_block_in(&stmts, LowerMode::Tail(CExpr::Var(k_var.to_string())))
-            }
-            ExprKind::With { expr, handler, .. } => self.lower_with_inherited_return_k(
-                expr,
-                handler,
-                Some(CExpr::Var(k_var.to_string())),
-            ),
-            ExprKind::Do {
-                bindings,
-                success,
-                else_arms,
+        }
+
+        if self.branch_is_effectful(value) {
+            let saved_handler_vars = pat_opt
+                .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
+                .unwrap_or_default();
+            let rest_ce = rest(self);
+            self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
+            let (param, rest_ce) = match pat_opt {
+                Some(p) if is_assert => self.destructure_pat_assert(p, rest_ce, span),
+                Some(p) => self.destructure_pat(p, rest_ce),
+                None => (self.fresh(), rest_ce),
+            };
+            let rest_k = CExpr::Fun(vec![param], Box::new(rest_ce));
+            return self.lower_tail(value, Some(rest_k));
+        }
+
+        let val_ce = self.lower_expr(value);
+        let hof_binding = match stmt {
+            Stmt::Let {
+                pattern: Pat::Var { name, .. },
+                value,
                 ..
-            } => {
-                let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
-                self.lower_do(bindings, success, &else_arms, Some(k_var))
-            }
-            ExprKind::Receive {
-                arms, after_clause, ..
-            } => self.lower_receive(arms, after_clause.as_ref(), Some(k_var)),
-            // Everything else is evaluated to a value: effect normalization
-            // has left nothing in its operands that needs a continuation.
-            _ => self.lower_value_to_k(expr, k_var),
-        }
-    }
-
-    /// Lower a branch expression with an outer continuation K.
-    /// Dispatches based on whether the branch is a direct effect call,
-    /// contains nested effects, or is a plain expression.
-    pub(crate) fn lower_branch_with_k(&mut self, expr: &Expr, k_var: &str) -> CExpr {
-        self.lower_terminal_effectful_expr_to_k(expr, k_var)
-    }
-
-    /// Lower a block with an outer continuation K threaded to the terminal.
-    /// Like `lower_block` but applies K at terminal positions instead of return_k.
-    pub(crate) fn lower_block_with_k(&mut self, stmts: &[Stmt], k_var: &str) -> CExpr {
-        match stmts {
-            [] => CExpr::Apply(
-                Box::new(CExpr::Var(k_var.to_string())),
-                vec![CExpr::Tuple(vec![])],
-            ),
-            [Stmt::Expr(e)] => self.lower_branch_with_k(e, k_var),
-            [Stmt::Let { value, .. }] => self.lower_branch_with_k(value, k_var),
-            [first, rest @ ..] => {
-                // Handler-value let binding: register so `with name` resolves.
-                // Mirrors the same detection in `lower_block_with_return_k`.
-                if let Stmt::Let { pattern, value, .. } = first
-                    && let Pat::Var {
-                        name, id: pat_id, ..
-                    } = pattern
-                    && self.is_handler_value(value)
-                {
-                    self.lower_handle_binding(name, Some(*pat_id), value);
-                    if let Some((var, _effects, _has_return)) =
-                        self.handle_dynamic_vars.get(name.as_str()).cloned()
-                    {
-                        if self.expr_is_effectful_call(value) {
-                            let rest_k = self.lower_rest_block_with_k_k(Some(pattern), rest, k_var);
-                            return self.lower_expr_with_call_return_k(value, Some(rest_k));
-                        }
-                        let rhs_ce = self.lower_expr_value(value);
-                        let rest_ce = self.lower_block_with_k(rest, k_var);
-                        return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
-                    }
-                    return self.lower_block_with_k(rest, k_var);
-                }
-
-                let effect_info = match first {
-                    Stmt::Expr(e) => collect_effect_call_expr(e)
-                        .map(|(head, name, qual, args)| (None, head.id, name, qual, args)),
-                    Stmt::Let { pattern, value, .. } => collect_effect_call_expr(value)
-                        .map(|(head, name, qual, args)| (Some(pattern), head.id, name, qual, args)),
-                    Stmt::LetFun { .. } => None,
-                };
-
-                if let Some((pat, effect_call_id, op_name, qualifier, args)) = effect_info {
-                    // Direct effect call at statement level: CPS with rest -> K-threaded
-                    let inner_k = self.lower_rest_block_with_k_k(pat, rest, k_var);
-                    let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
-                    self.lower_effect_call(
-                        effect_call_id,
-                        op_name,
-                        qualifier,
-                        &args_owned,
-                        Some(inner_k),
-                    )
-                } else {
-                    let (pat_opt, value_expr) = match first {
-                        Stmt::Let { pattern, value, .. } => (Some(pattern), value),
-                        Stmt::Expr(e) => (None, e),
-                        Stmt::LetFun { .. } => unreachable!(),
-                    };
-
-                    // Check for call to an effectful function. Capture the
-                    // rest of the block as _ReturnK so CPS chains correctly
-                    // (e.g. state-threading handlers need real continuations).
-                    if self.expr_is_effectful_call(value_expr) {
-                        let rest_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
-                        return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
-                    }
-
-                    if self.has_nested_effectful_expr(value_expr) {
-                        // Value has nested effects: build inner K and thread through
-                        let inner_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
-                        let inner_k_var = self.fresh();
-                        let body = self.lower_expr_with_k_inner(value_expr, &inner_k_var);
-                        CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(body))
-                    } else {
-                        // Normal statement: evaluate, bind, then rest with K
-                        let val_ce = self.lower_expr(value_expr);
-                        let saved_handler_vars = pat_opt
-                            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
-                            .unwrap_or_default();
-                        let rest_ce = self.lower_block_with_k(rest, k_var);
-                        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
-                        let (var, rest_ce) = match pat_opt {
-                            Some(p) => self.destructure_pat(p, rest_ce),
-                            None => (self.fresh(), rest_ce),
-                        };
-                        CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
-                    }
-                }
+            } => self
+                .hof_direct_binding_for_value_expr(value)
+                .map(|binding| (name.clone(), binding)),
+            _ => None,
+        };
+        let saved_hof_binding = hof_binding.as_ref().and_then(|(name, specialization)| {
+            self.direct_hof_value_bindings
+                .insert(name.clone(), specialization.clone())
+        });
+        let saved_handler_vars = pat_opt
+            .map(|pat| self.register_dynamic_handler_pattern_vars(pat))
+            .unwrap_or_default();
+        let rest_ce = rest(self);
+        self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
+        if let Some((name, _)) = hof_binding {
+            if let Some(saved) = saved_hof_binding {
+                self.direct_hof_value_bindings.insert(name, saved);
+            } else {
+                self.direct_hof_value_bindings.remove(&name);
             }
         }
+        let (var, rest_ce) = match pat_opt {
+            Some(p) if is_assert => self.destructure_pat_assert(p, rest_ce, span),
+            Some(p) => self.destructure_pat(p, rest_ce),
+            None => (self.fresh(), rest_ce),
+        };
+        CExpr::Let(var, Box::new(val_ce), Box::new(rest_ce))
     }
 }

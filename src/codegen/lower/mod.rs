@@ -229,15 +229,6 @@ impl FunInfo {
     }
 }
 
-/// Explicit lowering context for value-producing vs terminal positions.
-#[derive(Clone)]
-pub(crate) enum LowerMode {
-    /// Lower as a value-producing subexpression.
-    Value,
-    /// Lower as a terminal computation whose successful result should flow to K.
-    Tail(CExpr),
-}
-
 #[derive(Default)]
 pub(super) struct LowererResolution {
     pub(super) symbols: super::resolve::ResolutionMap,
@@ -784,6 +775,7 @@ impl<'a> Lowerer<'a> {
                 expr: inner,
                 handler,
             } => self.with_handler_chains_continuation(handler) && self.branch_is_effectful(inner),
+            ExprKind::EffectCall { .. } => self.nullary_operation(node).is_some(),
             _ => false,
         })
     }

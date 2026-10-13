@@ -73,27 +73,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Bind an expression that performs effects to `var_name` for use in
-    /// `body`, making `body` its continuation. Unlike
-    /// [`Self::lower_bind_expr_with_cps`] the expression may also be a
-    /// direct effect operation (`op! x`), and a direct effectful call
-    /// receives the continuation as its `_ReturnK` without an intermediate
-    /// binding.
-    pub(crate) fn lower_bind_effectful_expr(
-        &mut self,
-        expr: &Expr,
-        var_name: String,
-        body: CExpr,
-    ) -> CExpr {
-        let k = CExpr::Fun(vec![var_name], Box::new(body));
-        if self.expr_is_effectful_call(expr) {
-            return self.lower_expr_with_call_return_k(expr, Some(k));
-        }
-        let k_var = self.fresh();
-        let inner = self.lower_terminal_effectful_expr_to_k(expr, &k_var);
-        CExpr::Let(k_var, Box::new(k), Box::new(inner))
-    }
-
     /// Build `case rec_var of <{TagVar, ...field pats...}> when 'true' -> body`,
     /// binding the record's tag and its untouched fields so subsequent reads use
     /// `get_tuple_element` (arity proven locally) rather than `erlang:element/2`.

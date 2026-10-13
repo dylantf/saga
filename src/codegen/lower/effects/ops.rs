@@ -177,7 +177,7 @@ impl<'a> Lowerer<'a> {
             .map(|(name, value)| {
                 (
                     crate::codegen::lower::core_var(name),
-                    self.lower_expr_value(value),
+                    self.lower_expr(value),
                 )
             })
             .collect();
@@ -196,12 +196,10 @@ impl<'a> Lowerer<'a> {
         self.current_handler_source_module = plan.source_module;
         let lowered_body = match body {
             StaticTailResumeDirectBody::Expr(value) => {
-                let resumed_value = self.lower_expr_value(&value);
+                let resumed_value = self.lower_expr(&value);
                 self.lower_direct_op_result(resumed_value, continuation)
             }
-            StaticTailResumeDirectBody::Block(stmts) => {
-                self.lower_block_with_return_k(&stmts, continuation)
-            }
+            StaticTailResumeDirectBody::Block(stmts) => self.lower_block(&stmts, continuation),
         };
         self.current_handler_source_module = saved_source_module;
 
@@ -362,7 +360,7 @@ impl<'a> Lowerer<'a> {
         // to plain value-mode lowering: the abort value just becomes the
         // closure's Erlang return value.
         if let Some(k) = self.current_handler_inherited_k.clone() {
-            self.lower_expr_with_installed_return_k(expr, Some(k))
+            self.lower_tail(expr, Some(k))
         } else if self.branch_is_effectful(expr) {
             // The body performs effects of its own (handled further out)
             // somewhere inside an expression: `resume (g x) + 1`,
@@ -372,18 +370,10 @@ impl<'a> Lowerer<'a> {
             // continuation, and a handler that aborts it skips that rest.
             let param = self.fresh();
             let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
-            self.lower_expr_tail(expr, identity)
+            self.lower_tail(expr, Some(identity))
         } else {
-            self.lower_expr_value(expr)
+            self.lower_expr(expr)
         }
-    }
-
-    pub(crate) fn lower_handled_expr_with_return_k(
-        &mut self,
-        expr: &Expr,
-        return_k: Option<CExpr>,
-    ) -> CExpr {
-        self.lower_expr_with_installed_return_k(expr, return_k)
     }
 
     pub(crate) fn lower_handled_inner_expr(
@@ -402,11 +392,7 @@ impl<'a> Lowerer<'a> {
             // CPS-chained like the same expression in an effectful function.
             return_k = Some(self.identity_return_lambda());
         }
-        if self.expr_is_effectful_call(expr) {
-            self.lower_expr_with_call_return_k(expr, return_k)
-        } else {
-            self.lower_handled_expr_with_return_k(expr, return_k)
-        }
+        self.lower_tail(expr, return_k)
     }
 
     /// Whether the expression a handled computation ends in (the last

@@ -66,7 +66,7 @@ impl<'a> Lowerer<'a> {
         let mut bindings = Vec::with_capacity(args.len());
         for arg in args {
             let var = self.fresh();
-            let ce = self.lower_expr_value(arg);
+            let ce = self.lower_expr(arg);
             arg_vars.push(var.clone());
             bindings.push((var, ce));
         }
@@ -122,7 +122,7 @@ impl<'a> Lowerer<'a> {
         let mut bindings = Vec::with_capacity(args.len());
         for arg in args {
             let var = self.fresh();
-            let ce = self.lower_expr_value(arg);
+            let ce = self.lower_expr(arg);
             arg_vars.push(var.clone());
             bindings.push((var, ce));
         }
@@ -307,7 +307,7 @@ impl<'a> Lowerer<'a> {
         self.current_evidence = None;
         self.current_function = specialization.entry_name.clone();
         let body = &*self.effect_normal_body(body, "direct-callback variant");
-        let body = self.lower_expr_with_installed_return_k(body, None);
+        let body = self.lower_tail(body, None);
         self.current_function = saved_function;
         self.current_evidence = saved_evidence;
         self.direct_hof_callback_params = saved_callbacks;

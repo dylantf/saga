@@ -7234,15 +7234,15 @@ result () = f () with { stop i = 1000 }
     );
 }
 
-// Known gaps that normalization does not close. Each one is an effectful
-// expression already in `let` or tail position, so the position rule holds;
-// what is missing is in the block lowering itself.
+// Effectful expressions already in `let` or tail position, which the two
+// block lowerings (with and without a continuation) each handled partly.
+// There is one block lowerer now (`lower_block`), with one rule for a
+// statement that performs effects.
 
 /// A block that is the value of a `let`, has effects in it and defines a
-/// local function: the continuation-threaded block lowering has no case for
-/// a local function and reaches `unreachable!` (`lower_block_with_k`).
+/// local function. The continuation-threaded block lowering had no case for
+/// a local function and reached `unreachable!`.
 #[test]
-#[ignore = "codegen: a local function in a block lowered with a continuation panics the compiler"]
 fn local_function_in_a_block_lowered_with_a_continuation() {
     anf_int(
         "anf_local_fun_in_k_block",
@@ -7264,10 +7264,9 @@ result () = f () with { stop i = resume i }
 }
 
 /// `let assert` on the value of an effectful call: the rest of the block
-/// becomes the call's continuation and binds the pattern with an ordinary
-/// match, so a mismatch is a `case_clause` error, not an assertion failure.
+/// becomes the call's continuation. It bound the pattern with an ordinary
+/// match, so a mismatch was a `case_clause` error, not an assertion failure.
 #[test]
-#[ignore = "codegen: `let assert` on an effectful call loses the assertion"]
 fn let_assert_on_an_effectful_call_keeps_the_assertion() {
     let src = format!(
         "{ANF_PRELUDE}{}",
@@ -7296,11 +7295,10 @@ result () = f () with { stop i = resume i }
     );
 }
 
-/// A block that ends in `let x = <effectful call>`: the call is lowered as a
-/// plain value with an identity continuation, so the abort value becomes the
-/// value of the block and the caller's rest runs. Answers 100.
+/// A block that ends in `let x = <effectful call>`: the call was lowered as
+/// a plain value with an identity continuation, so the abort value became
+/// the value of the block and the caller's rest ran. It answered 100.
 #[test]
-#[ignore = "codegen: a block ending in a `let` of an effectful call gives the call no continuation"]
 fn block_ending_in_let_of_an_effectful_call() {
     anf_int(
         "anf_trailing_let",
@@ -7323,13 +7321,12 @@ result () = h () with { stop i = 1000 }
     );
 }
 
-/// A nullary operation (`number!`) performs when it is evaluated, but it is
+/// A nullary operation (`number!`) performs when it is evaluated. It was
 /// lowered as a plain value with an identity continuation wherever it
-/// stands, a `let` included. The handler's abort value becomes the value of
-/// the operation and the rest of the block runs. Normalization does not
-/// count it as effectful for that reason: a `let` would not help.
+/// stood, a `let` included, so the handler's abort value became the value
+/// of the operation and the rest of the block ran (1001). It is a
+/// performing leaf now, for normalization and for the block rule.
 #[test]
-#[ignore = "codegen: a nullary operation never gets the rest of the block as its continuation"]
 fn nullary_operation_aborted_by_its_handler() {
     check_result_int(
         "anf_nullary_op",
@@ -7342,6 +7339,25 @@ compute () = {
   let n = number!
   n + 1
 }
+
+pub fun result : Unit -> Int
+result () = compute () with { number = 1000 }
+"#,
+        1000,
+    );
+}
+
+/// The same operation as an operand: normalization binds it first.
+#[test]
+fn nullary_operation_as_an_operand_aborted_by_its_handler() {
+    check_result_int(
+        "anf_nullary_op_operand",
+        r#"module Main
+
+effect Config { fun number : Int }
+
+fun compute : Unit -> Int needs {Config}
+compute () = (number! + 1) * 2
 
 pub fun result : Unit -> Int
 result () = compute () with { number = 1000 }

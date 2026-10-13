@@ -143,7 +143,7 @@ impl Lowerer<'_> {
     /// Clears the CPS return continuation so the thunk returns its value
     /// normally instead of tail-calling into the caller's continuation.
     pub(super) fn lower_catch_panic(&mut self, thunk_expr: &crate::ast::Expr) -> CExpr {
-        let thunk = self.lower_expr_value(thunk_expr);
+        let thunk = self.lower_expr(thunk_expr);
 
         // The thunk's type is effectful, so it may be a tagged closure:
         // call it with the current evidence and an identity continuation.

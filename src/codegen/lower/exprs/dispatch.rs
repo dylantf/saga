@@ -57,19 +57,15 @@ impl<'a> Lowerer<'a> {
 
     /// Lower `receive { Pat -> body, after N -> timeout_body }`.
     ///
-    /// With `k_var`, the value of the whole expression is passed to that
-    /// continuation instead of returned, and arm bodies (and the timeout
-    /// body) that perform effects are CPS-chained into it.
+    /// Arm bodies and the timeout body are in tail position: with `k`,
+    /// their values go to it.
     pub(crate) fn lower_receive(
         &mut self,
         arms: &[ast::Annotated<ast::CaseArm>],
         after_clause: Option<&(Box<Expr>, Box<Expr>)>,
-        k_var: Option<&str>,
+        k: Option<&CExpr>,
     ) -> CExpr {
-        let lower_body = |this: &mut Self, body: &Expr| match k_var {
-            Some(k) => this.lower_branch_with_k(body, k),
-            None => this.lower_expr(body),
-        };
+        let lower_body = |this: &mut Self, body: &Expr| this.lower_tail(body, k.cloned());
         // Lower arms: same pattern/guard/body as case, but for receive
         // there is no scrutinee variable to fall through to.
         let lowered_arms: Vec<CArm> = arms
@@ -284,41 +280,14 @@ impl<'a> Lowerer<'a> {
                 )
             }
 
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                let cond_var = self.fresh();
-                let cond_ce = self.lower_operand(cond, "if");
-                let then_ce = self.lower_expr(then_branch);
-                let else_ce = self.lower_expr(else_branch);
-                CExpr::Let(
-                    cond_var.clone(),
-                    Box::new(cond_ce),
-                    Box::new(CExpr::Case(
-                        Box::new(CExpr::Var(cond_var)),
-                        vec![
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("true".to_string())),
-                                guard: None,
-                                body: then_ce,
-                            },
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("false".to_string())),
-                                guard: None,
-                                body: else_ce,
-                            },
-                        ],
-                    )),
-                )
-            }
-
-            ExprKind::Block { stmts, .. } => {
-                let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
-                self.lower_block_with_return_k(&stmts, None)
-            }
+            // The forms that hand a continuation to their branches have one
+            // implementation, in `lower_tail`; here there is none to hand on.
+            ExprKind::If { .. }
+            | ExprKind::Case { .. }
+            | ExprKind::Block { .. }
+            | ExprKind::Do { .. }
+            | ExprKind::Receive { .. }
+            | ExprKind::With { .. } => self.lower_tail(expr, None),
 
             ExprKind::Lambda { params, body, .. } => {
                 let mut flattened_params: Vec<Pat> = params.clone();
@@ -416,16 +385,7 @@ impl<'a> Lowerer<'a> {
                 for param in &flattened_params {
                     saved_handler_vars.extend(self.register_dynamic_handler_pattern_vars(param));
                 }
-                let body_ce = if is_effectful_lambda
-                    && !matches!(flattened_body.kind, ExprKind::Block { .. })
-                {
-                    self.lower_terminal_effectful_expr_with_return_k(
-                        flattened_body,
-                        effect_return_k.clone(),
-                    )
-                } else {
-                    self.lower_expr_with_installed_return_k(flattened_body, effect_return_k.clone())
-                };
+                let body_ce = self.lower_tail(flattened_body, effect_return_k.clone());
                 let body_ce = match callback_tail_binding {
                     Some((var, value)) => CExpr::Let(var, Box::new(value), Box::new(body_ce)),
                     None => body_ce,
@@ -491,23 +451,6 @@ impl<'a> Lowerer<'a> {
                     fun
                 }
             }
-
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                let scrut_var = self.fresh();
-                let scrut_ce = self.lower_operand(scrutinee, "case");
-                let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
-                CExpr::Let(
-                    scrut_var.clone(),
-                    Box::new(scrut_ce),
-                    Box::new(self.lower_case_expr(&scrut_var, &arms)),
-                )
-            }
-
-            ExprKind::Receive {
-                arms, after_clause, ..
-            } => self.lower_receive(arms, after_clause.as_ref(), None),
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
@@ -697,16 +640,6 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(rec_var, Box::new(rec_ce), Box::new(destructured))
             }
 
-            ExprKind::Do {
-                bindings,
-                success,
-                else_arms,
-                ..
-            } => {
-                let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
-                self.lower_do(bindings, success, &else_arms, None)
-            }
-
             // --- Elaboration-only constructs ---
             ExprKind::DictMethodAccess {
                 dict,
@@ -715,7 +648,7 @@ impl<'a> Lowerer<'a> {
             } => {
                 // Lower to: let D = <dict> in element(idx+1, D)
                 let dict_var = self.fresh();
-                let dict_ce = self.lower_expr_value(dict);
+                let dict_ce = self.lower_expr(dict);
                 let tuple_index = self.trait_method_tuple_index(trait_name, *method_index);
                 let extract_method = cerl_call(
                     "erlang",
@@ -747,7 +680,7 @@ impl<'a> Lowerer<'a> {
                 ..
             } => {
                 let dict_var = self.fresh();
-                let dict_ce = self.lower_expr_value(dict);
+                let dict_ce = self.lower_expr(dict);
                 let body = cerl_call(
                     "erlang",
                     "element",
@@ -845,9 +778,6 @@ impl<'a> Lowerer<'a> {
                 .unwrap_or_else(|| {
                     self.lower_effect_call(expr.id, name, qualifier.as_deref(), args, None)
                 }),
-
-            // `expr with handler` -- attaches handler(s) to a computation
-            ExprKind::With { expr, handler, .. } => self.lower_with(expr, handler),
 
             // `resume value` -- inside a handler arm, calls the continuation K.
             // When a `finally` block is active, the K call is wrapped in try/catch

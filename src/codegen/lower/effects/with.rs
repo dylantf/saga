@@ -9,10 +9,6 @@ impl<'a> Lowerer<'a> {
     ///
     /// Builds handler function(s) from the handler definition and passes them
     /// as extra parameters to the effectful computation.
-    pub(crate) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
-        self.lower_with_inherited_return_k(expr, handler, None)
-    }
-
     pub(crate) fn lower_with_inherited_return_k(
         &mut self,
         expr: &Expr,
@@ -469,7 +465,7 @@ impl<'a> Lowerer<'a> {
                 dangling_trivia: dangling_trivia.clone(),
             },
         );
-        Some(self.lower_expr_with_installed_return_k(&rewritten, inherited_return_k))
+        Some(self.lower_tail(&rewritten, inherited_return_k))
     }
 
     /// Build a per-op handler function from a single handler arm.
@@ -663,9 +659,9 @@ impl<'a> Lowerer<'a> {
                 self.handle_dynamic_vars
                     .get(value_name)
                     .map(|(tuple_var, _, _)| CExpr::Var(tuple_var.clone()))
-                    .unwrap_or_else(|| self.lower_expr_value(value))
+                    .unwrap_or_else(|| self.lower_expr(value))
             } else {
-                self.lower_expr_value(value)
+                self.lower_expr(value)
             };
             body_ce = CExpr::Let(
                 crate::codegen::lower::core_var(name),

@@ -629,7 +629,7 @@ impl<'a> Lowerer<'a> {
                     let eta_args: Vec<CExpr> =
                         eta_params.iter().map(|p| CExpr::Var(p.clone())).collect();
                     if let Some(body_ty) = body_expected_ty {
-                        let body_fun = self.lower_expr_value(body);
+                        let body_fun = self.lower_expr(body);
                         let body_is_cps = self.cps_function_shape_from_type(&body_ty).is_some();
                         if body_is_cps {
                             // The body's value is a function value of effectful
@@ -657,28 +657,15 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                     } else {
-                        // For non-block bodies, lower_block didn't run, so apply return_k.
-                        // Special case: if the body is a terminal effect call, pass _ReturnK
-                        // directly as K so abort-style handlers skip the rest (proper CPS).
-                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
-                        {
-                            self.lower_terminal_effectful_expr_with_return_k(
-                                body,
-                                effect_return_k.clone(),
-                            )
-                        } else {
-                            self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
-                        };
+                        let body_ce = self.lower_tail(body, effect_return_k.clone());
                         if has_effects {
                             CExpr::Apply(Box::new(body_ce), eta_args)
                         } else {
                             self.apply_function_value(body_ce, &eta_params)
                         }
                     }
-                } else if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                    self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
-                    self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
+                    self.lower_tail(body, effect_return_k.clone())
                 };
                 self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 CExpr::Fun(params_ce, Box::new(body_ce))
@@ -725,15 +712,7 @@ impl<'a> Lowerer<'a> {
                             )
                         };
                         let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
-                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
-                        {
-                            self.lower_terminal_effectful_expr_with_return_k(
-                                body,
-                                effect_return_k.clone(),
-                            )
-                        } else {
-                            self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
-                        };
+                        let body_ce = self.lower_tail(body, effect_return_k.clone());
                         self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         CArm {
                             pat,
@@ -795,7 +774,7 @@ impl<'a> Lowerer<'a> {
             let mut method_exprs: Vec<CExpr> =
                 Vec::with_capacity(super_dicts.len() + methods.len());
             for super_dict in super_dicts {
-                method_exprs.push(self.lower_expr_value(super_dict));
+                method_exprs.push(self.lower_expr(super_dict));
             }
             for (idx, m) in methods.iter().enumerate() {
                 // A slot holds a bare fun or a tagged one according to the

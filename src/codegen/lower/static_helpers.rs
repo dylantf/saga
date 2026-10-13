@@ -71,7 +71,7 @@ impl<'a> Lowerer<'a> {
 
         self.helper_inline_stack.push(helper_key);
         let helper_body = self.effect_normal_body(&helper.body, "inlined helper");
-        let body = self.lower_expr_with_installed_return_k(&helper_body, return_k);
+        let body = self.lower_tail(&helper_body, return_k);
         self.helper_inline_stack.pop();
 
         let body = params
@@ -157,7 +157,7 @@ impl<'a> Lowerer<'a> {
         let mut capture_arg_vars = Vec::new();
         for capture in &captures {
             let var = self.fresh();
-            let ce = self.lower_expr_value(&capture.arg);
+            let ce = self.lower_expr(&capture.arg);
             capture_arg_bindings.push((var.clone(), ce));
             capture_arg_vars.push(var);
         }
@@ -186,7 +186,7 @@ impl<'a> Lowerer<'a> {
         }
         self.helper_inline_stack.push(helper_key);
         let helper_body = self.effect_normal_body(&helper.body, "imported helper variant");
-        let body = self.lower_expr_with_installed_return_k(&helper_body, None);
+        let body = self.lower_tail(&helper_body, None);
         self.helper_inline_stack.pop();
         self.resolved = saved_resolved;
         self.static_tail_resume_ops = saved_static_tail_resume_ops;

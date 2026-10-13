@@ -261,7 +261,7 @@ impl<'a> Lowerer<'a> {
             self.assert_operand(arg, "an effectful call");
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr_value(arg));
+                .unwrap_or_else(|| self.lower_expr(arg));
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }
@@ -340,7 +340,7 @@ impl<'a> Lowerer<'a> {
                 )
             {
                 let arg_ces: Vec<CExpr> =
-                    dm_args.iter().map(|a| self.lower_expr_value(a)).collect();
+                    dm_args.iter().map(|a| self.lower_expr(a)).collect();
                 let call = callee.apply(arg_ces);
                 return self.apply_return_k_with(return_k, call);
             }
@@ -379,7 +379,7 @@ impl<'a> Lowerer<'a> {
             .and_then(|info| info.cps_call_abi().cloned())
             .expect("effectful call is missing its CPS plan");
         self.assert_operand(head, "an effectful call");
-        let func_ce = self.lower_expr_value(head);
+        let func_ce = self.lower_expr(head);
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
             abi: plan,
@@ -433,7 +433,7 @@ impl<'a> Lowerer<'a> {
         };
         if self.expr_is_effectful_call(inner) {
             let inner_k = CExpr::Fun(vec![func_var], Box::new(body));
-            self.lower_expr_with_call_return_k(inner, Some(inner_k))
+            self.lower_effectful_call(inner, Some(inner_k))
         } else {
             let inner_ce = self.lower_expr(inner);
             CExpr::Let(func_var, Box::new(inner_ce), Box::new(body))
@@ -722,7 +722,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let dict_var = self.fresh();
-        let dict_ce = self.lower_expr_value(dict);
+        let dict_ce = self.lower_expr(dict);
         let method_var = self.fresh();
         let tuple_index = self.trait_method_tuple_index(trait_name, method_index);
         let extract = cerl_call(
@@ -925,7 +925,7 @@ impl<'a> Lowerer<'a> {
             let (kind, arg) = if *func_name == "todo" {
                 (ErrorKind::Todo, lower_string_to_binary("not implemented"))
             } else {
-                (ErrorKind::Panic, self.lower_expr_value(args[0]))
+                (ErrorKind::Panic, self.lower_expr(args[0]))
             };
             let error = self.make_error(kind, CExpr::Var(v.clone()), Some(&expr.span));
             return CExpr::Let(v, Box::new(arg), Box::new(error));

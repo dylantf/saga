@@ -127,7 +127,7 @@ impl<'a> Lowerer<'a> {
             }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr_value(arg));
+                .unwrap_or_else(|| self.lower_expr(arg));
             // A lambda overlays the captured frame itself. Any other
             // callback value (a named function, a variable) is wrapped in a
             // tagged closure that does the same before calling it.
