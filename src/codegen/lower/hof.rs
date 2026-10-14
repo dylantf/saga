@@ -56,33 +56,21 @@ impl<'a> Lowerer<'a> {
         if !Self::hof_direct_effects_covered(info, &specialization) {
             return None;
         }
+        // The direct variant takes plain values. An argument that performs
+        // effects needs the rest of the call as its continuation, which only
+        // the CPS call path builds.
         if specialization.source_arity != args.len()
             || !self.hof_direct_callback_args_supported(&specialization.callback_params, args)
+            || args.iter().any(|arg| self.branch_is_effectful(arg))
         {
             return None;
         }
 
-        let callback_indexes: HashSet<usize> = specialization
-            .callback_params
-            .iter()
-            .map(|param| param.index)
-            .collect();
-        let param_types = self
-            .resolved_fun_info(head.id, lookup_name)
-            .map(|f| f.expected_arg_types(args.len()));
-
         let mut arg_vars = Vec::with_capacity(args.len());
         let mut bindings = Vec::with_capacity(args.len());
-        for (idx, arg) in args.iter().enumerate() {
+        for arg in args {
             let var = self.fresh();
-            let ce = if callback_indexes.contains(&idx) {
-                self.lower_expr_value(arg)
-            } else {
-                self.lower_expr_value_with_expected_type(
-                    arg,
-                    param_types.as_ref().and_then(|tys| tys.get(idx)),
-                )
-            };
+            let ce = self.lower_expr_value(arg);
             arg_vars.push(var.clone());
             bindings.push((var, ce));
         }
@@ -128,8 +116,12 @@ impl<'a> Lowerer<'a> {
     ) -> Option<CExpr> {
         let binding = self.direct_hof_value_bindings.get(var_name).cloned()?;
         let specialization = binding.specialization;
+        // The direct variant takes plain values. An argument that performs
+        // effects needs the rest of the call as its continuation, which only
+        // the CPS call path builds.
         if specialization.source_arity != args.len()
             || !self.hof_direct_callback_args_supported(&specialization.callback_params, args)
+            || args.iter().any(|arg| self.branch_is_effectful(arg))
         {
             return None;
         }
@@ -236,35 +228,16 @@ impl<'a> Lowerer<'a> {
     }
 
     fn hof_direct_callback_arg_supported(&self, arg: &Expr, expected_arity: usize) -> bool {
-        if self.expr_cps_function_shape(arg).is_some() {
-            return false;
-        }
-        if let Some(ty) = self.check_result.resolved_type_for_node(arg.id) {
-            let ty = self.check_result.sub.apply(&ty);
-            let (arity, effects) = super::util::arity_and_effects_from_type(&ty);
-            return arity == expected_arity
-                && effects.is_empty()
-                && matches!(ty, crate::typechecker::Type::Fun(_, _, _));
-        }
-        match &arg.kind {
-            ExprKind::Var { name, .. } => {
-                self.resolved_fun_info(arg.id, name).is_some_and(|info| {
-                    info.arity() == expected_arity
-                        && info.effects().is_empty()
-                        && !info.is_open_row()
-                })
-            }
-            ExprKind::QualifiedName { module, name, .. } => {
-                let qualified = format!("{}.{}", module, name);
-                self.resolved_fun_info(arg.id, &qualified)
-                    .is_some_and(|info| {
-                        info.arity() == expected_arity
-                            && info.effects().is_empty()
-                            && !info.is_open_row()
-                    })
-            }
-            _ => false,
-        }
+        // The direct variant calls its callback as a bare fun, so the
+        // argument's own type must be pure at every arrow. A dictionary
+        // slot is excluded: an open-row method instantiated at the empty
+        // row has a pure type here but a tagged closure in the slot.
+        !matches!(arg.kind, ExprKind::DictMethodAccess { .. })
+            && self.value_type(arg.id).is_some_and(|ty| {
+                crate::codegen::runtime_shape::value_repr(&ty)
+                    == crate::codegen::runtime_shape::ValueRepr::Bare
+                    && super::util::arity_and_effects_from_type(&ty).0 == expected_arity
+            })
     }
 
     pub(super) fn direct_hof_callback_arity(&self, name: &str) -> Option<usize> {

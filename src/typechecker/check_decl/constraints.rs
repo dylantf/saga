@@ -2,6 +2,12 @@ use super::*;
 
 impl Checker {
     pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
+        // Open-row trait methods used as values outside any function body
+        // (a top-level `let`), or left by a declaration that stopped early.
+        self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Scope {
+            forward: false,
+        });
+
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =
             std::collections::HashMap::new();

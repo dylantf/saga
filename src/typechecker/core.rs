@@ -81,21 +81,6 @@ impl EffectRow {
             .collect()
     }
 
-    /// Merge two closed effect rows, preserving distinct instantiations of the
-    /// same effect family.
-    pub fn merge(&self, other: &EffectRow) -> EffectRow {
-        let mut effects = self.effects.clone();
-        for entry in &other.effects {
-            if !effects.iter().any(|e| e.same_instantiation(entry)) {
-                effects.push(entry.clone());
-            }
-        }
-        EffectRow {
-            effects,
-            tails: vec![],
-        }
-    }
-
     /// Remove handled effects by family name.
     pub fn subtract(&self, handled: &std::collections::HashSet<String>) -> EffectRow {
         let effects = self
@@ -110,12 +95,14 @@ impl EffectRow {
         }
     }
 
-    /// Remove handled effects by exact instantiation.
+    /// Remove handled effects. An effect is identified by its family, so a
+    /// handler for `Fail e` removes the row's one `Fail` entry whatever its
+    /// arguments (the caller has already unified them).
     pub fn subtract_entries(&self, handled: &[EffectEntry]) -> EffectRow {
         let effects = self
             .effects
             .iter()
-            .filter(|entry| !handled.iter().any(|h| h.same_instantiation(entry)))
+            .filter(|entry| !handled.iter().any(|h| h.matches(entry)))
             .cloned()
             .collect();
         EffectRow {
@@ -439,6 +426,13 @@ pub struct Substitution {
     map: HashMap<u32, Type>,
     /// Row variable bindings for effect row polymorphism.
     pub(crate) row_map: HashMap<u32, EffectRow>,
+    /// Effects each unbound row variable shares a row with. A row holds one
+    /// application per effect family, so if `{Fail Int, ..r}` exists anywhere
+    /// then `r` may only ever contain `Fail` at `Int`. Checked (and passed on
+    /// to the new tail) when the variable is bound; see
+    /// `Checker::bind_row_checked`. Kept here so speculative unification that
+    /// restores a saved substitution restores these too.
+    pub(crate) row_companions: HashMap<u32, Vec<EffectEntry>>,
 }
 
 impl Substitution {

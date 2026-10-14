@@ -362,6 +362,16 @@ impl<'a> Lowerer<'a> {
         // closure's Erlang return value.
         if let Some(k) = self.current_handler_inherited_k.clone() {
             self.lower_expr_with_installed_return_k(expr, Some(k))
+        } else if self.branch_is_effectful(expr) {
+            // The body performs effects of its own (handled further out)
+            // somewhere inside an expression: `resume (g x) + 1`,
+            // `if g x == 0 then resume 1 else resume 2`. Thread an identity
+            // continuation through it, so each effectful sub-expression is
+            // called in tail position with the rest of the body as its
+            // continuation, and a handler that aborts it skips that rest.
+            let param = self.fresh();
+            let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
+            self.lower_expr_tail(expr, identity)
         } else {
             self.lower_expr_value(expr)
         }
@@ -381,11 +391,33 @@ impl<'a> Lowerer<'a> {
         handled_return_k: Option<CExpr>,
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
-        let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
+        let mut return_k = self.compose_return_k(handled_return_k, inherited_return_k);
+        if return_k.is_none() && self.handled_tail_needs_continuation(expr) {
+            // The handled computation ends in an expression with an
+            // effectful sub-expression (`{ g 3 + 100 } with h`). Without a
+            // continuation that expression would be lowered as a plain
+            // value, and a handler that aborts the sub-expression would
+            // return into the rest of it. An identity continuation makes it
+            // CPS-chained like the same expression in an effectful function.
+            return_k = Some(self.identity_return_lambda());
+        }
         if self.expr_is_effectful_call(expr) {
             self.lower_expr_with_call_return_k(expr, return_k)
         } else {
             self.lower_handled_expr_with_return_k(expr, return_k)
+        }
+    }
+
+    /// Whether the expression a handled computation ends in (the last
+    /// expression of its block, through nested blocks) has an effectful
+    /// sub-expression that needs a continuation to be chained into.
+    fn handled_tail_needs_continuation(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Block { stmts, .. } => match stmts.last().map(|stmt| &stmt.node) {
+                Some(Stmt::Expr(tail)) => self.handled_tail_needs_continuation(tail),
+                _ => false,
+            },
+            _ => !self.expr_is_effectful_call(expr) && self.has_nested_effectful_expr(expr),
         }
     }
 
@@ -423,17 +455,23 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// Build the handled computation's return continuation from a `return`
+    /// clause.
+    ///
+    /// With `outer_k`, the continuation of the whole `with` expression, the
+    /// clause's body is lowered with it as its continuation: an effect the
+    /// body performs captures the rest of the enclosing computation, so a
+    /// handler that aborts it skips that rest. Without it the lambda returns
+    /// the clause's value and the caller applies any outer continuation.
     pub(crate) fn build_return_lambda(
         &mut self,
         ret: &HandlerArm,
         source_module: Option<&str>,
+        outer_k: Option<CExpr>,
     ) -> CExpr {
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = source_module.map(str::to_string);
-        // Return-lambda body flows through the lambda's caller (which itself
-        // applies inherited_K to the lambda result). Threading inherited_K
-        // into the body would double-apply it.
-        let saved_inherited = self.current_handler_inherited_k.take();
+        let saved_inherited = std::mem::replace(&mut self.current_handler_inherited_k, outer_k);
         let ret_body = self.lower_handler_owned_expr(&ret.body);
         self.current_handler_inherited_k = saved_inherited;
         let (param, body) = if ret.params.is_empty() {
@@ -491,10 +529,9 @@ impl<'a> Lowerer<'a> {
     /// alphabetically by op name (matches `effect_handler_ops` ordering for a
     /// single effect and the canonical shape produced by handler emission).
     pub(crate) fn evidence_op_index(&self, effect_name: &str, op_name: &str) -> usize {
-        let effect_family = crate::typechecker::applied_effect_family(effect_name);
         let info = self
             .effect_defs
-            .get(effect_family)
+            .get(effect_name)
             .unwrap_or_else(|| panic!("unknown effect '{}'", effect_name));
         let mut ops: Vec<&String> = info.ops.keys().collect();
         ops.sort();

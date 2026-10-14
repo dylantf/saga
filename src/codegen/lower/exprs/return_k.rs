@@ -78,8 +78,8 @@ impl<'a> Lowerer<'a> {
             {
                 return call;
             }
-            if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-                if let Some(call) =
+            if let Some((func_name, head_expr, args)) = collect_fun_call(expr)
+                && let Some(call) =
                     self.lower_resolved_fun_call(crate::codegen::lower::ResolvedCallSite {
                         app_id: expr.id,
                         lookup_name: func_name,
@@ -90,43 +90,10 @@ impl<'a> Lowerer<'a> {
                         call_span: Some(&expr.span),
                         fallback_erlang_module: None,
                     })
-                {
-                    return call;
-                }
-                if let Some(call) =
-                    self.lower_effectful_var_call(expr.id, func_name, &args, return_k.clone())
-                {
-                    return call;
-                }
-            }
-            if let Some((dict, trait_name, method_index, args)) =
-                crate::codegen::lower::util::collect_dict_method_call(expr)
-                && let Some(call) = self.lower_dict_method_call(
-                    expr.id,
-                    dict,
-                    trait_name,
-                    method_index,
-                    &args,
-                    return_k.clone(),
-                )
             {
                 return call;
             }
-            if let Some((lambda, args)) =
-                crate::codegen::lower::util::collect_lambda_head_call(expr)
-                && let Some(call) =
-                    self.lower_lambda_head_call(expr.id, lambda, &args, return_k.clone())
-            {
-                return call;
-            }
-            if let Some((head, args)) =
-                crate::codegen::lower::util::collect_field_access_head_call(expr)
-                && let Some(call) =
-                    self.lower_field_access_head_call(expr.id, head, &args, return_k)
-            {
-                return call;
-            }
-            self.panic_unhandled_effectful_app(expr, None);
+            return self.lower_tagged_value_app(expr, return_k);
         }
 
         self.lower_expr(expr)

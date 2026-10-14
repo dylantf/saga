@@ -80,6 +80,15 @@ pub struct HandlerInfo {
     pub source_module: Option<String>,
 }
 
+/// A row variable fixed by a declared signature. See `Checker::rigid_row_vars`.
+#[derive(Debug, Clone, Default)]
+pub struct RigidRowVar {
+    /// Name as written (`r` for `..r`).
+    pub name: String,
+    /// Effects named in a declared row alongside this variable.
+    pub companions: Vec<EffectEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TraitMethodEffectSig {
     pub effects: Vec<String>,
@@ -230,6 +239,18 @@ pub struct Checker {
     /// checked for required forwarding in `check_fun_clauses`. Cleared at the
     /// start of each function body. See docs/planning/effect-polymorphic-traits.md.
     pub(crate) trait_forward_row_vars: std::collections::HashMap<u32, String>,
+    /// The head of the application being inferred and how many arguments it
+    /// is applied to, set only while that head is inferred. Lets a name tell
+    /// a call that supplies every argument from a use as a value (see
+    /// `open_row_refs.rs`).
+    pub(crate) call_head: Option<(crate::ast::NodeId, usize)>,
+    /// Row variables the code being checked may not refine: the `..r` tails
+    /// written in the enclosing function's signature (or in the signature of
+    /// the trait method or effect operation being implemented). Whoever calls
+    /// the function chooses what they stand for. Each maps to its source name
+    /// and to the effects written next to it in a declared row
+    /// (`needs {Fail e, ..r}`), which is all the body may assume about it.
+    pub(crate) rigid_row_vars: std::collections::HashMap<u32, RigidRowVar>,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -273,6 +294,12 @@ pub struct Checker {
     /// Keyed by (name, pat_node_id) to avoid collisions between same-named
     /// bindings in different scopes (e.g. multiple test bodies).
     pub(crate) let_dict_params: HashMap<(String, NodeId), result::LetDictInfo>,
+    /// Steps taken so far by the unification in progress (see
+    /// `unify::UnifyStep`). Empty outside `unify`.
+    pub(crate) unify_path: Vec<super::unify::UnifyStep>,
+    /// Unequal closed effect rows accepted by the unification in progress,
+    /// drained by the top-level unification entry point.
+    pub(crate) row_subsumptions: Vec<super::unify::RowSubsumption>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -281,6 +308,14 @@ pub struct Checker {
     pub(crate) internal_handler_normalization_warnings: HashSet<String>,
     /// LSP/IDE state: type info, references, definitions, go-to-def targets.
     pub(crate) lsp: LspState,
+    /// Codegen type table: the type of every expression node whose inference
+    /// completed, keyed by `NodeId`. Unlike `lsp.type_at_node` (first write
+    /// wins, hover-oriented coverage) this is written for every expression
+    /// and the last write wins, so a node that is inferred more than once
+    /// holds the type from the attempt that was kept. Stored unresolved and
+    /// zonked at the `CheckResult` boundary. Not populated when
+    /// `modules.skip_expr_types` is set (the language server).
+    pub(crate) expr_types: HashMap<crate::ast::NodeId, Type>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
@@ -520,6 +555,9 @@ pub(crate) struct TraitState {
     pub where_bound_trait_args: HashMap<(u32, String), Vec<Type>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
     pub where_bound_var_names: HashMap<u32, String>,
+    /// Open-row trait methods referenced as values whose impl effects have
+    /// not been put on their arrows yet (see `open_row_refs.rs`).
+    pub open_row_refs: Vec<super::open_row_refs::OpenRowRef>,
 }
 
 /// Metadata for effect inference: instantiation caches and name registries.
@@ -604,6 +642,10 @@ pub struct ModuleContext {
     /// Kept out of the global map so private module names don't collide with
     /// other packages or the consumer's own modules.
     pub private_modules: Option<HashMap<String, check_module::ModuleMap>>,
+    /// When true, checkers do not populate the codegen expression type table
+    /// (`Checker::expr_types`). Set by the language server, which never runs
+    /// codegen; inherited by the module checkers spawned for imports.
+    pub(crate) skip_expr_types: bool,
     /// Cache of already-typechecked modules: module name -> all public exports.
     ///
     /// All module-cache products are write-once snapshots shared via `Arc`.

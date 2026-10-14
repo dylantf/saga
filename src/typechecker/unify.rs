@@ -1,8 +1,128 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::{Expr, ExprKind, Stmt};
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
+
+/// One step from the two types handed to a top-level unification down to the
+/// pair of function types whose effect rows are being compared.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum UnifyStep {
+    /// Into argument `i` of a type constructor (`List (...)`, a tuple slot).
+    ConArg(usize),
+    /// Into a function's parameter type.
+    FunParam,
+    /// Into a function's return type. Not "depth": functions are curried and
+    /// effects sit on an inner arrow, so `A -> B -> C needs {E}` reaches its
+    /// row through one return step.
+    FunRet,
+    /// Into the named field of an anonymous record type.
+    RecordField(String),
+    /// Into a type argument of an effect in a row (`Fail (..)`).
+    EffectArg,
+}
+
+/// Two closed effect rows that are not equal were accepted as unifiable
+/// because one is a subset of the other. Recorded by `unify_effect_rows` and
+/// judged by the top-level unification entry point, which knows the source
+/// position and which side (if any) is the expected type.
+#[derive(Clone, Debug)]
+pub(crate) struct RowSubsumption {
+    /// Where in the unified types the rows sit.
+    pub(crate) path: Vec<UnifyStep>,
+    /// The full rows, in the argument order of the top-level unification.
+    pub(crate) left: EffectRow,
+    pub(crate) right: EffectRow,
+    /// True when the left row is the larger one (the right row is a strict
+    /// subset of it); false when the right row is the larger one.
+    pub(crate) left_is_larger: bool,
+}
+
+/// What a top-level unification is being used for, as far as effect-row
+/// subsumption is concerned.
+#[derive(Clone, Copy)]
+pub(crate) enum RowPosition<'a> {
+    /// Not a coercion position: closed rows must be equal.
+    Exact,
+    /// The two types are already nested inside a larger type (e.g. the
+    /// parameter types of two functions being joined): closed rows must be
+    /// equal and a mismatch is reported as "at depth".
+    Nested,
+    /// A coercion position. A value of the *actual* type is used where the
+    /// *expected* type is wanted, so the actual row may be a subset of the
+    /// expected row, but not the other way round. `expr` is the expression
+    /// that produced the actual type, when there is one: tuple, list and
+    /// anonymous-record literals (and `if`/`case`/block results) extend the
+    /// coercion position to their elements.
+    Coercion {
+        actual_is_left: bool,
+        expr: Option<&'a Expr>,
+    },
+}
+
+/// Phrase that identifies the "one application per effect family" error, so
+/// callers that rewrite unification errors can let it through unchanged.
+pub(crate) const FAMILY_CONFLICT_MARKER: &str = "can hold only one";
+
+/// Prefix of every effect-row rule error (unequal closed rows where they
+/// must be equal, or a function used where one with fewer effects is
+/// expected), so callers that rewrite unification errors can let it through
+/// unchanged.
+pub(crate) const ROW_RULE_MARKER: &str = "effect row mismatch: ";
+
+/// Does `path` lead to a position where subsumption is allowed, given the
+/// expression whose type is being coerced? True when the path consists of
+/// return steps only (the row sits on the value's own arrow), after walking
+/// through any literal structure of `expr` that mirrors leading type steps.
+fn coercion_path_is_direct(expr: Option<&Expr>, path: &[UnifyStep]) -> bool {
+    let Some(first) = path.first() else {
+        return true;
+    };
+    if *first == UnifyStep::FunRet {
+        return path.iter().all(|step| *step == UnifyStep::FunRet);
+    }
+    let Some(expr) = expr else {
+        return false;
+    };
+    match (&expr.kind, first) {
+        (ExprKind::Tuple { elements }, UnifyStep::ConArg(i)) => elements
+            .get(*i)
+            .is_some_and(|elem| coercion_path_is_direct(Some(elem), &path[1..])),
+        (ExprKind::AnonRecordCreate { fields }, UnifyStep::RecordField(name)) => fields
+            .iter()
+            .find(|(fname, _, _)| fname == name)
+            .is_some_and(|(_, _, fexpr)| coercion_path_is_direct(Some(fexpr), &path[1..])),
+        // A desugared list literal: the single type argument is the joined
+        // element type.
+        (ExprKind::App { .. }, UnifyStep::ConArg(0)) => {
+            super::infer::collect_list_literal_elements(expr).is_some_and(|elements| {
+                elements
+                    .iter()
+                    .all(|elem| coercion_path_is_direct(Some(elem), &path[1..]))
+            })
+        }
+        (
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            },
+            _,
+        ) => {
+            coercion_path_is_direct(Some(then_branch), path)
+                && coercion_path_is_direct(Some(else_branch), path)
+        }
+        (ExprKind::Case { arms, .. }, _) => arms
+            .iter()
+            .all(|arm| coercion_path_is_direct(Some(&arm.node.body), path)),
+        (ExprKind::Block { stmts, .. }, _) => match stmts.last().map(|s| &s.node) {
+            Some(Stmt::Expr(last)) => coercion_path_is_direct(Some(last), path),
+            _ => false,
+        },
+        _ => false,
+    }
+}
 
 /// Substitute every `Type::Var(id)` whose id is a key in `subst` with the
 /// corresponding type, recursively. Used to instantiate a type alias body
@@ -142,7 +262,26 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
 impl Checker {
     // --- Unification ---
 
+    /// Unify two types with no position information. Unequal closed effect
+    /// rows accepted along the way are not reported: use `unify_at` or one of
+    /// the `coerce_*` entry points wherever a source span is available.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), Diagnostic> {
+        self.unify_path.clear();
+        let result = self.unify_rec(a, b);
+        self.row_subsumptions.clear();
+        result
+    }
+
+    /// Recurse into a component of the types being unified, tracking the step
+    /// taken so `unify_effect_rows` knows where it is.
+    fn unify_step(&mut self, step: UnifyStep, a: &Type, b: &Type) -> Result<(), Diagnostic> {
+        self.unify_path.push(step);
+        let result = self.unify_rec(a, b);
+        self.unify_path.pop();
+        result
+    }
+
+    fn unify_rec(&mut self, a: &Type, b: &Type) -> Result<(), Diagnostic> {
         let a = self.sub.apply(a);
         let b = self.sub.apply(b);
 
@@ -156,16 +295,16 @@ impl Checker {
             (_, Type::Var(id)) => self.sub.bind(*id, &a),
 
             (Type::Fun(a1, b1, row1), Type::Fun(a2, b2, row2)) => {
-                self.unify(a1, a2)?;
-                self.unify(b1, b2)?;
+                self.unify_step(UnifyStep::FunParam, a1, a2)?;
+                self.unify_step(UnifyStep::FunRet, b1, b2)?;
                 self.unify_effect_rows(row1, row2)
             }
 
             (Type::Con(n1, args1), Type::Con(n2, args2))
                 if n1 == n2 && args1.len() == args2.len() =>
             {
-                for (a, b) in args1.iter().zip(args2.iter()) {
-                    self.unify(a, b)?;
+                for (i, (a, b)) in args1.iter().zip(args2.iter()).enumerate() {
+                    self.unify_step(UnifyStep::ConArg(i), a, b)?;
                 }
                 Ok(())
             }
@@ -181,8 +320,8 @@ impl Checker {
                         a_display, b_display
                     )));
                 }
-                for ((_, t1), (_, t2)) in f1.iter().zip(f2.iter()) {
-                    self.unify(t1, t2)?;
+                for ((name, t1), (_, t2)) in f1.iter().zip(f2.iter()) {
+                    self.unify_step(UnifyStep::RecordField(name.clone()), t1, t2)?;
                 }
                 Ok(())
             }
@@ -194,15 +333,20 @@ impl Checker {
     /// Unify two effect rows. Matches effects by name, unifies type args,
     /// then binds leftover effects to row variables (if open).
     fn unify_effect_rows(&mut self, row1: &EffectRow, row2: &EffectRow) -> Result<(), Diagnostic> {
-        // Apply row substitutions to resolve any already-bound row variables
-        let r1 = self.sub.apply_effect_row(row1);
-        let r2 = self.sub.apply_effect_row(row2);
+        if row1.is_empty() && row2.is_empty() {
+            return Ok(());
+        }
+        // Resolve already-bound row variables. A row holds one application
+        // per effect family, so a row variable that was bound to a row naming
+        // a family this row also names has its arguments unified here.
+        let r1 = self.normalize_row(row1)?;
+        let r2 = self.normalize_row(row2)?;
 
         // Match effects by identity (instance + name) and unify their type args pairwise
         for entry1 in &r1.effects {
             if let Some(entry2) = r2.effects.iter().find(|e| e.matches(entry1)) {
                 for (t1, t2) in entry1.args.iter().zip(entry2.args.iter()) {
-                    self.unify(t1, t2)?;
+                    self.unify_step(UnifyStep::EffectArg, t1, t2)?;
                 }
             }
         }
@@ -227,12 +371,23 @@ impl Checker {
         match (tails1.is_empty(), tails2.is_empty()) {
             // Both closed: accept if one side is a subset of the other.
             // This is symmetric (unification doesn't know direction), so it
-            // accepts both directions of effect subsumption. The directional
-            // check (effectful callback where pure expected = error) is
-            // enforced by check_callback_effect_subtype in infer.rs at
-            // function application sites.
+            // accepts both directions of effect subsumption, at any depth.
+            // The intended rule is stricter (closed rows unify only when
+            // equal, except at coercion positions and only in the
+            // actual-subset-of-expected direction), so every acceptance of
+            // unequal rows is recorded here with its path and judged by the
+            // top-level entry point (`unify_in_position`), which reports
+            // violations as type errors.
             (true, true) => {
                 if extras1.is_empty() || extras2.is_empty() {
+                    if !(extras1.is_empty() && extras2.is_empty()) {
+                        self.row_subsumptions.push(RowSubsumption {
+                            path: self.unify_path.clone(),
+                            left: r1.clone(),
+                            right: r2.clone(),
+                            left_is_larger: !extras1.is_empty(),
+                        });
+                    }
                     Ok(())
                 } else {
                     // Both have unmatched effects -- genuinely incompatible
@@ -273,12 +428,12 @@ impl Checker {
     ) -> Result<(), Diagnostic> {
         if extras.is_empty() {
             for &t in tails {
-                self.sub.bind_row(t, EffectRow::empty())?;
+                self.bind_row_checked(t, EffectRow::empty())?;
             }
             return Ok(());
         }
         if tails.len() == 1 {
-            return self.sub.bind_row(tails[0], EffectRow::closed(extras));
+            return self.bind_row_checked(tails[0], EffectRow::closed(extras));
         }
         Err(ambiguous_row_error(&extras))
     }
@@ -311,15 +466,39 @@ impl Checker {
                 // the variable denotes the same set on both sides.
                 return Ok(());
             }
+            // A where-bound type variable used as a row (`..a` for
+            // `a: Trait`, the effects of the impl chosen for `a`) means that
+            // only as itself: renaming it to a fresh row variable would
+            // leave a row unrelated to `a`. When it has nothing to absorb,
+            // bind the other variable to it instead.
+            let where_bound = |checker: &Self, id: u32| checker.is_where_bound_var(id);
+            if extras1.is_empty() && where_bound(self, t2) && !where_bound(self, t1) {
+                return self.bind_row_checked(
+                    t1,
+                    EffectRow {
+                        effects: extras2,
+                        tails: vec![Type::Var(t2)],
+                    },
+                );
+            }
+            if extras2.is_empty() && where_bound(self, t1) && !where_bound(self, t2) {
+                return self.bind_row_checked(
+                    t2,
+                    EffectRow {
+                        effects: extras1,
+                        tails: vec![Type::Var(t1)],
+                    },
+                );
+            }
             let fresh = self.fresh_var();
-            self.sub.bind_row(
+            self.bind_row_checked(
                 t1,
                 EffectRow {
                     effects: extras2,
                     tails: vec![fresh.clone()],
                 },
             )?;
-            return self.sub.bind_row(
+            return self.bind_row_checked(
                 t2,
                 EffectRow {
                     effects: extras1,
@@ -328,31 +507,32 @@ impl Checker {
             );
         }
 
-        // One side has a single tail and the other has several. If the
-        // multi-tail side has no named effects the single side must absorb,
-        // the single tail can stand for the union of the multi side's tails.
-        if tails2.len() == 1 && !tails1.is_empty() && extras1.is_empty() {
-            // extras2 (effects r2 has, r1 lacks) must be absorbed by r1's
-            // tails — ambiguous when there are 2+ of them.
+        // One side has a single tail and the other has several. The single
+        // tail can stand for everything the multi-tail side has that it
+        // lacks: that side's extra named effects plus the union of its
+        // tails. Named effects only the single-tail side has would have to
+        // go into one of the other side's tails, and which one is
+        // undetermined.
+        if tails2.len() == 1 && !tails1.is_empty() {
             if !extras2.is_empty() {
                 return Err(ambiguous_row_error(&extras2));
             }
-            return self.sub.bind_row(
+            return self.bind_row_checked(
                 tails2[0],
                 EffectRow {
-                    effects: vec![],
+                    effects: extras1,
                     tails: tails1.iter().map(|&id| Type::Var(id)).collect(),
                 },
             );
         }
-        if tails1.len() == 1 && !tails2.is_empty() && extras2.is_empty() {
+        if tails1.len() == 1 && !tails2.is_empty() {
             if !extras1.is_empty() {
                 return Err(ambiguous_row_error(&extras1));
             }
-            return self.sub.bind_row(
+            return self.bind_row_checked(
                 tails1[0],
                 EffectRow {
-                    effects: vec![],
+                    effects: extras2,
                     tails: tails2.iter().map(|&id| Type::Var(id)).collect(),
                 },
             );
@@ -363,6 +543,700 @@ impl Checker {
         let mut all_extras = extras1;
         all_extras.extend(extras2);
         Err(ambiguous_row_error(&all_extras))
+    }
+
+    /// Whether `id` is (what the substitution has made of) a type variable
+    /// under a `where` bound.
+    pub(crate) fn is_where_bound_var(&self, id: u32) -> bool {
+        let bounds = &self.trait_state.where_bounds;
+        bounds.contains_key(&id)
+            || bounds
+                .keys()
+                .any(|bound| self.sub.apply(&Type::Var(*bound)) == Type::Var(id))
+    }
+
+    // --- One application per effect family ---
+
+    /// The error for two applications of one effect family meeting in a row.
+    pub(crate) fn family_conflict(
+        &self,
+        first: &super::EffectEntry,
+        second: &super::EffectEntry,
+    ) -> Diagnostic {
+        let family = first.name.rsplit('.').next().unwrap_or(&first.name);
+        // Prettify both entries together so shared variables get one name.
+        let both = self.prettify_type(&Type::Record(vec![
+            (
+                "a".to_string(),
+                Type::Con(family.to_string(), first.args.clone()),
+            ),
+            (
+                "b".to_string(),
+                Type::Con(family.to_string(), second.args.clone()),
+            ),
+        ]));
+        let (a, b) = match both {
+            Type::Record(parts) if parts.len() == 2 => {
+                (parts[0].1.to_string(), parts[1].1.to_string())
+            }
+            _ => (family.to_string(), family.to_string()),
+        };
+        Diagnostic::error(format!(
+            "an effect row {FAMILY_CONFLICT_MARKER} `{family}`, but both `{a}` and `{b}` are \
+             needed here. An effect is identified by its name, whatever its type arguments, so \
+             its operations always reach the nearest `{family}` handler. To use a second \
+             instance alongside the first, declare it with `neweffect` (for example \
+             `neweffect Other{family} = {b}`) and use that name instead"
+        ))
+    }
+
+    /// Unify the type arguments of two applications of the same family.
+    /// Fails with the family-conflict error.
+    pub(crate) fn unify_family(
+        &mut self,
+        first: &super::EffectEntry,
+        second: &super::EffectEntry,
+    ) -> Result<(), Diagnostic> {
+        if first.args.len() != second.args.len() {
+            return Err(self.family_conflict(first, second));
+        }
+        for (a, b) in first.args.iter().zip(second.args.iter()) {
+            if self.unify_step(UnifyStep::EffectArg, a, b).is_err() {
+                return Err(self.family_conflict(first, second));
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply the substitution to a row and enforce that it holds one
+    /// application per family: entries of the same family have their
+    /// arguments unified (a mismatch is the family-conflict error), and the
+    /// row's entries are recorded against its open tails so a later binding
+    /// of a tail cannot bring in a second, different application.
+    pub(crate) fn normalize_row(&mut self, row: &EffectRow) -> Result<EffectRow, Diagnostic> {
+        if row.is_empty() {
+            return Ok(EffectRow::empty());
+        }
+        let mut applied = self.sub.apply_effect_row(row);
+        let mut unified = false;
+        for i in 0..applied.effects.len() {
+            for j in (i + 1)..applied.effects.len() {
+                if applied.effects[i].matches(&applied.effects[j]) {
+                    let (first, second) = (applied.effects[i].clone(), applied.effects[j].clone());
+                    self.unify_family(&first, &second)?;
+                    unified = true;
+                }
+            }
+        }
+        if unified {
+            // The duplicates are now equal and collapse.
+            applied = self.sub.apply_effect_row(&applied);
+        }
+        if !applied.effects.is_empty() {
+            for tail in applied.tail_var_ids() {
+                for entry in &applied.effects {
+                    self.add_row_companion(tail, entry)?;
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    /// `normalize_row`, attaching `span` to a family-conflict error.
+    pub(crate) fn normalize_row_at(
+        &mut self,
+        row: &EffectRow,
+        span: Span,
+    ) -> Result<EffectRow, Diagnostic> {
+        self.normalize_row(row).map_err(|e| e.with_span(span))
+    }
+
+    /// Combine two rows into one, unifying the arguments of families both
+    /// name.
+    pub(crate) fn merge_rows(
+        &mut self,
+        a: &EffectRow,
+        b: &EffectRow,
+        span: Span,
+    ) -> Result<EffectRow, Diagnostic> {
+        let mut combined = a.clone();
+        combined.effects.extend(b.effects.iter().cloned());
+        for tail in &b.tails {
+            if !combined.tails.contains(tail) {
+                combined.tails.push(tail.clone());
+            }
+        }
+        self.normalize_row_at(&combined, span)
+    }
+
+    /// Record that row variable `var` shares a row with `entry`: whatever
+    /// `var` is bound to may contain `entry`'s family only at `entry`'s
+    /// arguments.
+    pub(crate) fn add_row_companion(
+        &mut self,
+        var: u32,
+        entry: &super::EffectEntry,
+    ) -> Result<(), Diagnostic> {
+        // A row variable that is also a type variable (`..a` for a
+        // where-bound `a`) may have been renamed, or resolved to a type.
+        let var = match self.sub.apply(&Type::Var(var)) {
+            Type::Var(id) => id,
+            _ => return Ok(()),
+        };
+        if let Some(bound) = self.sub.row_map.get(&var).cloned() {
+            // Already bound: check what it was bound to instead.
+            for existing in bound.effects.iter().filter(|e| e.matches(entry)) {
+                self.unify_family(existing, entry)?;
+            }
+            for tail in &bound.tails {
+                if let Type::Var(id) = self.sub.apply(tail)
+                    && id != var
+                {
+                    self.add_row_companion(id, entry)?;
+                }
+            }
+            return Ok(());
+        }
+        let resolved = super::EffectEntry {
+            name: entry.name.clone(),
+            args: entry.args.iter().map(|t| self.sub.apply(t)).collect(),
+        };
+        let companions = self.sub.row_companions.entry(var).or_default();
+        if !companions.iter().any(|c| c.same_instantiation(&resolved)) {
+            companions.push(resolved);
+        }
+        Ok(())
+    }
+
+    /// Bind a row variable, enforcing one application per family: the bound
+    /// row may name a family the variable shares a row with only at the same
+    /// arguments, and the new tails inherit the variable's obligations.
+    pub(crate) fn bind_row_checked(&mut self, id: u32, row: EffectRow) -> Result<(), Diagnostic> {
+        let companions = self
+            .sub
+            .row_companions
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let tail_ids: Vec<u32> = row
+            .tail_var_ids()
+            .into_iter()
+            .filter(|tail| *tail != id)
+            .collect();
+        for companion in &companions {
+            let mut named = false;
+            for entry in row.effects.iter().filter(|e| e.matches(companion)) {
+                named = true;
+                self.unify_family(companion, entry)?;
+            }
+            if !named {
+                for &tail in &tail_ids {
+                    self.add_row_companion(tail, companion)?;
+                }
+            }
+        }
+        for entry in &row.effects {
+            for &tail in &tail_ids {
+                self.add_row_companion(tail, entry)?;
+            }
+        }
+        self.sub.bind_row(id, row)
+    }
+
+    /// The row variables on the arrows of `ty` (following the return spine).
+    pub(crate) fn spine_row_tails(&self, ty: &Type) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut current = self.sub.apply(ty);
+        while let Type::Fun(_, ret, row) = current {
+            out.extend(self.sub.apply_effect_row(&row).tail_var_ids());
+            current = *ret;
+        }
+        out
+    }
+
+    /// Enforce one application per family on every row in `ty` (see
+    /// `normalize_row`).
+    pub(crate) fn check_type_rows(&mut self, ty: &Type) -> Result<(), Diagnostic> {
+        match ty {
+            Type::Fun(a, b, row) => {
+                self.check_type_rows(a)?;
+                self.check_type_rows(b)?;
+                for entry in &row.effects {
+                    for arg in &entry.args {
+                        self.check_type_rows(arg)?;
+                    }
+                }
+                self.normalize_row(row).map(|_| ())
+            }
+            Type::Con(_, args) => {
+                for arg in args {
+                    self.check_type_rows(arg)?;
+                }
+                Ok(())
+            }
+            Type::Record(fields) => {
+                for (_, t) in fields {
+                    self.check_type_rows(t)?;
+                }
+                Ok(())
+            }
+            Type::Var(_) | Type::Error => Ok(()),
+        }
+    }
+
+    /// Collect the type variables that appear in an effect's arguments in a
+    /// declared type (`e` in `needs {Fail e}` or `Handler (Fail e)`), each
+    /// with the family it was written under.
+    pub(crate) fn collect_effect_arg_vars(&self, ty: &Type, out: &mut Vec<(u32, String)>) {
+        let push_entry = |name: &str, args: &[Type], out: &mut Vec<(u32, String)>| {
+            let mut vars = Vec::new();
+            for arg in args {
+                collect_free_vars(arg, &mut vars);
+            }
+            for var in vars {
+                if !out.iter().any(|(seen, _)| *seen == var) {
+                    out.push((var, name.to_string()));
+                }
+            }
+        };
+        match ty {
+            Type::Fun(a, b, row) => {
+                self.collect_effect_arg_vars(a, out);
+                self.collect_effect_arg_vars(b, out);
+                for entry in &row.effects {
+                    push_entry(&entry.name, &entry.args, out);
+                    for arg in &entry.args {
+                        self.collect_effect_arg_vars(arg, out);
+                    }
+                }
+            }
+            Type::Con(name, args) => {
+                if name == super::canonicalize_type_name("Handler") {
+                    for arg in args {
+                        if let Type::Con(effect, effect_args) = arg {
+                            push_entry(effect, effect_args, out);
+                        }
+                    }
+                }
+                for arg in args {
+                    self.collect_effect_arg_vars(arg, out);
+                }
+            }
+            Type::Record(fields) => {
+                for (_, t) in fields {
+                    self.collect_effect_arg_vars(t, out);
+                }
+            }
+            Type::Var(_) | Type::Error => {}
+        }
+    }
+
+    /// A type variable written as an effect's argument in a signature
+    /// (`needs {Fail e}`) is chosen by the caller, who handles or performs
+    /// the effect at that type. The body must work for every choice: it may
+    /// not have pinned the variable to a type, nor merged two of them.
+    ///
+    /// `names` are the variables the signature's author named. A function
+    /// owns its signature, so an argument it left out (`needs {Fail}`) is a
+    /// hole its body fills in, and is skipped. A handler arm or an impl
+    /// method implements a signature declared elsewhere (the operation's,
+    /// the trait method's), which every other user instantiates afresh:
+    /// there every variable is the user's choice, written or not
+    /// (`all_abstract`).
+    pub(crate) fn check_effect_arg_vars_abstract(
+        &self,
+        vars: &[(u32, String)],
+        names: &[(String, u32)],
+        all_abstract: bool,
+        what: &str,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let name_of = |var: u32| {
+            names
+                .iter()
+                .find(|(_, id)| *id == var)
+                .map(|(name, _)| name.clone())
+        };
+        let mut roots: Vec<(u32, u32, String)> = Vec::new();
+        for (var, effect) in vars {
+            let name = name_of(*var);
+            if name.is_none() && !all_abstract {
+                continue;
+            }
+            let family = effect.rsplit('.').next().unwrap_or(effect).to_string();
+            match self.sub.apply(&Type::Var(*var)) {
+                Type::Var(root) => {
+                    if let Some((_, other, other_family)) =
+                        roots.iter().find(|(r, o, _)| *r == root && o != var)
+                    {
+                        let message = match (name, name_of(*other)) {
+                            (Some(a), Some(b)) => format!(
+                                "{what} declares the effect argument `{a}` (of `{family}`) and \
+                                 `{b}` as independent type variables, but its body only works \
+                                 when they are the same type. The caller chooses them; use one \
+                                 variable for both in the signature"
+                            ),
+                            _ => format!(
+                                "{what} is declared with independent type variables as effect \
+                                 arguments (of `{family}` and of `{other_family}`), but this \
+                                 implementation only works when they are the same type. \
+                                 Whoever uses it chooses them; use one variable for both in \
+                                 the declaration"
+                            ),
+                        };
+                        return Err(Diagnostic::error_at(span, message));
+                    }
+                    roots.push((root, *var, family));
+                }
+                Type::Error => {}
+                other => {
+                    let shown = self.prettify_type(&other);
+                    let message = match name {
+                        Some(var) => format!(
+                            "{what} declares `{family} {var}` for any type `{var}`, but its \
+                             body only works when `{var}` is `{shown}`. The caller chooses \
+                             `{var}` and performs or handles `{family}` at that type; write \
+                             `{shown}` in the signature, or make the body work for every `{var}`"
+                        ),
+                        None => format!(
+                            "{what} is declared with `{family}` at any type, but this \
+                             implementation only works when that type is `{shown}`. Whoever \
+                             uses it chooses the type and performs or handles `{family}` at \
+                             it; write `{shown}` in the declaration, or make the \
+                             implementation work for every type"
+                        ),
+                    };
+                    return Err(Diagnostic::error_at(span, message));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Companion of `check_effect_arg_vars_abstract` for a handler arm or an
+    /// impl method: an effect-argument variable of the implemented signature
+    /// must not reach what outlives the implementation (`performed`, the
+    /// effects it performs outward; `result`, e.g. a handler's answer type).
+    /// Every user of the signature chooses that variable afresh, but the
+    /// surroundings see one type: it would be pinned there, after this body
+    /// was checked.
+    pub(crate) fn check_effect_arg_vars_stay_inside(
+        &self,
+        vars: &[(u32, String)],
+        performed: &[super::EffectEntry],
+        result: Option<&Type>,
+        what: &str,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if vars.is_empty() {
+            return Ok(());
+        }
+        let mut outside = Vec::new();
+        for entry in performed {
+            for arg in &entry.args {
+                collect_free_vars(&self.sub.apply(arg), &mut outside);
+            }
+        }
+        if let Some(ty) = result {
+            collect_free_vars(&self.sub.apply(ty), &mut outside);
+        }
+        for (var, effect) in vars {
+            let Type::Var(root) = self.sub.apply(&Type::Var(*var)) else {
+                continue;
+            };
+            if outside.contains(&root) {
+                let family = effect.rsplit('.').next().unwrap_or(effect);
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "{what} is declared with `{family}` at any type, but this \
+                         implementation passes that type on to its surroundings (in an effect \
+                         it performs, or in its result). Whoever uses it chooses the type, each \
+                         time, while the surroundings see a single type; handle `{family}` \
+                         inside the implementation in a way that works for every type"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The type variables an instantiated operation signature uses as effect
+    /// arguments, each with its family.
+    pub(crate) fn op_sig_effect_arg_vars(&self, sig: &super::EffectOpSig) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        for (_, param_ty) in &sig.params {
+            self.collect_effect_arg_vars(param_ty, &mut out);
+        }
+        self.collect_effect_arg_vars(&sig.return_type, &mut out);
+        let as_fun = Type::Fun(
+            Box::new(Type::unit()),
+            Box::new(Type::unit()),
+            sig.needs.clone(),
+        );
+        self.collect_effect_arg_vars(&as_fun, &mut out);
+        out
+    }
+
+    /// Collect the row variables written in a declared type, with the
+    /// effects named next to each. See `Checker::rigid_row_vars`.
+    pub(crate) fn collect_rigid_row_vars(
+        ty: &Type,
+        names: &[(String, u32)],
+        out: &mut HashMap<u32, super::RigidRowVar>,
+    ) {
+        match ty {
+            Type::Fun(a, b, row) => {
+                Self::collect_rigid_row_vars(a, names, out);
+                Self::collect_rigid_row_vars(b, names, out);
+                for entry in &row.effects {
+                    for arg in &entry.args {
+                        Self::collect_rigid_row_vars(arg, names, out);
+                    }
+                }
+                Self::collect_rigid_row_vars_in_row(row, names, out);
+            }
+            Type::Con(_, args) => {
+                for arg in args {
+                    Self::collect_rigid_row_vars(arg, names, out);
+                }
+            }
+            Type::Record(fields) => {
+                for (_, t) in fields {
+                    Self::collect_rigid_row_vars(t, names, out);
+                }
+            }
+            Type::Var(_) | Type::Error => {}
+        }
+    }
+
+    pub(crate) fn collect_rigid_row_vars_in_row(
+        row: &EffectRow,
+        names: &[(String, u32)],
+        out: &mut HashMap<u32, super::RigidRowVar>,
+    ) {
+        for id in row.tail_var_ids() {
+            let info = out.entry(id).or_insert_with(|| super::RigidRowVar {
+                name: names
+                    .iter()
+                    .find(|(_, var)| *var == id)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| "e".to_string()),
+                companions: vec![],
+            });
+            for entry in &row.effects {
+                if !info.companions.iter().any(|c| c.same_instantiation(entry)) {
+                    info.companions.push(entry.clone());
+                }
+            }
+        }
+    }
+
+    /// A row variable written in a signature is chosen by the caller, so the
+    /// body may not rely on what it contains. Two things are checked once
+    /// the body has been inferred:
+    ///
+    /// - the variable was not pinned down: it was not unified with a row
+    ///   naming a type-parameterised effect, and (unless `allow_closing`) it
+    ///   was not closed. It may have been renamed, split into other
+    ///   variables, or widened with effects that take no type argument
+    ///   (which is how a callback is passed where more effects are allowed);
+    /// - the body did not put it in a row with a type-parameterised effect
+    ///   that the signature does not name next to it. `{State Int, ..e}`
+    ///   means "if `e` contains `State`, it is `State Int`", which is only
+    ///   true if callers are held to it by the signature.
+    ///
+    /// `what` names the declaration for the error.
+    ///
+    /// `allow_closing` is for handler arms. An arm may hand an operation's
+    /// callback on to something that accepts fewer effects, which closes the
+    /// callback's row variable; the callback still finds the effects of that
+    /// row at the place the operation was performed (see "Effect-Operation
+    /// Callbacks With Open Tails" in `docs/effect-implementation.md`), not
+    /// at whatever the arm installs around it.
+    pub(crate) fn check_rigid_row_vars_abstract(
+        &mut self,
+        rigid: &HashMap<u32, super::RigidRowVar>,
+        what: &str,
+        span: Span,
+        allow_closing: bool,
+    ) -> Result<(), Diagnostic> {
+        let mut vars: Vec<(u32, super::RigidRowVar)> =
+            rigid.iter().map(|(id, info)| (*id, info.clone())).collect();
+        vars.sort_by_key(|(id, _)| *id);
+        for (var, info) in vars {
+            let resolved = self.sub.apply_effect_row(&EffectRow {
+                effects: vec![],
+                tails: vec![Type::Var(var)],
+            });
+            let pinned: Vec<super::EffectEntry> = resolved
+                .effects
+                .iter()
+                .filter(|entry| {
+                    self.effects
+                        .get(&entry.name)
+                        .is_some_and(|info| !info.type_params.is_empty())
+                })
+                .cloned()
+                .collect();
+            let closed = resolved.tails.is_empty() && !allow_closing;
+            if !pinned.is_empty() || closed {
+                let (required, fix) = if pinned.is_empty() && resolved.effects.is_empty() {
+                    (
+                        "to be empty".to_string(),
+                        format!("remove `..{}` from the signature", info.name),
+                    )
+                } else if pinned.is_empty() {
+                    (
+                        format!("to be exactly {}", self.describe_effects(&resolved.effects)),
+                        format!("remove `..{}` from the signature", info.name),
+                    )
+                } else {
+                    let effects = self.describe_effects(&pinned);
+                    let inner = effects.trim_start_matches('{').trim_end_matches('}');
+                    (
+                        format!("to contain {effects}"),
+                        format!(
+                            "name them where `..{name}` is written (`needs {{{inner}, ..{name}}}`)",
+                            name = info.name
+                        ),
+                    )
+                };
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "{what} declares the open effect row `..{name}`, but its body requires \
+                         that row {required}. A row variable in a signature is chosen by the \
+                         caller, so the body cannot rely on what it contains; {fix}",
+                        name = info.name,
+                    ),
+                ));
+            }
+
+            for root in resolved.tail_var_ids() {
+                let declared = self
+                    .rigid_row_var_for(root)
+                    .map(|r| r.companions)
+                    .unwrap_or_default();
+                let assumed = self
+                    .sub
+                    .row_companions
+                    .get(&root)
+                    .cloned()
+                    .unwrap_or_default();
+                for companion in assumed {
+                    let parameterised = self
+                        .effects
+                        .get(&companion.name)
+                        .is_some_and(|e| !e.type_params.is_empty());
+                    if !parameterised {
+                        continue;
+                    }
+                    let mut covered = false;
+                    for decl in declared.iter().filter(|d| d.matches(&companion)) {
+                        let saved = self.sub.clone();
+                        if self.unify_family(decl, &companion).is_ok() {
+                            covered = true;
+                            break;
+                        }
+                        self.sub = saved;
+                    }
+                    if covered {
+                        continue;
+                    }
+                    let family = companion.name.rsplit('.').next().unwrap_or(&companion.name);
+                    let shown = self.prettify_effect_entry(&companion);
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "{what} declares the open effect row `..{name}`, and its body uses \
+                             `..{name}` together with `{shown}`. The caller chooses `..{name}`, \
+                             and it might contain `{family}` at another type; its operations \
+                             would then be treated as `{shown}`. Say so in the signature by \
+                             naming the effect where `..{name}` is written (`needs {{{shown}, \
+                             ..{name}}}`), or keep the two apart with a `neweffect`",
+                            name = info.name,
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A row variable about to be generalised loses what the substitution
+    /// knows about it, so anything it must stay consistent with has to be
+    /// visible in the type itself. Returns a type-parameterised effect that
+    /// `var` shares a row with somewhere, but that no row of `ty` names next
+    /// to `var`.
+    pub(crate) fn unexpressed_row_companion(
+        &mut self,
+        ty: &Type,
+        var: u32,
+    ) -> Option<super::EffectEntry> {
+        let assumed = self.sub.row_companions.get(&var).cloned()?;
+        let resolved = self.sub.apply(ty);
+        let mut structural = HashMap::new();
+        Self::collect_rigid_row_vars(&resolved, &[], &mut structural);
+        let named = structural
+            .remove(&var)
+            .map(|info| info.companions)
+            .unwrap_or_default();
+        for companion in assumed {
+            let parameterised = self
+                .effects
+                .get(&companion.name)
+                .is_some_and(|e| !e.type_params.is_empty());
+            if !parameterised {
+                continue;
+            }
+            let mut covered = false;
+            for decl in named.iter().filter(|d| d.matches(&companion)) {
+                let saved = self.sub.clone();
+                if self.unify_family(decl, &companion).is_ok() {
+                    covered = true;
+                    break;
+                }
+                self.sub = saved;
+            }
+            if !covered {
+                return Some(companion);
+            }
+        }
+        None
+    }
+
+    /// Record the entries of every open row in `ty` against its tails (see
+    /// `add_row_companion`). Used on freshly instantiated types, whose rows
+    /// may have a tail bound before the row itself is next unified.
+    pub(crate) fn register_open_rows(&mut self, ty: &Type) {
+        match ty {
+            Type::Fun(a, b, row) => {
+                self.register_open_rows(a);
+                self.register_open_rows(b);
+                for entry in &row.effects {
+                    for arg in &entry.args {
+                        self.register_open_rows(arg);
+                    }
+                }
+                if !row.effects.is_empty() && !row.tails.is_empty() {
+                    // A conflict here would be inside the type itself; it is
+                    // reported when the row is next unified.
+                    let _ = self.normalize_row(row);
+                }
+            }
+            Type::Con(_, args) => {
+                for arg in args {
+                    self.register_open_rows(arg);
+                }
+            }
+            Type::Record(fields) => {
+                for (_, t) in fields {
+                    self.register_open_rows(t);
+                }
+            }
+            Type::Var(_) | Type::Error => {}
+        }
     }
 
     /// Format a type for error messages: apply substitutions, then replace
@@ -405,8 +1279,199 @@ impl Checker {
     }
 
     /// Unify with span context: if unification fails, attach the span to the error.
+    ///
+    /// This is the entry point for positions that are *not* coercion
+    /// positions: unequal closed effect rows are a type error here.
     pub(crate) fn unify_at(&mut self, a: &Type, b: &Type, span: Span) -> Result<(), Diagnostic> {
-        self.unify(a, b).map_err(|e| e.with_span(span))
+        self.unify_in_position(a, b, span, RowPosition::Exact)
+    }
+
+    /// Unify two types that already sit inside a larger type (see
+    /// `RowPosition::Nested`).
+    pub(crate) fn unify_nested_at(
+        &mut self,
+        a: &Type,
+        b: &Type,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        self.unify_in_position(a, b, span, RowPosition::Nested)
+    }
+
+    /// Unify at a coercion position: a value of type `actual` (produced by
+    /// `expr`, when there is one) is used where `expected` is wanted. Same
+    /// unification as `unify_at(actual, expected, span)`; only the judgement
+    /// of unequal closed effect rows differs.
+    pub(crate) fn coerce_at(
+        &mut self,
+        actual: &Type,
+        expected: &Type,
+        span: Span,
+        expr: Option<&Expr>,
+    ) -> Result<(), Diagnostic> {
+        self.unify_in_position(
+            actual,
+            expected,
+            span,
+            RowPosition::Coercion {
+                actual_is_left: true,
+                expr,
+            },
+        )
+    }
+
+    /// `coerce_at` for call sites that unify as `(expected, actual)`. The
+    /// argument order is kept because it decides which side a type variable
+    /// is bound from and how mismatch errors read.
+    pub(crate) fn coerce_expected_first_at(
+        &mut self,
+        expected: &Type,
+        actual: &Type,
+        span: Span,
+        expr: Option<&Expr>,
+    ) -> Result<(), Diagnostic> {
+        self.unify_in_position(
+            expected,
+            actual,
+            span,
+            RowPosition::Coercion {
+                actual_is_left: false,
+                expr,
+            },
+        )
+    }
+
+    fn unify_in_position(
+        &mut self,
+        a: &Type,
+        b: &Type,
+        span: Span,
+        position: RowPosition<'_>,
+    ) -> Result<(), Diagnostic> {
+        self.unify_path.clear();
+        self.row_subsumptions.clear();
+        let result = self.unify_rec(a, b);
+        let subsumptions = std::mem::take(&mut self.row_subsumptions);
+        result.map_err(|e| e.with_span(span))?;
+        if subsumptions.is_empty() {
+            return Ok(());
+        }
+
+        // The rows were accepted by the symmetric subset check; judge each
+        // one against the position. The first violation is the error.
+        for subsumption in &subsumptions {
+            let message = match position {
+                RowPosition::Coercion {
+                    actual_is_left,
+                    expr,
+                } if coercion_path_is_direct(expr, &subsumption.path) => {
+                    self.coercion_error(subsumption, actual_is_left)
+                }
+                _ => Some(self.strict_row_error(subsumption, position)),
+            };
+            if let Some(message) = message {
+                return Err(Diagnostic::error_at(span, message));
+            }
+        }
+        Ok(())
+    }
+
+    /// Error for unequal closed rows where no subsumption is
+    /// allowed at all: inside a type-constructor argument, a function
+    /// parameter, an anonymous-record field or an effect's type argument
+    /// ("at depth": no variance tracking, so either direction is wrong), or
+    /// directly at a position that is not a coercion position.
+    fn strict_row_error(&self, subsumption: &RowSubsumption, position: RowPosition<'_>) -> String {
+        let (larger, smaller) = if subsumption.left_is_larger {
+            (&subsumption.left, &subsumption.right)
+        } else {
+            (&subsumption.right, &subsumption.left)
+        };
+        let returns_only = subsumption
+            .path
+            .iter()
+            .all(|step| *step == UnifyStep::FunRet);
+        if matches!(position, RowPosition::Exact) && returns_only {
+            format!(
+                "{}function types with different effect rows ({} and {}) cannot be used as \
+                 the same type here. Effects may only be added implicitly where a value is \
+                 passed, returned, annotated or placed in a literal; make both function types \
+                 declare the same `needs` row.",
+                ROW_RULE_MARKER,
+                self.describe_row(larger),
+                self.describe_row(smaller),
+            )
+        } else {
+            format!(
+                "{}function types with different effect rows ({} and {}) cannot be used as \
+                 the same type inside a larger type. Effect rows nested in a type argument, a \
+                 function parameter or a record field must be identical; make both function \
+                 types declare the same `needs` row.",
+                ROW_RULE_MARKER,
+                self.describe_row(larger),
+                self.describe_row(smaller),
+            )
+        }
+    }
+
+    /// Error for one arrow of a function value at a coercion position.
+    ///
+    /// The actual row may have fewer effects than the expected row
+    /// (subsumption). The reverse is an effectful function used as a less
+    /// effectful one, and is reported. Rows are compared arrow by arrow: an
+    /// effect on a different arrow of a curried type is performed at a
+    /// different application, so `fun a -> { e! (); fun b -> .. }` is not an
+    /// `A -> B -> C needs {E}`.
+    fn coercion_error(&self, subsumption: &RowSubsumption, actual_is_left: bool) -> Option<String> {
+        if subsumption.left_is_larger != actual_is_left {
+            return None;
+        }
+        let (actual, expected) = if actual_is_left {
+            (&subsumption.left, &subsumption.right)
+        } else {
+            (&subsumption.right, &subsumption.left)
+        };
+        let unexpected: Vec<super::EffectEntry> = actual
+            .effects
+            .iter()
+            .filter(|e| !expected.effects.iter().any(|x| x.matches(e)))
+            .cloned()
+            .collect();
+        let unexpected = self.describe_effects(&unexpected);
+        let expected = if expected.effects.is_empty() {
+            "a function with no effects is expected".to_string()
+        } else {
+            format!(
+                "a function that only allows {} is expected",
+                self.describe_effects(&expected.effects)
+            )
+        };
+        Some(format!(
+            "{}a function that uses {} is used where {}. Handle {} first \
+             (for example `fun x -> f x with handler`), or add `needs {}` to the \
+             expected function type.",
+            ROW_RULE_MARKER,
+            self.describe_effects(&actual.effects),
+            expected,
+            unexpected,
+            unexpected,
+        ))
+    }
+
+    fn describe_effects(&self, effects: &[super::EffectEntry]) -> String {
+        let mut names: Vec<String> = effects
+            .iter()
+            .map(|e| self.prettify_effect_entry(e))
+            .collect();
+        names.sort();
+        format!("{{{}}}", names.join(", "))
+    }
+
+    fn describe_row(&self, row: &EffectRow) -> String {
+        if row.effects.is_empty() {
+            "no effects".to_string()
+        } else {
+            self.describe_effects(&row.effects)
+        }
     }
 
     // --- Instantiation & Generalization ---
@@ -424,6 +1489,9 @@ impl Checker {
             .map(|&id| (id, self.fresh_var()))
             .collect();
         let ty = Self::replace_vars(&scheme.ty, &mapping);
+        if !mapping.is_empty() {
+            self.register_open_rows(&ty);
+        }
         let constraints = scheme
             .constraints
             .iter()
@@ -781,9 +1849,9 @@ impl Checker {
                 let a_ty = self.convert_type_expr_inner(from, params);
                 let b_ty = self.convert_type_expr_inner(to, params);
                 {
-                    let effect_refs: Vec<super::EffectEntry> = effects
-                        .iter()
-                        .map(|e| {
+                    let mut effect_refs: Vec<super::EffectEntry> = Vec::new();
+                    for e in effects {
+                        let entry = {
                             // Record effect name reference
                             let name_end = e.span.start + e.name.len();
                             self.lsp.type_references.push((
@@ -802,8 +1870,12 @@ impl Checker {
                                 ));
                             }
                             super::EffectEntry::unnamed(name, args)
-                        })
-                        .collect();
+                        };
+                        if let Err(err) = self.push_declared_effect(&mut effect_refs, entry, e.span)
+                        {
+                            self.collected_diagnostics.push(err);
+                        }
+                    }
                     let tails: Vec<Type> = effect_row_var
                         .iter()
                         .map(|(name, _)| {

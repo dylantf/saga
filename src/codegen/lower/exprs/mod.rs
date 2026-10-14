@@ -14,7 +14,6 @@
 
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::CExpr;
-use crate::typechecker::Type;
 
 mod blocks;
 mod cases;
@@ -32,11 +31,8 @@ pub(crate) enum CpsSlot<'e> {
     /// computed by the caller (e.g. `element(idx, rec_var)`).
     Pure(CExpr),
     /// Source expression to lower. CPS-chained if effectful; otherwise
-    /// lowered as a value with the optional expected type.
-    Expr {
-        expr: &'e Expr,
-        expected: Option<Type>,
-    },
+    /// lowered as a value.
+    Expr { expr: &'e Expr },
 }
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:

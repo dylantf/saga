@@ -41,7 +41,13 @@ impl Checker {
                 }
                 Some((_, expected_ty)) => match self.infer_expr(fexpr) {
                     Ok(actual) => {
-                        if let Err(e) = self.unify_at(expected_ty, &actual, fexpr.span) {
+                        // A field initialiser is a coercion position.
+                        if let Err(e) = self.coerce_expected_first_at(
+                            expected_ty,
+                            &actual,
+                            fexpr.span,
+                            Some(fexpr),
+                        ) {
                             self.collected_diagnostics.push(e);
                         }
                     }
@@ -298,7 +304,7 @@ impl Checker {
                                 )
                             })?;
                     let actual = self.infer_expr(fexpr)?;
-                    self.unify_at(&expected.1, &actual, fexpr.span)?;
+                    self.coerce_expected_first_at(&expected.1, &actual, fexpr.span, Some(fexpr))?;
                 }
                 Ok(self.sub.apply(&result_ty))
             }
@@ -312,7 +318,7 @@ impl Checker {
                             )
                         })?;
                     let actual = self.infer_expr(fexpr)?;
-                    self.unify_at(expected_ty, &actual, fexpr.span)?;
+                    self.coerce_expected_first_at(expected_ty, &actual, fexpr.span, Some(fexpr))?;
                 }
                 Ok(self.sub.apply(&resolved))
             }

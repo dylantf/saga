@@ -171,55 +171,6 @@ pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, &str, usiz
     }
 }
 
-/// Like `collect_fun_call`, but for an `App` chain whose ultimate head is a
-/// `Lambda` literal — `(fun x -> ...) y z`. Returns `Some((lambda, args))`
-/// where `lambda` is the head Lambda expr and `args` are the supplied
-/// arguments in order.
-pub(super) fn collect_lambda_head_call(expr: &Expr) -> Option<(&Expr, Vec<&Expr>)> {
-    let mut args: Vec<&Expr> = Vec::new();
-    let mut current = expr;
-    loop {
-        match &current.kind {
-            ExprKind::App { func, arg, .. } => {
-                args.push(arg);
-                current = func;
-            }
-            ExprKind::Lambda { .. } => {
-                if args.is_empty() {
-                    return None;
-                }
-                args.reverse();
-                return Some((current, args));
-            }
-            _ => return None,
-        }
-    }
-}
-
-/// Like `collect_lambda_head_call`, but for a call whose head is a field access
-/// yielding a function value (`s.run arg1 arg2`). Returns the `FieldAccess` head
-/// expression and the supplied arguments.
-pub(super) fn collect_field_access_head_call(expr: &Expr) -> Option<(&Expr, Vec<&Expr>)> {
-    let mut args: Vec<&Expr> = Vec::new();
-    let mut current = expr;
-    loop {
-        match &current.kind {
-            ExprKind::App { func, arg, .. } => {
-                args.push(arg);
-                current = func;
-            }
-            ExprKind::FieldAccess { .. } => {
-                if args.is_empty() {
-                    return None;
-                }
-                args.reverse();
-                return Some((current, args));
-            }
-            _ => return None,
-        }
-    }
-}
-
 /// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
 /// Returns `Some((module, func_name, head_expr, args))` if the head is a QualifiedName.
 pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, Vec<&Expr>)> {
@@ -299,7 +250,7 @@ pub(super) fn collect_effect_call_expr(
     }
 }
 
-pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
+pub(crate) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
     collect_effect_call_expr(expr).map(|(_, name, qualifier, args)| (name, qualifier, args))
 }
 
@@ -353,7 +304,7 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     (arity, effects.into_iter().collect())
 }
 
-/// Extract fully-applied effect keys from `Handler E` / `Handler E1 E2`.
+/// Extract the handled effects' runtime keys from `Handler E` / `Handler E1 E2`.
 pub fn handler_effects_from_type(ty: &Type) -> Vec<String> {
     let Type::Con(name, handled) = ty else {
         return Vec::new();

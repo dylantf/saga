@@ -11,6 +11,24 @@ impl Checker {
             Diagnostic::error_at(source.span, format!("undefined effect: {}", source.name))
         })?;
         let args = self.convert_effect_ref_args(source, &mut vec![]);
+        // A `neweffect` is one fixed instance. With a type variable in its
+        // source every operation call would pick its own type for it, and
+        // nothing would tie those to the type its handler was written for.
+        let mut free = Vec::new();
+        for arg in &args {
+            crate::typechecker::collect_free_vars(arg, &mut free);
+        }
+        if !free.is_empty() || source.type_args.len() != source_info.type_params.len() {
+            return Err(Diagnostic::error_at(
+                source.span,
+                format!(
+                    "neweffect `{}` must fix every type argument of `{}` to a concrete type (for \
+                     example `neweffect {} = {} Int`): a `neweffect` names a single instance of \
+                     the effect, so it cannot be generic",
+                    name, source.name, name, source.name
+                ),
+            ));
+        }
         if args.len() != source_info.type_params.len() {
             return Err(Diagnostic::error_at(
                 source.span,
@@ -156,15 +174,16 @@ impl Checker {
             let return_type = self.convert_user_type_expr(&op.return_type, &mut params_list);
             // Convert the op's own `needs` clause to an EffectRow
             let needs = if !op.effects.is_empty() || !op.effect_row_var.is_empty() {
-                let effect_refs: Vec<EffectEntry> = op
-                    .effects
-                    .iter()
-                    .map(|e| {
-                        let args = self.convert_effect_ref_args(e, &mut params_list);
-                        let resolved_name = self.resolved_effect_name(e.id, &e.name);
-                        EffectEntry::unnamed(resolved_name, args)
-                    })
-                    .collect();
+                let mut effect_refs: Vec<EffectEntry> = Vec::new();
+                for e in &op.effects {
+                    let args = self.convert_effect_ref_args(e, &mut params_list);
+                    let resolved_name = self.resolved_effect_name(e.id, &e.name);
+                    self.push_declared_effect(
+                        &mut effect_refs,
+                        EffectEntry::unnamed(resolved_name, args),
+                        e.span,
+                    )?;
+                }
                 let tails: Vec<Type> = op
                     .effect_row_var
                     .iter()
@@ -460,7 +479,71 @@ impl Checker {
                 ));
             }
 
-            let op_sig = matched_op.unwrap();
+            let mut op_sig = matched_op.unwrap();
+
+            // The operation's row variables (`..r` on a callback) are stored
+            // once, with the effect. Give this arm its own copies: an arm may
+            // close one (see `check_rigid_row_vars_abstract`), and that must
+            // not reach the other handlers of the effect, where the same
+            // variable would then stand for this arm's effects.
+            {
+                let mut row_vars = std::collections::HashMap::new();
+                for (_, param_ty) in &op_sig.params {
+                    Self::collect_rigid_row_vars(param_ty, &[], &mut row_vars);
+                }
+                Self::collect_rigid_row_vars(&op_sig.return_type, &[], &mut row_vars);
+                Self::collect_rigid_row_vars_in_row(&op_sig.needs, &[], &mut row_vars);
+                let mut ids: Vec<u32> = row_vars.into_keys().collect();
+                ids.sort_unstable();
+                // A tail that is also a constrained type variable (`..a` for
+                // `a: Trait`) keeps its identity: dictionaries are named
+                // after it.
+                ids.retain(|id| !op_sig.constraints.iter().any(|(_, var, _)| var == id));
+                if !ids.is_empty() {
+                    let fresh: std::collections::HashMap<u32, Type> =
+                        ids.into_iter().map(|id| (id, self.fresh_var())).collect();
+                    op_sig.params = op_sig
+                        .params
+                        .iter()
+                        .map(|(label, t)| (label.clone(), Self::replace_vars(t, &fresh)))
+                        .collect();
+                    op_sig.return_type = Self::replace_vars(&op_sig.return_type, &fresh);
+                    op_sig.needs = self.replace_vars_in_effect_row(&op_sig.needs, &fresh);
+                }
+            }
+
+            // The operation's signature is a declared type the arm must
+            // implement as written: its row variables are chosen by whoever
+            // performs the operation.
+            let mut arm_rigid_rows = std::collections::HashMap::new();
+            for (_, param_ty) in &op_sig.params {
+                Self::collect_rigid_row_vars(param_ty, &[], &mut arm_rigid_rows);
+            }
+            Self::collect_rigid_row_vars(&op_sig.return_type, &[], &mut arm_rigid_rows);
+            Self::collect_rigid_row_vars_in_row(&op_sig.needs, &[], &mut arm_rigid_rows);
+            self.rigid_row_vars
+                .extend(arm_rigid_rows.iter().map(|(id, info)| (*id, info.clone())));
+
+            // Likewise the type variables the operation uses as effect
+            // arguments (`e` in a callback's `needs {Fail e}`). The effect's
+            // own parameters are not among them: the handler's declaration
+            // (`for Scope String`, `for Scope a`) says what they are.
+            let arm_effect_arg_vars: Vec<(u32, String)> = {
+                let mut own_params: Vec<u32> = Vec::new();
+                for effect_ref in effect_names {
+                    let resolved = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
+                    if let Some(info) = self.effects.get(&resolved) {
+                        own_params.extend(info.type_params.iter().copied());
+                    }
+                }
+                for ty in handler_type_mapping.values() {
+                    crate::typechecker::unify::collect_free_vars(ty, &mut own_params);
+                }
+                self.op_sig_effect_arg_vars(&op_sig)
+                    .into_iter()
+                    .filter(|(var, _)| !own_params.contains(var))
+                    .collect()
+            };
 
             // Bind op params and set resume context, then check body
             let saved_env = self.env.clone();
@@ -490,9 +573,48 @@ impl Checker {
             // unique and never appear at call sites (those instantiate fresh).
             self.add_op_constraint_where_bounds(&op_sig.constraints);
 
-            let body_ty = self.infer_expr(&arm.body)?;
-            if let Err(e) = self.unify(&answer_ty, &body_ty) {
-                self.collected_diagnostics.push(e.with_span(arm.span));
+            // A `finally` block sees what the arm body's block binds, so with
+            // one present that block's scope stays open until the `finally`
+            // block has been checked.
+            let mut body_handlers = Vec::new();
+            let body_ty = if arm.finally_block.is_some() {
+                self.infer_expr_keeping_block_scope(&arm.body, &mut body_handlers)?
+            } else {
+                self.infer_expr(&arm.body)?
+            };
+            if let Err(e) =
+                self.coerce_expected_first_at(&answer_ty, &body_ty, arm.span, Some(&arm.body))
+            {
+                self.collected_diagnostics.push(e);
+            }
+            // An open-row trait method the arm used as a value: settle what
+            // is known (see `open_row_refs.rs`). A handler expression is
+            // checked inside a function body, whose own references stay.
+            self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Keep);
+            self.check_rigid_row_vars_abstract(
+                &arm_rigid_rows,
+                &format!("operation `{}`", arm.op_name),
+                arm.span,
+                true,
+            )?;
+            self.check_effect_arg_vars_abstract(
+                &arm_effect_arg_vars,
+                &[],
+                true,
+                &format!("operation `{}`", arm.op_name),
+                arm.span,
+            )?;
+            {
+                // What the arms have performed so far goes to the handler's
+                // `needs`, outside the arm.
+                let performed = self.effect_row.effects.clone();
+                self.check_effect_arg_vars_stay_inside(
+                    &arm_effect_arg_vars,
+                    &performed,
+                    Some(&answer_ty),
+                    &format!("operation `{}`", arm.op_name),
+                    arm.span,
+                )?;
             }
 
             // Typecheck optional `finally` block: may use the handler's `needs` effects
@@ -510,6 +632,7 @@ impl Checker {
                     self.collected_diagnostics.push(e);
                 }
             }
+            self.restore_shadowed_handlers(body_handlers);
 
             self.resume_type = saved_resume;
             self.resume_return_type = saved_resume_ret;
@@ -530,8 +653,10 @@ impl Checker {
             }
             let ret_ty = self.infer_expr(&rc.body)?;
             // Constrain answer_ty to match the return clause's body type
-            if let Err(e) = self.unify(&answer_ty, &ret_ty) {
-                self.collected_diagnostics.push(e.with_span(rc.body.span));
+            if let Err(e) =
+                self.coerce_expected_first_at(&answer_ty, &ret_ty, rc.body.span, Some(&rc.body))
+            {
+                self.collected_diagnostics.push(e);
             }
             self.resume_type = saved_resume;
             self.env = saved_env;
@@ -548,7 +673,11 @@ impl Checker {
         };
 
         // Collect accumulated handler effects and restore outer scope
+        // Resolved here so that only the handler's genuinely free type
+        // variables are instantiated per use: an arm that performs
+        // `Fail Int` needs `Fail Int` wherever the handler is installed.
         let all_handler_effs = self.restore_effects(handler_saved_effs);
+        let all_handler_effs = self.normalize_row_at(&all_handler_effs, *span)?;
         let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()
@@ -733,6 +862,32 @@ impl Checker {
                 })
             })
             .collect();
+        // The handled effects' type variables (`handler h for Fail a`) are
+        // instantiated per use, like the rest of the handler's scheme. Ones
+        // that belong to an enclosing signature are not: they are fixed
+        // there.
+        let applied_effects: Vec<EffectEntry> = applied_effects
+            .into_iter()
+            .map(|entry| EffectEntry {
+                name: entry.name,
+                args: entry.args.iter().map(|t| self.sub.apply(t)).collect(),
+            })
+            .collect();
+        {
+            let outer: std::collections::HashSet<u32> =
+                saved_outer_named.values().copied().collect();
+            let mut entry_vars = Vec::new();
+            for entry in &applied_effects {
+                for t in &entry.args {
+                    crate::typechecker::collect_free_vars(t, &mut entry_vars);
+                }
+            }
+            for var in entry_vars {
+                if !outer.contains(&var) && !forall.contains(&var) {
+                    forall.push(var);
+                }
+            }
+        }
         let info = HandlerInfo {
             effects: canonical_effects,
             effect_entries: applied_effects,

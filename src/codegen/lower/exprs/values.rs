@@ -4,7 +4,6 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
 use crate::token::Span;
-use crate::typechecker::Type;
 
 impl<'a> Lowerer<'a> {
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
@@ -52,32 +51,11 @@ impl<'a> Lowerer<'a> {
             }
             _ => {
                 // ADT constructor: tagged tuple {name, arg1, arg2, ...}
-                // Look up field types from the constructor's scheme so that
-                // lambda args receive a contextual function-value ABI and get the
-                // proper CPS expansion (evidence + _ReturnK).
-                let field_tys: Vec<Option<crate::typechecker::Type>> = {
-                    let scheme = self.constructor_scheme_for(name);
-                    if let Some(scheme) = scheme {
-                        let mut tys = Vec::new();
-                        let mut current = &scheme.ty;
-                        while let crate::typechecker::Type::Fun(param, ret, _) = current {
-                            tys.push(Some((**param).clone()));
-                            current = ret;
-                        }
-                        tys
-                    } else {
-                        vec![None; args.len()]
-                    }
-                };
-
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for (idx, arg) in args.iter().enumerate() {
+                for arg in &args {
                     let var = self.fresh();
-                    let val = match field_tys.get(idx).and_then(|t| t.as_ref()) {
-                        Some(ty) => self.lower_expr_value_with_expected_type(arg, Some(ty)),
-                        None => self.lower_expr_value(arg),
-                    };
+                    let val = self.lower_expr_value(arg);
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
@@ -107,7 +85,6 @@ impl<'a> Lowerer<'a> {
         &mut self,
         expr: &Expr,
         var_name: String,
-        expected: Option<Type>,
         body: CExpr,
     ) -> CExpr {
         if self.expr_is_effectful_call(expr) || self.has_nested_effectful_expr(expr) {
@@ -120,12 +97,30 @@ impl<'a> Lowerer<'a> {
             };
             CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body))
         } else {
-            let ce = match expected {
-                Some(ty) => self.lower_expr_value_with_expected_type(expr, Some(&ty)),
-                None => self.lower_expr_value(expr),
-            };
+            let ce = self.lower_expr_value(expr);
             CExpr::Let(var_name, Box::new(ce), Box::new(body))
         }
+    }
+
+    /// Bind an expression that performs effects to `var_name` for use in
+    /// `body`, making `body` its continuation. Unlike
+    /// [`Self::lower_bind_expr_with_cps`] the expression may also be a
+    /// direct effect operation (`op! x`), and a direct effectful call
+    /// receives the continuation as its `_ReturnK` without an intermediate
+    /// binding.
+    pub(crate) fn lower_bind_effectful_expr(
+        &mut self,
+        expr: &Expr,
+        var_name: String,
+        body: CExpr,
+    ) -> CExpr {
+        let k = CExpr::Fun(vec![var_name], Box::new(body));
+        if self.expr_is_effectful_call(expr) {
+            return self.lower_expr_with_call_return_k(expr, Some(k));
+        }
+        let k_var = self.fresh();
+        let inner = self.lower_terminal_effectful_expr_to_k(expr, &k_var);
+        CExpr::Let(k_var, Box::new(k), Box::new(inner))
     }
 
     /// Assemble a composite expression from `slots`, then apply `k_var` to
@@ -150,9 +145,7 @@ impl<'a> Lowerer<'a> {
         for (slot, var) in slots.into_iter().zip(vars.iter()).rev() {
             body = match slot {
                 CpsSlot::Pure(ce) => CExpr::Let(var.clone(), Box::new(ce), Box::new(body)),
-                CpsSlot::Expr { expr, expected } => {
-                    self.lower_bind_expr_with_cps(expr, var.clone(), expected, body)
-                }
+                CpsSlot::Expr { expr } => self.lower_bind_expr_with_cps(expr, var.clone(), body),
             };
         }
         body
@@ -183,27 +176,9 @@ impl<'a> Lowerer<'a> {
             return self.lower_value_to_k_with_ce(ce, k_var);
         }
 
-        let field_tys: Vec<Option<crate::typechecker::Type>> = if is_cons {
-            vec![None, None]
-        } else if let Some(scheme) = self.constructor_scheme_for(name) {
-            let mut tys = Vec::new();
-            let mut current = &scheme.ty;
-            while let crate::typechecker::Type::Fun(param, ret, _) = current {
-                tys.push(Some((**param).clone()));
-                current = ret;
-            }
-            tys
-        } else {
-            vec![None; args.len()]
-        };
-
         let slots: Vec<CpsSlot<'_>> = args
             .iter()
-            .enumerate()
-            .map(|(i, &arg)| CpsSlot::Expr {
-                expr: arg,
-                expected: field_tys.get(i).and_then(|t| t.clone()),
-            })
+            .map(|&arg| CpsSlot::Expr { expr: arg })
             .collect();
 
         let is_cons_local = is_cons;
@@ -231,13 +206,7 @@ impl<'a> Lowerer<'a> {
     /// effectful elements so an aborting handler bypasses the tuple build
     /// and the outer continuation.
     pub(crate) fn lower_tuple_with_k(&mut self, elems: &[Expr], k_var: &str) -> CExpr {
-        let slots: Vec<CpsSlot<'_>> = elems
-            .iter()
-            .map(|e| CpsSlot::Expr {
-                expr: e,
-                expected: None,
-            })
-            .collect();
+        let slots: Vec<CpsSlot<'_>> = elems.iter().map(|e| CpsSlot::Expr { expr: e }).collect();
         self.lower_with_cps_slots(slots, k_var, |_, vars| {
             CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect())
         })
@@ -263,16 +232,7 @@ impl<'a> Lowerer<'a> {
         let op_owned = op.clone();
         let span_owned: Option<crate::token::Span> = span.cloned();
         self.lower_with_cps_slots(
-            vec![
-                CpsSlot::Expr {
-                    expr: left,
-                    expected: None,
-                },
-                CpsSlot::Expr {
-                    expr: right,
-                    expected: None,
-                },
-            ],
+            vec![CpsSlot::Expr { expr: left }, CpsSlot::Expr { expr: right }],
             k_var,
             |this, vars| {
                 this.annotate(
@@ -314,7 +274,7 @@ impl<'a> Lowerer<'a> {
                 },
             ],
         );
-        self.lower_bind_expr_with_cps(left, left_var, None, case_expr)
+        self.lower_bind_expr_with_cps(left, left_var, case_expr)
     }
 
     /// Field-access variant: `(eff_expr).field`. CPS-chains the record
@@ -327,10 +287,7 @@ impl<'a> Lowerer<'a> {
         k_var: &str,
     ) -> CExpr {
         self.lower_with_cps_slots(
-            vec![CpsSlot::Expr {
-                expr: record_expr,
-                expected: None,
-            }],
+            vec![CpsSlot::Expr { expr: record_expr }],
             k_var,
             |_, vars| {
                 cerl_call(
@@ -381,10 +338,7 @@ impl<'a> Lowerer<'a> {
             slots.push(match field_map.get(name.as_str()) {
                 Some(new_expr) => {
                     pat_vars.push(None);
-                    CpsSlot::Expr {
-                        expr: new_expr,
-                        expected: None,
-                    }
+                    CpsSlot::Expr { expr: new_expr }
                 }
                 None => {
                     let fv = self.fresh();
@@ -399,7 +353,7 @@ impl<'a> Lowerer<'a> {
         });
 
         let destructured = Self::record_destructure_case(&rec_var, &tag_var, &pat_vars, inner);
-        self.lower_bind_expr_with_cps(record_expr, rec_var, None, destructured)
+        self.lower_bind_expr_with_cps(record_expr, rec_var, destructured)
     }
 
     /// Build `case rec_var of <{TagVar, ...field pats...}> when 'true' -> body`,

@@ -16,8 +16,7 @@ impl<'a> Lowerer<'a> {
             [Stmt::Expr(e)] => self.lower_block_terminal_expr_with_return_k(e, return_k),
             [Stmt::Let { pattern, value, .. }] => {
                 let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                let expected = self.let_pat_resolved_type(pattern);
-                let val_ce = self.lower_expr_value_with_expected_type(value, expected.as_ref());
+                let val_ce = self.lower_expr_value(value);
                 let body = self.apply_return_k_with(return_k, CExpr::Var(var.clone()));
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
@@ -286,9 +285,7 @@ impl<'a> Lowerer<'a> {
                                 span,
                                 ..
                             } => {
-                                let expected = self.let_pat_resolved_type(pattern);
-                                let val_ce = self
-                                    .lower_expr_value_with_expected_type(value, expected.as_ref());
+                                let val_ce = self.lower_expr_value(value);
                                 (Some(pattern), *assert, *span, val_ce)
                             }
                             Stmt::Expr(e) => (None, false, e.span, self.lower_expr_value(e)),
@@ -374,7 +371,7 @@ impl<'a> Lowerer<'a> {
                         },
                     ],
                 );
-                self.lower_bind_expr_with_cps(cond, cond_var, None, case)
+                self.lower_bind_expr_with_cps(cond, cond_var, case)
             }
             ExprKind::Case {
                 scrutinee, arms, ..
@@ -402,7 +399,7 @@ impl<'a> Lowerer<'a> {
                     })
                     .collect();
                 let case = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms_ce);
-                self.lower_bind_expr_with_cps(scrutinee, scrut_var, None, case)
+                self.lower_bind_expr_with_cps(scrutinee, scrut_var, case)
             }
             ExprKind::Block { stmts, .. } => {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
@@ -443,6 +440,64 @@ impl<'a> Lowerer<'a> {
             {
                 self.lower_binop_with_k(op, left, right, Some(&expr.span), k_var)
             }
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
+                self.lower_do(bindings, success, &else_arms, Some(k_var))
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => self.lower_receive(arms, after_clause.as_ref(), Some(k_var)),
+            ExprKind::BitString { segments }
+                if segments
+                    .iter()
+                    .any(|seg| self.branch_is_effectful(&seg.value)) =>
+            {
+                // Segment values that perform effects are bound first, left
+                // to right, with building the bitstring as their continuation.
+                let effectful: Vec<usize> = (0..segments.len())
+                    .filter(|&i| self.branch_is_effectful(&segments[i].value))
+                    .collect();
+                let slots: Vec<CpsSlot<'_>> = effectful
+                    .iter()
+                    .map(|&i| CpsSlot::Expr {
+                        expr: &segments[i].value,
+                    })
+                    .collect();
+                self.lower_with_cps_slots(slots, k_var, |this, vars| {
+                    let mut bound: Vec<Option<String>> = vec![None; segments.len()];
+                    for (&i, var) in effectful.iter().zip(vars) {
+                        bound[i] = Some(var.clone());
+                    }
+                    this.lower_bitstring_with_values(segments, &bound)
+                })
+            }
+            ExprKind::Resume { value } if self.branch_is_effectful(value) => {
+                let v = self.fresh();
+                let result = self.fresh();
+                let resumed = self.lower_resume_of_var(&v);
+                let body = CExpr::Let(
+                    result.clone(),
+                    Box::new(resumed),
+                    Box::new(CExpr::Apply(
+                        Box::new(CExpr::Var(k_var.to_string())),
+                        vec![CExpr::Var(result)],
+                    )),
+                );
+                self.lower_bind_effectful_expr(value, v, body)
+            }
+            ExprKind::UnaryMinus { expr: operand } if self.branch_is_effectful(operand) => self
+                .lower_with_cps_slots(vec![CpsSlot::Expr { expr: operand }], k_var, |_, vars| {
+                    cerl_call(
+                        "erlang",
+                        "-",
+                        vec![CExpr::Lit(CLit::Int(0)), CExpr::Var(vars[0].clone())],
+                    )
+                }),
             ExprKind::FieldAccess {
                 expr: rec_expr,
                 field,
@@ -524,14 +579,23 @@ impl<'a> Lowerer<'a> {
                     let any_eff = args_rev.iter().any(|a| {
                         self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
                     });
-                    if any_eff {
-                        let slots: Vec<CpsSlot<'_>> = args_rev
-                            .iter()
-                            .map(|a| CpsSlot::Expr {
-                                expr: a,
-                                expected: None,
-                            })
+                    // The function itself may be produced effectfully:
+                    // `(if g n == 0 then f else h) x`. It is evaluated
+                    // first, with the arguments and the call as its
+                    // continuation.
+                    if self.expr_is_effectful_call(callee) || self.has_nested_effectful_expr(callee)
+                    {
+                        let slots: Vec<CpsSlot<'_>> = std::iter::once(callee)
+                            .chain(args_rev.iter().copied())
+                            .map(|expr| CpsSlot::Expr { expr })
                             .collect();
+                        return self.lower_with_cps_slots(slots, k_var, |this, vars| {
+                            this.apply_function_value(CExpr::Var(vars[0].clone()), &vars[1..])
+                        });
+                    }
+                    if any_eff {
+                        let slots: Vec<CpsSlot<'_>> =
+                            args_rev.iter().map(|a| CpsSlot::Expr { expr: a }).collect();
                         return self.lower_with_cps_slots(slots, k_var, move |this, arg_vars| {
                             if let Some(resolved) = this.resolved.get(&callee.id).cloned()
                                 && let crate::codegen::resolve::ResolvedCodegenKind::Intrinsic {
@@ -545,11 +609,7 @@ impl<'a> Lowerer<'a> {
                             {
                                 return ce;
                             }
-                            let callee_ce = this.lower_expr(callee);
-                            CExpr::Apply(
-                                Box::new(callee_ce),
-                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-                            )
+                            this.lower_pure_apply_to_vars(callee, arg_vars)
                         });
                     }
                 }
@@ -623,7 +683,6 @@ impl<'a> Lowerer<'a> {
                     .get(field_name.as_str())
                     .copied()
                     .expect("field missing in record-create"),
-                expected: None,
             })
             .collect();
 

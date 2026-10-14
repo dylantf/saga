@@ -253,17 +253,6 @@ impl Elaborator {
                                         entries.iter().map(crate::typechecker::applied_effect_key),
                                     );
                                 }
-                                let applied_families: std::collections::HashSet<String> = effects
-                                    .iter()
-                                    .filter(|effect| effect.contains('<'))
-                                    .map(|effect| {
-                                        crate::typechecker::applied_effect_family(effect)
-                                            .to_string()
-                                    })
-                                    .collect();
-                                effects.retain(|effect| {
-                                    effect.contains('<') || !applied_families.contains(effect)
-                                });
                                 effects.sort();
                                 effects.dedup();
                                 method_effects.push(effects);
@@ -280,9 +269,8 @@ impl Elaborator {
                     let _ = type_params; // acknowledge but don't use for now
 
                     let mut impl_effects: Vec<String> = if registered_impl.is_some() {
-                        // Per-method inferred metadata above is both more
-                        // precise and retains applied effect arguments. The
-                        // old impl-wide family list is only a compatibility
+                        // Per-method inferred metadata above is more precise.
+                        // The impl-wide list is only a compatibility
                         // fallback when no registered impl metadata exists.
                         Vec::new()
                     } else {

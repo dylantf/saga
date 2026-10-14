@@ -42,7 +42,10 @@ fn infer_expr_type(src: &str) -> Result<Type, Diagnostic> {
     Ok(checker.sub.apply(&scheme.ty))
 }
 
-fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Checker, Diagnostic> {
+pub(super) fn check_with_project_files(
+    files: &[(&str, &str)],
+    main_src: &str,
+) -> Result<Checker, Diagnostic> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")
@@ -4138,8 +4141,8 @@ main () = parse \"x\" with { fail msg = String.length msg }",
 
 #[test]
 fn parameterized_effect_conflicting_instantiations_forwarded_is_error() {
-    // A single inferred `Fail` entry cannot silently cover two distinct
-    // applications; callers must declare both slots explicitly.
+    // A row holds one `Fail`: forwarding `Fail String` and `Fail Int`
+    // together is two applications of one family meeting in `both`'s row.
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4160,15 +4163,23 @@ main () = both 1 with { fail msg = 0 }",
         result
             .as_ref()
             .err()
-            .map(|e| e.message.contains("not declared"))
+            .map(|e| {
+                e.span.is_some()
+                    && e.message.contains("can hold only one `Fail`")
+                    && e.message.contains("Fail String")
+                    && e.message.contains("Fail Int")
+                    && e.message.contains("neweffect")
+            })
             .unwrap_or(false),
-        "expected an undeclared applied-effect error, got: {:?}",
+        "expected a one-application-per-family error, got: {:?}",
         result.err()
     );
 }
 
 #[test]
-fn parameterized_effect_distinct_declared_instantiations_coexist() {
+fn parameterized_effect_distinct_declared_instantiations_are_rejected() {
+    // Two applications of one family used to coexist in a declared row. An
+    // effect is now identified by its family, so the declaration is an error.
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4180,9 +4191,39 @@ fail_int () = fail! 99
 fun both : Unit -> Int needs {Fail String, Fail Int}
 both () = fail_string () + fail_int ()",
     );
+    let err = result
+        .err()
+        .expect("two applications of one family in a declared row must be rejected");
+    assert!(
+        err.span.is_some()
+            && err.message.contains("can hold only one `Fail`")
+            && err.message.contains("Fail String")
+            && err.message.contains("Fail Int")
+            && err.message.contains("neweffect"),
+        "expected a one-application-per-family error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn neweffect_instances_of_one_source_coexist_in_a_declared_row() {
+    // The `neweffect` form of the program above.
+    let result = check(
+        "effect Fail e {
+  fun fail : e -> a
+}
+neweffect FailString = Fail String
+neweffect FailInt = Fail Int
+fun fail_string : Unit -> Int needs {FailString}
+fail_string () = FailString.fail! \"str\"
+fun fail_int : Unit -> Int needs {FailInt}
+fail_int () = FailInt.fail! 99
+fun both : Unit -> Int needs {FailString, FailInt}
+both () = fail_string () + fail_int ()",
+    );
     assert!(
         result.is_ok(),
-        "distinct applied effects should coexist, got: {:?}",
+        "distinct neweffect instances should coexist, got: {:?}",
         result.err()
     );
 }
@@ -4211,7 +4252,7 @@ acceptor_loop _ value = {
 }
 
 #[test]
-fn parameterized_effect_potentially_equal_instantiations_are_ambiguous() {
+fn parameterized_effect_potentially_equal_instantiations_are_rejected() {
     let result = check(
         "effect Fail e {
   fun fail : e -> a
@@ -4222,8 +4263,8 @@ ambiguous _ _ = ()",
     assert!(
         result
             .err()
-            .is_some_and(|error| error.message.contains("ambiguous overlapping")),
-        "potentially equal applied effects must be rejected"
+            .is_some_and(|error| error.message.contains("can hold only one `Fail`")),
+        "two applications of one family in a declared row must be rejected"
     );
 }
 
@@ -4540,8 +4581,9 @@ effect Pg {
 }
 
 #[test]
-fn distinct_duplicate_effect_family_requirements_are_accepted() {
-    check(
+fn distinct_duplicate_effect_family_requirements_are_rejected() {
+    // `Actor Unit` and `Actor String` used to coexist in a declared row.
+    let err = check(
         r#"
 import Std.Actor (Process, Actor)
 
@@ -4549,7 +4591,15 @@ fun mixed_actor_messages : Unit -> String needs {Process, Actor Unit, Actor Stri
 mixed_actor_messages () = "ok"
 "#,
     )
-    .expect("distinct Actor applications should coexist");
+    .err()
+    .expect("two Actor applications in one declared row must be rejected");
+    assert!(
+        err.message.contains("can hold only one `Actor`")
+            && err.message.contains("Actor Unit")
+            && err.message.contains("Actor String"),
+        "expected a one-application-per-family error, got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -4580,9 +4630,10 @@ main () = {
     .err()
     .expect("expected mixed Fail instantiations to be rejected");
 
+    // The handled block is one row, and it would hold two `Fail`s.
     assert!(
-        err.message.contains("single `with`"),
-        "expected with-scope conflict error, got: {}",
+        err.message.contains("can hold only one `Fail`"),
+        "expected a one-application-per-family error, got: {}",
         err.message
     );
     assert!(
@@ -4593,7 +4644,39 @@ main () = {
 }
 
 #[test]
-fn named_handler_handles_only_its_applied_effect() {
+fn named_handler_does_not_handle_another_application() {
+    // A handler is found by family, so `app_fail` (for `Fail AppError`)
+    // would receive the `Fail String` operation. It used to be skipped as a
+    // handler for a different effect, leaving `Fail String` to escape.
+    let err = check(
+        r#"
+import Std.Fail (Fail)
+
+type AppError = HttpError String
+
+handler app_fail for Fail AppError {
+  fail _ = ()
+}
+
+fun run_app2 : Unit -> Unit needs {Fail String}
+run_app2 () = fail! "something"
+
+main () = run_app2 () with app_fail
+"#,
+    )
+    .err()
+    .expect("expected a handler for another application to be rejected");
+
+    assert!(
+        err.message.contains("this handler handles `Fail AppError`")
+            && err.message.contains("performs `Fail String`"),
+        "expected a handler mismatch, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn named_handler_block_with_two_applications_is_rejected() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4617,17 +4700,19 @@ main () = {
 "#,
     )
     .err()
-    .expect("expected the unmatched Fail application to remain");
+    .expect("expected two applications in the handled block to be rejected");
 
     assert!(
-        err.message.contains("cannot use `needs`"),
-        "expected residual effect at main, got: {}",
+        err.message.contains("can hold only one `Fail`")
+            && err.message.contains("Fail AppError")
+            && err.message.contains("Fail String"),
+        "expected a one-application-per-family error, got: {}",
         err.message
     );
 }
 
 #[test]
-fn handler_binding_handles_only_its_applied_effect() {
+fn handler_binding_does_not_handle_another_application() {
     let err = check(
         r#"
 import Std.Fail (Fail)
@@ -4638,27 +4723,22 @@ handler app_fail for Fail AppError {
   fail _ = ()
 }
 
-fun run_app : Unit -> Unit needs {Fail AppError}
-run_app () = fail! (HttpError "oops")
-
 fun run_app2 : Unit -> Unit needs {Fail String}
 run_app2 () = fail! "something"
 
 main () = {
   let h = app_fail
-  {
-    run_app ()
-    run_app2 ()
-  } with h
+  run_app2 () with h
 }
 "#,
     )
     .err()
-    .expect("expected the unmatched Fail application to remain");
+    .expect("expected a handler for another application to be rejected");
 
     assert!(
-        err.message.contains("cannot use `needs`"),
-        "expected residual effect at main, got: {}",
+        err.message.contains("this handler handles `Fail AppError`")
+            && err.message.contains("performs `Fail String`"),
+        "expected a handler mismatch, got: {}",
         err.message
     );
 }
@@ -6574,7 +6654,7 @@ fn trait_method_needs_survives_in_scheme() {
     let resolved = checker.sub.apply(&method.scheme.ty);
     let effects = super::effects_from_type(&resolved);
     assert!(
-        effects.iter().any(|effect| effect.starts_with("Fail<")),
+        effects.iter().any(|effect| effect == "Fail"),
         "effects were {:?}",
         effects
     );
@@ -8618,4 +8698,458 @@ main () = {
         main,
     )
     .expect("nested Handler effect should canonicalize to the re-export origin");
+}
+
+// --- Effect row placement on lambdas ---
+//
+// A lambda's effects sit on the arrow of its last parameter, as for a
+// declared `fun f : A -> B -> C needs {E}` (docs/effect-implementation.md,
+// "Where Effects Live on Curried Functions").
+
+const LAMBDA_ROW_PRELUDE: &str = "effect Skip {\n  fun skip : Unit -> Int\n}\n";
+
+/// Effect names on each arrow of the curried type of top-level
+/// `let f = <lambda>`, outermost arrow first.
+fn lambda_arrow_rows(lambda: &str) -> Vec<Vec<String>> {
+    let checker = check(&format!("{LAMBDA_ROW_PRELUDE}let f = {lambda}")).unwrap();
+    let mut ty = checker.sub.apply(&checker.env.get("f").unwrap().ty);
+    let mut rows = Vec::new();
+    while let Type::Fun(_, ret, row) = ty {
+        assert!(row.tails.is_empty(), "unexpected open row");
+        rows.push(row.effects.iter().map(|e| e.name.clone()).collect());
+        ty = *ret;
+    }
+    rows
+}
+
+fn row(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+#[test]
+fn multi_param_lambda_row_is_on_the_innermost_arrow() {
+    assert_eq!(
+        lambda_arrow_rows("fun a b -> a + b + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+    assert_eq!(
+        lambda_arrow_rows("fun a b c -> a + b + c + skip! ()"),
+        vec![row(&[]), row(&[]), row(&["Skip"])]
+    );
+    // Pure lambdas are unaffected.
+    assert_eq!(
+        lambda_arrow_rows("fun a b -> a + b + 1"),
+        vec![row(&[]), row(&[])]
+    );
+}
+
+#[test]
+fn explicitly_nested_lambda_row_is_on_the_inner_lambda() {
+    assert_eq!(
+        lambda_arrow_rows("fun a -> fun b -> a + b + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+}
+
+#[test]
+fn lambda_effect_before_returning_a_lambda_stays_on_the_outer_arrow() {
+    // The effect is performed when `a` is supplied, before the inner lambda
+    // exists, so it belongs to the first arrow.
+    assert_eq!(
+        lambda_arrow_rows("fun a -> {\n  let n = skip! ()\n  fun b -> a + b + n\n}"),
+        vec![row(&["Skip"]), row(&[])]
+    );
+    // With two parameters of its own, it is performed when the second one is
+    // supplied; the returned lambda's arrow is not touched.
+    assert_eq!(
+        lambda_arrow_rows("fun a b -> {\n  let n = skip! ()\n  fun c -> a + b + c + n\n}"),
+        vec![row(&[]), row(&["Skip"]), row(&[])]
+    );
+    // Both at once.
+    assert_eq!(
+        lambda_arrow_rows("fun a -> {\n  let n = skip! ()\n  fun b -> a + b + n + skip! ()\n}"),
+        vec![row(&["Skip"]), row(&["Skip"])]
+    );
+}
+
+#[test]
+fn unit_param_lambda_rows() {
+    assert_eq!(
+        lambda_arrow_rows("fun () -> skip! ()"),
+        vec![row(&["Skip"])]
+    );
+    assert_eq!(
+        lambda_arrow_rows("fun () b -> b + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+    assert_eq!(
+        lambda_arrow_rows("fun a () -> a + skip! ()"),
+        vec![row(&[]), row(&["Skip"])]
+    );
+}
+
+#[test]
+fn multi_param_effectful_lambda_passed_to_open_row_callback() {
+    // `foldl : (b -> a -> b needs {..e}) -> b -> List a -> b needs {..e}`.
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         import Std.List as List\n\
+         fun sum_skip : List Int -> Int needs {{Skip}}\n\
+         sum_skip xs = List.foldl (fun acc x -> acc + x + skip! ()) 0 xs\n"
+    ))
+    .unwrap();
+    // The effect reaches the caller: it cannot be dropped.
+    let err = check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         import Std.List as List\n\
+         fun sum_skip : List Int -> Int\n\
+         sum_skip xs = List.foldl (fun acc x -> acc + x + skip! ()) 0 xs\n"
+    ))
+    .err()
+    .expect("effect must reach sum_skip");
+    assert!(err.message.contains("Skip"), "{}", err.message);
+}
+
+#[test]
+fn calling_a_let_bound_multi_param_effectful_lambda_performs_its_effects() {
+    let body = "t6 () = {\n  let f = fun a b -> a + b + skip! ()\n  f 1 2\n}\n";
+    let err = check(&format!("{LAMBDA_ROW_PRELUDE}fun t6 : Unit -> Int\n{body}"))
+        .err()
+        .expect("t6 performs Skip");
+    assert!(
+        err.message
+            .contains("uses effects {Skip} but has no 'needs' declaration"),
+        "{}",
+        err.message
+    );
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}fun t6 : Unit -> Int needs {{Skip}}\n{body}"
+    ))
+    .unwrap();
+    // Partial application performs nothing.
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}fun t7 : Unit -> (Int -> Int needs {{Skip}})\n\
+         t7 () = {{\n  let f = fun a b -> a + b + skip! ()\n  f 1\n}}\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn multi_param_effectful_lambda_matches_its_annotation() {
+    check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         fun mk : Unit -> (Int -> Int -> Int needs {{Skip}})\n\
+         mk () = fun a b -> a + b + skip! ()\n\
+         fun run : (Int -> Int -> Int needs {{Skip}}) -> Int needs {{Skip}}\n\
+         run f = f 1 2\n\
+         fun go : Unit -> Int needs {{Skip}}\n\
+         go () = {{\n  \
+           let g : Int -> Int -> Int needs {{Skip}} = fun a b -> a + b + skip! ()\n  \
+           run (fun a b -> a + b + skip! ()) + run g + run (mk ())\n\
+         }}\n"
+    ))
+    .unwrap();
+    // Against a pure two-argument callback it is still rejected.
+    let err = check(&format!(
+        "{LAMBDA_ROW_PRELUDE}\
+         fun run_pure : (Int -> Int -> Int) -> Int\n\
+         run_pure f = f 1 2\n\
+         fun go : Unit -> Int\n\
+         go () = run_pure (fun a b -> a + b + skip! ())\n"
+    ))
+    .err()
+    .expect("effectful lambda as a pure callback");
+    assert!(
+        err.message
+            .contains("is used where a function with no effects is expected"),
+        "{}",
+        err.message
+    );
+}
+
+// --- Block scoping: a block's bindings end with the block ---
+
+const BLOCK_SCOPE_PRELUDE: &str = "effect Ask { fun ask : Unit -> Int }\n\
+     fun idf : Int -> Int\n\
+     idf n = n\n";
+
+/// `go`'s body is `body`, one statement per element.
+fn block_scope_src(body: &[&str]) -> String {
+    format!(
+        "{BLOCK_SCOPE_PRELUDE}fun go : Unit -> Int needs {{Ask}}\ngo () = {{\n  {}\n}}\n",
+        body.join("\n  ")
+    )
+}
+
+/// Each entry puts a block in one position. The block binds `x` as a String
+/// (the outer `x` is an Int) and binds `y`, which exists nowhere else.
+const BLOCK_POSITIONS: &[(&str, &str)] = &[
+    ("let value", "let b = { let x = \"s\"; let y = 2; y }"),
+    (
+        "call argument",
+        "let b = idf ({ let x = \"s\"; let y = 2; y })",
+    ),
+    (
+        "if branch",
+        "let b = if True then { let x = \"s\"; let y = 2; y } else 4",
+    ),
+    ("statement", "let b = 0\n  { let x = \"s\"; let y = 2; () }"),
+    (
+        "with body",
+        "let b = { let x = \"s\"; let y = 2; ask! () + y } with { ask () = resume 3 }",
+    ),
+    (
+        "case arm body",
+        "let b = case 5 {\n    _ -> { let x = \"s\"; let y = 2; y }\n  }",
+    ),
+    (
+        "inline handler arm body",
+        "let b = (ask! ()) with { ask () = { let x = \"s\"; let y = 2; resume y } }",
+    ),
+    (
+        "lambda body",
+        "let b = (fun u -> { let x = \"s\"; let y = 2; y + u }) 1",
+    ),
+    (
+        "local function body",
+        "let f u = { let x = \"s\"; let y = 2; y + u }\n  let b = f 1",
+    ),
+    ("pattern binding", "let b = { let (x, y) = (\"s\", 2); y }"),
+    (
+        "local function",
+        "let b = {\n    let x n = n + 1\n    let y n = x n\n    y 2\n  }",
+    ),
+    (
+        "block performing an effect",
+        "let b = { let x = \"s\"; let y = ask! (); y }",
+    ),
+    (
+        "block inside a block",
+        "let b = { let c = { let x = \"s\"; let y = 2; y }; c }",
+    ),
+];
+
+#[test]
+fn block_binding_does_not_shadow_after_the_block() {
+    for (position, block) in BLOCK_POSITIONS {
+        let src = block_scope_src(&["let x = 1", block, "x + b"]);
+        if let Err(e) = check(&src) {
+            panic!(
+                "{position}: outer `x` should be the Int again after the block: {}",
+                e.message
+            );
+        }
+    }
+}
+
+#[test]
+fn block_binding_is_unbound_after_the_block() {
+    for (position, block) in BLOCK_POSITIONS {
+        let src = block_scope_src(&[block, "y + b"]);
+        let err = check(&src)
+            .err()
+            .unwrap_or_else(|| panic!("{position}: `y` should not be in scope after the block"));
+        assert!(
+            err.message.contains("undefined variable: y"),
+            "{position}: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn block_binding_is_visible_to_the_rest_of_its_own_block() {
+    check(&block_scope_src(&[
+        "let x = 1",
+        "let b = { let y = x + 1; let z = { let w = y + 1; w + y }; z + y }",
+        "x + b",
+    ]))
+    .unwrap();
+}
+
+#[test]
+fn block_result_type_survives_the_block() {
+    // The block's value is typed by bindings that are gone once it ends,
+    // including a polymorphic binding used at two types inside it. (A lambda:
+    // a local function `let id2 v = v` is not let-polymorphic, block or not.)
+    check(&block_scope_src(&[
+        "let p = { let id2 = fun v -> v; let s = id2 \"s\"; (id2 3, s) }",
+        "let (n, s) = p",
+        "if s == \"s\" then n else 0",
+    ]))
+    .unwrap();
+    // A function built inside a block keeps its type outside it.
+    check(&block_scope_src(&[
+        "let f = { let k = 2; fun n -> n + k }",
+        "f 1",
+    ]))
+    .unwrap();
+}
+
+#[test]
+fn let_bound_handler_ends_with_its_block() {
+    let h = "let h = handler for Ask { ask () = resume 100 }";
+    let src = block_scope_src(&[
+        &format!("let b = {{ {h}; ask! () with h }}"),
+        "b + (ask! () with h)",
+    ]);
+    let err = check(&src)
+        .err()
+        .expect("`h` is bound only inside the block");
+    assert!(
+        err.message.contains("undefined handler: h"),
+        "{}",
+        err.message
+    );
+
+    // An outer handler of the same name is the one in scope again afterwards.
+    check(&block_scope_src(&[
+        h,
+        &format!("let b = {{ {h}; ask! () with h }}"),
+        "b + (ask! () with h)",
+    ]))
+    .unwrap();
+}
+
+#[test]
+fn finally_block_sees_the_arm_body_bindings() {
+    // Inline handler.
+    check(&block_scope_src(&[
+        "(ask! ()) with { ask () = { let held = 2; resume held } finally { let _ = held + 1; () } }",
+    ]))
+    .unwrap();
+    // Named handler.
+    check(&format!(
+        "{BLOCK_SCOPE_PRELUDE}handler h for Ask {{\n  \
+           ask () = {{ let held = 2; resume held }} finally {{ let _ = held + 1; () }}\n\
+         }}\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn finally_block_does_not_see_into_nested_blocks_or_other_arms() {
+    let err = check(&block_scope_src(&[
+        "(ask! ()) with { ask () = { let held = { let deep = 2; deep }; resume held } finally { let _ = deep + 1; () } }",
+    ]))
+    .err()
+    .expect("`deep` is bound in a block nested in the arm body");
+    assert!(
+        err.message.contains("undefined variable: deep"),
+        "{}",
+        err.message
+    );
+
+    let err = check(
+        "effect Two {\n  fun one : Unit -> Int\n  fun two : Unit -> Int\n}\n\
+         handler h for Two {\n  \
+           one () = { let held = 2; resume held } finally { () }\n  \
+           two () = resume held\n\
+         }\n",
+    )
+    .err()
+    .expect("`held` belongs to the other arm");
+    assert!(
+        err.message.contains("undefined variable: held"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn use_after_a_block_references_the_outer_definition() {
+    let src = block_scope_src(&["let x = 1", "let b = { let x = 2; x }", "x + b"]);
+    let checker = check(&src).unwrap();
+    let result = &checker.lsp;
+    let mut x_defs: Vec<_> = result
+        .definitions
+        .iter()
+        .filter(|(_, name, _)| name == "x")
+        .map(|(id, _, span)| (span.start, *id))
+        .collect();
+    x_defs.sort_by_key(|(start, _)| *start);
+    assert_eq!(x_defs.len(), 2, "outer and inner `x`");
+    let uses_of = |def: crate::ast::NodeId| {
+        let mut starts: Vec<usize> = result
+            .references
+            .iter()
+            .filter(|(_, d)| **d == def)
+            .filter_map(|(usage, _)| result.node_spans.get(usage).map(|s| s.start))
+            .collect();
+        starts.sort();
+        starts
+    };
+    let (outer, inner) = (uses_of(x_defs[0].1), uses_of(x_defs[1].1));
+    assert_eq!(
+        inner.len(),
+        1,
+        "the inner `x` is used once, inside the block"
+    );
+    assert_eq!(outer.len(), 1, "the `x` after the block is the outer one");
+    assert!(inner[0] < outer[0]);
+}
+
+#[test]
+fn with_handler_clause_sees_the_wrapped_block_bindings() {
+    let mk = "fun mk : Int -> Handler Ask\nmk n = handler for Ask { ask () = resume n }\n";
+    let go =
+        |body: &str| format!("{BLOCK_SCOPE_PRELUDE}{mk}fun go : Unit -> Int\ngo () = {body}\n");
+    // Documented (docs/handler-bindings.md): a handler bound inside the
+    // wrapped block is attached by the outer `with`, by name or in a list.
+    check(&go("{\n  let h = mk 5\n  { ask! () + 1 }\n} with h")).unwrap();
+    check(&go("{\n  let h = mk 5\n  { ask! () + 1 }\n} with {h}")).unwrap();
+    // Each name in a list is its own `with` layer around the same block.
+    check(&go(
+        "{\n  let a = mk 5\n  let b = mk 6\n  let c = mk 7\n  { ask! () + 1 }\n} with {a, b, c}",
+    ))
+    .unwrap();
+    // Existing behaviour kept deliberately, pending a language decision:
+    // inline arm bodies and `return` clauses see the wrapped block's values.
+    check(&go(
+        "{\n  let y = 2\n  ask! () + y\n} with { ask () = resume (y * 10) }",
+    ))
+    .unwrap();
+    check(&go(
+        "{\n  let y = 2\n  ask! () + y\n} with {\n  ask () = resume 1\n  return v = v + y\n}",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn wrapped_block_bindings_end_with_the_with_expression() {
+    let err = check(&block_scope_src(&[
+        "let b = { let y = 2; ask! () + y } with { ask () = resume (y * 10) }",
+        "b + y",
+    ]))
+    .err()
+    .expect("`y` is bound inside the wrapped block");
+    assert!(
+        err.message.contains("undefined variable: y"),
+        "{}",
+        err.message
+    );
+
+    let err = check(&block_scope_src(&[
+        "let b = { let h = handler for Ask { ask () = resume 1 }; ask! () } with h",
+        "b + (ask! () with h)",
+    ]))
+    .err()
+    .expect("`h` is bound inside the wrapped block");
+    assert!(
+        err.message.contains("undefined handler: h"),
+        "{}",
+        err.message
+    );
+
+    // A block nested inside the wrapped block is closed before the clause.
+    let err = check(&block_scope_src(&[
+        "{ let y = { let deep = 2; deep }; ask! () + y } with { ask () = resume deep }",
+    ]))
+    .err()
+    .expect("`deep` is bound in a nested block");
+    assert!(
+        err.message.contains("undefined variable: deep"),
+        "{}",
+        err.message
+    );
 }

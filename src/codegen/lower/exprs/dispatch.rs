@@ -8,12 +8,22 @@ use std::collections::HashMap;
 impl<'a> Lowerer<'a> {
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
     pub(crate) fn lower_bitstring_expr(&mut self, segments: &[BitSegment<Expr>]) -> CExpr {
+        self.lower_bitstring_with_values(segments, &[])
+    }
+
+    /// [`Self::lower_bitstring_expr`] where some segment values are already
+    /// bound: `bound[i]` names the variable holding segment `i`'s value.
+    pub(crate) fn lower_bitstring_with_values(
+        &mut self,
+        segments: &[BitSegment<Expr>],
+        bound: &[Option<String>],
+    ) -> CExpr {
         use crate::codegen::lower::util::{
             resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
         };
 
         let mut segs = Vec::new();
-        for seg in segments {
+        for (idx, seg) in segments.iter().enumerate() {
             // String literal sugar: expand to byte segments
             if let ExprKind::Lit {
                 value: Lit::String(s, kind),
@@ -32,7 +42,10 @@ impl<'a> Lowerer<'a> {
             }
 
             let is_binary = seg.specs.contains(&ast::BitSegSpec::Binary);
-            let value = self.lower_expr_value(&seg.value);
+            let value = match bound.get(idx).cloned().flatten() {
+                Some(var) => CExpr::Var(var),
+                None => self.lower_expr_value(&seg.value),
+            };
 
             if is_binary && seg.size.is_none() {
                 segs.push(CBinSeg::BinaryAll(value));
@@ -53,6 +66,174 @@ impl<'a> Lowerer<'a> {
             });
         }
         CExpr::Binary(segs)
+    }
+
+    /// Lower `receive { Pat -> body, after N -> timeout_body }`.
+    ///
+    /// With `k_var`, the value of the whole expression is passed to that
+    /// continuation instead of returned, and arm bodies (and the timeout)
+    /// that perform effects are CPS-chained into it.
+    pub(crate) fn lower_receive(
+        &mut self,
+        arms: &[ast::Annotated<ast::CaseArm>],
+        after_clause: Option<&(Box<Expr>, Box<Expr>)>,
+        k_var: Option<&str>,
+    ) -> CExpr {
+        let lower_body = |this: &mut Self, body: &Expr| match k_var {
+            Some(k) => this.lower_branch_with_k(body, k),
+            None => this.lower_expr(body),
+        };
+        // Lower arms: same pattern/guard/body as case, but for receive
+        // there is no scrutinee variable to fall through to.
+        let lowered_arms: Vec<CArm> = arms
+            .iter()
+            .map(|annotated| {
+                let arm = &annotated.node;
+                // System message patterns (Down/Exit): match raw Erlang
+                // tuple shapes and convert the reason field.
+                let (pat, reason_wrapper) =
+                    if let Pat::Constructor { name, args, .. } = &arm.pattern {
+                        if beam_interop::is_system_msg(name) && args.len() == 2 {
+                            let (reason_pat, wrapper) =
+                                if let Pat::Var { name: var_name, .. } = &args[1] {
+                                    let raw = self.fresh();
+                                    (CPat::Var(raw.clone()), Some((core_var(var_name), raw)))
+                                } else {
+                                    (
+                                        self.lower_pat(
+                                            &args[1],
+                                            &self.constructor_atoms,
+                                            self.handler_origin_module(),
+                                        ),
+                                        None,
+                                    )
+                                };
+                            let pid_pat = self.lower_pat(
+                                &args[0],
+                                &self.constructor_atoms,
+                                self.handler_origin_module(),
+                            );
+                            let tuple_pat =
+                                beam_interop::build_system_msg_pattern(name, pid_pat, reason_pat);
+                            (tuple_pat, wrapper)
+                        } else {
+                            (
+                                self.lower_pat(
+                                    &arm.pattern,
+                                    &self.constructor_atoms,
+                                    self.handler_origin_module(),
+                                ),
+                                None,
+                            )
+                        }
+                    } else {
+                        (
+                            self.lower_pat(
+                                &arm.pattern,
+                                &self.constructor_atoms,
+                                self.handler_origin_module(),
+                            ),
+                            None,
+                        )
+                    };
+
+                let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
+                let raw_body = lower_body(self, &arm.body);
+                let body = if let Some((user_var, raw_var)) = reason_wrapper {
+                    let ctor_atoms = self.constructor_atoms.clone();
+                    let conversion = beam_interop::build_exit_reason_from_erlang(
+                        &raw_var,
+                        &ctor_atoms,
+                        &mut || self.fresh(),
+                    );
+                    CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
+                } else {
+                    raw_body
+                };
+                CArm { pat, guard, body }
+            })
+            .collect();
+
+        let Some((timeout_expr, timeout_body)) = after_clause else {
+            return CExpr::Receive(
+                lowered_arms,
+                Box::new(CExpr::Lit(CLit::Atom("infinity".into()))),
+                Box::new(CExpr::Lit(CLit::Atom("true".into()))),
+            );
+        };
+        let timeout_body = lower_body(self, timeout_body);
+        // A timeout that performs effects is evaluated first, with the
+        // receive as its continuation.
+        if k_var.is_some() && self.branch_is_effectful(timeout_expr) {
+            let timeout_var = self.fresh();
+            let receive = CExpr::Receive(
+                lowered_arms,
+                Box::new(CExpr::Var(timeout_var.clone())),
+                Box::new(timeout_body),
+            );
+            return self.lower_bind_effectful_expr(timeout_expr, timeout_var, receive);
+        }
+        let timeout = self.lower_expr_value(timeout_expr);
+        CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
+    }
+
+    /// `resume v` for an already-bound value: call the handler arm's
+    /// continuation K. When a `finally` block is active, the K call is wrapped
+    /// in try/catch so cleanup runs after K completes or panics.
+    pub(crate) fn lower_resume_of_var(&mut self, v: &str) -> CExpr {
+        let k_name = self
+            .current_handler_k
+            .clone()
+            .expect("resume used outside handler");
+        let k_call = CExpr::Apply(
+            Box::new(CExpr::Var(k_name)),
+            vec![CExpr::Var(v.to_string())],
+        );
+        if let Some(ref finally_expr) = self.current_handler_finally.clone() {
+            // let Cleanup = fun() -> finally_body in
+            // try apply K(V)
+            // of OkVar -> let _ = apply Cleanup() in OkVar
+            // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
+            let cleanup_var = self.fresh();
+            let cleanup_body = self.lower_expr(finally_expr);
+            let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
+            let cleanup_call_ok = CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
+            let cleanup_call_catch =
+                CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
+            let ok_var = self.fresh();
+            let class_var = self.fresh();
+            let reason_var = self.fresh();
+            let trace_var = self.fresh();
+            CExpr::Let(
+                cleanup_var,
+                Box::new(cleanup_lambda),
+                Box::new(CExpr::Try {
+                    expr: Box::new(k_call),
+                    ok_var: ok_var.clone(),
+                    ok_body: Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_call_ok),
+                        Box::new(CExpr::Var(ok_var)),
+                    )),
+                    catch_vars: (class_var.clone(), reason_var.clone(), trace_var.clone()),
+                    catch_body: Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_call_catch),
+                        Box::new(CExpr::Call(
+                            "erlang".to_string(),
+                            "raise".to_string(),
+                            vec![
+                                CExpr::Var(class_var),
+                                CExpr::Var(reason_var),
+                                CExpr::Var(trace_var),
+                            ],
+                        )),
+                    )),
+                }),
+            )
+        } else {
+            k_call
+        }
     }
 
     pub(crate) fn lower_expr(&mut self, expr: &Expr) -> CExpr {
@@ -95,6 +276,14 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Constructor { name, .. } => {
                 let ctor_name = self.resolved_constructor_name_for(expr.id, name);
+                if let Some(ty) = self.value_type(expr.id)
+                    && matches!(ty, crate::typechecker::Type::Fun(..))
+                {
+                    // A constructor used as a function value: one bare fun
+                    // taking every field.
+                    let arity = arity_and_effects_from_type(&ty).0;
+                    return self.constructor_function_value(&ctor_name, arity);
+                }
                 let origin = self
                     .constructor_origin_module_for(expr.id, &ctor_name)
                     .map(str::to_string);
@@ -180,11 +369,39 @@ impl<'a> Lowerer<'a> {
                 });
                 let mut param_vars = lower_params(&flattened_params);
                 let mut is_effectful_lambda = false;
-                let shape = self.planned_function_value_evidence(expr.id);
+                // The lambda's own type decides whether it is a tagged CPS
+                // closure, and its body finds handlers by tag. A
+                // dictionary method's convention is forced by its slot, which
+                // also applies the tag itself.
+                let forced_cps = match self.forced_lambda_cps {
+                    Some((id, cps)) if id == expr.id => {
+                        self.forced_lambda_cps = None;
+                        Some(cps)
+                    }
+                    _ => None,
+                };
+                let shape = forced_cps
+                    .unwrap_or_else(|| self.lambda_is_tagged(expr, flattened_params.len()))
+                    .then(crate::codegen::lower::tagged::tag_only_abi);
                 let captured_evidence =
                     self.function_value_captured_evidence.get(&expr.id).cloned();
                 let saved_evidence = self.current_evidence.clone();
                 let mut callback_tail_binding = None;
+                // An effectful lambda resolves its operations against the
+                // evidence it is *called* with, so per-handler fast-path facts
+                // recorded by a lexically enclosing `with` (inline the arm's
+                // tail-resume value, pass `no_resume` instead of a
+                // continuation) must not leak into its body: the lambda may
+                // escape and run under a different handler. `direct_ops` is
+                // deliberately left alone — it is only populated for
+                // BEAM-native callback contexts (e.g. `spawn`), where the
+                // native binding inside the callback is the intended ABI.
+                let saved_fast_path_ops = shape.as_ref().map(|_| {
+                    (
+                        std::mem::take(&mut self.static_tail_resume_ops),
+                        std::mem::take(&mut self.no_resume_ops),
+                    )
+                });
                 if let Some(shape) = shape {
                     // Effectful lambdas take `_Evidence` and `_ReturnK`; the
                     // body reads per-op handlers out of the evidence vector.
@@ -201,14 +418,14 @@ impl<'a> Lowerer<'a> {
                     param_vars.push("_ReturnK".to_string());
                     let evidence_var = captured_evidence.as_ref().map_or_else(
                         || evidence_param.clone(),
-                        |captured| {
+                        |(captured, named_effects)| {
                             let merged = self.fresh();
                             callback_tail_binding = Some((
                                 merged.clone(),
                                 evidence::append_tail(
                                     CExpr::Var(evidence_param.clone()),
                                     CExpr::Var(captured.var.clone()),
-                                    &shape,
+                                    named_effects,
                                 ),
                             ));
                             merged
@@ -239,6 +456,10 @@ impl<'a> Lowerer<'a> {
                 };
                 self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 self.current_evidence = saved_evidence;
+                if let Some((static_tail_resume_ops, no_resume_ops)) = saved_fast_path_ops {
+                    self.static_tail_resume_ops = static_tail_resume_ops;
+                    self.no_resume_ops = no_resume_ops;
+                }
                 // If lambda has complex params (tuples, constructors), wrap
                 // the body in a case expression for destructuring. The
                 // scrutinee covers user params only — `_Evidence`/`_ReturnK`
@@ -287,7 +508,12 @@ impl<'a> Lowerer<'a> {
                 } else {
                     body_ce
                 };
-                CExpr::Fun(param_vars, Box::new(body_ce))
+                let fun = CExpr::Fun(param_vars, Box::new(body_ce));
+                if is_effectful_lambda && forced_cps.is_none() {
+                    crate::codegen::lower::tagged::tag_cps(fun)
+                } else {
+                    fun
+                }
             }
 
             ExprKind::Case {
@@ -305,91 +531,7 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Receive {
                 arms, after_clause, ..
-            } => {
-                // Lower arms: same pattern/guard/body as case, but for receive
-                // there is no scrutinee variable to fall through to.
-                let lowered_arms: Vec<CArm> = arms
-                    .iter()
-                    .map(|annotated| {
-                        let arm = &annotated.node;
-                        // System message patterns (Down/Exit): match raw Erlang
-                        // tuple shapes and convert the reason field.
-                        let (pat, reason_wrapper) = if let Pat::Constructor { name, args, .. } =
-                            &arm.pattern
-                        {
-                            if beam_interop::is_system_msg(name) && args.len() == 2 {
-                                let (reason_pat, wrapper) =
-                                    if let Pat::Var { name: var_name, .. } = &args[1] {
-                                        let raw = self.fresh();
-                                        (CPat::Var(raw.clone()), Some((core_var(var_name), raw)))
-                                    } else {
-                                        (
-                                            self.lower_pat(
-                                                &args[1],
-                                                &self.constructor_atoms,
-                                                self.handler_origin_module(),
-                                            ),
-                                            None,
-                                        )
-                                    };
-                                let pid_pat = self.lower_pat(
-                                    &args[0],
-                                    &self.constructor_atoms,
-                                    self.handler_origin_module(),
-                                );
-                                let tuple_pat = beam_interop::build_system_msg_pattern(
-                                    name, pid_pat, reason_pat,
-                                );
-                                (tuple_pat, wrapper)
-                            } else {
-                                (
-                                    self.lower_pat(
-                                        &arm.pattern,
-                                        &self.constructor_atoms,
-                                        self.handler_origin_module(),
-                                    ),
-                                    None,
-                                )
-                            }
-                        } else {
-                            (
-                                self.lower_pat(
-                                    &arm.pattern,
-                                    &self.constructor_atoms,
-                                    self.handler_origin_module(),
-                                ),
-                                None,
-                            )
-                        };
-
-                        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
-                        let raw_body = self.lower_expr(&arm.body);
-                        let body = if let Some((user_var, raw_var)) = reason_wrapper {
-                            let ctor_atoms = self.constructor_atoms.clone();
-                            let conversion = beam_interop::build_exit_reason_from_erlang(
-                                &raw_var,
-                                &ctor_atoms,
-                                &mut || self.fresh(),
-                            );
-                            CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
-                        } else {
-                            raw_body
-                        };
-                        CArm { pat, guard, body }
-                    })
-                    .collect();
-
-                let (timeout, timeout_body) = if let Some((t, b)) = after_clause {
-                    (self.lower_expr_value(t), self.lower_expr(b))
-                } else {
-                    (
-                        CExpr::Lit(CLit::Atom("infinity".into())),
-                        CExpr::Lit(CLit::Atom("true".into())),
-                    )
-                };
-
-                CExpr::Receive(lowered_arms, Box::new(timeout), Box::new(timeout_body))
-            }
+            } => self.lower_receive(arms, after_clause.as_ref(), None),
 
             ExprKind::Tuple { elements, .. } => self.lower_tuple_elems(elements),
 
@@ -444,11 +586,6 @@ impl<'a> Lowerer<'a> {
                     });
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-                // Per-field declared types let an effectful function-typed field
-                // (`f: A -> B needs {E}`) lower with the CPS evidence-passing
-                // convention instead of as a plain closure whose op calls have no
-                // evidence in scope.
-                let field_types = self.record_field_types_by_name(record_name.as_deref(), name);
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
                 for field_name in &order {
@@ -456,15 +593,7 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in RecordCreate");
-                    // Prefer the record's declared field type; fall back to the
-                    // field value's own resolved type (e.g. when the record's
-                    // layout was recovered by name but its field types weren't).
-                    let expected = field_types
-                        .as_ref()
-                        .and_then(|m| m.get(field_name.as_str()))
-                        .cloned()
-                        .or_else(|| self.check_result.resolved_type_for_node(e.id));
-                    let ce = self.lower_expr_value_with_expected_type(e, expected.as_ref());
+                    let ce = self.lower_expr_value(e);
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -492,11 +621,6 @@ impl<'a> Lowerer<'a> {
                 sorted_names.sort();
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
-                // Anon records have no nominal type to look up, so recover each
-                // field's type from the field *value's* own resolved type. This
-                // lets an effectful function-typed field lower with CPS evidence
-                // passing rather than as a plain closure (see the nominal
-                // `RecordCreate` arm for the rationale).
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
                 for field_name in &sorted_names {
@@ -504,8 +628,7 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in AnonRecordCreate");
-                    let expected = self.check_result.resolved_type_for_node(e.id);
-                    let ce = self.lower_expr_value_with_expected_type(e, expected.as_ref());
+                    let ce = self.lower_expr_value(e);
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -605,7 +728,7 @@ impl<'a> Lowerer<'a> {
                 ..
             } => {
                 let else_arms: Vec<_> = else_arms.iter().map(|a| a.node.clone()).collect();
-                self.lower_do(bindings, success, &else_arms)
+                self.lower_do(bindings, success, &else_arms, None)
             }
 
             // --- Elaboration-only constructs ---
@@ -632,6 +755,10 @@ impl<'a> Lowerer<'a> {
                 // yields the value, not the closure.
                 let body = if self.trait_method_is_nullary(trait_name, *method_index) {
                     CExpr::Apply(Box::new(extract_method), vec![])
+                } else if let Some(arity) =
+                    self.pure_view_of_effectful_method(dict, trait_name, *method_index)
+                {
+                    self.bare_view_of_function_value(extract_method, arity)
                 } else {
                     extract_method
                 };
@@ -752,63 +879,18 @@ impl<'a> Lowerer<'a> {
             // once into a lambda (at the resume site, where arm body variables are
             // in scope) and called in both the ok and catch branches.
             ExprKind::Resume { value, .. } => {
-                let k_name = self
-                    .current_handler_k
-                    .clone()
-                    .expect("resume used outside handler");
                 let v = self.fresh();
-                let ce = self.lower_expr_value(value);
-                let k_call =
-                    CExpr::Apply(Box::new(CExpr::Var(k_name)), vec![CExpr::Var(v.clone())]);
-                let k_or_wrapped = if let Some(ref finally_expr) =
-                    self.current_handler_finally.clone()
-                {
-                    // let Cleanup = fun() -> finally_body in
-                    // try apply K(V)
-                    // of OkVar -> let _ = apply Cleanup() in OkVar
-                    // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
-                    let cleanup_var = self.fresh();
-                    let cleanup_body = self.lower_expr(finally_expr);
-                    let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
-                    let cleanup_call_ok =
-                        CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
-                    let cleanup_call_catch =
-                        CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
-                    let ok_var = self.fresh();
-                    let class_var = self.fresh();
-                    let reason_var = self.fresh();
-                    let trace_var = self.fresh();
-                    CExpr::Let(
-                        cleanup_var,
-                        Box::new(cleanup_lambda),
-                        Box::new(CExpr::Try {
-                            expr: Box::new(k_call),
-                            ok_var: ok_var.clone(),
-                            ok_body: Box::new(CExpr::Let(
-                                "_".to_string(),
-                                Box::new(cleanup_call_ok),
-                                Box::new(CExpr::Var(ok_var)),
-                            )),
-                            catch_vars: (class_var.clone(), reason_var.clone(), trace_var.clone()),
-                            catch_body: Box::new(CExpr::Let(
-                                "_".to_string(),
-                                Box::new(cleanup_call_catch),
-                                Box::new(CExpr::Call(
-                                    "erlang".to_string(),
-                                    "raise".to_string(),
-                                    vec![
-                                        CExpr::Var(class_var),
-                                        CExpr::Var(reason_var),
-                                        CExpr::Var(trace_var),
-                                    ],
-                                )),
-                            )),
-                        }),
-                    )
+                // A resume value that performs effects (`resume (g n)`,
+                // `resume (1 + g n)`) has the resumption as its continuation,
+                // so a handler that aborts it does not resume.
+                if self.branch_is_effectful(value) {
+                    let resumed = self.lower_resume_of_var(&v);
+                    self.lower_bind_effectful_expr(value, v, resumed)
                 } else {
-                    k_call
-                };
-                CExpr::Let(v, Box::new(ce), Box::new(k_or_wrapped))
+                    let ce = self.lower_expr_value(value);
+                    let resumed = self.lower_resume_of_var(&v);
+                    CExpr::Let(v, Box::new(ce), Box::new(resumed))
+                }
             }
 
             // Handler expression as a value (e.g. returned from a function).

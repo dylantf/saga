@@ -32,6 +32,48 @@ during unification. This is important for higher-order functions with multiple
 effectful callbacks and for generic functions that forward multiple trait
 constraints' effects.
 
+### One Application Per Effect Family
+
+An effect is identified by its **family** (`Fail`), whatever its type
+arguments. `Fail String` and `Fail Int` are the same effect at two types, not
+two effects: an operation reaches the nearest handler for its family. The type
+arguments are still checked. Two instances that must coexist are declared with
+`neweffect` (`neweffect UserRepo = Repo UserDb`), which mints a distinct
+nominal effect with no type parameters of its own; a `neweffect` must fix
+every type argument of its source.
+
+So a row holds **at most one application of a family**. Wherever two entries
+of one family would end up in the same row their arguments are unified, and a
+mismatch is a type error that names both applications and suggests
+`neweffect`:
+
+| Where rows are built or combined | Code |
+| --- | --- |
+| a declared `needs {...}` (function, trait method, impl, handler, operation, callback type) | `push_declared_effect`: writing a family twice is an error unless the two are identical |
+| effects accumulating while a body is inferred | `emit_effect` / `emit_effects` |
+| two rows merged (handler `needs`, clauses of a local function) | `merge_rows` |
+| branch, list-element and tuple rows joined | `join_effect_rows` |
+| a body's row checked against its declared row | `check_effects_via_row` |
+| any row about to be unified, and any row variable being bound | `normalize_row`, `bind_row_checked` |
+| the type of a finished function | `check_type_rows` |
+
+Binding a row variable is the subtle case. `{Fail Int, ..r}` with
+`r := {Fail String}` must fail, and with `r := {Fail Int}` it collapses to one
+entry. The substitution cannot see the row a variable sits in when it is
+bound, so every open row records its entries against its tails
+(`Substitution.row_companions`, filled by `normalize_row` and on
+instantiation): "if `r` contains `Fail`, it is `Fail Int`". `bind_row_checked`
+checks the bound row against those entries and passes them on to the new
+tail. A variable may have several companions of one family, from different
+rows (`(.. needs {Fail a, ..r}) -> .. needs {Fail b, ..r}` does not force
+`a = b`; it only does once `r` is known to contain `Fail`).
+
+These obligations live in the substitution, not in the type, so a row
+variable is only generalised when its type shows them. A local binding whose
+row variable has an obligation the type does not show stays monomorphic in
+that variable; an unannotated top-level function in that position is an error
+asking for a signature (`unexpressed_row_companion`).
+
 ### Where Effects Live on Curried Functions
 
 Effects go on the **innermost** arrow (closest to the return type):
@@ -43,11 +85,31 @@ fun greet : String -> String -> Unit needs {Log}
 
 Partial application `greet "hi"` returns `Fun(String, Unit, {Log})` -- effects are preserved until full saturation.
 
+Lambdas and local functions follow the same rule: the row of what the body
+performs goes on the arrow of the **last parameter of that lambda**
+(`curried_lambda_type` in `infer.rs`).
+
+```
+fun a b -> a + b + skip! ()             => Fun(a, Fun(b, Int, {Skip}), {})
+fun a -> fun b -> a + b + skip! ()      => Fun(a, Fun(b, Int, {Skip}), {})
+fun a -> { skip! (); fun b -> a + b }   => Fun(a, Fun(b, Int, {}), {Skip})
+```
+
+The third one performs `Skip` when `a` is supplied, before the inner lambda
+exists, so it is not an `a -> b -> Int needs {Skip}`. Rows are compared arrow
+by arrow by the effect-row rule at coercion positions (see "Effect
+Subtyping" below). A local
+multi-clause function (`let go 0 = ..` / `let go m = ..`) gets the union of
+its clauses' effects, like a top-level one.
+
 ### Computation Types
 
 `infer_expr` returns the value `Type` and emits performed effects into
-`Checker.effect_row`. Callers use `save_effects` / `restore_effects` to isolate
-sub-expressions and recover their accumulated `EffectRow`. This is the core
+`Checker.effect_row`. The accumulator is a row: it holds one entry per effect
+family (see above), and it keeps the still-open tails of the functions that
+were called, so `fun () -> f ()` with `f : Unit -> a needs {..e}` has the row
+`{..e}` rather than being pure. Callers use `save_effects` / `restore_effects`
+to isolate sub-expressions and recover their accumulated `EffectRow`. This is the core
 mechanism: effects are inferred while walking expressions, then checked against
 the declared `needs` row at function, handler, and callback boundaries.
 
@@ -66,12 +128,50 @@ How effects compose at each expression form:
 
 ### Effect Subtyping
 
-A function with fewer effects can be used where more are allowed. Effect row unification is symmetric (accepting either direction of subset), but at function application sites, a directional check enforces that a callback argument's effects are a subset of the parameter's expected effects. This means:
+Two closed effect rows are the same type only when they are equal. The one
+exception is a *coercion position*, where a value of one type is used where
+another is expected: there a function with fewer effects may be used where
+more are allowed.
 
-- A pure function can be passed where an effectful callback is expected (covariant).
-- An effectful function CANNOT be passed where a pure callback is expected (caught by `check_callback_effect_subtype` in `infer.rs`).
+- A pure function can be passed where an effectful callback is expected.
+- An effectful function CANNOT be used where a function with fewer effects is
+  expected, at any position.
+- Away from a coercion position the rows must be identical in both directions:
+  a `List (Unit -> Int)` is not a `List (Unit -> Int needs {Skip})`, nor the
+  reverse.
 
-The directional check runs after unification succeeds, comparing the resolved argument type's effect row against the resolved parameter type's effect row. Open rows (with `..e` tail) are exempt since they accept extra effects by design.
+Coercion positions are: a direct call argument, an annotated `let` and a type
+ascription, a function or lambda body against its return type, `if` / `case`
+/ `do ... else` branches and block results against the expected type, record
+field initialisers and updates, handler arm and `return` clause bodies, and
+the elements of tuple, list and anonymous-record literals written at one of
+those positions. Only the row on the value's own arrows is coerced (compared
+arrow by arrow along a curried type). A row nested in a type-constructor
+argument, a function parameter type, a record field type or an effect's type
+argument is "at depth" and must match exactly; there is no variance tracking.
+
+```saga
+fun run : (Unit -> Int needs {Skip}) -> Int needs {Skip}
+
+run pure_fn              # ok: fewer effects at a call argument
+take_list [pure_fn, eff] # ok: literal elements at a call argument
+let fs = [pure_fn]       # List (Unit -> Int)
+take_list fs             # error: rows differ inside `List`
+```
+
+Implementation (`src/typechecker/unify.rs`): `unify_effect_rows` still accepts
+two closed rows when either is a subset of the other, but records every such
+acceptance of unequal rows as a `RowSubsumption` with the path taken through
+the types. The entry points that carry a span (`unify_at`, `unify_nested_at`,
+`coerce_at`, `coerce_expected_first_at`) judge the recorded subsumptions
+against their `RowPosition` and return a type error, prefixed
+`effect row mismatch:`, for the first violation. Three messages exist: rows
+differing at depth, an effectful function where a less effectful one is
+expected at a coercion position, and rows differing directly at a position
+that is not a coercion position. The spanless `unify` does not judge rows.
+
+Open rows (with a `..e` tail) are unaffected: a row variable is instantiated
+by unification at any depth.
 
 ### Absorption
 
@@ -159,7 +259,66 @@ concrete effects must come from concrete impl method facts instead.
 
 Open trait rows must be forwarded even if the body wraps the call in `with`.
 The generic function cannot name the open row's effects, so it cannot soundly
-handle them internally.
+handle them internally. For an effect with type parameters this is an error
+rather than a redundant handler: the impl chosen by the caller could perform
+that effect at another type. It is accepted only when the function's own row
+names the effect next to the tail (`needs {Fail Int, ..a}`), and then a caller
+whose impl performs `Fail String` is rejected at the call, where the impl's
+effects and the function's row meet.
+
+#### Open-row methods used as values
+
+Everything above is about calls that supply every argument. An open-row
+method that is only *referenced* performs nothing yet: its impl's effects
+belong on the arrow of the value.
+
+```saga
+impl Foo for Text needs {Fail String} { foo _ = fail! "text" }
+
+apply_open foo Text                  # performs {Fail String}
+pick () = foo                        # pick : Unit -> (Text -> Int needs {Fail String})
+Box { run: foo }                     # the field's row must allow {Fail String}
+```
+
+The impl is usually not known where the name is inferred (`foo` is
+instantiated at a fresh type variable; the argument `Text` comes later), so
+the reference is recorded (`open_row_refs.rs`, `TraitState.open_row_refs`)
+with the row variable its arrow carries, and settled later:
+
+- **The type becomes known** (checked after each application, before a `with`
+  subtracts, and when the enclosing declaration ends): the row must contain
+  the impl's effects for that method. An unconstrained row is bound to exactly
+  those effects; a row that already names one of the families has its
+  arguments unified (a mismatch is the family-conflict error); a closed row
+  lacking one is an error at the reference that names the impl's effects.
+- **The type stays a variable** (it is under a `where` bound, or the
+  declaration or `let` is about to generalise it): the row becomes `..a`, the
+  same form a call produces, and the forwarding rule above applies.
+
+The same is done for a function whose own row is `..a`
+(`generic_foo` above, or a `let`-bound `foo`) when it is referenced without
+all its arguments: its `..a` is replaced by a row variable that is settled the
+same way. A generic function may also return such a value
+(`fun via : a -> (a -> Int needs {..a}) where {a: Foo}`, `via _ = foo`);
+`via Text` then has the type `Text -> Int needs {Fail String}`.
+
+Multi-parameter traits are not covered, here or at calls.
+
+#### Effect arguments in a method's or an operation's signature
+
+A type variable used as an effect's argument in a trait method's signature
+(`fun run : a -> (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}`), or in
+an effect operation's, is chosen by each caller of the method or performer of
+the operation. An impl method or handler arm is checked against the signature
+once, so it must work for every choice: after its body is inferred, the
+variable must still be a variable, must not have been merged with another
+effect-argument variable of the signature, and must not appear in an effect
+the body performs outward or (for an arm) in the handler's answer type, where
+it would be pinned later (`check_effect_arg_vars_abstract`,
+`check_effect_arg_vars_stay_inside`). An argument left out (`needs {Fail}`)
+counts the same. Variables that stand for the trait's or the effect's own
+parameters are exempt: `impl Run String for T` and `handler h for Scope
+String` say what they are, and callers agree by the ordinary rules.
 
 ### Handler Effect Subtraction
 
@@ -179,8 +338,47 @@ using lexical order.
 
 Typechecking then happens one handler layer at a time: infer the inner
 expression to get `(ty, inner_effs)`, subtract the effects handled by this
-layer from `inner_effs` via `EffectRow::subtract`, then merge in any effects
-performed by this layer's arm bodies that escape outward.
+layer from `inner_effs` (`EffectRow::subtract_entries`, by family), then merge
+in any effects performed by this layer's arm bodies that escape outward. Open
+tails of `inner_effs` stay in the result: a handler cannot discharge effects
+it cannot name.
+
+Because a handler is found by family, **every** operation of that family
+performed inside the handled expression reaches it. The typechecker therefore
+makes sure none can do so at a type the handler was not written for
+(`resolve_handled_effect_entries`):
+
+- If the expression's row names the family, that entry is the one handled. A
+  handler declared for specific arguments (`handler h for Fail Int`, a value
+  of type `Handler (Fail Int)`) must agree with it; a handler for `Fail Int`
+  around a `Fail String` computation is an error, not a handler that is
+  skipped. A handler value must have a known `Handler (...)` type where it is
+  installed.
+- An open tail that inference is still free to refine is bound to contain the
+  family at the handled arguments. In an unannotated
+  `h f = f () with { fail n = resume (n + 1) }`, `f` becomes
+  `Unit -> a needs {Fail Int, ..}`.
+- An open tail fixed by a declared signature cannot be refined: the caller
+  chooses it. For an effect with type parameters the `with` is rejected unless
+  the signature names the family next to that tail.
+
+```saga
+fun h : (Unit -> Int needs {..r}) -> Int needs {..r}
+h f = f () with { fail n = resume (n + 1) }       # error: `..r` might contain `Fail`
+
+fun catch_it : (Unit -> Int needs {Fail e, ..r}) -> Int needs {..r}
+catch_it f = f () with { fail _ = 0 }             # ok
+```
+
+In `catch_it`, `{Fail e, ..r}` obliges every caller to keep `r` consistent
+with `Fail e` (one application per family), so no other `Fail` can hide in
+`r`. Effects without type parameters keep the old behaviour around a declared
+tail: the handler may catch operations the tail turns out to perform, and the
+signature still forwards them, which is imprecise but cannot mismatch a type.
+
+The declared row variables are tracked in `Checker.rigid_row_vars`: the tails
+written in the enclosing function's signature, in the trait method an impl
+implements, and in the operation a handler arm implements.
 
 This has one important consequence: sibling items in a surface `with {...}`
 block do not satisfy each other's arm-body effects. If an inline arm body uses
@@ -191,8 +389,21 @@ sibling item later in the same surface block.
 
 After inferring all clauses of a function body, the accumulated `EffectRow`
 (merged across clauses) is checked against the declared `needs` row from the
-annotation. This uses `check_effects_via_row`: if the declared row is open, any
-extras are allowed; if closed, undeclared effects are an error.
+annotation. This uses `check_effects_via_row`: a family both rows name is one
+application, so its arguments are unified; if the declared row is closed,
+undeclared effects are an error; if it is open, extras are allowed, except
+that an effect with type parameters must be named. The tail is the caller's
+row and says nothing about what this body performs, so an unnamed
+`Fail String` would be invisible to callers, who could then install a
+`Fail Int` handler around the call.
+
+A call emits the callee's row into the accumulator, tails included. The one
+tail left out is a row variable that the callee's signature does not tie to
+any argument (`fun f : Unit -> Int needs {Log, ..r}`): each call instantiates
+it afresh, nothing can bind it, and emitting it would only leave an
+unannotated caller with an open row of its own. A recursive call to a function
+still being inferred performs that function's own row variable, which is
+likewise dropped when the function's row is built.
 
 Function boundary checks also enforce forwarding obligations:
 
@@ -201,15 +412,39 @@ Function boundary checks also enforce forwarding obligations:
 - calls to open-row trait methods on abstract where-bound variables must
   forward the corresponding `..a` tail
 
+A row variable or an effect argument written in a signature is chosen by the
+caller, so the body must work for every choice. After the body is inferred
+(`check_rigid_row_vars_abstract`, `check_effect_arg_vars_abstract`):
+
+- a declared row variable must not have been unified with a row naming an
+  effect that has type parameters, nor closed (`h f = only_pure f` with
+  `f : .. needs {..r}`); it may be widened with effects that take no type
+  argument, which is how a callback is passed where more effects are allowed.
+  Handler arms may close an operation callback's row variable: the callback
+  finds those effects where the operation was performed.
+- a declared row variable must not have been used in a row together with a
+  type-parameterised effect that the signature does not name next to it
+  (`catch_it (fun () -> fail! "s" + k ())` with `k : .. needs {..t}` needs
+  `needs {Fail String, ..t}` on `k`'s type).
+- a type variable written as an effect argument (`needs {Fail e}`) must not
+  have been pinned to a type or merged with another one. An argument left out
+  (`needs {Fail}`) is a hole the body fills in; it stays one unknown type,
+  not generalised, until the body has been checked.
+
+These matter because impl method bodies are checked before function bodies,
+against the declared signatures.
+
 ### Key Files
 
-- `typechecker/mod.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `merge`, `subtract`), `EffectMeta`, `effects_from_type`, `ImplInfo.method_effects`
+- `typechecker/core.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `subtract_entries`), `Substitution` (row bindings and `row_companions`)
+- `typechecker/mod.rs` -- `emit_effect` / `emit_effects` (the accumulator), `EffectMeta`, `effects_from_type`, `ImplInfo.method_effects`
 - `typechecker/infer.rs` -- `infer_expr`, App absorption logic, lambda effect propagation, concrete trait impl effect emission, open-row trait forwarding surfacing, handler binding detection in `infer_block` (`extract_handler_info`, `handler_info_from_type`)
 - `typechecker/effects.rs` -- `check_effects_via_row`, effect op lookup/instantiation
-- `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, handler subtraction
+- `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, `resolve_handled_effect_entries` (which application a `with` handles, and the open-tail rule), handler subtraction
 - `typechecker/check_decl.rs` -- `collect_annotations` (builds EffectRow on innermost arrow), `check_fun_clauses` (body effect check and forwarding requirements), `innermost_effect_row` helper
 - `typechecker/check_traits.rs` -- impl body effect checking, trait method capability bounds, per-method impl effect collection
-- `typechecker/unify.rs` -- `unify_effect_rows` (row matching, tail binding)
+- `typechecker/unify.rs` -- `unify_effect_rows` (row matching, tail binding), `normalize_row` / `bind_row_checked` / `merge_rows` (one application per family), `check_rigid_row_vars_abstract`, `check_effect_arg_vars_abstract`
+- `typechecker/effect_family_tests.rs` -- tests for the family rule and the handler/open-tail rule
 
 ### EffectMeta
 
@@ -276,40 +511,90 @@ of a callable:
   `_Evidence` and `_ReturnK`.
 - `EvidenceFrame` identifies the Core variable currently carrying a particular
   `EvidenceAbi`.
-- `EffectAbiPlan` records declaration ABIs, instantiated call ABIs, and
-  contextual function-value ABIs by `NodeId`.
+- `EffectAbiPlan` records declaration ABIs and one `CallEffectInfo` per call,
+  by `NodeId`.
 - `EvidenceReframePlan` is the single source-to-target slot mapping used by
-  calls and CPS adapters.
+  calls to named functions.
 
-A callable body indexes evidence using its `CallableAbi`, never the narrower
-set of effects that happened to be performed in that body. Handler insertion
-updates the runtime tuple and the compile-time `EvidenceFrame` together.
-Exported `CallableAbi` metadata is preserved through imports and re-exports;
-the caller's occurrence type supplies concrete applied-effect instantiations.
+A named function's body indexes evidence using its declared `CallableAbi`,
+never the narrower set of effects that happened to be performed in that body.
+Handler insertion updates the runtime tuple and the compile-time
+`EvidenceFrame` together. Exported `CallableAbi` metadata is preserved through
+imports and re-exports and is used as declared at every occurrence.
 
-The plan is completed in two pre-lowering stages. Call classification records
-declarations, inferred callable views, and instantiated call targets. A
-contextual pass then propagates the consuming declaration's expected type
-through calls and containers and records each function value's implementation
-ABI separately from its exposed boundary ABI. Closed callback declarations
-stay closed; an open declaration such as `{Skip, ..e}` keeps its pinned static
-prefix and open tail even when the stored expression has inferred a concrete
-closed set such as `{Foo, Skip}`. Core lowering only reads and asserts this
-completed metadata. Imported named-handler bodies are included under their
-defining module's semantic context; compiler intrinsics retain their explicitly
-registered native callback convention.
+The plan is completed by one pre-lowering pass, call classification, which
+records declarations and the shape of every call. Core lowering only reads
+it. Imported named-handler bodies are included under their defining module's
+semantic context; compiler intrinsics retain their explicitly registered
+native callback convention.
+
+### Function Values
+
+A function *value* is represented from its own type, never from the type its
+context expects (`codegen/lower/tagged.rs`):
+
+| Value | Representation |
+|-------|----------------|
+| Own type is pure | bare Erlang fun of the user arity |
+| Own type is effectful or open-row | `{'$saga_cps', Fun}`, where `Fun` takes `(args..., Evidence, K)` |
+| Named function, called directly | unchanged: `f/N` if pure, `f/(N+2)` if effectful |
+
+A lambda is tagged when an arrow consumed by its own (flattened) parameters
+carries effects or an open row. A named effectful function used as a value,
+or partially applied, becomes a tagged closure that reframes the evidence it
+is called with into the function's declared layout. A dictionary slot holds a
+bare fun or a tagged one according to the method's convention.
+
+The body of a tagged closure uses an open `EvidenceAbi` with no static prefix:
+every operation finds its handler by tag, so a caller passes its own frame
+unchanged and needs no knowledge of the layout the closure was compiled
+against. Positional layout exists only for named functions, whose callers
+know the declared row.
+
+A call through a function value is classified from the callee's type:
+
+- **Pure:** `apply F(Args)` when `F` visibly lowers to a fun of that arity;
+  otherwise a guard `is_function(F, N)` selects the direct apply and
+  `saga_runtime:apply_n/2` handles partial and over-application. A tagged
+  closure can arrive here too: a value whose type has an open row is built
+  tagged, and a consumer that instantiates the row to the empty row sees a
+  pure function (`let run = fun g -> g ()` used as `run (fun () -> 3)`, or an
+  element of a `List (a -> b needs {..e})` used at `e = {}`). At that
+  instance it performs nothing of its own, so `apply_n` runs it with an empty
+  evidence frame and an identity continuation. This is the mirror image of a
+  bare fun arriving at an effectful site. An under-applied tagged closure
+  stays a tagged partial application, and whoever saturates it supplies the
+  frame. If a closure run this way did perform an effect (impossible in a
+  well-typed program), the lookup fails with "effect E was performed where no
+  handler for it is installed".
+- **Effectful or open-row:** a `case` on the value. `{'$saga_cps', G}` with
+  `is_function(G, N + 2)` is applied to the arguments, the caller's frame and
+  the continuation. Anything else (a bare fun, which a pure function used at
+  an effectful type remains, or an arity mismatch) goes to
+  `saga_runtime:apply_cps/4`.
+
+Erlang code does not go through these call shapes: a bridge calls its
+callback as `F(A)`. The wrapper generated for an `@external` function
+therefore passes every parameter declared with a pure function type through
+`saga_runtime:bare_fun(F, N)`, which returns a fun of arity `N` unchanged and
+wraps anything else (a tagged closure at a pure instance, or a fun of another
+arity) in a fun that calls `apply_n`. Callbacks of more than four arguments
+are passed through as they are.
 
 ### Evidence Vector Representation
 
-The evidence vector is a BEAM tuple of per-effect entries. Effect arguments
-are part of an entry's identity, so two applications of one family occupy
-independent slots:
+The evidence vector is a BEAM tuple of per-effect entries. An entry's tag is
+the effect's canonical family name; type arguments are not part of it, so
+`Fail String` and `Fail e` are both tagged `'Std.Fail.Fail'`. This is sound
+because a row holds one application of a family (see "One Application Per
+Effect Family"). A `neweffect` instance is a separate nominal effect and is
+tagged with its own name:
 
 ```erlang
 {
-  {'Std.Fail.Fail<Std.String.String>', {StringFailHandler}},
-  {'Std.Fail.Fail<Std.Int.Int>',       {IntFailHandler}},
-  {'Std.IO.Stdio',                     {EprintHandler, PrintHandler, ReadHandler}}
+  {'Main.UserRepo', {UserLoadHandler}},   %% neweffect UserRepo = Repo UserDb
+  {'Std.Fail.Fail', {FailHandler}},
+  {'Std.IO.Stdio',  {EprintHandler, PrintHandler, ReadHandler}}
 }
 ```
 
@@ -324,16 +609,14 @@ meaning of the vector is:
 ```
 
 This flat representation was chosen over a nested `{StaticSlots, OpenTail}`
-frame. It keeps the CPS function ABI unchanged while allowing a caller to
-select `Repo UsersDb` for a generic `Repo db` callee and forward
-`Repo DataDb` in the same vector.
+frame because it keeps the CPS function ABI unchanged.
 
 The vector is always tagged. Closed-row op calls technically don't need the tag (the static indices suffice), but tagging keeps cross-module ABI uniform and makes runtime panics self-describing.
 
 #### Op Call Lookup
 
 - **Closed row (statically known indices):** `element(OpIdx, element(2, element(EffectIdx, Evidence)))`. Three constant-time element loads.
-- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison. Exact applied tags win. If a handler was installed by code polymorphic in its effect argument, a unique same-family entry may satisfy the lookup; zero matches or multiple matches error. O(n) where n is the number of effects in scope, typically ≤5.
+- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison and raises `{evidence_tag_not_found, Tag}` when no entry has that tag. O(n) where n is the number of effects in scope, typically ≤5.
 
 #### Extending Evidence at `with`
 
@@ -362,45 +645,26 @@ CallEvidence = call 'std_evidence_bridge':'reframe_evidence'(
 apply Callee(Args, CallEvidence, ReturnK)
 ```
 
-Selectors are one-based positions in the caller's static prefix, concrete
-applied-effect atoms found in its tagged remainder, or `{Position, Tag}` pairs
-when a known static family slot must be relabeled. Selected entries are ordered
-as the callee expects. The reframe plan also names which unselected source
+Selectors are one-based positions in the caller's static prefix, or effect
+tags (atoms) looked up in its tagged remainder. Selection never changes an
+entry's tag. Selected entries are ordered as the callee expects. The reframe plan also names which unselected source
 static positions instantiate the target row variable: a closed caller's extra
 slots can become that tail, while an already-open caller forwards its tagged
-tail without leaking handled or omitted declaration-prefix slots into it. An
-atom selector relabels a unique polymorphic-family entry to the concrete
-applied identity requested by the callee; a position/tag pair does the same
-without searching a forwarded tail that may contain a sibling application.
-Closed-row
-Closed projection and relabeling use the same selector language as open-row
-reframing.
-When a closed CPS function value is passed through an open callback slot,
-`select_evidence` uses the position/tag selector language above but drops every
-unselected entry. The open tail belongs to the adapter ABI and must not enter
-the closed function: its local handler insertion and positional lookups assume
-a canonical closed vector.
-Thus a handler installed inside generic code may initially carry a tag such as
-`Abort<$e>`, while the evidence frame delivered to a concrete callback carries
-`Abort<String>`. Ambiguous same-family frames still error. A generic callee
-uses ordinary positional lookup and does not receive a separate runtime type
-witness. Reframing costs one tuple allocation at a cross-row call boundary.
+tail without leaking handled or omitted declaration-prefix slots into it.
+Closed projection uses the same selector language as open-row reframing.
+A handler installed inside code generic in an effect argument carries the same
+tag (`Abort`) as one installed by concrete code, so generic and concrete code
+agree on the frame without any runtime type witness. Reframing costs one tuple
+allocation at a cross-row call boundary.
 
-A partial application's runtime evidence shape comes from its compiled head,
-not solely from its instantiated result type. For example, partially applying
-`route : ... needs {Skip, ..e}` produces a closure whose static prefix remains
-`Skip` with an open tail, even when inference resolves `..e` to a concrete
-closed set at that occurrence. Treating the closure as the canonical union of
-that set would move `Skip` away from the slot used by the compiled `route`
-body.
-
-A lambda placed into a callback slot likewise uses the **expected callback
-row** as its positional ABI, even when the lambda body performs only a subset
-of those effects. Its inferred row contributes additional effects absorbed by
-an expected open tail, but it cannot remove an unused expected slot. Otherwise
-the caller and lambda can assign different meanings to the same index (for
-example, a `{Repo, Rollback e}` callback that performs only `Rollback` must
-still read it from slot 2).
+Reframing applies only to calls whose callee is a named function. A call
+through a function value passes the caller's frame unchanged, because a
+closure body looks everything up by tag (see "Function Values"). A partial
+application of a named effectful function is a tagged closure over the
+supplied arguments; when it is finally called it reframes the frame it is
+given into the head's declared layout, so partially applying
+`route : ... needs {Skip, ..e}` still calls `route` with `Skip` in its
+declared slot whatever the instantiation of `..e`.
 
 #### Effect-Operation Callbacks With Open Tails
 
@@ -417,12 +681,16 @@ fun transaction :
 The handler invoking that callback supplies the named static frame (`Repo` and
 `Rollback e`). The original perform site supplies `..r`. The callback closure
 therefore retains the perform-site evidence, but does not use it directly:
-`append_tail/3` relabels the handler's call-time static prefix to the callback's
-concrete applied tags, overlays that frame, and appends only captured entries
-not replaced there. This lets a transaction-scoped `Repo` shadow the outer
-repository while unrelated effects in `..r` continue to the callback.
+`append_tail/3` takes the entries for the named effects from the handler's
+call-time frame and every other entry from the captured frame. This lets a
+transaction-scoped `Repo` shadow the outer repository while effects in `..r`
+reach the handlers around the perform site, even when the handler arm itself
+runs under another handler of the same effect.
 Capturing the whole perform-site frame as the callback's active frame would
-incorrectly discard both nested handlers.
+incorrectly discard both nested handlers. A lambda argument applies the
+overlay at the top of its own body; any other callback value (a variable, a
+named function) is wrapped in a tagged closure that applies it and then calls
+the value.
 
 #### What Saga Doesn't Use From Koka
 
@@ -524,16 +792,59 @@ assuming each layer defines a `return` clause and completes normally. If an op
 handler aborts instead of resuming, outer `return` clauses still run only when
 their own surrounding handled expression completes.
 
+### The Continuation of a `with`
+
+Everything after a `with` in the enclosing body is the continuation of the
+whole `with` expression: of its `return` clause applied to the handled
+computation's result, and of any arm that aborts. How that continuation
+reaches the handled computation depends on the handler
+(`with_handler_chains_continuation`):
+
+- **No arm uses the value `resume` returns** (arms that never resume, and arms
+  whose every `resume` is in tail position; no `finally`; handler statically
+  known). The `with` is CPS-chained like an effectful call. The handled
+  computation's return continuation is the `return` clause, whose body is
+  lowered with the outer continuation as its own (or the outer continuation
+  itself); aborting arms apply the outer continuation to their value. An
+  operation performed inside and handled further out therefore captures the
+  rest of the enclosing body, and a handler that aborts it skips that rest.
+  This holds in tail position (the outer continuation is `_ReturnK`) and in
+  every other position (`let v = e with h`, an operand, an argument, a
+  condition or scrutinee: the outer continuation is the rest of the body).
+- **An arm uses the value of `resume`** (`let r = resume x`,
+  `resume a + resume b`, state-passing and collecting handlers), has a
+  `finally` block, or the handler is a runtime value. `resume` must return the
+  value of the `with`, so the handled computation cannot be given the rest of
+  the body: when the `with` is not in tail position it is lowered as a
+  delimiter that returns a plain value, to which the rest is then applied.
+
+The second form is not complete. An operation performed inside such a `with`
+and handled further out captures a continuation that ends at the `with`, so a
+handler that aborts it (or uses the value of its own `resume`) sees the wrong
+extent: the abort value becomes the value of the `with` and the rest of the
+body runs. And in tail position of a body that has a `_ReturnK`, such a `with`
+is still given that continuation, so `resume` returns the caller's answer.
+Both need the arm's code after `resume` to be a continuation rather than
+Erlang stack frames; see the ignored tests
+`non_tail_with_delimited_handler_under_aborting_outer_handler` and
+`tail_with_delimited_handler_resume_returns_value_of_with`.
+
+A handled block that ends in an expression with an effectful sub-expression
+and has no return continuation at all (`{ g 3 + 100 } with h` in a pure
+function) is given an identity continuation, so that expression is chained
+like the same expression in an effectful function.
+
 ### Lowering Structure
 
 Effect ABI metadata is computed once by a pre-pass and stored in
-`EffectAbiPlan` (keyed by AST `NodeId`). It contains declaration ABIs,
-`CallEffectInfo` entries, and the inferred/implementation/boundary ABIs of
-function values. The lowerer consumes those facts and maps its current
-`EvidenceFrame` to each planned target through `EvidenceReframePlan`. There is
-no inline call-shape recognition at lowering time -- adding a new call shape
-(e.g. `DictMethodAccess`, lambda-headed call) means teaching the planner one
-new branch, not auditing every dispatcher.
+`EffectAbiPlan` (keyed by AST `NodeId`). It contains declaration ABIs and
+one `CallEffectInfo` per `App` node. A call to a known function (top-level,
+imported, block-local, or a dictionary method) is classified from the
+callee's declared ABI; every other call is a call through a function value
+and is classified from the head's entry in the type table. For a known
+callee the lowerer maps its current `EvidenceFrame` to the planned target
+through `EvidenceReframePlan`; for a function value it passes the frame
+unchanged.
 
 `CallEffectInfo` has three runtime shapes:
 
@@ -541,7 +852,8 @@ new branch, not auditing every dispatcher.
 - `StaticOps` -- closed-row CPS call; evidence can be projected to the static
   effect set
 - `RowForwarded` -- open-row CPS call; caller evidence is reframed into the
-  callee's positional static prefix plus its unselected tagged tail
+  callee's positional static prefix plus its unselected tagged tail. A call
+  through a function value is this shape with an empty prefix
 
 `src/codegen/optimize.rs` records optional optimizer facts before lowering.
 Those facts are independent metadata that the lowerer may consume for direct
@@ -574,11 +886,13 @@ nested `with` semantics; the native interop happens inside the handler body.
 ### Key Files
 
 - `codegen/runtime_shape.rs` -- `EvidenceAbi`, `CallableAbi`, handler-installation and reframe plans, selector compatibility, and slot resolution.
-- `codegen/call_effects.rs` -- `EffectAbiPlan`, `CallEffectInfo`, and the planner for declaration, call, and function-value ABIs.
+- `codegen/call_effects.rs` -- `EffectAbiPlan`, `CallEffectInfo`, and the classifier for declaration and call ABIs.
+- `codegen/lower/tagged.rs` -- the tagged-closure representation of function values: tagging, the tag-dispatching call, named functions as values.
+- `stdlib/runtime.erl` -- `saga_runtime:apply_n/2` and `apply_cps/4`, the slow path of calls through function values.
 - `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
 - `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
 - `codegen/lower/evidence.rs` -- `EvidenceFrame` and thin Core emitters for the six runtime bridge operations.
-- `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values and executes `EvidenceReframePlan` for every effectful head shape.
+- `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values, executes `EvidenceReframePlan` for calls to known functions, and lowers calls through function values.
 - `codegen/lower/effects/ops.rs` -- resolves static or dynamic operation slots through `EvidenceAbi`.
 - `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.

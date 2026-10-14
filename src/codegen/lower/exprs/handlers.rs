@@ -88,12 +88,22 @@ impl<'a> Lowerer<'a> {
     /// Desugars to nested case expressions: each binding is a case on the
     /// scrutinee; a successful pattern match continues to the next binding,
     /// a mismatch routes the raw value to the else arms.
+    ///
+    /// With `k_var`, the value of the whole expression is passed to that
+    /// continuation instead of returned, and binding expressions, the
+    /// success expression and else-arm bodies that perform effects are
+    /// CPS-chained into it.
     pub(crate) fn lower_do(
         &mut self,
         bindings: &[(Pat, Expr)],
         success: &Expr,
         else_arms: &[CaseArm],
+        k_var: Option<&str>,
     ) -> CExpr {
+        let lower_body = |this: &mut Self, body: &Expr| match k_var {
+            Some(k) => this.lower_branch_with_k(body, k),
+            None => this.lower_expr(body),
+        };
         // Pre-lower the else arms once; clone them at each failure point.
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
@@ -104,17 +114,18 @@ impl<'a> Lowerer<'a> {
                     self.handler_origin_module(),
                 ),
                 guard: arm.guard.as_ref().map(|g| self.lower_expr_value(g)),
-                body: self.lower_expr(&arm.body),
+                body: lower_body(self, &arm.body),
             })
             .collect();
 
         // Build from the innermost binding outward.
-        let mut inner = self.lower_expr(success);
+        let mut inner = lower_body(self, success);
 
         for (pat, expr) in bindings.iter().rev() {
             let scrut_var = self.fresh();
             let fail_var = self.fresh();
-            let val_ce = self.lower_expr_value(expr);
+            let chained = k_var.is_some() && self.branch_is_effectful(expr);
+            let val_ce = (!chained).then(|| self.lower_expr_value(expr));
 
             let success_pat =
                 self.lower_pat(pat, &self.constructor_atoms, self.handler_origin_module());
@@ -135,7 +146,13 @@ impl<'a> Lowerer<'a> {
                 else_with_fallthrough.push(CArm {
                     pat: CPat::Var(fail_var.clone()),
                     guard: None,
-                    body: CExpr::Var(fail_var),
+                    body: match k_var {
+                        Some(k) => CExpr::Apply(
+                            Box::new(CExpr::Var(k.to_string())),
+                            vec![CExpr::Var(fail_var)],
+                        ),
+                        None => CExpr::Var(fail_var),
+                    },
                 });
             }
             let fail_arm = CArm {
@@ -162,7 +179,10 @@ impl<'a> Lowerer<'a> {
                 vec![success_arm, fail_arm]
             };
             let case_expr = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms);
-            inner = CExpr::Let(scrut_var, Box::new(val_ce), Box::new(case_expr));
+            inner = match val_ce {
+                Some(val_ce) => CExpr::Let(scrut_var, Box::new(val_ce), Box::new(case_expr)),
+                None => self.lower_bind_effectful_expr(expr, scrut_var, case_expr),
+            };
         }
 
         inner

@@ -107,6 +107,16 @@ semantically the same source node.
 Effect normalization pre-pass. Prepares the elaborated AST for the CPS-aware
 lowerer.
 
+A direct operation call (`op! x`) nested in an expression is lifted into a
+`let` ahead of the statement. The pass has no types, so to keep evaluation
+left to right it also lifts every sibling evaluated before the lifted call
+that is not a plain value (variable, literal, lambda, data built from those),
+each into its own `let`, in order. The variable replacing such a sibling keeps
+the sibling's `NodeId`, so its type is still found. Conditionally evaluated
+parts (`if`/`case` branches, the right operand of `&&`/`||`, lambda bodies,
+handler arms) are separate scopes. An expression with no nested operation call
+is left unchanged.
+
 ### Backend Resolve (`src/codegen/resolve.rs`)
 
 This phase is now a **backend-oriented projection layer**, not a second
@@ -157,6 +167,11 @@ node. This is the single place that decides the runtime call shape:
 - `StaticOps` -- closed-row CPS call with a known static effect set
 - `RowForwarded` -- open-row CPS call that forwards caller evidence
 
+A call to a known function is classified from the callee's declared ABI. Any
+other call goes through a function value and is classified from the head's
+own type: it is a CPS call when an arrow consumed by the supplied arguments
+carries effects or an open row.
+
 The rest of lowering consumes this map. It should not rediscover call effect
 shape from raw syntax.
 
@@ -169,6 +184,9 @@ This phase is responsible for:
 - consuming `CallEffectInfo` and optimizer facts
 - CPS transformation for algebraic effects when the classified shape requires it
 - handler lowering and inlining
+- representing function values from their own type: a bare fun when pure, a
+  tagged CPS closure `{'$saga_cps', Fun}` when effectful (`lower/tagged.rs`);
+  there is no planning pass or adapter between the two
 - saturated vs partial application detection
 - handler parameter / return continuation threading
 - direct fast paths proven by optimizer facts

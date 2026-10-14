@@ -54,6 +54,9 @@ pub struct CompiledModule {
     pub effect_at_node: HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     /// Resolved expression types used when lowering imported handler bodies.
     pub type_at_node: HashMap<ast::NodeId, crate::typechecker::Type>,
+    /// Complete per-expression type table (`CheckResult::expr_types`). Read
+    /// by the lowerer under tagged closures (`lower/tagged.rs`).
+    pub expr_types: HashMap<ast::NodeId, crate::typechecker::Type>,
     /// Resolved binding/pattern types used by contextual ABI planning inside
     /// imported handler bodies.
     pub type_at_span: HashMap<crate::token::Span, crate::typechecker::Type>,
@@ -76,6 +79,7 @@ pub struct ModuleSemantics<'a> {
     pub front_resolution: &'a crate::typechecker::ResolutionResult,
     pub effect_at_node: &'a HashMap<ast::NodeId, crate::typechecker::EffectEntry>,
     pub type_at_node: &'a HashMap<ast::NodeId, crate::typechecker::Type>,
+    pub expr_types: &'a HashMap<ast::NodeId, crate::typechecker::Type>,
     pub type_at_span: &'a HashMap<crate::token::Span, crate::typechecker::Type>,
     pub optimization: &'a optimize::OptimizationFacts,
 }
@@ -142,6 +146,7 @@ impl CodegenContext {
             front_resolution: &m.front_resolution,
             effect_at_node: &m.effect_at_node,
             type_at_node: &m.type_at_node,
+            expr_types: &m.expr_types,
             type_at_span: &m.type_at_span,
             optimization: &m.optimization,
         })
@@ -158,6 +163,7 @@ impl CodegenContext {
                     front_resolution: &m.front_resolution,
                     effect_at_node: &m.effect_at_node,
                     type_at_node: &m.type_at_node,
+                    expr_types: &m.expr_types,
                     type_at_span: &m.type_at_span,
                     optimization: &m.optimization,
                 },
@@ -201,6 +207,7 @@ pub fn compile_module_from_result(
         front_resolution: mod_result.resolution.clone(),
         effect_at_node: mod_result.effect_at_node.clone(),
         type_at_node: mod_result.type_at_node.clone(),
+        expr_types: mod_result.expr_types.clone(),
         type_at_span: mod_result.type_at_span.clone(),
         effect_abi_plan: call_effects::EffectAbiPlan::default(),
         effect_abi_plan_ready: false,

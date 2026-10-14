@@ -15,6 +15,7 @@ mod effects;
 pub(crate) mod exhaustiveness;
 mod handlers;
 mod infer;
+mod open_row_refs;
 mod patterns;
 mod records;
 mod resolve;
@@ -30,6 +31,16 @@ pub use result::{
 };
 pub use state::*;
 
+#[cfg(test)]
+mod effect_family_impl_tests;
+#[cfg(test)]
+mod effect_family_tests;
+#[cfg(test)]
+mod effect_row_rule_tests;
+#[cfg(test)]
+mod expr_types_tests;
+#[cfg(test)]
+mod guard_purity_tests;
 #[cfg(test)]
 mod tests;
 
@@ -83,6 +94,8 @@ impl Checker {
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
             trait_forward_row_vars: std::collections::HashMap::new(),
+            call_head: None,
+            rigid_row_vars: std::collections::HashMap::new(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),
@@ -95,10 +108,13 @@ impl Checker {
             resolution: ResolutionResult::default(),
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
+            unify_path: Vec::new(),
+            row_subsumptions: Vec::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
             internal_handler_normalization_warnings: HashSet::new(),
             lsp: LspState::default(),
+            expr_types: HashMap::new(),
             allow_bodyless_annotations: false,
             current_module: None,
             prelude_imports: Vec::new(),
@@ -210,6 +226,22 @@ impl Checker {
             .type_at_node
             .entry(node_id)
             .or_insert_with(|| ty.clone());
+    }
+
+    /// Record an expression's type in the codegen type table. Last write
+    /// wins: see `Checker::expr_types`.
+    pub(crate) fn record_expr_type(&mut self, node_id: crate::ast::NodeId, ty: &Type) {
+        if !self.modules.skip_expr_types {
+            self.expr_types.insert(node_id, ty.clone());
+        }
+    }
+
+    /// Stop populating the codegen expression type table. For drivers that
+    /// never run codegen (the language server). Applies to this checker and
+    /// to the module checkers it spawns for imports.
+    pub fn disable_expr_types(&mut self) {
+        self.modules.skip_expr_types = true;
+        self.expr_types.clear();
     }
 
     /// Record the type of a pattern binding (by Span).
@@ -596,31 +628,51 @@ impl Checker {
         (fields, result_ty)
     }
 
-    /// Push effects onto the accumulator, deduplicating by name.
-    pub(crate) fn emit_effects(&mut self, effs: &EffectRow) {
+    /// Add the effects (and still-open tails) of `effs` to the accumulator.
+    ///
+    /// The accumulator is a row, so it holds one application per effect
+    /// family: an entry whose family is already present has its arguments
+    /// unified with the existing one, and a mismatch is a type error at
+    /// `span`.
+    pub(crate) fn emit_effects(&mut self, effs: &EffectRow, span: Span) -> Result<(), Diagnostic> {
         for entry in &effs.effects {
-            if !self
-                .effect_row
-                .effects
-                .iter()
-                .any(|e| e.same_instantiation(entry))
-            {
-                self.effect_row.effects.push(entry.clone());
+            self.emit_effect(entry.name.clone(), entry.args.clone(), span)?;
+        }
+        for tail in &effs.tails {
+            // A tail that has resolved to a concrete type is the row of an
+            // open-row trait method at a known impl; its effects are emitted
+            // from the impl's facts instead.
+            let tail = self.sub.apply(tail);
+            if matches!(tail, Type::Var(_)) && !self.effect_row.tails.contains(&tail) {
+                self.effect_row.tails.push(tail);
             }
         }
+        Ok(())
     }
 
-    /// Push a single named effect onto the accumulator, deduplicating by exact instantiation.
-    pub(crate) fn emit_effect(&mut self, name: String, args: Vec<Type>) {
-        if !self
+    /// Add a single effect to the accumulator (see `emit_effects`).
+    pub(crate) fn emit_effect(
+        &mut self,
+        name: String,
+        args: Vec<Type>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let entry = EffectEntry::unnamed(name, args);
+        let existing = self
             .effect_row
             .effects
             .iter()
-            .any(|e| e.name == name && e.args == args)
-        {
-            self.effect_row
-                .effects
-                .push(EffectEntry::unnamed(name, args));
+            .find(|e| e.matches(&entry))
+            .cloned();
+        match existing {
+            Some(existing) if existing.same_instantiation(&entry) => Ok(()),
+            Some(existing) => self
+                .unify_family(&existing, &entry)
+                .map_err(|e| e.with_span(span)),
+            None => {
+                self.effect_row.effects.push(entry);
+                Ok(())
+            }
         }
     }
 
@@ -716,77 +768,14 @@ pub fn effects_from_type(ty: &Type) -> HashSet<String> {
     effects
 }
 
-/// Stable codegen identity for one applied effect entry.
+/// Runtime identity of an effect entry: its family name.
 ///
-/// Effect families without arguments retain their existing key. Applied
-/// effects include canonical structural type arguments so distinct runtime
-/// handler slots cannot collapse to the same family tag.
+/// Type arguments are not part of the identity. The typechecker guarantees a
+/// row holds at most one application of a family, so the family name alone
+/// selects the handler. `neweffect` instances are separate nominal effects
+/// and carry their own names.
 pub fn applied_effect_key(entry: &EffectEntry) -> String {
-    if entry.args.is_empty()
-        || matches!(
-            entry.name.rsplit('.').next().unwrap_or(&entry.name),
-            "Actor" | "Process" | "Monitor" | "Link" | "Timer"
-        )
-    {
-        return entry.name.clone();
-    }
-    let args = entry
-        .args
-        .iter()
-        .map(runtime_type_key)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{}<{}>", entry.name, args)
-}
-
-/// Return the canonical family portion of an applied-effect codegen key.
-pub fn applied_effect_family(key: &str) -> &str {
-    key.split_once('<').map_or(key, |(family, _)| family)
-}
-
-fn runtime_type_key(ty: &Type) -> String {
-    match ty {
-        Type::Var(id) => format!("${id}"),
-        Type::Con(name, args) if args.is_empty() => name.clone(),
-        Type::Con(name, args) => format!(
-            "{}<{}>",
-            name,
-            args.iter()
-                .map(runtime_type_key)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Type::Fun(param, ret, row) => {
-            let effects = row
-                .effects
-                .iter()
-                .map(applied_effect_key)
-                .collect::<Vec<_>>()
-                .join(",");
-            let tails = row
-                .tails
-                .iter()
-                .map(runtime_type_key)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "fn({})->{}!{{{}|{}}}",
-                runtime_type_key(param),
-                runtime_type_key(ret),
-                effects,
-                tails
-            )
-        }
-        Type::Record(fields) => format!(
-            "{{{}}}",
-            fields
-                .iter()
-                .map(|(name, ty)| format!("{name}:{}", runtime_type_key(ty)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Type::Error => "?".to_string(),
-    }
+    entry.name.clone()
 }
 
 /// Collect exact effect entries from a callback parameter type's effect rows.

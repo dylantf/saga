@@ -1,0 +1,83 @@
+import Std.Time (monotonic_ms)
+
+# Benchmark: a deep call chain that performs NO operations in the hot path.
+#
+# Five effects are in scope. `drive` calls a chain of six named functions
+# whose rows alternate between closed rows narrower than the caller's and open
+# rows, so every call in the chain has to build a new evidence frame for its
+# callee. Operations are performed once, after the last iteration.
+
+# Edit this to change the workload. Each iteration makes seven calls.
+fun iterations : Unit -> Int
+iterations () = 5000000
+
+effect Alpha {
+  fun alpha : Int -> Int
+}
+
+effect Beta {
+  fun beta : Int -> Int
+}
+
+effect Gamma {
+  fun gamma : Int -> Int
+}
+
+effect Delta {
+  fun delta : Int -> Int
+}
+
+effect Epsilon {
+  fun epsilon : Int -> Int
+}
+
+# The step is a run-time value, so no handler is statically known.
+fun make_alpha : (step: Int) -> Handler Alpha
+make_alpha step = handler for Alpha {
+  alpha n = resume (n + step)
+}
+
+# open {..e}, called from closed {Alpha}
+fun level6 : Int -> Int needs {..e}
+level6 x = (x * 7 + 1) % 1000003
+
+# closed {Alpha}, called from open {Alpha, ..e}
+fun level5 : Int -> Int needs {Alpha}
+level5 x = level6 (x + 5)
+
+# open {Alpha, ..e}, called from closed {Alpha, Beta, Gamma}
+fun level4 : Int -> Int needs {Alpha, ..e}
+level4 x = level5 (x + 4)
+
+# closed {Alpha, Beta, Gamma}, called from open {Alpha, Beta, Gamma, ..e}
+fun level3 : Int -> Int needs {Alpha, Beta, Gamma}
+level3 x = level4 (x + 3)
+
+# open {Alpha, Beta, Gamma, ..e}, called from closed {Alpha, Beta, Gamma, Delta}
+fun level2 : Int -> Int needs {Alpha, Beta, Gamma, ..e}
+level2 x = level3 (x + 2)
+
+# closed, one effect narrower than `drive`
+fun level1 : Int -> Int needs {Alpha, Beta, Gamma, Delta}
+level1 x = level2 (x + 1)
+
+fun drive : Int -> Int -> Int needs {Alpha, Beta, Gamma, Delta, Epsilon}
+drive n acc =
+  if n == 0 then epsilon! (delta! (gamma! (beta! (alpha! acc))))
+  else drive (n - 1) (level1 (acc + n))
+
+main () = {
+  let n = iterations ()
+  let t0 = monotonic_ms ()
+  let a = make_alpha (1 + n % 2)
+  let result = drive n 0 with {
+    a,
+    beta n = resume (n + 2),
+    gamma n = resume (n + 3),
+    delta n = resume (n + 4),
+    epsilon n = resume (n + 5),
+  }
+  let ms = monotonic_ms () - t0
+  dbg $"deep_call_chain: {result}"
+  dbg $"elapsed_ms: {ms}"
+}

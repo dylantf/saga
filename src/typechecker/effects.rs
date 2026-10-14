@@ -84,16 +84,37 @@ impl Checker {
     /// Build a closed `EffectRow` from a list of `EffectRef`s (e.g. a handler's `needs` clause).
     /// Each ref is resolved to its canonical name via `resolve_effect`.
     pub(crate) fn effect_row_from_refs(&mut self, refs: &[ast::EffectRef]) -> EffectRow {
+        let mut effects: Vec<EffectEntry> = Vec::new();
+        for e in refs {
+            let resolved_name = self.canonical_effect_name(&e.name);
+            let args = self.convert_effect_ref_args(e, &mut vec![]);
+            let entry = EffectEntry::unnamed(resolved_name, args);
+            if let Err(err) = self.push_declared_effect(&mut effects, entry, e.span) {
+                self.collected_diagnostics.push(err);
+            }
+        }
         EffectRow {
-            effects: refs
-                .iter()
-                .map(|e| {
-                    let resolved_name = self.canonical_effect_name(&e.name);
-                    let args = self.convert_effect_ref_args(e, &mut vec![]);
-                    EffectEntry::unnamed(resolved_name, args)
-                })
-                .collect(),
+            effects,
             tails: vec![],
+        }
+    }
+
+    /// Add an entry to a row being built from a written `needs {...}` list.
+    /// A row holds one application per effect family, so writing a family
+    /// twice is an error unless the two are literally the same.
+    pub(crate) fn push_declared_effect(
+        &mut self,
+        effects: &mut Vec<EffectEntry>,
+        entry: EffectEntry,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        match effects.iter().find(|seen| seen.matches(&entry)) {
+            Some(seen) if seen.same_instantiation(&entry) => Ok(()),
+            Some(seen) => Err(self.family_conflict(seen, &entry).with_span(span)),
+            None => {
+                effects.push(entry);
+                Ok(())
+            }
         }
     }
 
@@ -163,20 +184,57 @@ impl Checker {
         if body_effs.is_empty() && declared_row.is_empty() {
             return Ok(());
         }
-        let mut declared = self.sub.apply_effect_row(declared_row);
+        // The body's row and the declared row describe the same computation,
+        // so a family both name is one application: unify the arguments.
+        let declared = self.normalize_row_at(declared_row, span)?;
+        let body_effs = self.normalize_row_at(body_effs, span)?;
+        for entry in &body_effs.effects {
+            if let Some(decl) = declared.effects.iter().find(|d| d.matches(entry)) {
+                self.unify_family(decl, entry)
+                    .map_err(|e| e.with_span(span))?;
+            }
+        }
+        // Whatever the body's still-open tails turn out to be, they are part
+        // of the declared row too.
+        for tail in body_effs.tail_var_ids() {
+            for decl in &declared.effects {
+                self.add_row_companion(tail, decl)
+                    .map_err(|e| e.with_span(span))?;
+            }
+        }
+        let declared = self.sub.apply_effect_row(&declared);
+        let body_effs = self.sub.apply_effect_row(&body_effs);
 
-        self.match_effects_against_declared(body_effs, &declared, span)?;
-        declared = self.sub.apply_effect_row(&declared);
-        let body_effs = self.sub.apply_effect_row(body_effs);
-
-        // Open row: extras flow through the tail variable(s)
+        // Open row: extras flow through the tail variable(s). An effect with
+        // type parameters is the exception. The tail is chosen by the caller
+        // and says nothing about what this body performs, so an unnamed
+        // `Fail String` would be invisible to callers, and a handler they
+        // install for `Fail Int` would receive its operations.
         if declared.is_open() {
+            for entry in &body_effs.effects {
+                let parameterised = self
+                    .effects
+                    .get(&entry.name)
+                    .is_some_and(|info| !info.type_params.is_empty());
+                if parameterised && !declared.effects.iter().any(|e| e.matches(entry)) {
+                    let shown = self.prettify_effect_entry(entry);
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "{label} uses the effect `{shown}`, which its 'needs' clause does \
+                             not name. An open row (`..r`) stands for the caller's effects; an \
+                             effect with a type argument must be named so that callers handle \
+                             it at that type. Add `{shown}` to the 'needs' clause"
+                        ),
+                    ));
+                }
+            }
             return Ok(());
         }
         // Closed row: every body effect must appear in declared
         let mut undeclared = Vec::new();
         for entry in &body_effs.effects {
-            if !declared.effects.iter().any(|e| e.same_instantiation(entry)) {
+            if !declared.effects.iter().any(|e| e.matches(entry)) {
                 undeclared.push(self.prettify_effect_entry(entry));
             }
         }
@@ -215,56 +273,6 @@ impl Checker {
                 ),
             ))
         }
-    }
-
-    /// Match body effects against compatible applied entries in a declaration.
-    fn match_effects_against_declared(
-        &mut self,
-        body_effs: &EffectRow,
-        declared: &EffectRow,
-        span: crate::token::Span,
-    ) -> Result<(), Diagnostic> {
-        let applied_body = self.sub.apply_effect_row(body_effs);
-        for entry in &applied_body.effects {
-            let family_candidates: Vec<_> = declared
-                .effects
-                .iter()
-                .filter(|candidate| candidate.matches(entry))
-                .cloned()
-                .collect();
-            if family_candidates.is_empty() {
-                continue;
-            }
-            let mut compatible = Vec::new();
-            for candidate in family_candidates {
-                let saved = self.sub.clone();
-                let ok = candidate.args.len() == entry.args.len()
-                    && candidate
-                        .args
-                        .iter()
-                        .zip(&entry.args)
-                        .all(|(decl_arg, body_arg)| self.unify(decl_arg, body_arg).is_ok());
-                self.sub = saved;
-                if ok {
-                    compatible.push(candidate);
-                }
-            }
-            if compatible.len() > 1 {
-                return Err(Diagnostic::error_at(
-                    span,
-                    format!(
-                        "ambiguous effect application `{}`: it matches multiple entries in the declared effect row",
-                        self.prettify_effect_entry(entry)
-                    ),
-                ));
-            }
-            if let Some(candidate) = compatible.pop() {
-                for (decl_arg, body_arg) in candidate.args.iter().zip(&entry.args) {
-                    self.unify_at(decl_arg, body_arg, span)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Find which effect an operation belongs to. Returns the canonical
@@ -679,65 +687,39 @@ impl Checker {
         }
 
         // Apply substitutions so any already-bound tails are resolved.
-        let applied: Vec<EffectRow> = rows.iter().map(|r| self.sub.apply_effect_row(r)).collect();
+        let mut applied: Vec<EffectRow> = Vec::with_capacity(rows.len());
+        for row in rows {
+            applied.push(self.normalize_row_at(row, span)?);
+        }
 
-        // Build the union of entries.
-        //
-        // Merge compatible applications while preserving incompatible concrete
-        // applications of the same family as independent row entries.
+        // Build the union of entries. The joined row holds one application
+        // per family: the same family in two inputs is the same effect, so
+        // its arguments are unified.
         let mut union: Vec<EffectEntry> = Vec::new();
         for row in &applied {
             for entry in &row.effects {
-                if union
+                match union
                     .iter()
-                    .any(|existing| existing.same_instantiation(entry))
+                    .find(|existing| existing.matches(entry))
+                    .cloned()
                 {
-                    continue;
-                }
-                let family_only_runtime = matches!(
-                    entry.name.rsplit('.').next().unwrap_or(&entry.name),
-                    "Actor" | "Process" | "Monitor" | "Link" | "Timer"
-                );
-                let mut merged = false;
-                for existing in &mut union {
-                    if !existing.matches(entry) || existing.args.len() != entry.args.len() {
-                        continue;
-                    }
-                    let saved = self.sub.clone();
-                    let compatible = existing
-                        .args
-                        .iter()
-                        .zip(&entry.args)
-                        .all(|(a, b)| self.unify(a, b).is_ok());
-                    if compatible {
-                        existing.args = existing
-                            .args
-                            .iter()
-                            .map(|arg| self.sub.apply(arg))
-                            .collect();
-                        merged = true;
-                        break;
-                    }
-                    self.sub = saved;
-                    if family_only_runtime {
-                        let existing_args = existing.args.clone();
-                        for (a, b) in existing_args.iter().zip(&entry.args) {
-                            self.unify_at(a, b, span)?;
+                    Some(existing) => {
+                        if !existing.same_instantiation(entry) {
+                            self.unify_family(&existing, entry)
+                                .map_err(|e| e.with_span(span))?;
                         }
-                        existing.args = existing
-                            .args
-                            .iter()
-                            .map(|arg| self.sub.apply(arg))
-                            .collect();
-                        merged = true;
-                        break;
                     }
-                }
-                if !merged {
-                    union.push(entry.clone());
+                    None => union.push(entry.clone()),
                 }
             }
         }
+        let union: Vec<EffectEntry> = union
+            .into_iter()
+            .map(|entry| EffectEntry {
+                name: entry.name,
+                args: entry.args.iter().map(|arg| self.sub.apply(arg)).collect(),
+            })
+            .collect();
 
         // Decide tail. If any input is open, the result is open and shares
         // a single fresh tail var; otherwise the result is closed.
@@ -766,7 +748,7 @@ impl Checker {
             }
             let extras: Vec<EffectEntry> = union
                 .iter()
-                .filter(|u| !row.effects.iter().any(|re| re.same_instantiation(u)))
+                .filter(|u| !row.effects.iter().any(|re| re.matches(u)))
                 .cloned()
                 .collect();
             for (i, &tail_id) in tail_ids.iter().enumerate() {
@@ -777,16 +759,18 @@ impl Checker {
                     effects: if i == 0 { extras.clone() } else { vec![] },
                     tails: vec![shared_tail.clone()],
                 };
-                self.sub
-                    .bind_row(tail_id, binding)
+                self.bind_row_checked(tail_id, binding)
                     .map_err(|e| e.with_span(span))?;
             }
         }
 
-        Ok(EffectRow {
-            effects: union,
-            tails: vec![shared_tail],
-        })
+        self.normalize_row_at(
+            &EffectRow {
+                effects: union,
+                tails: vec![shared_tail],
+            },
+            span,
+        )
     }
 
     /// Join N types into a single type that all inputs fit into.
@@ -840,7 +824,8 @@ impl Checker {
 
         let joined_param = params[0].clone();
         for p in &params[1..] {
-            self.unify_at(&joined_param, p, span)?;
+            // Parameter types sit inside the function types being joined.
+            self.unify_nested_at(&joined_param, p, span)?;
         }
 
         let joined_return = self.join_branch_types(&returns, span)?;
@@ -913,8 +898,7 @@ impl Checker {
             }
             let row_refs: Vec<&EffectRow> = actual_rows.iter().collect();
             let joined = self.join_effect_rows(&row_refs, span)?;
-            self.sub
-                .bind_row(tail_id, joined)
+            self.bind_row_checked(tail_id, joined)
                 .map_err(|e| e.with_span(span))?;
         }
         Ok(())

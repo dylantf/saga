@@ -217,13 +217,33 @@ impl<'a> Lowerer<'a> {
         };
 
         // Lower the inner expression once handler params are in scope.
-        let return_k_lambda = match (&explicit_return_clause, &named_item) {
-            (Some(ret), _) => Some(self.build_return_lambda(ret, None)),
-            (None, Some(item)) => self.named_return_lambda(item),
-            (None, None) => None,
+        //
+        // A statically known `return` clause takes the `with`'s outer
+        // continuation as the continuation of its own body, so an effect it
+        // performs captures the rest of the enclosing computation. A clause
+        // only known at runtime is a plain function: its value is passed to
+        // the outer continuation afterwards (`compose_return_k`).
+        let static_return_clause = match (&explicit_return_clause, &named_item) {
+            (Some(ret), _) => Some((ret.clone(), None)),
+            (None, Some(NamedHandlerItem::Static { info, .. })) => info
+                .return_clause
+                .clone()
+                .map(|ret| (ret, info.source_module.clone())),
+            _ => None,
         };
-        let result =
-            self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k.clone());
+        let (return_k_lambda, outer_return_k) = match (static_return_clause, &named_item) {
+            (Some((ret, source_module)), _) => (
+                Some(self.build_return_lambda(
+                    &ret,
+                    source_module.as_deref(),
+                    inherited_return_k.clone(),
+                )),
+                None,
+            ),
+            (None, Some(item)) => (self.named_return_lambda(item), inherited_return_k.clone()),
+            (None, None) => (None, inherited_return_k.clone()),
+        };
+        let result = self.lower_handled_inner_expr(expr, return_k_lambda, outer_return_k);
 
         // Handler arm bodies must see the *outer* evidence, not the new one
         // we just installed for the body of `with`. A re-perform of the same

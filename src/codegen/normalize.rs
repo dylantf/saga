@@ -7,7 +7,17 @@
 //!
 //! This runs on the saga AST before lowering. The interpreter is unaffected.
 //!
-//! Subexpressions containing effect calls are evaluated left-to-right.
+//! Lifting an effect call moves it ahead of the whole statement, so everything
+//! that is evaluated before it in source order has to move with it: when a
+//! later sibling lifts something, each earlier sibling that is not a plain
+//! value is lifted into its own `let` first (see `normalize_parts`). The pass
+//! has no types, so this applies to any earlier sibling that computes
+//! something, whether an effectful call, a pure call or a foreign call.
+//! Expressions from which nothing is lifted are left exactly as they were.
+//!
+//! Parts that are evaluated conditionally or later (`if`/`case` branches, the
+//! right operand of `&&`/`||`, lambda bodies, handler arms) are their own
+//! scope: what is lifted out of them stays inside them.
 
 use crate::ast::*;
 
@@ -116,34 +126,72 @@ impl Normalizer {
     /// Normalize the arguments of an effect call (or App-chain around one),
     /// but keep the effect call itself in place.
     fn normalize_effect_args(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        match &expr.kind {
+        let (head, apps) = peel_app_chain(expr);
+        let ExprKind::EffectCall {
+            name,
+            qualifier,
+            args: op_args,
+        } = &head.kind
+        else {
+            return self.normalize_and_lift(expr, lifted);
+        };
+        let parts: Vec<&Expr> = op_args
+            .iter()
+            .chain(apps.iter().map(|(_, arg)| *arg))
+            .collect();
+        let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
+        let new_head = Expr::rebuild_like(
+            head,
             ExprKind::EffectCall {
-                name,
-                qualifier,
-                args,
-            } => Expr::rebuild_like(
-                expr,
-                ExprKind::EffectCall {
-                    name: name.clone(),
-                    qualifier: qualifier.clone(),
-                    args: args
-                        .iter()
-                        .map(|a| self.normalize_and_lift(a, lifted))
-                        .collect(),
-                },
-            ),
-            ExprKind::App { func, arg } => {
-                let new_arg = self.normalize_and_lift(arg, lifted);
-                let new_func = self.normalize_effect_args(func, lifted);
-                Expr::rebuild_like(
-                    expr,
-                    ExprKind::App {
-                        func: Box::new(new_func),
-                        arg: Box::new(new_arg),
-                    },
-                )
-            }
-            _ => self.normalize_and_lift(expr, lifted),
+                name: name.clone(),
+                qualifier: qualifier.clone(),
+                args: new_parts.by_ref().take(op_args.len()).collect(),
+            },
+        );
+        rebuild_app_chain(new_head, &apps, new_parts)
+    }
+
+    /// Normalize sub-expressions that are evaluated one after another, in
+    /// the order given. If a later part lifts something, every earlier part
+    /// that still computes something is lifted as well, ahead of it, so the
+    /// parts keep their relative order. Nothing is lifted when no part
+    /// contains an effect call.
+    fn normalize_parts(&mut self, parts: &[&Expr], lifted: &mut Vec<Stmt>) -> Vec<Expr> {
+        let normalized: Vec<(Expr, Vec<Stmt>)> = parts
+            .iter()
+            .map(|part| {
+                let mut own = Vec::new();
+                let new_part = self.normalize_and_lift(part, &mut own);
+                (new_part, own)
+            })
+            .collect();
+        let last_lifting = normalized.iter().rposition(|(_, own)| !own.is_empty());
+        normalized
+            .into_iter()
+            .enumerate()
+            .map(|(i, (new_part, own))| {
+                lifted.extend(own);
+                if last_lifting.is_some_and(|last| i < last) && !is_atomic(&new_part) {
+                    self.lift_sibling_to_let(new_part, lifted)
+                } else {
+                    new_part
+                }
+            })
+            .collect()
+    }
+
+    /// Lift a sibling evaluated before a lifted effect call into its own
+    /// let-binding. The variable that replaces it keeps the expression's
+    /// `NodeId`, so lookups keyed on the id (the expression's type, which
+    /// decides how a function value is called or passed) still answer for
+    /// the value now reached through the variable.
+    fn lift_sibling_to_let(&mut self, expr: Expr, lifted: &mut Vec<Stmt>) -> Expr {
+        let (id, span) = (expr.id, expr.span);
+        let var = self.lift_to_let(expr, lifted);
+        Expr {
+            id,
+            span,
+            kind: var.kind,
         }
     }
 
@@ -169,10 +217,16 @@ impl Normalizer {
     /// The expression itself is NOT an effect call (that's handled by the caller).
     fn walk_expr(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
         match &expr.kind {
-            // Binary op: left-to-right normalization of operands.
-            ExprKind::BinOp { op, left, right } => {
+            // Short-circuit operators: the right operand is evaluated only
+            // when the left one does not decide the result, so it is its own
+            // scope, like an `if` branch.
+            ExprKind::BinOp {
+                op: op @ (BinOp::And | BinOp::Or),
+                left,
+                right,
+            } => {
                 let new_left = self.normalize_and_lift(left, lifted);
-                let new_right = self.normalize_and_lift(right, lifted);
+                let new_right = self.normalize_expr(right);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::BinOp {
@@ -183,17 +237,33 @@ impl Normalizer {
                 )
             }
 
-            // Function application (non-effect): normalize func and arg.
-            ExprKind::App { func, arg } => {
-                let new_func = self.normalize_and_lift(func, lifted);
-                let new_arg = self.normalize_and_lift(arg, lifted);
+            // Binary op: left-to-right normalization of operands.
+            ExprKind::BinOp { op, left, right } => {
+                let mut parts = self.normalize_parts(&[left, right], lifted).into_iter();
+                let new_left = parts.next().expect("left operand");
+                let new_right = parts.next().expect("right operand");
                 Expr::rebuild_like(
                     expr,
-                    ExprKind::App {
-                        func: Box::new(new_func),
-                        arg: Box::new(new_arg),
+                    ExprKind::BinOp {
+                        op: op.clone(),
+                        left: Box::new(new_left),
+                        right: Box::new(new_right),
                     },
                 )
+            }
+
+            // Function application (non-effect): the head, then the
+            // arguments left to right. The chain is rebuilt on the same `App`
+            // nodes: a partial application is never split off, since the call
+            // is classified by its head and argument count.
+            ExprKind::App { .. } => {
+                let (head, apps) = peel_app_chain(expr);
+                let parts: Vec<&Expr> = std::iter::once(head)
+                    .chain(apps.iter().map(|(_, arg)| *arg))
+                    .collect();
+                let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
+                let new_head = new_parts.next().expect("application head");
+                rebuild_app_chain(new_head, &apps, new_parts)
             }
 
             // If: lift effect calls from condition; branches are their own scope.
@@ -255,10 +325,8 @@ impl Normalizer {
 
             // Tuple: normalize each element left-to-right.
             ExprKind::Tuple { elements } => {
-                let new_elems = elements
-                    .iter()
-                    .map(|e| self.normalize_and_lift(e, lifted))
-                    .collect();
+                let parts: Vec<&Expr> = elements.iter().collect();
+                let new_elems = self.normalize_parts(&parts, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::Tuple {
@@ -295,7 +363,7 @@ impl Normalizer {
                 expr,
                 ExprKind::With {
                     expr: Box::new(self.normalize_expr(inner)),
-                    handler: handler.clone(),
+                    handler: Box::new(self.normalize_handler(handler)),
                 },
             ),
 
@@ -333,10 +401,7 @@ impl Normalizer {
                 fields,
                 record_name,
             } => {
-                let new_fields = fields
-                    .iter()
-                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
-                    .collect();
+                let new_fields = self.normalize_fields(fields, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::RecordCreate {
@@ -349,10 +414,7 @@ impl Normalizer {
 
             // AnonRecordCreate: normalize field values.
             ExprKind::AnonRecordCreate { fields } => {
-                let new_fields = fields
-                    .iter()
-                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
-                    .collect();
+                let new_fields = self.normalize_fields(fields, lifted);
                 Expr::rebuild_like(expr, ExprKind::AnonRecordCreate { fields: new_fields })
             }
 
@@ -366,10 +428,15 @@ impl Normalizer {
                 fields,
                 record_name,
             } => {
-                let new_record = self.normalize_and_lift(record, lifted);
+                let parts: Vec<&Expr> = std::iter::once(record.as_ref())
+                    .chain(fields.iter().map(|(_, _, e)| e))
+                    .collect();
+                let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
+                let new_record = new_parts.next().expect("updated record");
                 let new_fields = fields
                     .iter()
-                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
+                    .zip(new_parts)
+                    .map(|((n, s, _), e)| (n.clone(), *s, e))
                     .collect();
                 Expr::rebuild_like(
                     expr,
@@ -447,10 +514,8 @@ impl Normalizer {
             }
 
             ExprKind::ForeignCall { module, func, args } => {
-                let new_args = args
-                    .iter()
-                    .map(|a| self.normalize_and_lift(a, lifted))
-                    .collect();
+                let parts: Vec<&Expr> = args.iter().collect();
+                let new_args = self.normalize_parts(&parts, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::ForeignCall {
@@ -501,19 +566,33 @@ impl Normalizer {
                 },
             ),
 
-            // Handler expressions: clone as-is (arm bodies are normalized when lowered).
-            ExprKind::HandlerExpr { .. } => expr.clone(),
+            // Handler expressions: normalize each arm body in its own scope.
+            ExprKind::HandlerExpr { body } => {
+                let mut body = body.clone();
+                for arm in &mut body.arms {
+                    self.normalize_handler_arm(&mut arm.node);
+                }
+                if let Some(rc) = body.return_clause.as_mut() {
+                    self.normalize_handler_arm(rc);
+                }
+                Expr::rebuild_like(expr, ExprKind::HandlerExpr { body })
+            }
 
             // BitString: normalize segment values and sizes.
             ExprKind::BitString { segments } => {
+                let parts: Vec<&Expr> = segments
+                    .iter()
+                    .flat_map(|seg| std::iter::once(&seg.value).chain(seg.size.as_deref()))
+                    .collect();
+                let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
                 let new_segs = segments
                     .iter()
                     .map(|seg| BitSegment {
-                        value: self.normalize_and_lift(&seg.value, lifted),
+                        value: new_parts.next().expect("segment value"),
                         size: seg
                             .size
                             .as_ref()
-                            .map(|s| Box::new(self.normalize_and_lift(s, lifted))),
+                            .map(|_| Box::new(new_parts.next().expect("segment size"))),
                         specs: seg.specs.clone(),
                         span: seg.span,
                     })
@@ -527,7 +606,7 @@ impl Normalizer {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => expr.clone(),
-            ExprKind::Ascription { expr: inner, .. } => self.walk_expr(inner, lifted),
+            ExprKind::Ascription { expr: inner, .. } => self.normalize_and_lift(inner, lifted),
 
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }
@@ -540,6 +619,46 @@ impl Normalizer {
                 unreachable!("surface syntax should be desugared before normalization")
             }
         }
+    }
+
+    /// Normalize record field values, evaluated in the order written.
+    fn normalize_fields(
+        &mut self,
+        fields: &[(String, crate::token::Span, Expr)],
+        lifted: &mut Vec<Stmt>,
+    ) -> Vec<(String, crate::token::Span, Expr)> {
+        let parts: Vec<&Expr> = fields.iter().map(|(_, _, e)| e).collect();
+        let new_parts = self.normalize_parts(&parts, lifted);
+        fields
+            .iter()
+            .zip(new_parts)
+            .map(|((n, s, _), e)| (n.clone(), *s, e))
+            .collect()
+    }
+
+    /// Normalize a handler arm (or return clause) body in its own scope.
+    fn normalize_handler_arm(&mut self, arm: &mut HandlerArm) {
+        *arm.body = self.normalize_expr(&arm.body);
+        if let Some(fb) = arm.finally_block.as_mut() {
+            **fb = self.normalize_expr(fb);
+        }
+    }
+
+    /// Normalize the arms and return clause written inline in a `with`, the
+    /// same way the arms of a `handler` declaration are.
+    fn normalize_handler(&mut self, handler: &Handler) -> Handler {
+        let mut handler = handler.clone();
+        if let Handler::Inline { items, .. } = &mut handler {
+            for item in items {
+                match &mut item.node {
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        self.normalize_handler_arm(arm)
+                    }
+                    HandlerItem::Named(_) => {}
+                }
+            }
+        }
+        handler
     }
 
     /// Normalize an expression that starts its own scope (branches, lambda bodies, etc.).
@@ -580,6 +699,72 @@ fn is_effect_call_head(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::EffectCall { .. } => true,
         ExprKind::App { func, .. } => is_effect_call_head(func),
+        _ => false,
+    }
+}
+
+/// Split an application chain `h a b c` into its head and, outermost last,
+/// each `App` node with its argument.
+fn peel_app_chain(expr: &Expr) -> (&Expr, Vec<(&Expr, &Expr)>) {
+    let mut apps = Vec::new();
+    let mut current = expr;
+    while let ExprKind::App { func, arg } = &current.kind {
+        apps.push((current, arg.as_ref()));
+        current = func;
+    }
+    apps.reverse();
+    (current, apps)
+}
+
+/// Rebuild an application chain peeled by `peel_app_chain` around a new head
+/// and new arguments, keeping every `App` node's identity.
+fn rebuild_app_chain(
+    head: Expr,
+    apps: &[(&Expr, &Expr)],
+    args: impl Iterator<Item = Expr>,
+) -> Expr {
+    apps.iter().zip(args).fold(head, |func, ((app, _), arg)| {
+        Expr::rebuild_like(
+            app,
+            ExprKind::App {
+                func: Box::new(func),
+                arg: Box::new(arg),
+            },
+        )
+    })
+}
+
+/// Whether evaluating `expr` computes nothing that could be observed: a
+/// variable, literal, lambda or other value form, a projection out of one, or
+/// data built only from such parts. These stay in place when a later sibling
+/// is lifted; everything else is lifted ahead of it.
+fn is_atomic(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictRef { .. }
+        | ExprKind::Lambda { .. }
+        | ExprKind::HandlerExpr { .. }
+        | ExprKind::EffectCall { .. } => true,
+        ExprKind::Ascription { expr: inner, .. }
+        | ExprKind::FieldAccess { expr: inner, .. }
+        | ExprKind::DictMethodAccess { dict: inner, .. }
+        | ExprKind::DictSuperAccess { dict: inner, .. } => is_atomic(inner),
+        ExprKind::Tuple { elements } => elements.iter().all(is_atomic),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            fields.iter().all(|(_, _, e)| is_atomic(e))
+        }
+        // A constructor or a trait dictionary applied to values only builds
+        // data.
+        ExprKind::App { .. } => {
+            let (head, apps) = peel_app_chain(expr);
+            matches!(
+                head.kind,
+                ExprKind::Constructor { .. } | ExprKind::DictRef { .. }
+            ) && apps.iter().all(|(_, arg)| is_atomic(arg))
+        }
         _ => false,
     }
 }
@@ -665,6 +850,21 @@ pub fn normalize_effects(program: &Program) -> Program {
                     span: *span,
                     dangling_trivia: vec![],
                 }
+            }
+            // Impl method bodies live here after elaboration.
+            Decl::DictConstructor { methods, .. } => {
+                let mut decl = decl.clone();
+                if let Decl::DictConstructor {
+                    methods: new_methods,
+                    ..
+                } = &mut decl
+                {
+                    *new_methods = methods
+                        .iter()
+                        .map(|m| normalizer.normalize_expr(m))
+                        .collect();
+                }
+                decl
             }
             other => other.clone(),
         })

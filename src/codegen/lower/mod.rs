@@ -12,21 +12,27 @@ mod module;
 mod pats;
 mod semantic;
 mod static_helpers;
+mod tagged;
 mod trait_spec_stats;
 pub mod util;
 
 use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
 use crate::codegen::call_effects::CallEffectInfo;
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
+use crate::codegen::runtime_shape::CallableAbi;
 use crate::typechecker::TraitInfo;
 use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
 pub(super) use evidence::EvidenceFrame;
+pub(crate) use tagged::consumed_arrows_effectful as tagged_consumed_arrows_effectful;
 use util::{cerl_call, collect_effect_call, core_var, lower_string_to_binary};
 
 pub(super) type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+
+/// A perform-site frame captured by an operation callback, and the effects
+/// the callback's parameter type names.
+pub(super) type CapturedCallbackEvidence = (EvidenceFrame, Vec<String>);
 
 /// Lower a simple expression used as a bitstring segment size.
 /// Handles integer literals and variable references — the common cases
@@ -220,18 +226,6 @@ impl FunInfo {
             .as_ref()
             .is_some_and(crate::codegen::runtime_shape::EvidenceAbi::is_open)
     }
-
-    fn expected_arg_types(&self, arg_count: usize) -> Vec<crate::typechecker::Type> {
-        let mut out = Vec::with_capacity(arg_count);
-        for idx in 0..arg_count {
-            if idx < self.dict_param_count {
-                out.push(crate::typechecker::Type::Error);
-            } else if let Some(ty) = self.param_types.get(idx - self.dict_param_count) {
-                out.push(ty.clone());
-            }
-        }
-        out
-    }
 }
 
 /// Explicit lowering context for value-producing vs terminal positions.
@@ -253,6 +247,11 @@ pub(super) struct LowererResolution {
 
 pub struct Lowerer<'a> {
     counter: usize,
+    /// The lambda with this id is lowered as a raw fun with
+    /// the given convention (CPS or direct) instead of deciding from its own
+    /// type. Set by dictionary-method lowering, which owns the slot's
+    /// representation.
+    forced_lambda_cps: Option<(NodeId, bool)>,
     /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
     ctx: &'a super::CodegenContext,
     /// Source location info for error terms. None for stdlib modules (no user source).
@@ -327,8 +326,9 @@ pub struct Lowerer<'a> {
     /// module-separated and are consulted only by semantic module.
     fallback_effect_abi_plans: HashMap<String, super::call_effects::EffectAbiPlan>,
     /// Perform-site evidence captured by an open-row callback value, keyed by
-    /// that callback expression's identity.
-    function_value_captured_evidence: HashMap<NodeId, EvidenceFrame>,
+    /// that callback expression's identity, with the effects the callback's
+    /// type names (those it takes from its caller instead).
+    function_value_captured_evidence: HashMap<NodeId, CapturedCallbackEvidence>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -419,6 +419,7 @@ impl<'a> Lowerer<'a> {
     ) -> Self {
         Lowerer {
             counter: 0,
+            forced_lambda_cps: None,
             ctx,
             source_info,
             current_module: String::new(),
@@ -475,11 +476,6 @@ impl<'a> Lowerer<'a> {
         format!("_Cor{}", n)
     }
 
-    pub(super) fn planned_function_value_evidence(&self, node_id: NodeId) -> Option<EvidenceAbi> {
-        self.planned_function_value_implementation(node_id)
-            .and_then(|abi| abi.evidence.clone())
-    }
-
     fn semantic_effect_abi_plan(&self) -> Option<&super::call_effects::EffectAbiPlan> {
         let semantic_module = self.current_semantic_module_name();
         if let Some(plan) = self.fallback_effect_abi_plans.get(semantic_module) {
@@ -506,49 +502,20 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    pub(super) fn planned_function_value(
-        &self,
-        node_id: NodeId,
-    ) -> Option<&super::call_effects::FunctionValueAbiPlan> {
-        self.effect_abi_plan.function_value(node_id).or_else(|| {
-            self.semantic_effect_abi_plan()
-                .and_then(|plan| plan.function_value(node_id))
-        })
-    }
-
-    pub(super) fn planned_function_value_implementation(
-        &self,
-        node_id: NodeId,
-    ) -> Option<&CallableAbi> {
-        self.effect_abi_plan
-            .function_value_implementation(node_id)
-            .or_else(|| {
-                self.semantic_effect_abi_plan()
-                    .and_then(|plan| plan.function_value_implementation(node_id))
-            })
-    }
-
-    pub(super) fn planned_function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        self.effect_abi_plan
-            .function_value_boundary(node_id)
-            .or_else(|| {
-                self.semantic_effect_abi_plan()
-                    .and_then(|plan| plan.function_value_boundary(node_id))
-            })
-    }
-
     pub(super) fn capture_function_value_evidence(
         &mut self,
         node_id: NodeId,
         frame: EvidenceFrame,
-    ) -> Option<EvidenceFrame> {
-        self.function_value_captured_evidence.insert(node_id, frame)
+        named_effects: Vec<String>,
+    ) -> Option<CapturedCallbackEvidence> {
+        self.function_value_captured_evidence
+            .insert(node_id, (frame, named_effects))
     }
 
     pub(super) fn restore_function_value_captured_evidence(
         &mut self,
         node_id: NodeId,
-        previous: Option<EvidenceFrame>,
+        previous: Option<CapturedCallbackEvidence>,
     ) {
         if let Some(previous) = previous {
             self.function_value_captured_evidence
@@ -612,13 +579,10 @@ impl<'a> Lowerer<'a> {
 
     /// Resolve a bare effect name to its canonical form.
     fn canonicalize_effect(&self, bare: &str) -> String {
-        let family = crate::typechecker::applied_effect_family(bare);
-        let canonical = self
-            .effect_canonical
-            .get(family)
+        self.effect_canonical
+            .get(bare)
             .cloned()
-            .unwrap_or_else(|| family.to_string());
-        format!("{}{}", canonical, &bare[family.len()..])
+            .unwrap_or_else(|| bare.to_string())
     }
 
     /// Canonicalize a list of effect names from the type system (which uses bare names).
@@ -643,8 +607,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn effect_handler_ops(&self, effects: &[String]) -> Vec<(String, String)> {
         let mut ops = Vec::new();
         for eff_name in effects {
-            let family = crate::typechecker::applied_effect_family(eff_name);
-            if let Some(info) = self.effect_defs.get(family) {
+            if let Some(info) = self.effect_defs.get(eff_name) {
                 // Sort op names for deterministic ordering
                 let mut op_names: Vec<&String> = info.ops.keys().collect();
                 op_names.sort();
@@ -732,41 +695,49 @@ impl<'a> Lowerer<'a> {
             ExprKind::BinOp { left, right, .. } => {
                 self.branch_is_effectful(left) || self.branch_is_effectful(right)
             }
-            ExprKind::FieldAccess { expr, .. } => self.branch_is_effectful(expr),
+            ExprKind::FieldAccess { expr, .. } | ExprKind::UnaryMinus { expr } => {
+                self.branch_is_effectful(expr)
+            }
             ExprKind::RecordUpdate { record, fields, .. } => {
                 self.branch_is_effectful(record)
                     || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
             }
-            // A `with` with an *inline, abort-only* handler over effectful
-            // inner work needs CPS-aware routing in enclosing contexts so
-            // the handler closure receives the host's return K and the
-            // inner effectful calls get handler-arg threading. We restrict
-            // this to inline + abort-only because:
-            //
-            // - Named handlers (`with collect`) keep their own
-            //   return-clause / resume-chain composition that breaks
-            //   under inherited-K composition (would short-circuit
-            //   resume-based accumulators like Std.Test's `collect`).
-            // - Inline resume handlers similarly route values through
-            //   captured `resume` continuations; inheriting K would
-            //   double-route. Leave them as before.
-            //
-            // The repro shape — `Ctor (eff_call) with { fail e = ... }`
-            // inside a case arm — is the abort-only case, which is the
-            // shape that drops K silently today.
+            ExprKind::Resume { value } => self.branch_is_effectful(value),
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                bindings.iter().any(|(_, e)| self.branch_is_effectful(e))
+                    || self.branch_is_effectful(success)
+                    || else_arms
+                        .iter()
+                        .any(|arm| self.branch_is_effectful(&arm.node.body))
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                arms.iter()
+                    .any(|arm| self.branch_is_effectful(&arm.node.body))
+                    || after_clause.as_ref().is_some_and(|(timeout, body)| {
+                        self.branch_is_effectful(timeout) || self.branch_is_effectful(body)
+                    })
+            }
+            ExprKind::BitString { segments } => segments
+                .iter()
+                .any(|seg| self.branch_is_effectful(&seg.value)),
+            // A `with` over effectful work whose handler never needs the
+            // value of the handled computation back (see
+            // `with_handler_chains_continuation`) takes the rest of the
+            // enclosing body as its continuation, like an effectful call.
+            // An outer handler that aborts an operation performed inside
+            // it then skips that rest. Other handlers stay delimiters that
+            // produce a plain value.
             ExprKind::With {
                 expr: inner,
                 handler,
-            } => {
-                let inline_abort_only = match handler.as_ref() {
-                    ast::Handler::Inline { .. } => {
-                        handler.inline_arms().all(|arm| !arm.body.contains_resume())
-                            && handler.return_clause().is_none()
-                    }
-                    ast::Handler::Named(_) => false,
-                };
-                inline_abort_only && self.branch_is_effectful(inner)
-            }
+            } => self.with_handler_chains_continuation(handler) && self.branch_is_effectful(inner),
             _ => false,
         }
     }
@@ -891,22 +862,6 @@ impl<'a> Lowerer<'a> {
         (arity > 0).then_some((current, arity))
     }
 
-    pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
-        let shape = self
-            .planned_call(expr.id)
-            .map(|info| info.debug_label())
-            .unwrap_or_else(|| "missing-call-effect-info".to_string());
-        let head = head.unwrap_or(expr);
-        panic!(
-            "effectful App {:?} at span {:?} was classified by call_effects as {} but no lowerer dispatch path handled it (head {:?}: {})",
-            expr.id,
-            expr.span,
-            shape,
-            head.id,
-            module::lower_head_debug_label(head)
-        );
-    }
-
     /// Variant that uses an explicit `CheckResult` for type-at-span lookups.
     /// When the lowerer runs the pre-pass over a foreign module's elaborated
     /// AST (e.g. handler arm bodies imported from another module), the active
@@ -1027,70 +982,4 @@ pub(crate) fn precompute_call_effects(
         None,
     )
     .precompute_call_effects(module_name, program)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::codegen::CodegenContext;
-    use crate::token::Span;
-
-    #[test]
-    fn unhandled_effectful_app_panic_includes_classifier_shape_and_head_label() {
-        let ctx = CodegenContext::default();
-        let check_result = crate::typechecker::Checker::new().to_result();
-        let mut lowerer = Lowerer::new(
-            &ctx,
-            std::collections::HashMap::new(),
-            LowererResolution::default(),
-            &check_result,
-            super::super::optimize::OptimizationFacts::default(),
-            None,
-            None,
-        );
-        let head = Expr::synth(
-            Span { start: 10, end: 16 },
-            ExprKind::Tuple { elements: vec![] },
-        );
-        let app = Expr::synth(
-            Span { start: 10, end: 22 },
-            ExprKind::App {
-                func: Box::new(head.clone()),
-                arg: Box::new(Expr::synth(
-                    Span { start: 17, end: 22 },
-                    ExprKind::Lit {
-                        value: Lit::String("arg".to_string(), crate::token::StringKind::Normal),
-                    },
-                )),
-            },
-        );
-        lowerer.effect_abi_plan.record_call(
-            app.id,
-            super::super::call_effects::CallEffectInfo::test_cps_static("Main.Log", "log", 1),
-        );
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            lowerer.panic_unhandled_effectful_app(&app, Some(&head));
-        }));
-        let payload = result.expect_err("expected panic for unhandled effectful app");
-        let msg = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload should be a string");
-
-        assert!(
-            msg.contains(&format!("effectful App {:?}", app.id)),
-            "{msg}"
-        );
-        assert!(msg.contains("span Span { start: 10, end: 22 }"), "{msg}");
-        assert!(
-            msg.contains(r#"cps-static(1->3, effects=["Main.Log"])"#),
-            "{msg}"
-        );
-        assert!(
-            msg.contains(&format!("head {:?}: tuple/0", head.id)),
-            "{msg}"
-        );
-    }
 }
