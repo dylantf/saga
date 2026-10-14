@@ -196,7 +196,7 @@ impl<'a> Lowerer<'a> {
             Some((frame, _)) => Some(frame.clone()),
             None => saved_evidence.clone(),
         };
-        let (evidence_binding, new_evidence_var) = {
+        let (new_evidence_var, base_evidence, install_steps) = {
             let mut effect_to_ops: std::collections::BTreeMap<String, Vec<&str>> =
                 std::collections::BTreeMap::new();
             let mut effect_to_vars: std::collections::HashMap<(String, String), String> =
@@ -218,10 +218,11 @@ impl<'a> Lowerer<'a> {
             // bound. Non-dynamic withs install handlers that depend only on
             // outer-scope values, so their evidence binding can safely live
             // at the with boundary.
-            let mut acc = match &inherited_evidence {
+            let base = match &inherited_evidence {
                 Some(ctx) => CExpr::Var(ctx.var.clone()),
                 None => CExpr::Tuple(Vec::new()),
             };
+            let mut steps = Vec::new();
             let mut new_abi = inherited_evidence
                 .as_ref()
                 .map(|frame| frame.abi.clone())
@@ -238,11 +239,9 @@ impl<'a> Lowerer<'a> {
                         CExpr::Var(var.clone())
                     })
                     .collect();
-                let entry =
-                    crate::codegen::lower::evidence::build_evidence_entry(&eff, op_closures);
-                let install = new_abi.plan_install(eff);
-                acc = crate::codegen::lower::evidence::apply_install(acc, entry, &install);
-                new_abi = install.target;
+                let install = new_abi.plan_install(eff.clone());
+                new_abi = install.target.clone();
+                steps.push((eff, op_closures, install));
             }
             let new_var = self.fresh();
             // Layout mirrors the value we built: union of the inherited
@@ -254,7 +253,7 @@ impl<'a> Lowerer<'a> {
                 new_var.clone(),
                 new_abi,
             ));
-            ((new_var.clone(), acc), new_var)
+            (new_var, base, steps)
         };
 
         // Lower the inner expression once handler params are in scope.
@@ -299,7 +298,13 @@ impl<'a> Lowerer<'a> {
             None => result,
         };
         let result = match &inherited_return_k {
-            Some(k) if general => evidence::meta_bind(result, k.clone()),
+            Some(k) if general => {
+                let vars = [self.fresh(), self.fresh()];
+                match k {
+                    CExpr::Var(_) => evidence::meta_bind_inline(result, k.clone(), vars),
+                    _ => evidence::meta_bind(result, k.clone()),
+                }
+            }
             None if general && lifted_evidence.is_some() => {
                 evidence::meta_bind(result, self.identity_return_lambda())
             }
@@ -312,7 +317,7 @@ impl<'a> Lowerer<'a> {
         // stack; if the arm body's effectful calls picked up the new evidence,
         // they'd recurse into the just-installed entry instead.
         let saved_evidence_for_arms =
-            std::mem::replace(&mut self.current_evidence, inherited_evidence);
+            std::mem::replace(&mut self.current_evidence, inherited_evidence.clone());
 
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
@@ -375,6 +380,48 @@ impl<'a> Lowerer<'a> {
         self.current_handler_inherited_k = saved_handler_inherited_k;
         self.current_abort_ref = saved_abort_ref;
 
+        // An entry whose arms can run where the operation is performed, in
+        // any `with` inside this one, without lifting: none leaves a frame
+        // (each resumes at most once, in tail position, and has no
+        // `finally`) and none can suspend (none uses the frame, so none
+        // performs anything). Every other entry is marked to be lifted.
+        let frame_vars: HashSet<String> = [&saved_evidence, &inherited_evidence]
+            .into_iter()
+            .flatten()
+            .map(|frame| frame.var.clone())
+            .collect();
+        // An arm of that shape that does perform, through its frame, is
+        // direct when every entry of the frame is (`entry/3`, at runtime).
+        let mut entry_kinds: HashMap<String, EntryKind> = HashMap::new();
+        for ((eff, _op, _var, plan), (_, binding)) in op_vars.iter().zip(&handler_bindings) {
+            let mut refs = HashSet::new();
+            Self::collect_var_refs(binding, &mut refs);
+            let kind = if !op_plan_is_direct(plan) {
+                EntryKind::Lifted
+            } else if refs.is_disjoint(&frame_vars) {
+                EntryKind::Direct
+            } else {
+                EntryKind::DirectIfFrameIs
+            };
+            let slot = entry_kinds.entry(eff.clone()).or_insert(EntryKind::Direct);
+            *slot = (*slot).max(kind);
+        }
+        let arm_frame = inherited_evidence.as_ref().map(|frame| frame.var.clone());
+        let mut acc = base_evidence;
+        for (eff, op_closures, install) in install_steps {
+            let entry = match (entry_kinds.get(&eff).copied(), &arm_frame) {
+                (Some(EntryKind::Lifted), _) => {
+                    evidence::build_evidence_entry(&eff, op_closures, true)
+                }
+                (Some(EntryKind::DirectIfFrameIs), Some(frame)) => {
+                    evidence::entry_for_frame(&eff, op_closures, CExpr::Var(frame.clone()))
+                }
+                _ => evidence::build_evidence_entry(&eff, op_closures, false),
+            };
+            acc = evidence::apply_install(acc, entry, &install);
+        }
+        let evidence_binding = (new_evidence_var.clone(), acc);
+
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
         self.static_tail_resume_ops = saved_static_tail_resume_ops;
@@ -383,7 +430,6 @@ impl<'a> Lowerer<'a> {
         // restore the caller's evidence as the function exits the `with`.
         let _ = saved_evidence_for_arms;
         self.current_evidence = saved_evidence;
-        let _ = new_evidence_var;
 
         // Post-hoc reachability: scan the lowered body for _Handle_* references,
         // then transitively close through handler binding values.
@@ -930,4 +976,36 @@ impl<'a> Lowerer<'a> {
             Box::new(CExpr::Case(Box::new(scrutinee), case_arms)),
         )
     }
+}
+
+/// Whether the arms a plan installs never leave a frame where the operation
+/// is performed: each resumes at most once and only in tail position, and
+/// none has a `finally` block. A handler value only known at runtime may.
+fn op_plan_is_direct(plan: &OpHandlerPlan) -> bool {
+    use crate::codegen::handler_analysis::{ResumptionKind, classify_body};
+    let arm_is_direct = |arm: &HandlerArm| {
+        arm.finally_block.is_none()
+            && matches!(
+                classify_body(&arm.body),
+                ResumptionKind::TailResumptive | ResumptionKind::OneShot
+            )
+    };
+    match plan {
+        OpHandlerPlan::Inline { arms } => arms.iter().all(arm_is_direct),
+        OpHandlerPlan::Static { arm, .. } => arm_is_direct(arm),
+        OpHandlerPlan::Conditional {
+            then_arm, else_arm, ..
+        } => then_arm.iter().chain(else_arm.iter()).all(arm_is_direct),
+        OpHandlerPlan::Dynamic { .. } => false,
+        OpHandlerPlan::BeamNative { .. } | OpHandlerPlan::Passthrough => true,
+    }
+}
+
+/// How an evidence entry installed by a `with` is treated by the `with`s
+/// inside it (`lift_evidence`), from least to most lifting.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EntryKind {
+    Direct,
+    DirectIfFrameIs,
+    Lifted,
 }

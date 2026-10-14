@@ -8264,3 +8264,39 @@ result () = show (f () with { ask () = (resume 1) + (resume 2) })
 "#;
     check_result_string("abort_multishot_outer", src, "102");
 }
+
+/// A `with` lifts only the entries of its inherited frame whose arms could
+/// leave a frame or suspend. `relay` resumes in tail position but performs
+/// `ask!` itself: its entry is direct only when the entry it performs
+/// through is. Under a handler that resumes twice it is not, and `guarded`
+/// must lift it, or the abort in the second resumption would unwind the
+/// outer arm (expected 13 + 113); under a direct handler nothing is lifted.
+#[test]
+fn entries_are_lifted_when_their_arms_can_suspend() {
+    let src = r#"module Main
+
+effect Ask { fun ask : Int -> Int }
+effect Stop { fun stop : Unit -> Int }
+
+fun body : Unit -> Int needs {Ask, Stop}
+body () = {
+  let a = ask! 1
+  let b = ask! 10
+  if b > 20 then stop! () else a + b
+}
+
+fun guarded : Unit -> Int needs {Ask}
+guarded () = body () with { stop () = 0 }
+
+fun relayed : Unit -> Int needs {Ask}
+relayed () = guarded () with { ask n = resume (ask! (n + 1)) }
+
+pub fun result : Unit -> String
+result () = {
+  let twice = relayed () with { ask n = (resume n) + (resume (n + 100)) }
+  let direct = relayed () with { ask n = resume (n * 3) }
+  show twice <> " " <> show direct
+}
+"#;
+    check_result_string("entries_lifted_when_arms_can_suspend", src, "126 0");
+}

@@ -832,16 +832,29 @@ carried out of themselves (below), or `run` in place of `k` at a `run` site.
 `M(Mk)`; `mbind(S, F, Ref)` puts `{k, Ref, F}` in front of the `Mk` a
 suspension gets.
 
-- **Lifting.** `lift_evidence(Ev, Ref)` wraps every operation of the
+- **Lifting.** `lift_evidence(Ev, Ref)` wraps the operations of the
   inherited frame: `fun (Args, K1) -> {'$saga_meta', fun (Mk) -> Op(Args,
   fun (V) -> resume_into(Ref, K1, V, Mk))}`. Performed inside the `with`, an
   outer operation suspends; when the suspension reaches `bind`, the outer
   handler is called with a continuation that runs the rest of the handled
   computation, delimited again by this `with`, and then the meta
   continuation. Tags and positions are unchanged, so the lifted frame has
-  the ABI of the inherited one; `lift_evidence` is the only function that
-  looks at the frame's representation. A `with` in a pure host has no frame
-  to lift.
+  the ABI of the inherited one. A `with` in a pure host has no frame to
+  lift.
+- **Direct entries are not lifted.** An entry `{Tag, Ops}` is *direct*: every
+  arm of its handler resumes at most once and only in tail position, has no
+  `finally`, and performs nothing except operations of direct entries. Run
+  where the operation is performed, such an arm leaves no frame (a tail
+  `resume` is a tail call, an abort a throw) and returns no suspension, so
+  it behaves as fused CPS does and needs no lifting. Every other entry is
+  `{Tag, Ops, lift}`, and so is every lifted entry, since its operations
+  suspend. Which an entry is is decided where it is installed: from the arms'
+  shape (`op_plan_is_direct`), whether the lowered arms use their frame at
+  all, and, when they do, at runtime from that frame (`entry/3`: direct when
+  all of its entries are). A handler value only known at runtime is never
+  direct. When every inherited entry is direct, `lift_evidence` returns the
+  frame unchanged. The entry shapes are known only to the bridge's evidence
+  functions and to `build_evidence_entry` / `entry_for_frame`.
 - **Arms** are lowered against the lifted frame and never receive `k`.
   `resume x` in tail position of the arm is `K(x)`; followed by the rest of
   the arm it is `mbind(K(x) delimited by Ref, rest, Ref)`. Both are cases of
@@ -1003,9 +1016,14 @@ aborts throws through the inner `with` like any other abort.
 #### Cost
 
 A fused `with` costs what it always did. A general one, on each entry:
-`make_ref`, a `try` around the handled computation, and in an effectful host
-one closure per operation of the inherited frame, one tuple per effect and
-one for the frame. Each operation of the inherited frame performed inside
+`make_ref`, a `try` around the handled computation, a `bind` call, and in an
+effectful host a scan of the inherited frame; if an entry is not direct, one
+closure per operation of each such entry, one tuple per effect and one for
+the frame. A `with` whose arms perform through their frame pays another
+scan of it (`entry/3`). On the `saga_json` combinator decoder (nine `at`
+entries per record, each a `with` whose arm re-performs `fail!`) this is
+about 4% more reductions than the fused lowering; lifting every entry was
+about 9%. Each operation of a lifted entry performed inside
 costs a suspension tuple, two closures, a list append, an `apply` and a
 `try` more than the direct call, and that again for every enclosing lifting
 `with`. Each `resume` whose value is used costs a `try`, one `mbind` call

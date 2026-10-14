@@ -3,7 +3,7 @@
          select_evidence/2, reframe_evidence/3,
          append_tail/3,
          lift_evidence/2, bind/2, mbind/3, run/1,
-         abort/3, resume_into/4, fin_resume/4, run_process/1]).
+         abort/3, resume_into/4, fin_resume/4, run_process/1, entry/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -22,34 +22,36 @@ find_evidence(Evidence, Tag) ->
 find_evidence_at(_Evidence, _Tag, I, N) when I > N -> not_found;
 find_evidence_at(Evidence, Tag, I, N) ->
     case element(I, Evidence) of
-        {Tag, OpTuple} -> {ok, OpTuple};
+        Entry when element(1, Entry) =:= Tag -> {ok, element(2, Entry)};
         _ -> find_evidence_at(Evidence, Tag, I + 1, N)
     end.
 
 %% Insert a new {Tag, OpTuple} entry at its canonical position. If an entry
 %% with the same tag already exists, replace it (innermost-wins semantics
 %% for nested `with` blocks).
-insert_canonical(Evidence, {NewTag, _NewOps} = NewEntry) ->
+insert_canonical(Evidence, NewEntry) ->
+    NewTag = element(1, NewEntry),
     insert_at(tuple_to_list(Evidence), NewTag, NewEntry, []).
 
 insert_at([], _NewTag, NewEntry, Acc) ->
     list_to_tuple(lists:reverse([NewEntry | Acc]));
-insert_at([{Tag, _} | Rest], NewTag, NewEntry, Acc) when Tag =:= NewTag ->
+insert_at([Old | Rest], NewTag, NewEntry, Acc) when element(1, Old) =:= NewTag ->
     list_to_tuple(lists:reverse([NewEntry | Acc]) ++ Rest);
-insert_at([{Tag, _} = Old | Rest], NewTag, NewEntry, Acc) when Tag < NewTag ->
+insert_at([Old | Rest], NewTag, NewEntry, Acc) when element(1, Old) < NewTag ->
     insert_at(Rest, NewTag, NewEntry, [Old | Acc]);
-insert_at([{Tag, _} = Old | Rest], NewTag, NewEntry, Acc) when Tag > NewTag ->
+insert_at([Old | Rest], NewTag, NewEntry, Acc) when element(1, Old) > NewTag ->
     list_to_tuple(lists:reverse([NewEntry | Acc]) ++ [Old | Rest]).
 
 %% Install a handler into an open evidence frame. Only the known positional
 %% prefix is canonicalized; globally sorting would move static slots behind
 %% unknown tail entries. An exact entry is removed from either part before the
 %% replacement is inserted into the prefix.
-insert_static(Evidence, StaticCount, {NewTag, _} = NewEntry) ->
+insert_static(Evidence, StaticCount, NewEntry) ->
+    NewTag = element(1, NewEntry),
     Entries = tuple_to_list(Evidence),
     {Prefix, Tail} = lists:split(StaticCount, Entries),
-    CleanPrefix = [Entry || {Tag, _} = Entry <- Prefix, Tag =/= NewTag],
-    CleanTail = [Entry || {Tag, _} = Entry <- Tail, Tag =/= NewTag],
+    CleanPrefix = [Entry || Entry <- Prefix, element(1, Entry) =/= NewTag],
+    CleanTail = [Entry || Entry <- Tail, element(1, Entry) =/= NewTag],
     NewPrefix = tuple_to_list(insert_at(CleanPrefix, NewTag, NewEntry, [])),
     list_to_tuple(NewPrefix ++ CleanTail).
 
@@ -90,11 +92,11 @@ reframe_evidence(Evidence, {StaticCount, ForwardStaticPositions}, Selectors) ->
 %% `Actor` under `spawn`) falls back to the captured entry if there is one.
 %% The result is only ever read by tag.
 append_tail(CallEvidence, CapturedEvidence, NamedTags) ->
-    Named = [Entry || {Tag, _} = Entry <- tuple_to_list(CallEvidence),
-                      lists:member(Tag, NamedTags)],
-    Supplied = [Tag || {Tag, _} <- Named],
-    Tail = [Entry || {Tag, _} = Entry <- tuple_to_list(CapturedEvidence),
-                     not lists:member(Tag, Supplied)],
+    Named = [Entry || Entry <- tuple_to_list(CallEvidence),
+                      lists:member(element(1, Entry), NamedTags)],
+    Supplied = [element(1, Entry) || Entry <- Named],
+    Tail = [Entry || Entry <- tuple_to_list(CapturedEvidence),
+                     not lists:member(element(1, Entry), Supplied)],
     list_to_tuple(Named ++ Tail).
 
 unique_positions(Positions) -> unique_positions(Positions, []).
@@ -117,7 +119,7 @@ selector_position(Evidence, Tag) when is_atom(Tag) ->
 entry_position(_Evidence, _Tag, I, N) when I > N -> not_found;
 entry_position(Evidence, Tag, I, N) ->
     case element(I, Evidence) of
-        {Tag, _} -> {ok, I};
+        Entry when element(1, Entry) =:= Tag -> {ok, I};
         _ -> entry_position(Evidence, Tag, I + 1, N)
     end.
 
@@ -145,42 +147,77 @@ entry_position(Evidence, Tag, I, N) ->
 %% The frame a `with` inherits, with every operation suspending instead of
 %% calling its handler. Tags and positions are unchanged. This is the only
 %% function that knows the frame's representation.
+%%
+%% An entry {Tag, Ops} is *direct*: every arm of its handler resumes at most
+%% once and only in tail position, has no `finally', and performs nothing
+%% but operations of direct entries (`entry/3'). Such an arm, run where the
+%% operation is performed, leaves no frame and returns no suspension, so it
+%% needs no lifting. An entry {Tag, Ops, lift} (any other handler, and every
+%% lifted entry) is lifted.
 lift_evidence(Evidence, Ref) ->
-    list_to_tuple([{Tag, list_to_tuple([lift_op(Op, Ref) || Op <- tuple_to_list(Ops)])}
-                   || {Tag, Ops} <- tuple_to_list(Evidence)]).
+    case all_direct(Evidence) of
+        true -> Evidence;
+        false ->
+            list_to_tuple([lift_entry(Entry, Ref) || Entry <- tuple_to_list(Evidence)])
+    end.
+
+%% Whether every entry of a frame is direct. Frames are small; the common
+%% sizes are checked in one clause.
+all_direct({}) -> true;
+all_direct({{_, _}}) -> true;
+all_direct({{_, _}, {_, _}}) -> true;
+all_direct({{_, _}, {_, _}, {_, _}}) -> true;
+all_direct({{_, _}, {_, _}, {_, _}, {_, _}}) -> true;
+all_direct(Evidence) when tuple_size(Evidence) =< 4 -> false;
+all_direct(Evidence) -> all_direct(Evidence, tuple_size(Evidence)).
+
+all_direct(_Evidence, 0) -> true;
+all_direct(Evidence, I) ->
+    tuple_size(element(I, Evidence)) =:= 2 andalso all_direct(Evidence, I - 1).
+
+%% The entry of a handler whose arms have the shape of a direct one but
+%% perform operations, through Frame: direct when every entry of Frame is,
+%% since then none of those operations can suspend.
+entry(Tag, Ops, Frame) ->
+    case all_direct(Frame) of
+        true -> {Tag, Ops};
+        false -> {Tag, Ops, lift}
+    end.
+
+lift_entry({Tag, Ops, lift}, Ref) ->
+    {Tag, list_to_tuple([lift_op(Op, Ref) || Op <- tuple_to_list(Ops)]), lift};
+lift_entry(Entry, _Ref) -> Entry.
 
 %% An operation closure takes its arguments and then the continuation. Once
 %% the meta continuation is known, the handler gets a continuation that runs
 %% the rest of the handled computation, delimited again by the `with', and
 %% then the meta continuation.
-%%
+lift_op(Op, Ref) when is_function(Op, 1) -> fun(K) -> lifted(Op, [], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 2) -> fun(A, K) -> lifted(Op, [A], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 3) -> fun(A, B, K) -> lifted(Op, [A, B], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 4) ->
+    fun(A, B, C, K) -> lifted(Op, [A, B, C], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 5) ->
+    fun(A, B, C, D, K) -> lifted(Op, [A, B, C, D], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 6) ->
+    fun(A, B, C, D, E, K) -> lifted(Op, [A, B, C, D, E], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 7) ->
+    fun(A, B, C, D, E, F, K) -> lifted(Op, [A, B, C, D, E, F], K, Ref) end;
+lift_op(Op, Ref) when is_function(Op, 8) ->
+    fun(A, B, C, D, E, F, G, K) -> lifted(Op, [A, B, C, D, E, F, G], K, Ref) end;
+lift_op(Op, _Ref) -> Op.
+
 %% An operation given a callback (a tagged closure) is not suspended: its
 %% handler's arm runs the callback and then resumes, and the meta continuation
 %% current at that resume cannot be passed through the arm's code. It is
 %% performed where it stands.
-lift_op(Op, Ref) ->
-    {arity, N} = erlang:fun_info(Op, arity),
-    nary(N, Op, fun(All) ->
-        {Args, [K]} = lists:split(N - 1, All),
-        case lists:any(fun({'$saga_cps', _}) -> true; (_) -> false end, Args) of
-            true -> erlang:apply(Op, All);
-            false ->
-                {'$saga_meta',
-                 fun(Mk) -> erlang:apply(Op, Args ++ [fun(V) -> resume_into(Ref, K, V, Mk) end]) end}
-        end
-    end).
-
-%% A fun of N arguments that passes them to Body as a list. An operation of
-%% more arguments is left as it is.
-nary(1, _, Body) -> fun(A) -> Body([A]) end;
-nary(2, _, Body) -> fun(A, B) -> Body([A, B]) end;
-nary(3, _, Body) -> fun(A, B, C) -> Body([A, B, C]) end;
-nary(4, _, Body) -> fun(A, B, C, D) -> Body([A, B, C, D]) end;
-nary(5, _, Body) -> fun(A, B, C, D, E) -> Body([A, B, C, D, E]) end;
-nary(6, _, Body) -> fun(A, B, C, D, E, F) -> Body([A, B, C, D, E, F]) end;
-nary(7, _, Body) -> fun(A, B, C, D, E, F, G) -> Body([A, B, C, D, E, F, G]) end;
-nary(8, _, Body) -> fun(A, B, C, D, E, F, G, H) -> Body([A, B, C, D, E, F, G, H]) end;
-nary(_, Op, _) -> Op.
+lifted(Op, Args, K, Ref) ->
+    case lists:any(fun({'$saga_cps', _}) -> true; (_) -> false end, Args) of
+        true -> erlang:apply(Op, Args ++ [K]);
+        false ->
+            {'$saga_meta',
+             fun(Mk) -> erlang:apply(Op, Args ++ [fun(V) -> resume_into(Ref, K, V, Mk) end]) end}
+    end.
 
 %% The abort of an arm of the `with' Ref, from effect Tag.
 abort(Ref, Tag, Value) -> throw({'$saga_abort', Ref, Tag, Value}).

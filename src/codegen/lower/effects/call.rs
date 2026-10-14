@@ -390,7 +390,7 @@ impl<'a> Lowerer<'a> {
                 .iter()
                 .map(|(_, op)| self.build_beam_native_op_fun(op, &handler_canonical))
                 .collect();
-            let entry = evidence::build_evidence_entry(&effect, op_closures);
+            let entry = evidence::build_evidence_entry(&effect, op_closures, false);
             evidence = evidence::insert_static(evidence, 0, entry);
         }
         Some(evidence)
