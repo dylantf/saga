@@ -259,7 +259,6 @@ with_log f = fun () -> {
 // --- H1: a declared open row names every effect the body performs (step 7) ---
 
 #[test]
-#[ignore = "H1: a declared open row accepts effects it does not name"]
 fn h1_declared_open_row_rejects_an_unnamed_effect() {
     rejected(
         "fun h : (Unit -> Int needs {..e}) -> Int needs {..e}

@@ -686,6 +686,7 @@ impl Checker {
                 if let Err(e) = self.check_effects_via_row(
                     &finally_effs,
                     &needs_row,
+                    None,
                     &format!("finally block for '{}'", arm.op_name),
                     finally_expr.span,
                 ) {

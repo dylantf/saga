@@ -173,11 +173,18 @@ impl Checker {
 
     /// Check body effects against a declared effect row.
     /// Returns Ok if all body effects are covered by the declared row.
-    /// Open rows (with tail) allow any extra effects through.
+    ///
+    /// An open row's tails stand for the caller's effects, so they cover
+    /// only what the body performs through them (calling a callback typed
+    /// with the same `..e`): every named effect the body performs must be
+    /// named in the row as written (`written`, when the declared row has
+    /// been resolved through the substitution, where a tail may have been
+    /// bound to more effects).
     pub(crate) fn check_effects_via_row(
         &mut self,
         body_effs: &EffectRow,
         declared_row: &EffectRow,
+        written: Option<&EffectRow>,
         label: &str,
         span: crate::token::Span,
     ) -> Result<(), Diagnostic> {
@@ -205,29 +212,37 @@ impl Checker {
         let declared = self.sub.apply_effect_row(&declared);
         let body_effs = self.sub.apply_effect_row(&body_effs);
 
-        // Open row: extras flow through the tail variable(s). An effect with
-        // type parameters is the exception. The tail is chosen by the caller
-        // and says nothing about what this body performs, so an unnamed
-        // `Fail String` would be invisible to callers, and a handler they
-        // install for `Fail Int` would receive its operations.
+        // Open row: the tail variable(s) are chosen by the caller and say
+        // nothing about what this body performs. An effect the body performs
+        // that the row does not name would be invisible to callers: one who
+        // chooses `..e` empty would call this as if it performed nothing.
+        // (For an effect with type parameters, a handler installed for
+        // `Fail Int` would also receive the body's `Fail String`.)
         if declared.is_open() {
+            let named = written.map_or(&declared.effects, |row| &row.effects);
             for entry in &body_effs.effects {
+                if named.iter().any(|e| e.matches(entry)) {
+                    continue;
+                }
                 let parameterised = self
                     .effects
                     .get(&entry.name)
                     .is_some_and(|info| !info.type_params.is_empty());
-                if parameterised && !declared.effects.iter().any(|e| e.matches(entry)) {
-                    let shown = self.prettify_effect_entry(entry);
-                    return Err(Diagnostic::error_at(
-                        span,
-                        format!(
-                            "{label} uses the effect `{shown}`, which its 'needs' clause does \
-                             not name. An open row (`..r`) stands for the caller's effects; an \
-                             effect with a type argument must be named so that callers handle \
-                             it at that type. Add `{shown}` to the 'needs' clause"
-                        ),
-                    ));
-                }
+                let shown = self.prettify_effect_entry(entry);
+                let why = if parameterised {
+                    "an effect with a type argument must be named so that callers handle it \
+                     at that type"
+                } else {
+                    "an effect the body performs must be named so that callers handle it"
+                };
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "{label} uses the effect `{shown}`, which its 'needs' clause does \
+                         not name. An open row (`..r`) stands for the caller's effects; {why}. \
+                         Add `{shown}` to the 'needs' clause"
+                    ),
+                ));
             }
             return Ok(());
         }

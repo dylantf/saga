@@ -1464,7 +1464,9 @@ result () = {
 #[test]
 fn open_row_inner_handler_preserves_sibling_instance_in_tail() {
     // Was `Fail Int` travelling through the open tail next to a handled
-    // `Fail String`; now two `neweffect` instances.
+    // `Fail String`; now two `neweffect` instances. `FailInt` reaches the
+    // tail through the callback: a body may not perform an effect its open
+    // row does not name.
     let src = r#"
 effect Fail e {
   fun fail : e -> a
@@ -1491,11 +1493,11 @@ from_string () = FailString.fail! "nope"
 fun from_int : Unit -> Int needs {FailInt}
 from_int () = FailInt.fail! 7
 
-fun wrapped : Unit -> Int needs {FailString, ..r}
-wrapped () = (from_string () with inner_string) + from_int ()
+fun wrapped : (Unit -> Int needs {..r}) -> Int needs {FailString, ..r}
+wrapped g = (from_string () with inner_string) + g ()
 
 pub fun result : Unit -> String
-result () = show (wrapped () with {outer_string, outer_int})
+result () = show (wrapped from_int with {outer_string, outer_int})
 "#;
     check_result_string("open_row_inner_applied_handler", src, "34");
 }

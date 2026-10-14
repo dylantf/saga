@@ -6226,9 +6226,21 @@ fn effect_row_var_closed_row_rejects_extra_effects() {
 
 #[test]
 fn effect_row_var_function_open_needs() {
-    // Function with open needs clause allows extra effects in body
-    check(
+    // An open needs clause does not let the body perform effects it does
+    // not name: `..e` is the caller's, and a caller choosing it empty would
+    // not handle Log.
+    let err = check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun both : Int -> Int needs {Fail, ..e}\nboth x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
+    )
+    .err()
+    .expect("Log is not named");
+    assert!(
+        err.message.contains("uses the effect `Log`"),
+        "{}",
+        err.message
+    );
+    check(
+        "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nfun both : Int -> Int needs {Fail, Log, ..e}\nboth x = {\n  log! \"hello\"\n  fail! \"oops\"\n}",
     )
     .unwrap();
 }

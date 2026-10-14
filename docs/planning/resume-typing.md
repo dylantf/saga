@@ -470,3 +470,32 @@ Newly rejected (sound):
 
 Examples, stdlib, snapshot, matrix and `effect_property_tests` unchanged.
 Non-test `src/`: +220 / -8.
+
+### Step 7: a declared open row names what the body performs (H1)
+
+`check_effects_via_row` rejects, for every effect (not only effects with
+type parameters), a named effect the body performs that the declared row
+does not name, comparing against the row *as written*
+(`saturated_effect_row` of the unresolved annotation): a declared tail may
+have been bound to more effects through an equality, and those do not
+count as named. Message: "function 'h' uses the effect `Log`, which its
+'needs' clause does not name. An open row (`..r`) stands for the caller's
+effects; an effect the body performs must be named so that callers handle
+it. Add `Log` to the 'needs' clause".
+
+Newly rejected (sound): any annotated function whose open row leaves out an
+effect its body performs, e.g. `fun h : (Unit -> Int needs {..e}) -> Int
+needs {..e}`, `h f = { log! "x"; f () }`; `fun loose : Unit -> Int needs
+{..r}`, `loose () = plain! ()` (whose callers dropped `..r` entirely, so
+Plain was never handled). Tests that asserted the old behaviour, changed:
+`effect_row_var_function_open_needs` (now expects the error, and accepts
+the version naming Log) and the `loose` case of
+`parameterised_effect_cannot_hide_in_a_declared_open_row`; and
+`open_row_inner_handler_preserves_sibling_instance_in_tail` in
+`effect_property_tests`, whose `wrapped` performed `FailInt` under `needs
+{FailString, ..r}`: `FailInt` now reaches the open tail through a callback
+(`wrapped from_int`), same result.
+
+Examples, stdlib, snapshot, matrix unchanged; `codegen_integration`,
+`module_codegen_integration`, `e2e` and `stdlib_tests` pass. Non-test
+`src/`: +35 / -14.

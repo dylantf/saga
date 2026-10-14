@@ -467,9 +467,13 @@ impl Checker {
             // Unannotated functions are necessarily private (pub requires an
             // annotation); let their inferred effect row stand and propagate.
             if annotation.is_some() {
+                let written = declared_effect_row
+                    .cloned()
+                    .or_else(|| annotation.and_then(|ann| saturated_effect_row(ann, arity)));
                 self.check_effects_via_row(
                     &all_body_effs,
                     &declared_row,
+                    written.as_ref(),
                     &format!("function '{}'", name),
                     err_span,
                 )?;
