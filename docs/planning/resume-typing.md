@@ -300,3 +300,26 @@ Core snapshot: 09-sorting and 21-do-else changed only in the numbering of
 dictionary parameters (`___dict_Ord_v801` -> `v786`; fewer fresh variables
 are allocated); blessed. Matrix, examples, stdlib, `effect_property_tests`:
 unchanged. Non-test `src/`: +330 / -110 (`unify.rs` mostly moved code).
+
+### Step 3: the resume context is monomorphic (H2)
+
+`generalize` leaves out the free variables of the `resume` in scope (its
+argument type and answer type; R is added at step 4), as it does those of
+the environment. So `let k = fun x -> resume x` (or `let k = resume ()`) in
+an arm is one function at the handled operation's types.
+
+Newly rejected: the H2 program (a named handler using `k` at String while
+the handled computation is an Int: "type mismatch: expected String, got
+Int"). Sound.
+
+Core snapshot: `Std.Test`'s `collect` handler binds `let k = resume ()`
+and calls `k (...)` inside a `fun entries -> ...`. `k` was generalised, so
+the call was compiled at an instantiated open row (`apply_cps` with an
+empty frame); it is now at the answer type, which is pure, so the call is
+a direct one (`is_function`/`apply_n`). Either path runs either closure
+representation; `stdlib_tests` (the stdlib's own test suite, run by this
+handler) passes. Blessed. Examples were not rechecked at this step (not
+required); matrix and `effect_property_tests` unchanged. Not fixed, found
+on the way: an arm may pin an operation's own type variable (`pick : List
+a -> a`, `pick xs = resume 1` is accepted); that is not about
+generalisation and is left for a separate fix. Non-test `src/`: +20.

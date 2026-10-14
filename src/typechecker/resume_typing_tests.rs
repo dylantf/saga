@@ -277,7 +277,6 @@ h f = {
 /// `k` must not be generalised over the handler's answer type: here it
 /// would be used at String while the handled computation is an Int.
 #[test]
-#[ignore = "H2: a let inside an arm generalises over the answer type"]
 fn h2_resume_in_a_let_is_not_generalised_over_the_answer_type() {
     rejected(
         "handler bad_k for Ask {
@@ -290,7 +289,7 @@ fn h2_resume_in_a_let_is_not_generalised_over_the_answer_type() {
 
 main () = dbg ((ask! () + 1) with bad_k)
 ",
-        &[],
+        &["expected String, got Int"],
     );
 }
 

@@ -168,7 +168,7 @@ stdlib/Std.Set 5487e3f9058cd732
 stdlib/Std.Stream d748ceb6ace015e7
 stdlib/Std.String e780c80dee5cda5b
 stdlib/Std.Supervisor 658755bbd7b65d01
-stdlib/Std.Test 046f6018286a9eb1
+stdlib/Std.Test cc818280b7fb287e
 stdlib/Std.Time 71f0d5c5195d61c1
 stdlib/Std.Tuple ac444803cbf4d432
 stdlib/Std.Vec b8efdbcbf19c400b

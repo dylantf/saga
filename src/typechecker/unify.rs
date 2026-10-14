@@ -1866,6 +1866,22 @@ impl Checker {
         }
     }
 
+    /// The variables of the `resume` in scope: the type of the value it
+    /// takes, the answer type it returns and what it performs. They belong
+    /// to the one operation call being handled, like the variables of the
+    /// environment, so a `let` inside an arm (`let k = fun x -> resume x`)
+    /// is not generalised over them.
+    fn resume_context_vars(&self) -> Vec<u32> {
+        let mut vars = Vec::new();
+        for ty in [&self.resume_type, &self.resume_return_type]
+            .into_iter()
+            .flatten()
+        {
+            collect_free_vars(&self.sub.apply(ty), &mut vars);
+        }
+        vars
+    }
+
     /// Generalize a type over variables not free in the environment.
     pub(crate) fn generalize(&self, ty: &Type) -> Scheme {
         let resolved = self.sub.apply(ty);
@@ -1887,9 +1903,12 @@ impl Checker {
                 })
             })
             .collect();
+        let resume_vars = self.resume_context_vars();
         let mut forall = Vec::new();
         collect_free_vars(&resolved, &mut forall);
-        forall.retain(|v| !env_vars.contains(v) && !effect_vars.contains(v));
+        forall.retain(|v| {
+            !env_vars.contains(v) && !effect_vars.contains(v) && !resume_vars.contains(v)
+        });
         Scheme {
             forall,
             constraints: vec![],
