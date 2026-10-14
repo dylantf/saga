@@ -464,12 +464,12 @@ Metadata for effect inference (not effect tracking):
 
 ### Core Idea
 
-All effects are implemented via CPS (Continuation-Passing Style) transform at compile time. There is **one mechanism** for all effects -- resumable, non-resumable, and multishot. No `throw`/`catch`, no process spawning for control flow.
+All effects are implemented via CPS (Continuation-Passing Style) transform at compile time. There is **one mechanism** for all effects -- resumable, non-resumable, and multishot. No process spawning for control flow; the one exception used is the explicit abort of an arm that does not resume (see "The Continuation of a `with`").
 
 Every effect call captures "everything after this point" as a closure (`K`) and passes it to the handler. The handler decides what to do:
 
 - **Resume:** call `K(value)` -- computation continues
-- **Abort:** don't call `K` -- computation is abandoned, handler's return value is the result
+- **Abort:** don't call `K` -- computation is abandoned, handler's return value is the result (thrown to the `with`, so that `finally` regions in between are cleaned up)
 - **Multishot:** call `K` multiple times -- each call runs an independent copy of the rest of the computation (free on BEAM since closures are immutable)
 
 ### Effect Calls Become Continuation-Passing
@@ -697,9 +697,9 @@ the value.
 The convention is inspired by Koka's evidence passing (Xie & Leijen 2021), with deliberate simplifications enabled by Saga's effect semantics:
 
 - **No `hevv` per entry.** Saga has no non-scoped resumes, so each evidence entry doesn't need to carry the saved evidence at handler installation.
-- **No marker integers.** No prompt mechanism.
+- **No marker integers.** A `with` that is not fused makes a reference on entry, which its aborts carry; that is the only prompt.
 - **No mask levels.** Saga has no surface syntax for accessing shadowed outer handlers; innermost-wins covers all cases.
-- **No yield checks.** Saga's CPS is user-level; there's no equivalent of Koka's `is_yielding` flag. The places a result is inspected are `bind` and `mbind`, for a `with` whose arms use the value of `resume` (see "The Continuation of a `with`").
+- **No yield checks.** Saga's CPS is user-level; there's no equivalent of Koka's `is_yielding` flag. The places a result is inspected are `bind` and `mbind`, for a `with` that is not fused (see "The Continuation of a `with`").
 - **Flat caller-side reframing**, rather than nested open wrappers. Koka projects via `@open` wrappers; Saga selects a positional static prefix and retains unselected entries as a tagged tail.
 
 These reductions cut roughly half the runtime apparatus a Koka-faithful implementation would need.
@@ -796,8 +796,8 @@ their own surrounding handled expression completes.
 
 Everything after a `with` in the enclosing body is the continuation `k` of
 the whole `with` expression: of its `return` clause applied to the handled
-computation's result, and of any arm that aborts. There is one lowering, an
-optimisation of it, and one exception (`finally`).
+computation's result, and of any arm that aborts. There is one lowering, and
+an optimisation of it for handlers that only resume in tail position.
 
 #### The lowering
 
@@ -806,11 +806,14 @@ cannot simply be given `k` as its return continuation. It returns to the
 `with`, and `k` is supplied afterwards, as a second, *meta* continuation:
 
 ```erlang
-let LEv = call 'std_evidence_bridge':'lift_evidence'(Ev) in
+let Ref = call 'erlang':'make_ref'() in
+let LEv = call 'std_evidence_bridge':'lift_evidence'(Ev, Ref) in
 let Ask = fun (_, R) ->                       %% ask () = (resume 1) + 10
-            call 'std_evidence_bridge':'mbind'(apply R(1), fun (V) -> V + 10) in
+            call 'std_evidence_bridge':'mbind'(<R(1), delimited by Ref>,
+                                               fun (V) -> <abort Ref (V + 10)>, Ref) in
 let Ev1 = call 'std_evidence_bridge':'insert_canonical'(LEv, {'Ask', {Ask}}) in
-call 'std_evidence_bridge':'bind'(<e lowered with Ev1 and the return clause>, K)
+call 'std_evidence_bridge':'bind'(<e lowered with Ev1 and the return clause,
+                                   delimited by Ref>, K)
 ```
 
 Inside a `with`, CPS code returns one of two things:
@@ -821,33 +824,29 @@ Inside a `with`, CPS code returns one of two things:
   handled computation has a value": the code after `resume` in the arms that
   resumed, then `k`.
 
-```erlang
-bind({'$saga_meta', M}, Mk) -> M(Mk);        %% at the `with`
-bind(Value, Mk)             -> Mk(Value).
+`Mk` is `k` itself (a fun) or a list of frames ending in it: `{k, Ref, F}`
+for the code after a `resume` in an arm of the `with` `Ref`, `{fin, Key}` for
+the end of a `finally` region, `{held, Keys}` for regions a suspension
+carried out of themselves (below), or `run` in place of `k` at a `run` site.
+`bind(V, Mk)` runs the frames in order; `bind({'$saga_meta', M}, Mk)` is
+`M(Mk)`; `mbind(S, F, Ref)` puts `{k, Ref, F}` in front of the `Mk` a
+suspension gets.
 
-mbind({'$saga_meta', M}, F) ->               %% `let r = resume x; F(r)`
-    {'$saga_meta', fun(Mk) -> M(fun(V) -> bind(F(V), Mk) end) end};
-mbind(Value, F)             -> F(Value).
-
-run({'$saga_meta', M}) -> run(M(fun(V) -> V end));   %% `bind` with the identity
-run(Value)             -> Value.
-```
-
-- **Lifting.** `lift_evidence` wraps every operation of the inherited frame:
-  `fun (Args, K1) -> {'$saga_meta', fun (Mk) -> Op(Args, fun (V) ->
-  bind(K1(V), Mk))}`. Performed inside the `with`, an outer operation
-  suspends; when the suspension reaches `bind`, the outer handler is called
-  with a continuation that runs the rest of the handled computation *and
-  then the meta continuation*. An outer handler that aborts skips both, and
-  one that uses the value of its own `resume` gets the answer of both. Tags
-  and positions are unchanged, so the lifted frame has the ABI of the
-  inherited one; `lift_evidence` is the only function that looks at the
-  frame's representation. A `with` in a pure host has no frame to lift.
-- **Arms** are lowered against the lifted frame and never receive `k`: an arm
-  that aborts returns its value, which reaches `bind`. `resume x` followed by
-  the rest of the arm is `mbind(K(x), rest)`; in tail position it is `K(x)`.
-  This is one case of the tail rule (`lower_tail`), reached from the `let`
-  rule like any other performing expression.
+- **Lifting.** `lift_evidence(Ev, Ref)` wraps every operation of the
+  inherited frame: `fun (Args, K1) -> {'$saga_meta', fun (Mk) -> Op(Args,
+  fun (V) -> resume_into(Ref, K1, V, Mk))}`. Performed inside the `with`, an
+  outer operation suspends; when the suspension reaches `bind`, the outer
+  handler is called with a continuation that runs the rest of the handled
+  computation, delimited again by this `with`, and then the meta
+  continuation. Tags and positions are unchanged, so the lifted frame has
+  the ABI of the inherited one; `lift_evidence` is the only function that
+  looks at the frame's representation. A `with` in a pure host has no frame
+  to lift.
+- **Arms** are lowered against the lifted frame and never receive `k`.
+  `resume x` in tail position of the arm is `K(x)`; followed by the rest of
+  the arm it is `mbind(K(x) delimited by Ref, rest, Ref)`. Both are cases of
+  the tail rule (`lower_tail`), reached from the `let` rule like any other
+  performing expression.
 - **No continuation** (the `with` is the last thing in a body that has none):
   `k` is the identity, `bind(result, fun v -> v)`, and nothing at all when no
   frame was lifted.
@@ -855,64 +854,116 @@ run(Value)             -> Value.
   already lifted frame; a suspension leaving the inner `bind` is a suspension
   of the outer level, returned from the inner `with` in tail position.
 
+#### Explicit aborts
+
+An arm that does not resume must skip everything between the operation and
+its `with`. In CPS that is a continuation nobody calls, which nothing in
+between can see; a `finally` region in between could not clean up. So the
+abort is explicit: each `with` of the general lowering makes a reference
+`Ref` on entry, and the tail of an arm that is not a `resume` (and does not
+keep the continuation in a value it returns, such as `fun s -> (resume s)
+s`) is given the abort continuation `fun (V) -> abort(Ref, Tag, V)`, which
+throws `{'$saga_abort', Ref, Tag, V}`. It is caught wherever the `with`
+delimits the computation, and its value is then the value of the handled
+computation at that point:
+
+| Where | Catch |
+| --- | --- |
+| entry of the `with` | inline `try` around the handled computation (`evidence::catch_own_abort`) |
+| a resumption from a handler further out | `resume_into`, in the lifted continuation |
+| a `resume` that is not the arm's tail (also one in a function inside the arm) | inline `try` around `K(x)`; `fin_resume` |
+| the code after such a `resume`, run later by `bind` | the `{k, Ref, F}` frame |
+
+Every place the code of a `with` runs is under one of these, and none of
+them is ever below a frame of a handler further out: the `with` lifts its
+inherited frame, so such a handler's arm runs only after the computation
+has suspended out of the `with` (out of its catch), and it re-enters only
+through `resume_into`. That is why the catch is re-installed per
+resumption: a catch installed once on entry would sit below an outer arm
+that resumes twice (`(resume 1) + (resume 2)`), and an abort in the first
+resumption would unwind that arm (102 becomes 100). A suspension returns
+through the catch, so a loop that suspends and is resumed at every step
+does not grow the stack.
+
+A `run` site (below) does not delimit any `with`: `resume_into` and the
+frames do not catch an abort whose `Mk` ends in `run`, and it goes on to its
+`with`. `catch_panic` re-raises an abort. A spawned process runs its
+computation through `run_process`; an abort arriving there belongs to a
+`with` of the process that spawned it and cannot be delivered, so it becomes
+a panic: "the handler of effect `E` aborted in a process spawned inside its
+`with`: an abort cannot cross a process boundary".
+
+Handler values only known at runtime use this lowering too. A handler value
+is a function of the abort reference of the `with` that installs it,
+`fun (Ref) -> {Ops..., Return}`, so that its arms throw with that `with`'s
+reference.
+
+#### `finally`
+
+An arm with a `finally` block resumes with `fin_resume(Ref, Cleanup, K, x)`:
+the resumed computation is a *region*. On entry the cleanup is stored under
+a fresh key in the process dictionary; it runs at most once, when the region
+ends:
+
+- the resumed computation returns a value (or the `with`'s own abort, which
+  is the value of `resume`): the cleanup runs, then the rest of the arm;
+- an exception leaves it (a panic, or the abort of a `with` further out): the
+  cleanup runs and the exception goes on;
+- it suspends (an outer operation): the region is still open. The suspension
+  takes it along as a `{fin, Key}` frame in front of its `Mk`. While the
+  outer handler runs, a `guard` around it runs the cleanup on an exception
+  (the outer handler aborted); a further suspension carries the region on as
+  `{held, Keys}`, guarded again at the next level; when the computation is
+  resumed, `resume_into` cleans it up on an exception, and `bind` ends it
+  when the value reaches the `{fin, Key}` frame. When a `with` catches its own
+  abort in `resume_into`, the regions held by that resumption are cleaned up.
+
+So the guarantee is: the cleanup runs once, after everything that follows
+`resume` up to the end of the handled computation has finished, or when that
+computation is ended by an exception or by the abort of any handler, before
+that handler's continuation proceeds. A computation kept in a closure by a
+handler further out (a generator, state passing) keeps its regions open
+until it is resumed and finishes. In an arm that does not resume, the
+cleanup runs before the abort. The cleanup is called by the runtime, which
+needs a plain value: it is a `run` site.
+
 #### The optimisation: fusing `k` into the handled computation
 
-When no arm looks at the value `resume` returns (arms that never resume, and
-arms whose every `resume` is in tail position:
-`with_handler_chains_continuation`), no frame of an arm is ever pending
-between the handled computation and `bind`. Then:
+When every arm of a statically known handler resumes in every tail position
+and nowhere else, and none has a `finally` block
+(`with_handler_chains_continuation`), no arm ever aborts or looks at the
+value `resume` returns, so no frame of an arm is pending between the handled
+computation and `bind`. Then:
 
 1. every value that reaches `bind` does so through tail calls that end in
-   the `return` clause or in an arm that aborts, so `bind(v, k) = k(v)` can
-   be moved to those two places;
+   the `return` clause, so `bind(v, k) = k(v)` can be moved there;
 2. every suspension reaches `bind` unextended, so
    `bind(suspend(Op, Args, K1), k) = Op(Args, fun v -> bind(K1(v), k))`, and
    by (1) that continuation is `K1` built with a return continuation that
    already ends in `k`: the operation, not lifted.
 
 So the handled computation gets the `return` clause lowered with `k` as its
-own continuation (or `k` itself), aborting arms apply `k` to their value, and
-nothing is lifted. This is ordinary CPS, and it is what such handlers have
-always compiled to.
-
-#### The exception: `finally`
-
-Cleanup runs "after everything that follows `resume` has finished", also
-when another handler aborts. In CPS an abort is a continuation nobody calls;
-the only place it can be seen is the return of `apply K(x)` on the Erlang
-stack (`try apply K(x) of V -> cleanup, V`). So an abort from further out has
-to *return through* the `with`, where in the lowering above it returns only
-to the aborting handler's own `bind`. Stopping it at the `finally` frame
-makes it the value of `resume`, hence of the `with`, to which `k` would then
-be applied.
-
-A handler with a `finally` block (`with_handler_keeps_stack`) therefore
-keeps the lowering it had before the meta continuation existed: nothing is
-lifted and the handled computation is run on the Erlang stack. In tail
-position of a body that has a continuation, that continuation is fused into
-the handled computation as above; anywhere else the `with` is a value,
-`run(<handled computation>)`, and the rest of the body is applied to it.
-Inside it, `resume x` is `try run(K(x))` and the cleanup is `run`, so that a
-suspension from an enclosing lifted frame is not mistaken for the end of the
-computation.
-
-A handler value only known at runtime (a parameter, the result of a call)
-may have a `finally` arm, so its `with` is lowered the same way. Its arms are
-built with `mbind` like any others.
+own continuation (or `k` itself), nothing is lifted, no reference is made
+and nothing is caught. This is ordinary CPS. BEAM-native handlers
+(`beam_actor`, `beam_ref`, ...) are of this kind.
 
 #### Where a plain value is needed (`run`)
 
 A suspension must reach a `bind` or an `mbind` through tail calls. Code that
 is not CPS but calls code that is cannot pass one on, so it runs the result:
-`bind` with the identity continuation. For what is run, a handler further
-out that aborts returns there.
+`bind` with `run` in place of a continuation.
 
 | Site | Why |
 | --- | --- |
 | the body of a pure lambda or local function inside an arm, when it resumes (`fun s -> (resume s) s`; `lower_fun_body`) | its type is pure, so its caller is an ordinary call |
-| `finally`: the resumed computation, the cleanup, and the `with` itself outside tail position | above |
-| `catch_panic`, and the thunk a spawned process runs | native code calling a function value |
+| a `finally` cleanup | called by the runtime when the region ends |
+| `catch_panic`, and the thunk a spawned process runs (`run_process`) | native code calling a function value |
 | `saga_runtime:apply_n/2` on a tagged closure | a callback passed to an operation keeps its perform-site frame; an arm that sees its row as empty calls it as a pure function |
+
+A handler further out whose operation is driven by a `run` site runs there,
+in place: an outer arm that uses the value of its `resume` gets the value of
+the computation run there, not the answer of the meta continuation it
+belongs to.
 
 The lowerer itself has no such site: an expression that performs is the
 value of a `let` or in tail position, and anything else is an internal error
@@ -926,44 +977,48 @@ Its handler's arm runs the callback and then resumes; by then an arm of the
 inner `with` may have resumed across the end of the callback, so the inner
 meta continuation has grown, and it would have to reach a continuation
 closure built when the operation was performed, through the outer arm's
-code, which was compiled without it. Only process state could carry it.
-Everything the callback itself performs is lifted and bound as usual.
+code, which was compiled without it. Everything the callback itself
+performs is lifted and bound as usual. An arm for such an operation that
+aborts throws through the inner `with` like any other abort.
 
 #### Known gaps
 
-Each of the first three has an ignored test in
-`tests/effect_property_tests.rs`.
-
-- A `finally` handler, or a handler value only known at runtime, under an
-  outer handler that aborts or uses the value of its `resume`: the abort
-  value becomes the value of the `with` and the rest of the body runs
-  (`non_tail_with_finally_handler_under_aborting_outer_handler`,
-  `runtime_handler_value_under_aborting_outer_handler`). In tail position of
-  a body with a continuation, `resume` in such a handler returns the caller's
-  answer.
-- `resume` in a pure function inside an arm (state passing): an outer abort
-  after the first such `resume` becomes the value of that `resume`
+- `resume` in a pure function inside an arm (state passing): an outer
+  handler that uses the value of its own `resume`, after the first such
+  `resume`, gets the value of the computation run there
   (`resume_under_lambda_under_aborting_outer_handler`). Fixing it needs the
   typechecker to put the residual effects of the `with` on that function.
-- An operation that carries a callback, handled further out by an arm that
-  aborts or uses the value of its `resume`: that arm sees the extent of the
-  inner `with` (`callback_operation_aborted_by_outer_handler`). A callback
-  held inside other data is not recognised, and the operation is lifted.
-- An operation of more than seven arguments is not lifted either.
+- An operation that carries a callback, or of more than seven arguments, is
+  performed in place: its handler further out runs on top of the inner
+  `with`. An arm for it that uses the value of its `resume` sees the extent
+  of the inner `with`, and one that resumes twice around an abort of the
+  inner `with` loses its second resumption. A callback held inside other
+  data is not recognised, and the operation is lifted.
 - The arms of a handler *value* perform outer operations against the frame
   where the value was built, not the lifted one.
+- A `finally` region whose computation is resumed in another process is
+  cleaned up only in the process that entered it (the cleanup is kept in
+  that process's dictionary).
 
 #### Cost
 
-A fused `with` costs what it did before. Otherwise, on each entry in an
-effectful host: one closure per operation of the inherited frame, one tuple
-per effect and one for the frame. Each operation of the inherited frame
-performed inside costs a suspension tuple, two closures, a list append and
-an `apply` more than the direct call, and that again for every enclosing
-lifting `with` (a recursive function that enters one at each level makes
-outer operations linear in the depth). Each `resume` whose value is used
-costs one `mbind` call and, if the resumed computation suspends, two
-closures.
+A fused `with` costs what it always did. A general one, on each entry:
+`make_ref`, a `try` around the handled computation, and in an effectful host
+one closure per operation of the inherited frame, one tuple per effect and
+one for the frame. Each operation of the inherited frame performed inside
+costs a suspension tuple, two closures, a list append, an `apply` and a
+`try` more than the direct call, and that again for every enclosing lifting
+`with`. Each `resume` whose value is used costs a `try`, one `mbind` call
+and, if the resumed computation suspends, a closure and a frame. An abort is
+a `throw` (about 60 ns, against a return).
+
+The `try` at entry makes the handled computation non-tail: a recursion that
+enters a general `with` at every level and recurses inside its handled
+computation (`nested n = { check n; nested (n - 1) } with { fail _ = 0 }`)
+keeps one catch frame per level, 4 words. A loop inside a `with` entered
+once does not grow, nor does one that suspends out of the `with` and is
+resumed at every step: the suspension returns through the catch before the
+next one is installed.
 
 A handled block with no return continuation at all (`{ g 3 + 100 } with h`
 in a pure function) needs nothing special: normalization has turned its tail
@@ -1044,10 +1099,9 @@ The lowerer then has two rules, each with one implementation:
 
 "Takes a continuation" (`Lowerer::takes_continuation`) is `performs_effect`
 with one exception that concerns the continuation and not the position: a
-`with` takes the rest of the block when its handled computation performs
-and its handler does not keep the stack (a `finally` handler produces a plain
-value; see "The Continuation of a `with`"). It must still be a `let`, never
-an operand. A `resume` takes the rest of its arm like any call.
+`with` takes the rest of the block when its handled computation performs.
+It must still be a `let`, never an operand. A `resume` takes the rest of its
+arm like any call.
 
 Normalization runs once, here. The generic fold runs before it and may copy
 an argument that still contains an operation; the copy has a fresh id, and
@@ -1058,7 +1112,7 @@ position within their own body.
 
 ### Non-Resumable Effects
 
-No special mechanism needed. A non-resumable handler simply doesn't call `K`. The continuation closure sits unreferenced on the heap and gets garbage collected. Same calling convention as resumable handlers.
+A non-resumable arm doesn't call `K`; the closure sits unreferenced on the heap and gets garbage collected. Same calling convention as resumable handlers. Its value is thrown to its `with` (see "Explicit aborts"), so that `finally` regions between the operation and the `with` are cleaned up and no frame in between takes it for a value.
 
 ### Multishot Continuations
 
@@ -1083,13 +1137,13 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/lower/calls.rs` -- consumes planned call `CallableAbi` values, executes `EvidenceReframePlan` for calls to known functions, and lowers calls through function values.
 - `codegen/lower/effects/ops.rs` -- resolves static or dynamic operation slots through `EvidenceAbi`.
 - `codegen/lower/effects/with.rs` -- installs handlers through `EvidenceInstallPlan` and updates the active `EvidenceFrame`. Lowers the continuation of a `with`.
-- `codegen/lower/effects/handlers.rs` -- `with_handler_chains_continuation` (when the lowering may be fused), `with_handler_keeps_stack` (`finally`).
+- `codegen/lower/effects/handlers.rs` -- `with_handler_chains_continuation` (when the lowering may be fused); handler values as functions of the abort reference.
 - `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/effect_position.rs` -- the position rule: the table of sub-expression positions, the effect predicate and the checker.
 - `codegen/normalize.rs`, `codegen/lower/anf.rs` -- value-normal form, and where it is applied and asserted.
 - `codegen/lower/exprs/` -- `lower_tail` (`return_k.rs`), `lower_block` (`blocks.rs`), `lower_expr` (`dispatch.rs`), `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- registers local/imported `FunInfo` entries carrying `CallableAbi` plus non-ABI HOF parameter metadata.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly. `lift_evidence/1`, `bind/2`, `mbind/2` and `run/1` for the continuation of a `with`.
+- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly. `lift_evidence/2`, `bind/2`, `mbind/3`, `resume_into/4`, `abort/3`, `fin_resume/4`, `run/1` and `run_process/1` for the continuation of a `with`, its aborts and `finally` regions.
 
 ### Optimization Opportunities
 
