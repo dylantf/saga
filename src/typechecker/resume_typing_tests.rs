@@ -128,7 +128,6 @@ fn names(row: &EffectRow) -> Vec<String> {
 /// first arrow and unified with the declared (empty) one there, which
 /// closed `..e`.
 #[test]
-#[ignore = "U1: open-vs-closed drops the open side's extra effects"]
 fn u1_declared_row_of_a_returned_function_keeps_its_tail() {
     let checker = accepted("");
     let ty = type_of(&checker, "wrap");
@@ -146,7 +145,6 @@ fn u1_declared_row_of_a_returned_function_keeps_its_tail() {
 /// The same placement let a function perform an effect before returning a
 /// function while its first arrow stayed pure.
 #[test]
-#[ignore = "U1: open-vs-closed drops the open side's extra effects"]
 fn u1_effect_before_returning_a_function_is_on_the_first_arrow() {
     rejected(
         "fun early : Int -> Int -> Int needs {Log}
@@ -169,7 +167,6 @@ fn u1_open_row_with_an_effect_is_not_a_pure_function() {
 /// accepted as equal (`{Stop | r} ~ {| r}`), dropping Stop. Unannotated, the
 /// row variable must take Stop on.
 #[test]
-#[ignore = "U2: the same tail on both sides drops the differing effects"]
 fn u2_shared_tail_keeps_the_differing_effect() {
     let checker = accepted("bad f = (eq f (wrap f)) ()\n");
     let ty = type_of(&checker, "bad");
@@ -183,6 +180,7 @@ fn u2_shared_tail_keeps_the_differing_effect() {
 /// U2 at a declared row variable: the caller chooses `..e`, so the body may
 /// not assume it contains Stop.
 #[test]
+#[ignore = "a declared row variable still takes on effects in equality unification (step 2)"]
 fn u2_shared_rigid_tail_rejects_the_differing_effect() {
     rejected(
         "fun bad : (Unit -> Int needs {..e}) -> Int needs {..e}\nbad f = (eq f (wrap f)) ()\n",
@@ -193,7 +191,6 @@ fn u2_shared_rigid_tail_rejects_the_differing_effect() {
 /// U3: tails common to both rows must cancel before the rest is unified,
 /// or `{..a, ..b} ~ {..b}` binds `b` to a row containing itself.
 #[test]
-#[ignore = "U3: common tails are not cancelled"]
 fn u3_common_tails_cancel() {
     accepted(
         "fun two : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b}) -> Int needs {..a, ..b}

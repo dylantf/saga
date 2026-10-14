@@ -365,8 +365,35 @@ impl Checker {
             .cloned()
             .collect();
 
-        let tails1 = r1.tail_var_ids();
-        let tails2 = r2.tail_var_ids();
+        // A tail both rows have stands for the same effects on both sides,
+        // so it cancels: `{..a, ..b} ~ {..b}` is `{..a} ~ {}` (binding `b`
+        // to a row containing `b` would be an infinite row). What the two
+        // rows still differ in must then be the same set of effects, except
+        // that a shared tail can hold the named effects only one side has:
+        // `{Stop, ..r} ~ {..r}` holds when `r` contains Stop.
+        let all1 = r1.tail_var_ids();
+        let all2 = r2.tail_var_ids();
+        let common: Vec<u32> = all1.iter().copied().filter(|t| all2.contains(t)).collect();
+        let tails1: Vec<u32> = all1.into_iter().filter(|t| !common.contains(t)).collect();
+        let tails2: Vec<u32> = all2.into_iter().filter(|t| !common.contains(t)).collect();
+        if !common.is_empty() && tails1.is_empty() && tails2.is_empty() {
+            let mut differing = extras1;
+            differing.extend(extras2);
+            if differing.is_empty() {
+                return Ok(());
+            }
+            if common.len() == 1 {
+                let fresh = self.fresh_var();
+                return self.bind_row_checked(
+                    common[0],
+                    EffectRow {
+                        effects: differing,
+                        tails: vec![fresh],
+                    },
+                );
+            }
+            return Err(ambiguous_row_error(&differing));
+        }
 
         match (tails1.is_empty(), tails2.is_empty()) {
             // Both closed: accept if one side is a subset of the other.
@@ -405,12 +432,61 @@ impl Checker {
                 }
             }
             // row1 open, row2 closed: row1's tails must absorb the effects that
-            // row2 has but row1 lacks (extras2).
-            (false, true) => self.absorb_extras_into_tails(&tails1, extras2),
+            // row2 has but row1 lacks (extras2). The effects only row1 names
+            // are not in row2 at all: see `open_side_extras`.
+            (false, true) => {
+                self.absorb_extras_into_tails(&tails1, extras2)?;
+                self.open_side_extras(&r1, &r2, true, extras1, &common)
+            }
             // row2 open, row1 closed: symmetric.
-            (true, false) => self.absorb_extras_into_tails(&tails2, extras1),
+            (true, false) => {
+                self.absorb_extras_into_tails(&tails2, extras1)?;
+                self.open_side_extras(&r1, &r2, false, extras2, &common)
+            }
             // Both open.
             (false, false) => self.unify_open_rows(&tails1, &tails2, extras1, extras2),
+        }
+    }
+
+    /// Named effects of the open side of an open-vs-closed unification that
+    /// the closed side lacks (`{Stop | e} ~ {}`). Binding the open side's
+    /// tails cannot make them disappear: either a tail both rows share holds
+    /// them, or the rows really differ by them. The latter is the same
+    /// situation as two closed rows of which one is the larger, so it is
+    /// recorded as such and judged by the position (a coercion position
+    /// accepts it when the closed side is the actual one).
+    fn open_side_extras(
+        &mut self,
+        r1: &EffectRow,
+        r2: &EffectRow,
+        open_is_left: bool,
+        extras: Vec<super::EffectEntry>,
+        common: &[u32],
+    ) -> Result<(), Diagnostic> {
+        if extras.is_empty() {
+            return Ok(());
+        }
+        match common {
+            [] => {
+                self.row_subsumptions.push(RowSubsumption {
+                    path: self.unify_path.clone(),
+                    left: self.sub.apply_effect_row(r1),
+                    right: self.sub.apply_effect_row(r2),
+                    left_is_larger: open_is_left,
+                });
+                Ok(())
+            }
+            [shared] => {
+                let fresh = self.fresh_var();
+                self.bind_row_checked(
+                    *shared,
+                    EffectRow {
+                        effects: extras,
+                        tails: vec![fresh],
+                    },
+                )
+            }
+            _ => Err(ambiguous_row_error(&extras)),
         }
     }
 

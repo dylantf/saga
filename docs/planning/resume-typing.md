@@ -199,4 +199,55 @@ Estimated 650–800 lines of non-test code, ~400 of tests.
 
 ## Outcome
 
-(Filled in as steps land.)
+Tests are in `src/typechecker/resume_typing_tests.rs` unless noted.
+
+### Step 0: reproductions
+
+All five holes reproduce, but U1 not as described. `thunk_pure (wrap g)`
+was already rejected, for the wrong reason: `check_fun_clauses` put the row
+of the function a declaration *returns* (`innermost_effect_row`) on the
+function's own first arrow as well, and unified that with the declared
+(empty) first arrow through `unify` (no position), where U1 dropped Stop and
+closed `..e` in `wrap`'s own scheme. So `wrap` was typed `(Unit -> Int) ->
+(Unit -> Int needs {Stop})`. The same placement accepted a function that
+performs an effect before returning a function while its first arrow was
+declared pure (`early`, unsound). U2 and U3 reproduce once U1 is fixed (U2:
+`bad f = (eq f (wrap f)) ()` typed without Stop). H1, H2 and both H3
+programs are accepted as described.
+
+### Step 1: U1-U3
+
+- `unify_effect_rows` cancels tails both rows share before comparing (U3).
+  When only shared tails remain, a single shared tail takes the named
+  effects that only one side has (`{Stop | r} ~ {| r}` binds `r := {Stop |
+  r'}`, U2); more than one shared tail is the ambiguous-row error.
+- Open-vs-closed: the open side's named effects that the closed side lacks
+  (U1) go into a shared tail if there is one, else they are recorded like a
+  closed-vs-closed subset with the open side larger, so the position judges
+  them (a coercion accepts `{} ⊆ {Stop | e}`, rejects the reverse).
+- `check_fun_clauses` checks a body against, and builds the function's own
+  arrow from, the row of the arrow its arity saturates
+  (`saturated_effect_row`), not the innermost one. The two "forwarded
+  tail" checks (callback `..e`, open-row trait method `..a`) also accept a
+  tail forwarded on the returned function's arrows.
+
+Newly rejected (breaking-change list):
+
+- A function that performs an effect before returning a function whose
+  type names the effect only on the returned arrow (`fun early : Int -> Int
+  -> Int needs {Log}`, `early x = { log! ".."; fun y -> x + y }`): calling
+  `early 1` performs Log, which its first arrow does not allow. Sound.
+- Function-shape matrix, 9 entries added to
+  `function_shape_matrix_typecheck_rejected.txt`: `eta_op.{returned,
+  returned_let, cross_module_ret}.{e1, e2, eu}`, i.e. `fun make : Unit ->
+  (Int -> Int needs {Bump})`, `make () = bump!`. An effect operation
+  referenced without arguments captures the handler in scope where the
+  reference is written (`lower_eta_reduced_effect_op_ref`; the typechecker
+  emits the effect at the reference, which is also why
+  `eta_op.let_outside_handler` was already rejected). So calling `make`
+  needs a Bump handler, which its pure first arrow does not provide; it was
+  accepted only through the misplaced row. Writing `make () = fun x -> bump!
+  x` is accepted.
+
+Examples and stdlib: unchanged, all typecheck. `effect_property_tests` and
+`core_snapshot` unchanged. Non-test `src/`: +117 / -12.
