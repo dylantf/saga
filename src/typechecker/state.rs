@@ -63,6 +63,13 @@ pub struct HandlerInfo {
     /// handler's `needs`: the rest of the handled computation, bound to what
     /// it leaves unhandled at each `with`.
     pub resume_row: Option<u32>,
+    /// The handler leaves the answer type to the computation it is
+    /// installed around (no `return` clause but the identity, arms that do
+    /// not decide the answer type). See `Checker::check_handler_value`.
+    pub uniform: bool,
+    /// For a `let` bound to an `if` over handlers: the declarations of the
+    /// other branches, each checked at the `with` like this one.
+    pub alternatives: Vec<HandlerInfo>,
     /// Fully applied handled effects, used to select exact evidence slots.
     pub effect_entries: Vec<EffectEntry>,
     /// Frozen return clause: (param_type, body_type). Sub-applied at register time so
@@ -237,6 +244,10 @@ pub struct Checker {
     /// For each `with` (by node) whose arms resume: what resuming performs,
     /// for the note on errors about a function that resumes.
     pub(crate) resume_rows: HashMap<NodeId, EffectRow>,
+    /// The handler references making up the right-hand side of a `let` or a
+    /// function body being inferred, where a handler value keeps its
+    /// declaration (see `Checker::check_handler_value`).
+    pub(crate) handler_alias_sites: Vec<NodeId>,
     /// Metadata for effect inference (instantiation caches, declared rows, name registries).
     pub(crate) effect_meta: EffectMeta,
     /// Effect accumulator: effects from the current scope are pushed here automatically

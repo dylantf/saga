@@ -571,6 +571,15 @@ impl Checker {
                         let final_effs =
                             self.merge_rows(&remaining_effs, &fresh_needs, with_span)?;
                         self.emit_effects(&final_effs, with_span)?;
+                        for alternative in &handler_info.alternatives {
+                            self.check_alternative_handler(
+                                alternative,
+                                &expr_ty,
+                                &fresh_ret,
+                                &remaining_effs,
+                                with_span,
+                            )?;
+                        }
                         if handler_info.return_type.is_none()
                             && !handler_info.effects.is_empty()
                             && !handled_entries
@@ -872,6 +881,95 @@ impl Checker {
                 Ok(self.sub.apply(&answer_ty))
             }
         }
+    }
+
+    /// Another handler a `with` may install (the other branch of the `if`
+    /// it was bound from): it must give the `with` the same type, and what
+    /// it needs is needed here too.
+    fn check_alternative_handler(
+        &mut self,
+        info: &super::HandlerInfo,
+        expr_ty: &Type,
+        ret_ty: &Type,
+        remaining: &EffectRow,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mapping: std::collections::HashMap<u32, Type> =
+            info.forall.iter().map(|&id| (id, self.fresh_var())).collect();
+        if let Some((param, ret)) = &info.return_type {
+            let param = Self::replace_vars(param, &mapping);
+            let ret = Self::replace_vars(ret, &mapping);
+            let disagree = |e: Diagnostic| {
+                Diagnostic::error_at(
+                    span,
+                    format!(
+                        "the handlers this `with` may install (chosen by an `if`) give it \
+                         different types: {}",
+                        e.message
+                    ),
+                )
+            };
+            self.unify_at(&param, expr_ty, span).map_err(disagree)?;
+            self.unify_at(&ret, ret_ty, span).map_err(disagree)?;
+        }
+        if let Some(Type::Var(resume_rest)) =
+            info.resume_row.and_then(|id| mapping.get(&id).cloned())
+        {
+            self.bind_row_checked(resume_rest, remaining.clone())
+                .map_err(|e| e.with_span(span))?;
+        }
+        let needs = self.replace_vars_in_effect_row(&info.needs_effects, &mapping);
+        self.emit_effects(&needs, span)
+    }
+
+    /// A handler used as a value, anywhere but as a `let`'s right-hand
+    /// side or a function's body (or a branch of an `if` that is one), where
+    /// its declaration stays known to the `with` that installs it
+    /// (`static_handler_sites`). Elsewhere (an argument, a field) a `with`
+    /// may know it only by its `Handler E` type, which says
+    /// nothing about the answer type, so the handler must be uniform (see
+    /// `HandlerInfo::uniform`). A declared handler's `needs` are provided at
+    /// the `with` that names it; a `with` that has only a value provides
+    /// none, so such a handler may not need anything either. (A handler
+    /// expression's `needs` are taken where it is built.)
+    pub(crate) fn check_handler_value(
+        &self,
+        expr_id: crate::ast::NodeId,
+        info: &super::HandlerInfo,
+        what: &str,
+        declared: bool,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if self.handler_alias_sites.contains(&expr_id) {
+            return Ok(());
+        }
+        let reason = if !info.uniform {
+            "it decides the type of the `with` that installs it (with a `return` clause, \
+             or with what its arms return)"
+                .to_string()
+        } else if declared && !info.needs_effects.effects.is_empty() {
+            let mut names: Vec<String> = info
+                .needs_effects
+                .effects
+                .iter()
+                .map(|e| self.prettify_effect_entry(e))
+                .collect();
+            names.sort();
+            format!(
+                "it needs {{{}}}, which only a `with` that names it provides",
+                names.join(", ")
+            )
+        } else {
+            return Ok(());
+        };
+        Err(Diagnostic::error_at(
+            span,
+            format!(
+                "{what} cannot be used as a `Handler` value here: {reason}. A `with` given a \
+                 handler only by its type cannot account for that. Install it with `with` \
+                 directly, or bind it with `let` first"
+            ),
+        ))
     }
 
     /// `ty` with a fresh slack tail (`Slack::Answer`) added to the row of

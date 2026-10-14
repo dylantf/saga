@@ -95,6 +95,7 @@ impl Checker {
             resume_return_type: None,
             resume_effects: None,
             resume_rows: HashMap::new(),
+            handler_alias_sites: Vec::new(),
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
             trait_forward_row_vars: std::collections::HashMap::new(),

@@ -739,6 +739,20 @@ impl Checker {
         // Var nodes. Without a return clause the handler doesn't transform
         // the result type: usage sites get the answer type as a template.
         let frozen_answer = self.sub.apply(&answer_ty);
+        // A uniform handler leaves the answer type to the computation, like
+        // Koka's first-class handlers (`∀ε a. (() -> ⟨E|ε⟩ a) -> ε a`): no
+        // `return` clause but the identity, and arms that do not decide the
+        // answer type. Only such a handler can be installed by a `with` that
+        // knows it by its `Handler E` type alone.
+        let identity_return = return_clause.is_none_or(|rc| {
+            matches!(
+                (rc.params.first(), &rc.body.kind),
+                (Some(ast::Pat::Var { name: param, .. }), ast::ExprKind::Var { name: body, .. })
+                    if param == body
+            )
+        });
+        let uniform = identity_return
+            && matches!(&frozen_answer, Type::Var(id) if !saved_outer_named.values().any(|v| v == id));
         let handler_return_type = match return_param {
             Some(param_var_id) => Some((self.sub.apply(&Type::Var(param_var_id)), frozen_answer)),
             None => Some((frozen_answer.clone(), frozen_answer)),
@@ -971,6 +985,8 @@ impl Checker {
             }
         }
         let info = HandlerInfo {
+            uniform,
+            alternatives: vec![],
             resume_row: resume_rest_roots.first().copied(),
             effects: canonical_effects,
             effect_entries: applied_effects,

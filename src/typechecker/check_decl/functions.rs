@@ -177,11 +177,17 @@ impl Checker {
                 self.check_guard(guard)?;
             }
 
-            let body_ty = if annotation.is_some() {
-                self.infer_expr_against(body, &result_ty)?
+            // A handler returned as the body stays known to `with`s through
+            // `handler_funs` (see `check_handler_value`).
+            let sites = self.static_handler_sites(body);
+            let saved_alias_sites = std::mem::replace(&mut self.handler_alias_sites, sites);
+            let inferred = if annotation.is_some() {
+                self.infer_expr_against(body, &result_ty)
             } else {
-                self.infer_expr(body)?
+                self.infer_expr(body)
             };
+            self.handler_alias_sites = saved_alias_sites;
+            let body_ty = inferred?;
             if returned_handler_info.is_none() {
                 returned_handler_info = self.extract_handler_info(body);
             }

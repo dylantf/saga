@@ -220,6 +220,17 @@ impl Checker {
                     if let Some(def_id) = def_id {
                         self.record_reference(node_id, span, def_id);
                     }
+                    if let Some(info) = self.handlers.get(&resolved_name)
+                        && matches!(&ty, Type::Con(con, _) if con == super::canonicalize_type_name("Handler"))
+                    {
+                        self.check_handler_value(
+                            node_id,
+                            info,
+                            &format!("handler `{name}`"),
+                            true,
+                            span,
+                        )?;
+                    }
                     Ok(ty)
                 } else if let Some(diag) = self.bare_trait_method_ambiguity_diag(name, span) {
                     Err(diag)
@@ -678,6 +689,9 @@ impl Checker {
                 if !needs.effects.is_empty() {
                     self.emit_effects(&needs, span)?;
                 }
+                if let Some(info) = self.handlers.get(&synthetic_name) {
+                    self.check_handler_value(node_id, info, "this handler", false, span)?;
+                }
                 let scheme = self.env.get(&synthetic_name).unwrap();
                 let ty = scheme.ty.clone();
                 self.record_type(node_id, &ty);
@@ -996,6 +1010,18 @@ impl Checker {
         if let Some(callee_ty) = saturation_callee {
             self.emit_saturated_call_effects(&callee_ty, &head_ty, head_vars, expr.span)?;
             self.emit_concrete_trait_impl_effects(head)?;
+        }
+
+        if let ExprKind::Var { name, .. } = &head.kind
+            && let Some(info) = self.handler_funs.get(name)
+        {
+            self.check_handler_value(
+                expr.id,
+                info,
+                &format!("the handler `{name}` returns"),
+                false,
+                expr.span,
+            )?;
         }
 
         Ok(current_ty)
@@ -1579,10 +1605,15 @@ impl Checker {
                 else_branch,
                 ..
             } => {
-                // For conditionals, try to extract from either branch
-                // (both should handle the same effects, verified by type unification)
-                self.extract_handler_info(then_branch)
-                    .or_else(|| self.extract_handler_info(else_branch))
+                // Either branch may be installed: keep both declarations, the
+                // second as an alternative the `with` checks too. Without
+                // both, nothing is known statically.
+                let mut first = self.extract_handler_info(then_branch)?;
+                let mut second = self.extract_handler_info(else_branch)?;
+                let rest = std::mem::take(&mut second.alternatives);
+                first.alternatives.push(second);
+                first.alternatives.extend(rest);
+                Some(first)
             }
             ExprKind::HandlerExpr { .. } => {
                 // Handler expressions are registered under a synthetic name by infer_expr
@@ -1591,6 +1622,49 @@ impl Checker {
             }
             _ => None,
         }
+    }
+
+    /// The handler references `expr` consists of, if it is a reference to a
+    /// handler declaration, a handler expression, a call of a function that
+    /// returns one, or an `if` choosing between such: what
+    /// `extract_handler_info` keeps the declarations of. Empty otherwise.
+    pub(crate) fn static_handler_sites(&self, expr: &Expr) -> Vec<NodeId> {
+        fn go(checker: &Checker, expr: &Expr, out: &mut Vec<NodeId>) -> bool {
+            match &expr.kind {
+                ExprKind::Var { name } => {
+                    let resolved = checker.resolved_value_name(expr.id, name);
+                    let known = checker.handlers.contains_key(name)
+                        || checker.handlers.contains_key(&resolved);
+                    if known {
+                        out.push(expr.id);
+                    }
+                    known
+                }
+                ExprKind::HandlerExpr { .. } => {
+                    out.push(expr.id);
+                    true
+                }
+                ExprKind::App { .. } => {
+                    let mut head = expr;
+                    while let ExprKind::App { func, .. } = &head.kind {
+                        head = func;
+                    }
+                    let known = matches!(&head.kind, ExprKind::Var { name } if checker.handler_funs.contains_key(name));
+                    if known {
+                        out.push(expr.id);
+                    }
+                    known
+                }
+                ExprKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => go(checker, then_branch, out) && go(checker, else_branch, out),
+                _ => false,
+            }
+        }
+        let mut out = Vec::new();
+        if go(self, expr, &mut out) { out } else { Vec::new() }
     }
 
     /// Build a minimal HandlerInfo from a Handler type.
@@ -1615,6 +1689,8 @@ impl Checker {
             }
             Some(super::HandlerInfo {
                 resume_row: None,
+                uniform: true,
+                alternatives: vec![],
                 effects,
                 effect_entries: args
                     .iter()
@@ -1722,7 +1798,11 @@ impl Checker {
                     span,
                     ..
                 } => {
-                    let ty = match self.infer_expr(value) {
+                    let sites = self.static_handler_sites(value);
+                    let saved_alias_sites = std::mem::replace(&mut self.handler_alias_sites, sites);
+                    let inferred = self.infer_expr(value);
+                    self.handler_alias_sites = saved_alias_sites;
+                    let ty = match inferred {
                         Ok(ty) => {
                             if let Some(ann) = annotation {
                                 let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);

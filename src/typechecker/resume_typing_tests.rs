@@ -298,7 +298,6 @@ main () = dbg ((ask! () + 1) with bad_k)
 /// A handler whose arms decide the answer type, passed as a `Handler Ask`
 /// value: the `with` inside `use_h` cannot know its answer type.
 #[test]
-#[ignore = "H3: a non-uniform handler passed as a Handler value"]
 fn h3_non_uniform_handler_value_is_rejected() {
     rejected(
         "fun use_h : Handler Ask -> Int
@@ -313,9 +312,9 @@ main () = dbg (use_h (make_bad ()))
 }
 
 /// `if` over two handlers with different return clauses: which one is
-/// installed is decided at run time, so neither's answer type can be used.
+/// installed is decided at run time, so both must give the `with` the same
+/// type (only the first was looked at).
 #[test]
-#[ignore = "H3: extract_handler_info takes the first branch of an if"]
 fn h3_handlers_chosen_by_if_must_be_uniform() {
     rejected(
         "effect Oops { fun oops : String -> a }
@@ -335,7 +334,7 @@ pick c = {
   (oops! \"x\") with h
 }
 ",
-        &[],
+        &["the handlers this `with` may install (chosen by an `if`) give it different types"],
     );
 }
 
@@ -718,6 +717,92 @@ handler runner for State, Fail {
 
 fun go : Unit -> Int needs {Stop}
 go () = (counter () with runner) 0
+",
+    );
+}
+
+// --- Handler values (step 6) ---
+
+/// A uniform handler (its answer type is the computation's) can be passed
+/// as a `Handler` value; one that needs effects only a naming `with`
+/// provides cannot; a non-uniform one can still be bound by a `let`.
+#[test]
+fn handler_values_must_be_uniform() {
+    let use_h = "fun use_h : Handler Ask -> Int needs {Stop}
+use_h h = ask_stop () with h
+";
+    accepted(&format!(
+        "{use_h}
+handler plain for Ask {{ ask () = resume 1 }}
+
+fun go : Unit -> Int needs {{Stop}}
+go () = use_h plain
+
+fun go_expr : Unit -> Int needs {{Stop}}
+go_expr () = use_h (handler for Ask {{ ask () = resume 2 }})
+"
+    ));
+    rejected(
+        &format!(
+            "{use_h}
+handler noisy for Ask needs {{Log}} {{
+  ask () = {{
+    log! \"asked\"
+    resume 1
+  }}
+}}
+
+fun go : Unit -> Int needs {{Stop, Log}}
+go () = use_h noisy
+"
+        ),
+        &["handler `noisy` cannot be used as a `Handler` value", "{Log}"],
+    );
+    rejected(
+        &format!(
+            "{use_h}
+handler counting for Ask {{
+  ask () = (resume 1) + 1
+}}
+
+fun go : Unit -> Int needs {{Stop}}
+go () = use_h counting
+"
+        ),
+        &["handler `counting` cannot be used as a `Handler` value"],
+    );
+    // Two handlers chosen by an `if` that agree on the `with`'s type.
+    accepted(
+        "handler loud for Log {
+  log msg = \"L:\" <> msg <> \"/\" <> resume ()
+  return _ = \"\"
+}
+
+handler quiet for Log {
+  log _ = resume ()
+  return _ = \"Q\"
+}
+
+fun choose : Bool -> String
+choose c = {
+  let h = if c then loud else quiet
+  log! \"x\" with h
+}
+",
+    );
+    accepted(
+        "effect Oops { fun oops : String -> a }
+
+handler to_result for Oops {
+  oops e = Err e
+  return v = Ok v
+}
+
+fun bound : Unit -> Result Int String
+bound () = {
+  let h = to_result
+  (oops! \"x\") with h
+}
 ",
     );
 }

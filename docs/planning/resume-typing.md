@@ -421,3 +421,52 @@ that passes `resume`'s result to its `_ReturnK` through `mbind`. Output of
 changed only in dictionary-parameter numbering again. Blessed. Matrix and
 `effect_property_tests` unchanged; all examples and the stdlib typecheck;
 `stdlib_tests` passes. Non-test `src/` (incl. Stream.saga): +145 / -41.
+
+### Step 6: handler values (H3)
+
+- `HandlerInfo::uniform`: no `return` clause but the identity, and an
+  answer type that is still a free variable after the arms (not one of an
+  enclosing signature). Not checked separately: `ρ_R` in the answer, which
+  a free answer variable cannot contain.
+- `check_handler_value` at every expression that produces a handler value
+  (a reference to a declared or `let`-bound handler, a handler expression,
+  a call of a function in `handler_funs`): unless the expression is a
+  *static site*, the handler must be uniform. Static sites
+  (`static_handler_sites`) are the right-hand side of a block `let` and a
+  function body (`handler_funs`), when it is such a reference or an `if`
+  whose branches all are; that is exactly where `extract_handler_info`
+  keeps the declaration for the `with`. A top-level `let` is not one (it
+  never registered handler info).
+- Deviation (more precise than "reject `if c then to_result else
+  to_result2`", still sound): `extract_handler_info` on an `if` keeps every
+  branch's declaration (`HandlerInfo::alternatives`) instead of the first,
+  and a `with` installing it checks each alternative as it checks the first
+  (its return clause against the computation and the first's result, its
+  `ρ_R`, its `needs`). Branches that give the `with` different types are
+  rejected ("the handlers this `with` may install (chosen by an `if`) give
+  it different types: ..."), which is the H3 program; branches that agree
+  (the runtime tests `handler_chosen_conditionally` and
+  `conditional_and_mixed_handlers_are_delimited`, which the flat rule broke)
+  are accepted. An `if` with a branch that is not a static handler
+  reference has no static info and goes the type-only way.
+- Addition: a *declared* handler with `needs` is not uniform as a value
+  either. A `with` that knows a handler only by its type does not provide
+  its `needs` (a handler expression's are taken where it is built, a
+  declared handler's only at a `with` naming it), so `use_h noisy` for
+  `handler noisy for Ask needs {Log}` passed `check` and then failed in the
+  lowering ("no evidence in scope for op 'Log.log'"); it is now a type
+  error.
+
+Newly rejected (sound):
+
+- A non-uniform handler passed, stored or returned where only its `Handler
+  E` type travels: `use_h (handler for Ask { ask () = "oops" })`,
+  `use_h counting` for `ask () = (resume 1) + 1` (its arms fix the answer
+  type to Int). Bind it with `let` and install it with `with` where the
+  computation is known instead.
+- A declared handler with `needs` passed as a value (`use_h noisy`).
+- `let h = if c then to_result else to_list` with the two giving the
+  `with` different types.
+
+Examples, stdlib, snapshot, matrix and `effect_property_tests` unchanged.
+Non-test `src/`: +220 / -8.
