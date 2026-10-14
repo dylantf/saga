@@ -42,6 +42,8 @@ mod expr_types_tests;
 #[cfg(test)]
 mod guard_purity_tests;
 #[cfg(test)]
+mod resume_typing_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
