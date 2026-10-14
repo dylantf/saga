@@ -321,6 +321,38 @@ This includes:
 - computing which effects are handled and which still escape
 - inferring the resulting `Handler` type
 
+**What `resume` performs.** Resuming runs the rest of the handled computation
+under the same handler, then the `return` clause, so `resume` performs
+`R = (inner − handled) ∪ eff(return clause) ∪ eff(arms) ∪ needs` (Koka's
+HANDLE rule), and a function an arm builds around it (`get () = fun s ->
+(resume s) s`) carries `R` on its arrow. For an inline `with`, `R` is that
+row with a slack tail `ρ_arm` that takes the arms' effects; for a named
+handler, the computation is unknown at the declaration, so `R = needs ∪
+..ρ_R`, where `ρ_R` is rigid while the arms are checked (an arm that lets a
+resuming function reach a place that allows fewer effects is rejected) and
+is bound to what the computation leaves unhandled at each `with`. The
+answer type gets one slack tail per arrow of its spine, which takes what
+the arms' function values perform; all slack is closed to `{}` once the
+`with` (or the handler declaration) has been checked, so a `with` whose
+arms do not resume under a function keeps its old type. The variables of
+`resume`'s argument, answer type and `R` are monomorphic inside the arm
+(`generalize`). See `docs/planning/resume-typing.md`.
+
+**Effect rows at coercion positions.** At a coercion position (a call
+argument, an annotated `let`, a return, a literal's element, a branch),
+directly on the coerced value's arrows, a row that involves a declared row
+variable (`..e` of a signature, a where-bound type's row) or a slack
+variable is compared by inclusion (`subsume_rows`): nothing is bound when
+`actual ⊆ expected` already holds, and what is missing goes into a tail of
+the expected row that may grow (slack first), never into a declared one.
+Rows of inference variables only are unified as equal, which is one way for
+the inclusion to hold. Elsewhere closed rows must be equal. A declared
+open row must also name every effect the body performs (`..e` is the
+caller's). Handler values that reach a `with` only through their `Handler
+E` type must be uniform: no `return` clause but the identity, arms that do
+not decide the answer type, and (for a declared handler) no `needs`
+(`check_handler_value`).
+
 ### Trait constraint collection
 
 Trait constraints are generated throughout inference, especially for:

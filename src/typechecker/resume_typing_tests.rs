@@ -267,7 +267,7 @@ h f = {
   f ()
 }
 ",
-        &["Log"],
+        &["uses the effect `Log`", "does not name"],
     );
 }
 

@@ -199,7 +199,44 @@ Estimated 650–800 lines of non-test code, ~400 of tests.
 
 ## Outcome
 
-Tests are in `src/typechecker/resume_typing_tests.rs` unless noted.
+Steps 0-7 landed on `resume-type` (step 8, codegen, is not part of this
+branch). Tests are in `src/typechecker/resume_typing_tests.rs` unless
+noted. Non-test `src/` since the plan: +1056 / -192 lines (about a third of
+`unify.rs`'s share is moved code and comments).
+
+Deviations from the design, each explained in its step: the U1 hole was
+reached through `check_fun_clauses` placing a returned function's row on
+the function's own arrow (fixed with `saturated_effect_row`, step 1);
+`subsume_rows` applies only to rows with a declared or slack tail (step 2);
+slack closing also closes the inference variables it was bound to, but
+never a declared one (step 4); the provenance note has no line and column
+(step 4); named handlers have their own error for a pinned `ρ_R` (step 5);
+an `if` over handlers keeps every branch's declaration and checks each at
+the `with` instead of being rejected outright, and a declared handler with
+`needs` is not uniform (step 6).
+
+Open questions from the study, as found:
+
+- Greedy absorber: with the step-2 restriction, an absorber is chosen only
+  when a declared or slack tail is involved, preferring answer slack, then
+  `ρ_arm`, then a single inference variable; two inference candidates with
+  named effects to place is the existing ambiguous-row error. Nothing in
+  the test suites, examples or stdlib was rejected by it. Not proven.
+- Closing slack rejecting a later use at a larger row: not seen.
+- Callbacks given to outer operations that capture `resume`: typed with
+  `R`; evidence routing not checked (codegen).
+- `R` known before slack closing: the arms' effects are coerced into `R`
+  after all arms, and `ρ_R`/`ρ_arm` are closed only then; deferred lambda
+  arguments are inferred within the arm. Not seen to fail.
+- Row parameters on type declarations: not explored; `Std.Stream` was
+  fixed by an inline handler instead.
+
+Found and not fixed (outside this plan): an arm may pin an operation's own
+type variable (`pick : List a -> a`, `pick xs = resume 1`, step 3).
+
+Not done here: step 8. Until it lands, a function that resumes is typed
+with `R`, so where `R` is not empty it is compiled as a tagged CPS closure;
+the ignored runtime tests in `effect_property_tests` stay ignored.
 
 ### Step 0: reproductions
 
@@ -498,4 +535,4 @@ the version naming Log) and the `loose` case of
 
 Examples, stdlib, snapshot, matrix unchanged; `codegen_integration`,
 `module_codegen_integration`, `e2e` and `stdlib_tests` pass. Non-test
-`src/`: +35 / -14.
+`src/`: +38 / -18.
