@@ -9177,7 +9177,6 @@ counter () = {
 ";
 
 #[test]
-#[ignore = "`resume` is typed as pure: the residual row of the `with` is not on the function"]
 fn function_that_resumes_carries_the_residual_effects() {
     let src = format!(
         "{RESUME_UNDER_LAMBDA_SRC}
@@ -9205,7 +9204,6 @@ make () = counter () with {{
 }
 
 #[test]
-#[ignore = "`resume` is typed as pure: the residual row of the `with` is not on the function"]
 fn function_that_resumes_is_not_a_pure_function() {
     let src = format!(
         "{RESUME_UNDER_LAMBDA_SRC}

@@ -338,3 +338,299 @@ pick c = {
         &[],
     );
 }
+
+// --- What resume performs: inline `with` (step 4) ---
+
+/// The unannotated generic state runner: the state function performs what
+/// the computation does beyond State and Fail, and nothing is pinned by the
+/// pure `fail` arm or `return` clause.
+#[test]
+fn unannotated_state_runner_keeps_the_computation_open() {
+    let checker = accepted(
+        "effect Fail { fun fail : String -> a }
+
+rsf init f = {
+  let g = f () with {
+    get () = fun s -> (resume s) s
+    put n = fun _ -> (resume ()) n
+    fail msg = fun _ -> Err msg
+    return v = fun _ -> Ok v
+  }
+  g init
+}
+",
+    );
+    let ty = type_of(&checker, "rsf");
+    let rows = spine_rows(&ty);
+    let Type::Fun(_, rest, _) = &ty else {
+        panic!("{ty:?}")
+    };
+    let Type::Fun(f_ty, _, _) = &**rest else {
+        panic!("{ty:?}")
+    };
+    let f_row = &spine_rows(f_ty)[0];
+    assert_eq!(names(f_row), vec!["Fail", "State"], "{ty:?}");
+    assert_eq!(f_row.tails.len(), 1, "f stays open: {ty:?}");
+    assert_eq!(rows[1].tails, f_row.tails, "rsf performs f's rest: {ty:?}");
+}
+
+/// A resuming function given to a function that takes a pure one: fine
+/// when the rest of the computation is pure, not when it performs Stop.
+#[test]
+fn resuming_function_passed_where_a_pure_one_is_expected() {
+    accepted("ok () = ask_only () with { ask () = apply_pure (fun x -> resume x) }\n");
+    let message = rejected(
+        "bad () = ask_stop () with { ask () = apply_pure (fun x -> resume x) }\n",
+        &["effect row mismatch", "Stop"],
+    );
+    assert!(
+        message.contains("resum"),
+        "the error says the function resumes: {message}"
+    );
+}
+
+/// A multishot handler resuming inside a callback: the callback performs
+/// what the rest of the computation does.
+#[test]
+fn resuming_callback_carries_the_rest_of_the_computation() {
+    let checker = accepted(
+        "pick_all () = pick_stop () with {
+  choose () = List.flat_map (fun b -> resume b) [True, False]
+  return v = [v]
+}
+",
+    );
+    let ty = type_of(&checker, "pick_all");
+    assert_eq!(names(&spine_rows(&ty)[0]), vec!["Stop"], "{ty:?}");
+    let result = checker.to_result();
+    let bool_ty = Type::bool();
+    let list_int = Type::Con("Std.List.List".into(), vec![Type::int()]);
+    let callback = result.expr_types.values().find(|t| {
+        matches!(t, Type::Fun(param, ret, _) if **param == bool_ty && **ret == list_int)
+    });
+    let Some(Type::Fun(_, _, row)) = callback else {
+        panic!("no `Bool -> List Int` lambda in the expression types");
+    };
+    assert_eq!(names(row), vec!["Stop"], "the callback resumes: {row:?}");
+}
+
+/// Resumptions kept in a list and called later.
+#[test]
+fn resumptions_stored_in_a_list() {
+    let checker = accepted(
+        "r () = ask_stop () with {
+  ask () = {
+    let ks = [fun x -> resume x]
+    List.foldl (fun acc k -> acc + k 1) 10 ks
+  }
+}
+",
+    );
+    let ty = type_of(&checker, "r");
+    assert_eq!(names(&spine_rows(&ty)[0]), vec!["Stop"], "{ty:?}");
+}
+
+/// A resuming function in a field declared pure.
+#[test]
+fn resuming_function_in_a_pure_field() {
+    let decls = "record Box { run : Int -> Int }
+type Step = Done(Int) | More(Unit -> Step)
+";
+    accepted(&format!(
+        "{decls}
+ok () = ask_only () with {{
+  ask () = {{
+    let b = Box {{ run: fun x -> resume x }}
+    b.run 1
+  }}
+}}
+"
+    ));
+    rejected(
+        &format!(
+            "{decls}
+bad () = ask_stop () with {{
+  ask () = {{
+    let b = Box {{ run: fun x -> resume x }}
+    b.run 1
+  }}
+}}
+"
+        ),
+        &["Stop"],
+    );
+    rejected(
+        &format!(
+            "{decls}
+bad () = ask_stop () with {{
+  ask () = More(fun () -> resume 1)
+  return v = Done(v)
+}}
+"
+        ),
+        &["Stop"],
+    );
+}
+
+/// `resume` bound by a `let` in an arm is the same function.
+#[test]
+fn resume_bound_by_a_let() {
+    accepted(
+        "ok () = ask_only () with {
+  ask () = {
+    let k = fun x -> resume x
+    apply_pure k
+  }
+}
+",
+    );
+    rejected(
+        "bad () = ask_stop () with {
+  ask () = {
+    let k = fun x -> resume x
+    apply_pure k
+  }
+}
+",
+        &["Stop"],
+    );
+}
+
+/// What the arms and the `return` clause perform is part of what resuming
+/// performs: the state function logs.
+#[test]
+fn arm_and_return_effects_are_performed_by_resuming() {
+    let make = "fun counter_state : Unit -> Int needs {State}
+counter_state () = {
+  put! (get! () + 1)
+  get! ()
+}
+
+make8 () = counter_state () with {
+  get () = {
+    log! \"g\"
+    fun s -> (resume s) s
+  }
+  put n = fun _ -> (resume ()) n
+  return v = {
+    log! \"r\"
+    fun _ -> v
+  }
+}
+";
+    let checker = accepted(&format!(
+        "{make}
+fun ok8 : Unit -> Int
+ok8 () = {{
+  let f = make8 ()
+  f 1
+}} with {{ log _ = resume () }}
+"
+    ));
+    let ty = type_of(&checker, "make8");
+    let rows = spine_rows(&ty);
+    assert_eq!(names(&rows[1]), vec!["Log"], "the state function logs: {ty:?}");
+    rejected(
+        &format!(
+            "{make}
+fun bad8 : Unit -> Int
+bad8 () = {{
+  let f = make8 () with {{ log _ = resume () }}
+  f 1
+}}
+"
+        ),
+        &["Log"],
+    );
+}
+
+/// An inner state-passing handler whose arm function performs the outer
+/// State: the function carries State and the inner computation's Stop.
+#[test]
+fn nested_handlers_of_the_same_effect() {
+    let inner = "inner () = counter () with {
+  get () = fun s -> {
+    let o = get! ()
+    (resume (s + o)) s
+  }
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}
+";
+    let checker = accepted(inner);
+    let ty = type_of(&checker, "inner");
+    let rows = spine_rows(&ty);
+    assert_eq!(names(&rows[1]), vec!["State", "Stop"], "{ty:?}");
+    rejected(
+        &format!(
+            "{inner}
+fun bad9 : Unit -> (Int -> Int)
+bad9 () = inner () with {{
+  get () = resume 1
+  put _ = resume ()
+  stop n = resume n
+}}
+"
+        ),
+        &["effect row mismatch"],
+    );
+}
+
+/// Resuming over an open-row trait method at a where-bound type: the state
+/// function performs the impl's effects, `..a`.
+#[test]
+fn resuming_over_an_open_row_trait_method() {
+    accepted(
+        "trait Src a { fun next : a -> Int needs {..e} }
+
+fun drive : a -> Int -> Int needs {..a} where {a: Src}
+drive x s0 = {
+  let g = (next x + ask! ()) with {
+    ask () = fun s -> (resume s) s
+    return v = fun _ -> v
+  }
+  g s0
+}
+",
+    );
+}
+
+/// A pure arm value and `return` clause next to a resuming arm, over a
+/// computation with a declared open row: nothing is pinned.
+#[test]
+fn pure_arm_values_do_not_pin_the_resumed_row() {
+    accepted(
+        "effect Fail { fun fail : String -> a }
+
+fun run : (Unit -> Int needs {State, Fail, ..e}) -> Int needs {..e}
+run f = {
+  let g = f () with {
+    fail _ = fun _ -> 0
+    get () = fun s -> (resume s) s
+    put n = fun _ -> (resume ()) n
+    return v = fun _ -> v
+  }
+  g 0
+}
+",
+    );
+}
+
+/// The state function itself, passed on where a pure function is expected.
+#[test]
+fn value_of_a_resuming_with_is_not_a_pure_function() {
+    rejected(
+        "fun leak : Unit -> Int needs {Stop}
+leak () = apply_pure (counter () with {
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+})
+",
+        &[
+            "effect row mismatch",
+            "{Stop}",
+            "the value of a `with` whose handler resumes inside it",
+        ],
+    );
+}

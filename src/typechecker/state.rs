@@ -226,6 +226,13 @@ pub struct Checker {
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
     pub(crate) resume_return_type: Option<Type>,
+    /// What `resume` performs, inside a handler arm: the rest of the handled
+    /// computation (what the `with` does not handle), the `return` clause
+    /// and the arms themselves (see `infer_with_inner`).
+    pub(crate) resume_effects: Option<EffectRow>,
+    /// For each `with` (by node) whose arms resume: what resuming performs,
+    /// for the note on errors about a function that resumes.
+    pub(crate) resume_rows: HashMap<NodeId, EffectRow>,
     /// Metadata for effect inference (instantiation caches, declared rows, name registries).
     pub(crate) effect_meta: EffectMeta,
     /// Effect accumulator: effects from the current scope are pushed here automatically
@@ -304,7 +311,7 @@ pub struct Checker {
     /// empty row once the `with` or handler that made them has been checked
     /// (see `unify::Slack`). A coercion that needs room in a row containing
     /// one widens it there rather than binding the row's other variables.
-    pub(crate) slack_rows: HashMap<u32, super::unify::Slack>,
+    pub(crate) slack_rows: HashMap<u32, (super::unify::Slack, NodeId)>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -702,6 +709,7 @@ pub(crate) struct InferScope {
     pub(crate) field_candidates: FieldCandidates,
     pub(crate) resume_type: Option<Type>,
     pub(crate) resume_return_type: Option<Type>,
+    pub(crate) resume_effects: Option<EffectRow>,
 }
 
 /// What accumulated inside an InferScope while it was active.

@@ -323,3 +323,56 @@ required); matrix and `effect_property_tests` unchanged. Not fixed, found
 on the way: an arm may pin an operation's own type variable (`pick : List
 a -> a`, `pick xs = resume 1` is accepted); that is not about
 generalisation and is left for a separate fix. Non-test `src/`: +20.
+
+### Step 4: inline `with`
+
+As designed: the `return` clause is checked first; the answer type `A` is
+the return type with one `Slack::Answer` tail per arrow of its spine
+(`open_answer_spine`); `R = remaining ∪ E_ret ∪ ..ρ_arm` (`ρ_arm` is
+`Slack::Arm`); in each arm `resume` coerces its argument, emits `R`
+(`resume_effects`, saved and restored like `resume_type`, and in
+`enter_scope`) and returns `A`; arm values are coerced to `A`. After the
+arms, their effects (and `finally` blocks') are coerced into `R`, then
+`close_slack` binds this `with`'s slack, and what is left of it, to `{}`.
+The `with`'s type is `A`. `generalize` also leaves out the variables of
+`R`. Deviations:
+
+- `close_slack` also closes the inference variables made while the `with`
+  was checked that slack was bound to (an equality position such as an
+  `if` join binds a slack tail to a fresh shared one), so none stays open
+  in the answer type. It does not close declared row variables: an arm's
+  callback parameter has the operation's own `..r` (registered rigid), and
+  closing it typed the callback as pure, which compiled its call as a pure
+  call (`callbacks_across_a_delimited_with` caught this).
+- The provenance note has no line and column (the checker has no source
+  text): "This function resumes the computation handled by the enclosing
+  `with`: resuming runs the rest of that computation, which performs {Stop}
+  that the `with` does not handle." while the arm is being checked (the
+  function's row still has the `with`'s slack), and "This function is the
+  value of a `with` whose handler resumes inside it: calling it runs the
+  rest of the handled computation, which performs {Stop} that the `with`
+  does not handle." when the coerced expression is the `with` itself.
+  Appended to the existing "a function that uses ..." message.
+
+Tests: the two ignored typechecker tests in `tests.rs` are un-ignored and
+pass; `generic_state_runner_with_an_aborting_arm_is_accepted` stays green.
+Snippets 1, 2, 4-10 and 13 (inline forms) are in `resume_typing_tests.rs`.
+
+Newly rejected (all sound; R ≠ ∅ in each):
+
+- A function that resumes, or the value of such a `with`, used where a
+  pure function (or one with fewer effects) is expected: `apply_pure (fun
+  x -> resume x)` over a computation that also performs Stop; `apply_pure
+  (counter () with {get () = fun s -> (resume s) s ...})`; `let k = fun x
+  -> resume x; apply_pure k`.
+- A resuming function stored in a field typed pure (`Box { run: fun x ->
+  resume x }`, `More(fun () -> resume 1)` of `type Step = Done(Int) |
+  More(Unit -> Step)`) when the rest of the computation performs something.
+- Calling a state function outside a handler for what the arms or the
+  `return` clause perform (`get () = { log! ..; fun s -> ... }` makes the
+  state function perform Log).
+
+Examples, stdlib, core snapshot, matrix and `effect_property_tests`:
+unchanged (no inline handler in them resumes under a function over a
+computation with effects left; `Std.Control.run_writer`'s `R` is `{}`).
+Non-test `src/`: +198 / -16.

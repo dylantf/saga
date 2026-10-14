@@ -600,26 +600,42 @@ impl Checker {
             ast::Handler::Inline { .. } => {
                 // After desugaring, Inline handlers contain only Arm and Return
                 // items (no Named refs — those are split into their own With layers).
-                let answer_ty = expr_ty.clone();
-
                 self.effect_meta.type_param_cache = inner_effect_cache.clone();
 
                 // Return clause: wraps the answer type
-                let answer_ty = if let Some(ret_arm) = handler.return_clause() {
+                let (ret_ty, ret_effs) = if let Some(ret_arm) = handler.return_clause() {
                     let saved_env = self.env.clone();
                     let saved_effs = self.save_effects();
                     if let Some(pat) = ret_arm.params.first() {
-                        self.bind_pattern(pat, &answer_ty)?;
+                        self.bind_pattern(pat, &expr_ty)?;
                     }
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
                     let raw_ret_effs = self.restore_effects(saved_effs);
                     let ret_effs = self.sub.apply_effect_row(&raw_ret_effs);
                     self.emit_effects(&ret_effs, ret_arm.body.span)?;
                     self.env = saved_env;
-                    ret_ty
+                    (ret_ty, ret_effs)
                 } else {
-                    answer_ty
+                    (expr_ty.clone(), EffectRow::empty())
                 };
+
+                // What `resume` returns and performs. Resuming runs the rest
+                // of the handled computation under this handler, then the
+                // `return` clause, so it performs what this `with` does not
+                // handle, the `return` clause's effects, and (since a later
+                // operation runs an arm inside it) the arms' effects:
+                // `ρ_arm`, which takes them below. A function value an arm
+                // builds around `resume` performs all that when called, so
+                // the answer type's arrows get room for it (slack tails).
+                // Slack that nothing needed is closed again at the end.
+                let vars_before = self.next_var;
+                let answer_ty = self.open_answer_spine(&ret_ty, with_node_id);
+                let arm_slack = self.new_slack(super::unify::Slack::Arm, with_node_id);
+                let mut resume_row = self.merge_rows(&remaining_effs, &ret_effs, with_span)?;
+                resume_row.tails.push(arm_slack);
+                let resume_row = self.normalize_row_at(&resume_row, with_span)?;
+                self.resume_rows.insert(with_node_id, resume_row.clone());
+                let mut arms_effs = EffectRow::empty();
 
                 // Inline handler arms
                 for arm in handler.inline_arms() {
@@ -636,6 +652,7 @@ impl Checker {
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
                     let saved_resume_ret = self.resume_return_type.take();
+                    let saved_resume_effs = self.resume_effects.take();
                     let saved_effect_cache = self.effect_meta.type_param_cache.clone();
 
                     // The type variables the operation's signature uses as
@@ -706,6 +723,7 @@ impl Checker {
                         }
                         self.resume_type = Some(sig.return_type.clone());
                         self.resume_return_type = Some(answer_ty.clone());
+                        self.resume_effects = Some(resume_row.clone());
                         for (i, pat) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
                                 sig.params[i].1.clone()
@@ -750,6 +768,7 @@ impl Checker {
                     let raw_arm_effs = self.restore_effects(saved_effs);
                     let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
                     self.emit_effects(&arm_effs, arm.span)?;
+                    arms_effs = self.merge_rows(&arms_effs, &arm_effs, arm.span)?;
 
                     // Arm result against the handled expression's answer type.
                     self.coerce_at(&arm_ty, &answer_ty, arm.span, Some(&arm.body))?;
@@ -783,14 +802,27 @@ impl Checker {
                         let finally_effs = self.restore_effects(saved_effs2);
                         let finally_effs = self.sub.apply_effect_row(&finally_effs);
                         self.emit_effects(&finally_effs, finally_expr.span)?;
+                        arms_effs = self.merge_rows(&arms_effs, &finally_effs, arm.span)?;
                     }
                     self.restore_shadowed_handlers(body_handlers);
 
                     self.resume_type = saved_resume;
                     self.resume_return_type = saved_resume_ret;
+                    self.resume_effects = saved_resume_effs;
                     self.effect_meta.type_param_cache = saved_effect_cache;
                     self.env = saved_env;
                 }
+
+                // The arms' own effects are part of what resuming performs
+                // (`ρ_arm` takes them); then the slack this `with` made, and
+                // whatever is left of it, is closed.
+                self.coerce_at(
+                    &Self::row_as_fun(arms_effs),
+                    &Self::row_as_fun(resume_row),
+                    with_span,
+                    None,
+                )?;
+                self.close_slack(with_node_id, vars_before, with_span)?;
 
                 // Emit remaining effects from the inner expression
                 self.emit_effects(&remaining_effs, with_span)?;
@@ -820,8 +852,74 @@ impl Checker {
                     ));
                 }
 
-                Ok(answer_ty)
+                Ok(self.sub.apply(&answer_ty))
             }
         }
+    }
+
+    /// `ty` with a fresh slack tail (`Slack::Answer`) added to the row of
+    /// each arrow along its result spine: the type of a `with` whose arms
+    /// may return functions that resume.
+    pub(crate) fn open_answer_spine(&mut self, ty: &Type, with: crate::ast::NodeId) -> Type {
+        match self.sub.apply(ty) {
+            Type::Fun(param, ret, mut row) => {
+                let ret = self.open_answer_spine(&ret, with);
+                row.tails
+                    .push(self.new_slack(super::unify::Slack::Answer, with));
+                let _ = self.normalize_row(&row);
+                Type::Fun(param, Box::new(ret), row)
+            }
+            other => other,
+        }
+    }
+
+    pub(crate) fn new_slack(&mut self, kind: super::unify::Slack, with: crate::ast::NodeId) -> Type {
+        let var = self.fresh_var();
+        if let Type::Var(id) = var {
+            self.slack_rows.insert(id, (kind, with));
+        }
+        var
+    }
+
+    /// A row as the row of a function, for comparing two rows through
+    /// `coerce_at`.
+    pub(crate) fn row_as_fun(row: EffectRow) -> Type {
+        Type::Fun(Box::new(Type::unit()), Box::new(Type::unit()), row)
+    }
+
+    /// Close the slack `with` made to the empty row: an instantiation, so
+    /// every inclusion established so far still holds, and the answer type
+    /// keeps exactly what some arm needed. Inference variables made while
+    /// the `with` was checked (from `vars_before` on) that slack was bound
+    /// to are closed too, so none of them is left open in the answer type.
+    pub(crate) fn close_slack(
+        &mut self,
+        with: crate::ast::NodeId,
+        vars_before: u32,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mine: Vec<u32> = self
+            .slack_rows
+            .iter()
+            .filter(|(_, (_, owner))| *owner == with)
+            .map(|(id, _)| *id)
+            .collect();
+        let reached = self.sub.apply_effect_row(&EffectRow {
+            effects: vec![],
+            tails: mine.iter().map(|id| Type::Var(*id)).collect(),
+        });
+        for tail in reached.tail_var_ids() {
+            // A declared row variable is not ours to close: one of the
+            // operation's (an arm's callback) still stands for what the
+            // callback performs where the operation was called.
+            if mine.contains(&tail) || (tail >= vars_before && !self.is_rigid_tail(tail)) {
+                self.bind_row_checked(tail, EffectRow::empty())
+                    .map_err(|e| e.with_span(span))?;
+            }
+        }
+        for id in mine {
+            self.slack_rows.remove(&id);
+        }
+        Ok(())
     }
 }

@@ -72,6 +72,9 @@ pub(crate) enum RowMode {
     Coercion {
         actual_is_left: bool,
         shape: DirectShape,
+        /// The coerced expression, when it is a `with` (for the note on
+        /// functions that resume, see `Checker::resume_note`).
+        origin: Option<crate::ast::NodeId>,
     },
 }
 
@@ -561,7 +564,7 @@ impl Checker {
             expected_tails
                 .iter()
                 .copied()
-                .filter(|t| checker.slack_rows.get(t) == Some(&kind))
+                .filter(|t| checker.slack_rows.get(t).map(|(k, _)| *k) == Some(kind))
                 .collect()
         };
         let mut candidates = of_kind(self, Slack::Answer);
@@ -577,11 +580,11 @@ impl Checker {
         }
         if let [absorber] = candidates[..] {
             let mut tails: Vec<Type> = missing_tails.iter().map(|&t| Type::Var(t)).collect();
-            if let Some(&kind) = self.slack_rows.get(&absorber) {
+            if let Some(&slack) = self.slack_rows.get(&absorber) {
                 // What is left of a slack variable is slack too.
                 let rest = self.fresh_var();
                 if let Type::Var(id) = rest {
-                    self.slack_rows.insert(id, kind);
+                    self.slack_rows.insert(id, slack);
                 }
                 tails.push(rest);
             }
@@ -1612,6 +1615,9 @@ impl Checker {
             } => RowMode::Coercion {
                 actual_is_left,
                 shape: DirectShape::of(expr),
+                origin: expr
+                    .filter(|e| matches!(e.kind, ExprKind::With { .. }))
+                    .map(|e| e.id),
             },
         };
         let saved = std::mem::replace(&mut self.row_mode, mode);
@@ -1628,6 +1634,7 @@ impl Checker {
             RowMode::Coercion {
                 actual_is_left,
                 shape,
+                ..
             } if shape.is_direct(&self.unify_path) => Some(*actual_is_left),
             _ => None,
         }
@@ -1720,13 +1727,16 @@ impl Checker {
         } else {
             (&subsumption.right, &subsumption.left)
         };
-        let unexpected: Vec<super::EffectEntry> = actual
+        let unexpected_entries: Vec<super::EffectEntry> = actual
             .effects
             .iter()
             .filter(|e| !expected.effects.iter().any(|x| x.matches(e)))
             .cloned()
             .collect();
-        let unexpected = self.describe_effects(&unexpected);
+        let unexpected = self.describe_effects(&unexpected_entries);
+        let note = self
+            .resume_note(actual, &unexpected_entries)
+            .unwrap_or_default();
         let expected = if expected.effects.is_empty() {
             "a function with no effects is expected".to_string()
         } else {
@@ -1738,13 +1748,62 @@ impl Checker {
         Some(format!(
             "{}a function that uses {} is used where {}. Handle {} first \
              (for example `fun x -> f x with handler`), or add `needs {}` to the \
-             expected function type.",
+             expected function type.{}",
             ROW_RULE_MARKER,
             self.describe_effects(&actual.effects),
             expected,
             unexpected,
             unexpected,
+            note,
         ))
+    }
+
+    /// When the row of a function that is used where fewer effects are
+    /// allowed contains what `resume` performs, say so: such a function
+    /// resumes (or is the value of a `with` whose handler built it around
+    /// `resume`), and resuming runs the rest of the handled computation.
+    fn resume_note(
+        &self,
+        actual: &EffectRow,
+        unexpected: &[super::EffectEntry],
+    ) -> Option<String> {
+        let from_slack = actual
+            .tail_var_ids()
+            .into_iter()
+            .find_map(|t| self.slack_rows.get(&t).map(|(_, owner)| *owner));
+        let (owner, built_by_with) = match from_slack {
+            Some(owner) => (owner, false),
+            None => match &self.row_mode {
+                RowMode::Coercion {
+                    origin: Some(origin),
+                    ..
+                } => (*origin, true),
+                _ => return None,
+            },
+        };
+        let resumed = self.sub.apply_effect_row(self.resume_rows.get(&owner)?);
+        let performed: Vec<super::EffectEntry> = unexpected
+            .iter()
+            .filter(|e| resumed.effects.iter().any(|r| r.matches(e)))
+            .cloned()
+            .collect();
+        if performed.is_empty() {
+            return None;
+        }
+        let performed = self.describe_effects(&performed);
+        Some(if built_by_with {
+            format!(
+                " This function is the value of a `with` whose handler resumes inside it: \
+                 calling it runs the rest of the handled computation, which performs \
+                 {performed} that the `with` does not handle."
+            )
+        } else {
+            format!(
+                " This function resumes the computation handled by the enclosing `with`: \
+                 resuming runs the rest of that computation, which performs {performed} \
+                 that the `with` does not handle."
+            )
+        })
     }
 
     fn describe_effects(&self, effects: &[super::EffectEntry]) -> String {
@@ -1878,6 +1937,14 @@ impl Checker {
             .flatten()
         {
             collect_free_vars(&self.sub.apply(ty), &mut vars);
+        }
+        if let Some(row) = &self.resume_effects {
+            let row = Type::Fun(
+                Box::new(Type::unit()),
+                Box::new(Type::unit()),
+                row.clone(),
+            );
+            collect_free_vars(&self.sub.apply(&row), &mut vars);
         }
         vars
     }

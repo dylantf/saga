@@ -508,6 +508,11 @@ impl Checker {
                     // site: an argument position.
                     self.coerce_at(&val_ty, expected, span, Some(value))?;
                 }
+                // Resuming runs the rest of the handled computation, the
+                // `return` clause and any later arm: it performs their row.
+                if let Some(row) = self.resume_effects.clone() {
+                    self.emit_effects(&row, span)?;
+                }
                 if let Some(ret_ty) = &self.resume_return_type.clone() {
                     Ok(ret_ty.clone())
                 } else {
