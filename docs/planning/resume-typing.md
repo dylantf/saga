@@ -251,3 +251,52 @@ Newly rejected (breaking-change list):
 
 Examples and stdlib: unchanged, all typecheck. `effect_property_tests` and
 `core_snapshot` unchanged. Non-test `src/`: +117 / -12.
+
+### Step 2: directional subsumption at direct coercion positions
+
+- The position of a unification is kept on the checker while it runs
+  (`RowMode`, with the coerced expression's literal structure as an owned
+  `DirectShape`), and `unify_effect_rows` decides each pair of rows as it
+  meets them (`unequal_rows`). The recorded `row_subsumptions` judged after
+  the fact are gone; the three `effect row mismatch` messages are unchanged.
+- `subsume_rows(actual ⊆ expected)` as designed, with one deviation: it is
+  used only when one of the two rows has a *protected* tail, i.e. a row
+  variable fixed by a declared signature (or a where-bound type's), or one
+  created for `resume` (`slack_rows`, from step 4 on). Rows of inference
+  variables only are still unified as equal, which is one solution of the
+  inclusion and the one inference made so far. Reason: "nothing missing,
+  bind nothing" for an ordinary variable leaves it unbound, so a pure
+  callback passed to `List.map` would leave the call's `..e` open and give
+  the enclosing unannotated function an open row (and a different calling
+  convention); and binding an actual tail's missing part into the expected
+  tail lets an effect the callee handles (`{Log, ..e}`) flow into its
+  result row through `e`. For protected rows the absorber gets no fresh
+  tail unless it is slack (whose rest is slack too and closed later).
+- With no tail to absorb into, a missing *declared* tail is closed to the
+  expected row's named effects (so `check_rigid_row_vars_abstract` reports
+  it as before); an inference or slack tail is bound to the expected row.
+
+Newly rejected (all sound):
+
+- A declared row variable no longer takes on effects to make a coercion
+  hold: `with_log : (Unit -> Int needs {..e}) -> (Unit -> Int needs
+  {..e})`, `with_log f = fun () -> { log! ".."; f () }` was accepted (the
+  caller's `..e` widened with Log); now "a function that uses {Log} is used
+  where ..." is reported. Returning `fun () -> { log! ..; 1 }` at `Unit ->
+  Int needs {..e}` is still rejected, now with that message instead of
+  "requires that row to be exactly {Log}".
+- Two independent declared row variables are no longer merged:
+  `mix : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b})`, `mix f =
+  f` ("declares the open effect row `..a`, but its body requires that row
+  to be empty").
+- U2 at a declared row variable (`fun bad : (Unit -> Int needs {..e}) ->
+  Int needs {..e}`, `bad f = (eq f (wrap f)) ()`), accepted at step 1.
+
+Newly accepted: a pure function returned or passed where a function over a
+declared `..e` is expected (`fun mk : Unit -> (Unit -> Int needs {..e})`,
+`mk () = fun () -> 1`), which closed `..e` and was rejected.
+
+Core snapshot: 09-sorting and 21-do-else changed only in the numbering of
+dictionary parameters (`___dict_Ord_v801` -> `v786`; fewer fresh variables
+are allocated); blessed. Matrix, examples, stdlib, `effect_property_tests`:
+unchanged. Non-test `src/`: +330 / -110 (`unify.rs` mostly moved code).

@@ -180,7 +180,6 @@ fn u2_shared_tail_keeps_the_differing_effect() {
 /// U2 at a declared row variable: the caller chooses `..e`, so the body may
 /// not assume it contains Stop.
 #[test]
-#[ignore = "a declared row variable still takes on effects in equality unification (step 2)"]
 fn u2_shared_rigid_tail_rejects_the_differing_effect() {
     rejected(
         "fun bad : (Unit -> Int needs {..e}) -> Int needs {..e}\nbad f = (eq f (wrap f)) ()\n",
@@ -198,6 +197,62 @@ two f g = f () + g ()
 
 both f g = eq (fun () -> two f g) g
 ",
+    );
+}
+
+// --- Directional row subsumption at coercion positions (step 2) ---
+
+/// A pure function returned where a function over the caller's `..e` is
+/// declared: `{} ⊆ {..e}` holds without choosing `e`.
+#[test]
+fn pure_lambda_returned_at_a_declared_row_variable_is_accepted() {
+    accepted(
+        "fun mk : Unit -> (Unit -> Int needs {..e})
+mk () = fun () -> 1
+",
+    );
+}
+
+#[test]
+fn effectful_lambda_returned_at_a_declared_row_variable_is_rejected() {
+    rejected(
+        "fun mk : Unit -> (Unit -> Int needs {..e})
+mk () = fun () -> {
+  log! \"x\"
+  1
+}
+",
+        &["effect row mismatch", "Log"],
+    );
+}
+
+/// Two row variables the caller chooses independently: a function over one
+/// is not a function over the other.
+#[test]
+fn function_over_one_declared_row_is_not_one_over_another() {
+    rejected(
+        "fun mix : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b})
+mix f = f
+",
+        &["..a"],
+    );
+}
+
+/// A declared row variable is never chosen to make room: here `..e` would
+/// have to contain Log.
+#[test]
+fn declared_row_variable_does_not_absorb_an_effect() {
+    rejected(
+        "fun run : (Unit -> Int needs {..e}) -> Int needs {..e}
+run f = f ()
+
+fun with_log : (Unit -> Int needs {..e}) -> (Unit -> Int needs {..e})
+with_log f = fun () -> {
+  log! \"x\"
+  f ()
+}
+",
+        &["Log"],
     );
 }
 

@@ -297,9 +297,14 @@ pub struct Checker {
     /// Steps taken so far by the unification in progress (see
     /// `unify::UnifyStep`). Empty outside `unify`.
     pub(crate) unify_path: Vec<super::unify::UnifyStep>,
-    /// Unequal closed effect rows accepted by the unification in progress,
-    /// drained by the top-level unification entry point.
-    pub(crate) row_subsumptions: Vec<super::unify::RowSubsumption>,
+    /// The position of the unification in progress, as far as effect-row
+    /// subsumption is concerned (`unify::RowMode`). `Lenient` at rest.
+    pub(crate) row_mode: super::unify::RowMode,
+    /// Row variables created for typing `resume`, which are closed to the
+    /// empty row once the `with` or handler that made them has been checked
+    /// (see `unify::Slack`). A coercion that needs room in a row containing
+    /// one widens it there rather than binding the row's other variables.
+    pub(crate) slack_rows: HashMap<u32, super::unify::Slack>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
