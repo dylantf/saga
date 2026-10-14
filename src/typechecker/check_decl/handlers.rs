@@ -1,5 +1,9 @@
 use super::*;
 
+/// How the row variable for what a named handler's `resume` runs beyond
+/// its `needs` (`ρ_R`) is shown, where a declared row variable's name would be.
+const RESUME_ROW_NAME: &str = "the handled computation's effects";
+
 impl Checker {
     pub(crate) fn register_new_effect(
         &mut self,
@@ -368,8 +372,8 @@ impl Checker {
             self.outer_named_type_vars.insert(name.clone(), *var_id);
         }
 
-        // Fresh type variable for the handler's answer type.
-        // Arms unify against this; the return clause (if any) constrains it later.
+        // Fresh type variable for the handler's answer type. The return
+        // clause (if any) constrains it first, then the arms.
         let answer_ty = self.fresh_var();
 
         // Save effects and start fresh for handler body checking
@@ -378,6 +382,60 @@ impl Checker {
         // Build effect row from handler's `needs` clause so `finally` blocks can
         // use these effects (they're already provided by the handler's caller).
         let needs_row = self.effect_row_from_refs(needs);
+
+        // Check the return clause body if present, capturing the param var.
+        // Its types are frozen once the arms have been checked too.
+        let return_param = if let Some(rc) = return_clause {
+            let saved_env = self.env.clone();
+            let saved_resume = self.resume_type.take();
+            let param_ty = self.fresh_var();
+            let param_var_id = match &param_ty {
+                Type::Var(id) => *id,
+                _ => unreachable!(),
+            };
+            if let Some(pat) = rc.params.first() {
+                self.bind_pattern(pat, &param_ty)?;
+            }
+            let ret_ty = self.infer_expr(&rc.body)?;
+            // Constrain answer_ty to match the return clause's body type
+            if let Err(e) =
+                self.coerce_expected_first_at(&answer_ty, &ret_ty, rc.body.span, Some(&rc.body))
+            {
+                self.collected_diagnostics.push(e);
+            }
+            self.resume_type = saved_resume;
+            self.env = saved_env;
+            Some(param_var_id)
+        } else {
+            None
+        };
+
+        // What `resume` returns and performs in the arms. The handler is
+        // installed around computations it does not know, so what resuming
+        // runs (the rest of the handled computation beyond the handled
+        // effects) is a row variable `ρ_R` the arms must treat as chosen by
+        // each `with` (rigid), next to the handler's `needs`. It is bound to
+        // what the computation leaves unhandled at each `with`. The answer
+        // type gets room on its arrows for functions that resume, as for an
+        // inline `with`, closed again once the arms are checked.
+        let vars_before = self.next_var;
+        let resume_rest = self.fresh_var();
+        let Type::Var(resume_rest_id) = resume_rest else {
+            unreachable!("fresh_var is a variable")
+        };
+        self.rigid_row_vars.insert(
+            resume_rest_id,
+            crate::typechecker::RigidRowVar {
+                name: RESUME_ROW_NAME.to_string(),
+                companions: needs_row.effects.clone(),
+            },
+        );
+        let resume_row = EffectRow {
+            effects: needs_row.effects.clone(),
+            tails: vec![resume_rest.clone()],
+        };
+        let answer_ty = self.open_answer_spine(&answer_ty, *def_id);
+        self.resume_rows.insert(*def_id, resume_row.clone());
 
         // Validate that each arm's operation belongs to the handler's declared effects
         let mut seen_ops: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -549,8 +607,10 @@ impl Checker {
             let saved_env = self.env.clone();
             let saved_resume = self.resume_type.take();
             let saved_resume_ret = self.resume_return_type.take();
+            let saved_resume_effs = self.resume_effects.take();
             self.resume_type = Some(op_sig.return_type.clone());
             self.resume_return_type = Some(answer_ty.clone());
+            self.resume_effects = Some(resume_row.clone());
 
             for (i, pat) in arm.params.iter().enumerate() {
                 let param_ty = if i < op_sig.params.len() {
@@ -636,40 +696,52 @@ impl Checker {
 
             self.resume_type = saved_resume;
             self.resume_return_type = saved_resume_ret;
+            self.resume_effects = saved_resume_effs;
             self.env = saved_env;
         }
 
-        // Check the return clause body if present, capturing the param var and return type
-        let handler_return_type = if let Some(rc) = return_clause {
-            let saved_env = self.env.clone();
-            let saved_resume = self.resume_type.take();
-            let param_ty = self.fresh_var();
-            let param_var_id = match &param_ty {
-                Type::Var(id) => *id,
-                _ => unreachable!(),
+        // The arms may not have relied on what the handled computation
+        // performs: `ρ_R` must still be open (renamed at most).
+        self.close_slack(*def_id, vars_before, *span)?;
+        self.rigid_row_vars.remove(&resume_rest_id);
+        let resume_rest_row = self.sub.apply_effect_row(&EffectRow {
+            effects: vec![],
+            tails: vec![resume_rest.clone()],
+        });
+        if resume_rest_row.tails.is_empty() || !resume_rest_row.effects.is_empty() {
+            let allowed = if resume_rest_row.effects.is_empty() {
+                "no effects".to_string()
+            } else {
+                let mut names: Vec<String> = resume_rest_row
+                    .effects
+                    .iter()
+                    .map(|e| self.prettify_effect_entry(e))
+                    .collect();
+                names.sort();
+                format!("only {{{}}}", names.join(", "))
             };
-            if let Some(pat) = rc.params.first() {
-                self.bind_pattern(pat, &param_ty)?;
-            }
-            let ret_ty = self.infer_expr(&rc.body)?;
-            // Constrain answer_ty to match the return clause's body type
-            if let Err(e) =
-                self.coerce_expected_first_at(&answer_ty, &ret_ty, rc.body.span, Some(&rc.body))
-            {
-                self.collected_diagnostics.push(e);
-            }
-            self.resume_type = saved_resume;
-            self.env = saved_env;
-            // Freeze by applying sub: resolves internal handler vars but leaves
-            // polymorphic vars (handler type params, answer type) as free Var nodes.
-            let frozen_param = self.sub.apply(&Type::Var(param_var_id));
-            let frozen_ret = self.sub.apply(&ret_ty);
-            Some((frozen_param, frozen_ret))
-        } else {
-            // No return clause: the handler doesn't transform the result type.
-            // Freeze answer_ty so usage sites get a template to instantiate.
-            let frozen = self.sub.apply(&answer_ty);
-            Some((frozen.clone(), frozen))
+            let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
+            return Err(Diagnostic::error_at(
+                err_span,
+                format!(
+                    "handler '{name}' resumes inside a function that is used where {allowed} \
+                     may be performed, but resuming runs the rest of the computation the \
+                     handler is installed around, which can perform any effect the handler \
+                     does not handle. Use the function where its effects are allowed, or \
+                     write the handler inline at the `with`, where that computation is known"
+                ),
+            ));
+        }
+        let resume_rest_roots = resume_rest_row.tail_var_ids();
+
+        // Freeze by applying sub: resolves internal handler vars but leaves
+        // polymorphic vars (handler type params, answer type, `ρ_R`) as free
+        // Var nodes. Without a return clause the handler doesn't transform
+        // the result type: usage sites get the answer type as a template.
+        let frozen_answer = self.sub.apply(&answer_ty);
+        let handler_return_type = match return_param {
+            Some(param_var_id) => Some((self.sub.apply(&Type::Var(param_var_id)), frozen_answer)),
+            None => Some((frozen_answer.clone(), frozen_answer)),
         };
 
         // Collect accumulated handler effects and restore outer scope
@@ -677,7 +749,12 @@ impl Checker {
         // variables are instantiated per use: an arm that performs
         // `Fail Int` needs `Fail Int` wherever the handler is installed.
         let all_handler_effs = self.restore_effects(handler_saved_effs);
-        let all_handler_effs = self.normalize_row_at(&all_handler_effs, *span)?;
+        let mut all_handler_effs = self.normalize_row_at(&all_handler_effs, *span)?;
+        // What resuming performs beyond `needs` is the handled computation's,
+        // not the handler's.
+        all_handler_effs
+            .tails
+            .retain(|t| !matches!(t, Type::Var(id) if resume_rest_roots.contains(id)));
         let _scope_result = self.exit_scope(body_scope);
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()
@@ -888,7 +965,13 @@ impl Checker {
                 }
             }
         }
+        for root in &resume_rest_roots {
+            if !forall.contains(root) {
+                forall.push(*root);
+            }
+        }
         let info = HandlerInfo {
+            resume_row: resume_rest_roots.first().copied(),
             effects: canonical_effects,
             effect_entries: applied_effects,
             return_type: handler_return_type,

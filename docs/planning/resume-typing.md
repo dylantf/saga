@@ -376,3 +376,48 @@ Examples, stdlib, core snapshot, matrix and `effect_property_tests`:
 unchanged (no inline handler in them resumes under a function over a
 computation with effects left; `Std.Control.run_writer`'s `R` is `{}`).
 Non-test `src/`: +198 / -16.
+
+### Step 5: named handlers
+
+As designed: `register_handler` checks the `return` clause before the arms
+(its types are frozen after them), allocates `ρ_R`, registered rigid while
+the arms are checked, sets `R = needs ∪ ..ρ_R` and opens the answer type's
+spine with slack, closed after the arms. `ρ_R` is stripped from the stored
+`needs`, added to `forall` and recorded as `HandlerInfo.resume_row`; a
+`with` naming the handler binds its instance to what the computation
+leaves unhandled. Deviation: instead of `check_rigid_row_vars_abstract`
+(whose message names a written `..e`), the handler gets its own error when
+`ρ_R` was closed or given named effects: "handler 'bad' resumes inside a
+function that is used where no effects may be performed, but resuming runs
+the rest of the computation the handler is installed around, which can
+perform any effect the handler does not handle. Use the function where its
+effects are allowed, or write the handler inline at the `with`, where that
+computation is known". The note on the value of a `with` (step 4) also
+covers named handlers (`apply_pure (counter () with passing)`).
+
+Newly rejected (sound):
+
+- A named handler whose arm puts a resuming function where its effects
+  are not allowed: `handler bad for Ask { ask () = apply_pure (fun x ->
+  resume x) }`.
+- `Std.Stream.stream_of` (`yield v = More v (Stream (fun () -> resume
+  ()))`): the `Stream` thunk is pure, but forcing it resumes whatever
+  computation the handler was installed around. Edited: `stream_of` is
+  removed (it was `pub`, but nothing in the repository used it outside
+  `from_gen`) and `from_gen` installs the same arms inline, where the
+  producer is known to perform only `Gen a`, so the thunk is pure. The
+  emitted code for `Std.Stream` is identical (named handlers are compiled
+  at their `with`). This removes a public name: user code that wrote
+  `with stream_of` must use `Stream.from_gen`.
+- The state function of a named state-passing handler now carries the
+  computation's unhandled effects (`counter () with passing : Int -> Int
+  needs {Stop}`), so using it as a pure function is rejected.
+
+Core snapshot: 54 and 55 (`choose options = List.flat_map (fun x -> resume
+x) options`): the callback now carries `..ρ_R` and is a tagged CPS closure
+that passes `resume`'s result to its `_ReturnK` through `mbind`. Output of
+`saga run` checked unchanged for 54, 55 (and 58, which uses
+`Stream.from_gen`); matches the expected output in their headers. 09 and 21
+changed only in dictionary-parameter numbering again. Blessed. Matrix and
+`effect_property_tests` unchanged; all examples and the stdlib typecheck;
+`stdlib_tests` passes. Non-test `src/` (incl. Stream.saga): +145 / -41.

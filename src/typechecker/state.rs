@@ -59,6 +59,10 @@ pub type HandlerWhereConstraints = HashMap<(String, usize), Vec<(String, Vec<u32
 pub struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
+    /// The row variable (one of `forall`) for what `resume` runs beyond the
+    /// handler's `needs`: the rest of the handled computation, bound to what
+    /// it leaves unhandled at each `with`.
+    pub resume_row: Option<u32>,
     /// Fully applied handled effects, used to select exact evidence slots.
     pub effect_entries: Vec<EffectEntry>,
     /// Frozen return clause: (param_type, body_type). Sub-applied at register time so

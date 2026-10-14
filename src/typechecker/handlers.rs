@@ -499,6 +499,23 @@ impl Checker {
                         let fresh_param = Self::replace_vars(param_ty, &mapping);
                         let fresh_ret = Self::replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
+                        // What the arms' `resume` runs beyond the handler's
+                        // `needs`: here, what this computation leaves
+                        // unhandled.
+                        if let Some(Type::Var(resume_rest)) = handler_info
+                            .resume_row
+                            .and_then(|id| mapping.get(&id).cloned())
+                        {
+                            self.bind_row_checked(resume_rest, remaining_effs.clone())
+                                .map_err(|e| e.with_span(with_span))?;
+                            self.resume_rows.insert(
+                                with_node_id,
+                                EffectRow {
+                                    effects: remaining_effs.effects.clone(),
+                                    tails: vec![Type::Var(resume_rest)],
+                                },
+                            );
+                        }
 
                         for ((effect_name, param_idx), trait_constraints) in
                             &handler_info.where_constraints

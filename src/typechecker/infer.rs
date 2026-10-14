@@ -1614,6 +1614,7 @@ impl Checker {
                 return None;
             }
             Some(super::HandlerInfo {
+                resume_row: None,
                 effects,
                 effect_entries: args
                     .iter()

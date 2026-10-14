@@ -634,3 +634,90 @@ leak () = apply_pure (counter () with {
         ],
     );
 }
+
+// --- Named handlers (step 5) ---
+
+const PASSING: &str = "handler passing for State {
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}
+";
+
+/// The state function a named state-passing handler returns performs what
+/// the computation it is installed around leaves unhandled.
+#[test]
+fn named_state_passing_handler_carries_the_computation_row() {
+    let checker = accepted(&format!(
+        "{PASSING}
+run_it () = counter () with passing
+
+fun quiet : Unit -> Int needs {{State}}
+quiet () = get! () + 1
+
+fun pure_state : Int -> Int
+pure_state n = apply_pure (quiet () with passing)
+"
+    ));
+    let ty = type_of(&checker, "run_it");
+    assert_eq!(names(&spine_rows(&ty)[1]), vec!["Stop"], "{ty:?}");
+    rejected(
+        &format!(
+            "{PASSING}
+fun leak : Unit -> Int needs {{Stop}}
+leak () = apply_pure (counter () with passing)
+"
+        ),
+        &[
+            "effect row mismatch",
+            "{Stop}",
+            "the value of a `with` whose handler resumes inside it",
+        ],
+    );
+}
+
+/// A named handler does not know the computation it is installed around,
+/// so its arms may not pass a resuming function where a pure one is
+/// expected.
+#[test]
+fn named_handler_resuming_in_a_pure_function_is_rejected() {
+    rejected(
+        "handler bad for Ask {
+  ask () = apply_pure (fun x -> resume x)
+}
+",
+        &["handler 'bad' resumes inside a function", "no effects"],
+    );
+    accepted(
+        "fun apply_open : (Int -> Int needs {..e}) -> Int needs {..e}
+apply_open g = g 20
+
+handler fine for Ask {
+  ask () = apply_open (fun x -> resume x)
+}
+
+fun use_fine : Unit -> Int needs {Stop}
+use_fine () = ask_stop () with fine
+",
+    );
+}
+
+/// A pure arm value, a pure `return` clause and a resuming function over
+/// the handled computation: nothing pins what resuming performs.
+#[test]
+fn named_handler_pure_arm_values_do_not_pin_the_resumed_row() {
+    accepted(
+        "effect Fail { fun fail : String -> a }
+
+handler runner for State, Fail {
+  fail _ = fun _ -> 0
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}
+
+fun go : Unit -> Int needs {Stop}
+go () = (counter () with runner) 0
+",
+    );
+}
