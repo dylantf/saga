@@ -9153,3 +9153,97 @@ fn wrapped_block_bindings_end_with_the_with_expression() {
         err.message
     );
 }
+
+// --- What `resume` performs ---
+//
+// Resuming runs the rest of the handled computation, which may perform
+// effects the `with` does not handle. A function that resumes when called
+// (state passing) must say so in its type.
+
+const RESUME_UNDER_LAMBDA_SRC: &str = "effect State {
+  fun get : Unit -> Int
+  fun put : Int -> Unit
+}
+effect Fail { fun fail : String -> a }
+effect Stop { fun stop : Int -> Int }
+
+fun counter : Unit -> Int needs {Stop, State}
+counter () = {
+  let s = get! ()
+  let t = stop! s
+  put! (s + t)
+  get! ()
+}
+";
+
+#[test]
+#[ignore = "`resume` is typed as pure: the residual row of the `with` is not on the function"]
+fn function_that_resumes_carries_the_residual_effects() {
+    let src = format!(
+        "{RESUME_UNDER_LAMBDA_SRC}
+make () = counter () with {{
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}}
+"
+    );
+    let checker = check(&src).expect("typechecks");
+    let ty = checker
+        .sub
+        .apply(&checker.env.get("make").expect("make").ty);
+    let Type::Fun(_, state_fn, _) = ty else {
+        panic!("make is not a function: {ty:?}");
+    };
+    let Type::Fun(_, _, row) = *state_fn else {
+        panic!("make does not return a function: {state_fn:?}");
+    };
+    assert!(
+        row.effects.iter().any(|e| e.name.ends_with("Stop")),
+        "calling the state function resumes `counter`, which performs Stop: {row:?}"
+    );
+}
+
+#[test]
+#[ignore = "`resume` is typed as pure: the residual row of the `with` is not on the function"]
+fn function_that_resumes_is_not_a_pure_function() {
+    let src = format!(
+        "{RESUME_UNDER_LAMBDA_SRC}
+fun apply_pure : (Int -> Int) -> Int
+apply_pure g = g 20
+
+fun leak : Unit -> Int needs {{Stop}}
+leak () = apply_pure (counter () with {{
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}})
+"
+    );
+    let err = check(&src).err().expect("the state function performs Stop");
+    assert!(err.message.contains("Stop"), "{}", err.message);
+}
+
+/// Must keep typechecking: a generic state runner whose handler has an arm
+/// that does not resume (`fail`), returning a pure function, next to arms
+/// whose functions resume into the caller's open row `..e`.
+#[test]
+fn generic_state_runner_with_an_aborting_arm_is_accepted() {
+    let src = format!(
+        "{RESUME_UNDER_LAMBDA_SRC}
+fun run_state_fail : Int -> (Unit -> a needs {{State, Fail, ..e}}) -> Result a String needs {{..e}}
+run_state_fail init f = {{
+  let g = f () with {{
+    get () = fun s -> (resume s) s
+    put n = fun _ -> (resume ()) n
+    fail msg = fun _ -> Err msg
+    return v = fun _ -> Ok v
+  }}
+  g init
+}}
+"
+    );
+    if let Err(e) = check(&src) {
+        panic!("{}", e.message);
+    }
+}
