@@ -2,7 +2,8 @@
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
          select_evidence/2, reframe_evidence/3,
          append_tail/3,
-         lift_evidence/1, bind/2, mbind/2, run/1]).
+         lift_evidence/2, bind/2, mbind/3, run/1,
+         abort/3, resume_into/4, fin_resume/4, run_process/1]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
 %% canonically (alphabetically) by EffectTag. Within each OpTuple, op
@@ -126,26 +127,38 @@ entry_position(Evidence, Tag, I, N) ->
 %%
 %% Inside a `with`, CPS code returns a plain value or a suspension
 %% {'$saga_meta', M}: an operation handled further out was performed, and M
-%% takes the meta continuation, everything that happens once the handled
-%% computation has a value (the code after `resume` in the arms that resumed,
-%% then the code after the `with`).
+%% takes the meta continuation Mk, everything that happens once the handled
+%% computation has a value. Mk is the continuation of the `with` (a fun), or a
+%% list of frames ending in one:
+%%
+%%   {k, Ref, F}   the code after a `resume' in an arm of the `with' Ref
+%%   {fin, Key}    the end of a `finally' region (its cleanup is stored under
+%%                 Key in the process dictionary until it has run)
+%%   {held, Keys}  regions that a suspension carried out of themselves
+%%   run           in place of the continuation, at a `run' site
+%%
+%% An arm that does not resume aborts: it throws {'$saga_abort', Ref, Tag, V},
+%% caught where the `with' Ref delimits the computation: at its entry, at
+%% every resumption of it through its lifted frame, after a non-tail
+%% `resume' in its arms, and around the code after such a `resume'.
 
 %% The frame a `with` inherits, with every operation suspending instead of
 %% calling its handler. Tags and positions are unchanged. This is the only
 %% function that knows the frame's representation.
-lift_evidence(Evidence) ->
-    list_to_tuple([{Tag, list_to_tuple([lift_op(Op) || Op <- tuple_to_list(Ops)])}
+lift_evidence(Evidence, Ref) ->
+    list_to_tuple([{Tag, list_to_tuple([lift_op(Op, Ref) || Op <- tuple_to_list(Ops)])}
                    || {Tag, Ops} <- tuple_to_list(Evidence)]).
 
 %% An operation closure takes its arguments and then the continuation. Once
 %% the meta continuation is known, the handler gets a continuation that runs
-%% the rest of the handled computation and then the meta continuation.
+%% the rest of the handled computation, delimited again by the `with', and
+%% then the meta continuation.
 %%
 %% An operation given a callback (a tagged closure) is not suspended: its
 %% handler's arm runs the callback and then resumes, and the meta continuation
 %% current at that resume cannot be passed through the arm's code. It is
-%% performed where it stands, as the handled computation would be by `run'.
-lift_op(Op) ->
+%% performed where it stands.
+lift_op(Op, Ref) ->
     {arity, N} = erlang:fun_info(Op, arity),
     nary(N, Op, fun(All) ->
         {Args, [K]} = lists:split(N - 1, All),
@@ -153,7 +166,7 @@ lift_op(Op) ->
             true -> erlang:apply(Op, All);
             false ->
                 {'$saga_meta',
-                 fun(Mk) -> erlang:apply(Op, Args ++ [fun(V) -> bind(K(V), Mk) end]) end}
+                 fun(Mk) -> erlang:apply(Op, Args ++ [fun(V) -> resume_into(Ref, K, V, Mk) end]) end}
         end
     end).
 
@@ -169,17 +182,127 @@ nary(7, _, Body) -> fun(A, B, C, D, E, F, G) -> Body([A, B, C, D, E, F, G]) end;
 nary(8, _, Body) -> fun(A, B, C, D, E, F, G, H) -> Body([A, B, C, D, E, F, G, H]) end;
 nary(_, Op, _) -> Op.
 
+%% The abort of an arm of the `with' Ref, from effect Tag.
+abort(Ref, Tag, Value) -> throw({'$saga_abort', Ref, Tag, Value}).
+
+%% Resume a computation suspended inside the `with' Ref: its aborts are
+%% caught here again, and an exception leaving it runs the cleanups of the
+%% `finally' regions it is inside of.
+resume_into(Ref, K, V, Mk) ->
+    R = case {owns_aborts(Mk), pending(Mk)} of
+            {false, []} -> K(V);
+            {Owns, Keys} ->
+                try K(V)
+                catch
+                    throw:{'$saga_abort', Ref, _, A} when Owns ->
+                        cleanup(held(Mk)),
+                        A;
+                    C:E:S ->
+                        cleanup(Keys),
+                        erlang:raise(C, E, S)
+                end
+        end,
+    bind(R, Mk).
+
 %% The value of a handled computation goes to the continuation of its `with`.
-bind({'$saga_meta', M}, Mk) -> M(Mk);
-bind(Value, Mk) -> Mk(Value).
+%% A suspension passing out of `finally' regions takes them along: they are
+%% held by whatever handles it, and cleaned up if that handler aborts.
+bind({'$saga_meta', M}, Mk) when is_function(Mk) -> M(Mk);
+bind({'$saga_meta', M}, Mk) -> guard(pending(Mk), fun() -> M(Mk) end);
+bind(Value, Mk) when is_function(Mk) -> Mk(Value);
+bind(Value, [Mk]) when is_function(Mk) -> Mk(Value);
+bind(Value, [run]) -> Value;
+bind(Value, [{k, Ref, F} | Rest]) ->
+    R = case {Ref =/= none andalso owns_aborts(Rest), pending(Rest)} of
+            {false, []} -> F(Value);
+            {Owns, Keys} ->
+                try F(Value)
+                catch
+                    throw:{'$saga_abort', Ref, _, A} when Owns -> A;
+                    C:E:S -> cleanup(Keys), erlang:raise(C, E, S)
+                end
+        end,
+    bind(R, Rest);
+bind(Value, [{fin, Key} | Rest]) -> fin_exit(Key), bind(Value, Rest);
+bind(Value, [{held, _} | Rest]) -> bind(Value, Rest).
 
-%% `let r = resume x; F(r)' in a handler arm: F runs on the value of the
-%% handled computation, before the continuation of the `with'.
-mbind({'$saga_meta', M}, F) ->
-    {'$saga_meta', fun(Mk) -> M(fun(Value) -> bind(F(Value), Mk) end) end};
-mbind(Value, F) -> F(Value).
+%% `let r = resume x; F(r)' in an arm of the `with' Ref: F runs on the value
+%% of the handled computation, before the continuation of the `with'.
+mbind({'$saga_meta', M}, F, Ref) ->
+    {'$saga_meta', fun(Mk) -> M([{k, Ref, F} | frames(Mk)]) end};
+mbind(Value, F, _Ref) -> F(Value).
 
-%% `bind' with the identity continuation, where the caller is not CPS code
-%% and needs a plain value. A handler further out that aborts returns here.
-run({'$saga_meta', M}) -> run(M(fun(Value) -> Value end));
+%% `resume' in an arm with a `finally' block, Cleanup: the resumed
+%% computation is a region. Cleanup runs once, when the region ends: with a
+%% value, with an exception (a panic, or the abort of a `with' further out),
+%% or when the handler holding it after a suspension aborts.
+fin_resume(Ref, Cleanup, K, V) ->
+    Key = make_ref(),
+    put(Key, Cleanup),
+    R = try K(V)
+        catch
+            throw:{'$saga_abort', Ref, _, A} -> A;
+            C:E:S -> fin_exit(Key), erlang:raise(C, E, S)
+        end,
+    case R of
+        {'$saga_meta', M} ->
+            {'$saga_meta', fun(Mk) -> guard([Key], fun() -> M([{fin, Key} | frames(Mk)]) end) end};
+        _ -> fin_exit(Key), R
+    end.
+
+%% Hand a suspension that left the regions Keys to its handler. While the
+%% handler runs, an exception ends the regions; if it suspends in turn, the
+%% regions go along with that suspension, held by whatever handles it.
+guard([], Thunk) -> Thunk();
+guard(Keys, Thunk) ->
+    R = try Thunk()
+        catch C:E:S -> cleanup(Keys), erlang:raise(C, E, S)
+        end,
+    case R of
+        {'$saga_meta', M} ->
+            {'$saga_meta', fun(Mk) -> guard(Keys, fun() -> M([{held, Keys} | frames(Mk)]) end) end};
+        _ -> R
+    end.
+
+fin_exit(Key) ->
+    case erase(Key) of
+        undefined -> ok;
+        Cleanup -> _ = Cleanup(), ok
+    end.
+
+cleanup(Keys) -> lists:foreach(fun fin_exit/1, Keys).
+
+frames(Mk) when is_function(Mk) -> [Mk];
+frames(Mk) -> Mk.
+
+%% The regions a meta continuation is inside of, innermost first.
+pending(Mk) when is_function(Mk) -> [];
+pending(Mk) -> pending(Mk, []).
+pending([{fin, Key} | Rest], Acc) -> pending(Rest, [Key | Acc]);
+pending([{held, Keys} | Rest], Acc) -> pending(Rest, lists:reverse(Keys, Acc));
+pending([_ | Rest], Acc) -> pending(Rest, Acc);
+pending([], Acc) -> lists:reverse(Acc).
+
+held(Mk) -> lists:append([Keys || {held, Keys} <- frames(Mk)]).
+
+%% A `run' site does not delimit any `with': an abort passes through it to the
+%% `with' it belongs to.
+owns_aborts(Mk) when is_function(Mk) -> true;
+owns_aborts(Mk) -> lists:last(Mk) =/= run.
+
+%% `bind' where the caller is not CPS code and needs a plain value.
+run({'$saga_meta', M}) -> run(M([run]));
 run(Value) -> Value.
+
+%% The computation of a spawned process. An abort of a `with' in the process
+%% that spawned it cannot be delivered here.
+run_process(Thunk) ->
+    try run(Thunk())
+    catch
+        throw:{'$saga_abort', _, Tag, _} ->
+            Msg = unicode:characters_to_binary(
+                    io_lib:format("the handler of effect ~ts aborted in a process spawned "
+                                  "inside its `with`: an abort cannot cross a process boundary",
+                                  [Tag])),
+            erlang:error({saga_error, panic, Msg, <<>>, <<>>, <<>>, 0})
+    end.

@@ -300,21 +300,27 @@ pub struct Lowerer<'a> {
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
     /// When lowering a handler arm with `finally`, this holds the finally block AST.
-    /// At each `resume` site, the cleanup code is lowered inline (wrapped in try/catch
-    /// around the K call) so it can capture variables from the arm body's lexical scope.
+    /// At each `resume` site the cleanup code is lowered inline (as the cleanup of
+    /// the region `fin_resume` makes of the resumed computation) so it can capture
+    /// variables from the arm body's lexical scope.
     current_handler_finally: Option<crate::ast::Expr>,
     /// When inlining a named handler from another module, local function references
     /// inside that handler body should lower against the source module, not the
     /// current module being emitted.
     current_handler_source_module: Option<String>,
-    /// The with's outer return continuation, threaded into abort-handler arm
-    /// bodies so their terminal value flows through the host's CPS chain
-    /// (e.g. an effectful impl method's `_ReturnK`) instead of escaping via
-    /// the Erlang return stack. Set by `lower_with_inherited_return_k` for
-    /// the duration of handler-closure construction; `None` when the host
-    /// context has no continuation to thread (e.g. a top-level non-effectful
-    /// `run_x` function, where direct Erlang return is correct).
+    /// The continuation of the tail of the handler arm being lowered: the
+    /// arm's abort continuation (`current_abort_k`) in an arm of a general
+    /// `with`; `None` in an arm of a chained one, which resumes in every
+    /// tail. A `return` clause is lowered with the continuation of its
+    /// `with` here instead.
     current_handler_inherited_k: Option<CExpr>,
+    /// The variable holding the abort reference of the `with` whose arms are
+    /// being built: an arm that does not resume throws with it, and a
+    /// `resume` that is not in tail position catches it.
+    current_abort_ref: Option<String>,
+    /// The variable holding the abort continuation of the arm being lowered
+    /// (`fun(V) -> abort(Ref, Tag, V)`), given to the arm body's tail.
+    current_abort_k: Option<String>,
     /// Pre-resolved constructor name -> mangled Erlang atom.
     /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
     /// Built by resolve::build_constructor_atoms before lowering.
@@ -430,6 +436,8 @@ impl<'a> Lowerer<'a> {
             current_handler_finally: None,
             current_handler_source_module: None,
             current_handler_inherited_k: None,
+            current_abort_ref: None,
+            current_abort_k: None,
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
             check_result,
@@ -639,16 +647,11 @@ impl<'a> Lowerer<'a> {
     /// It does when something in it performs (`Lowerer::performs_effect`,
     /// the one definition of that), composed over sub-expressions by
     /// `effect_position::is_effectful`. A `with` does when its handled
-    /// computation does, unless it keeps that computation on the Erlang
-    /// stack (`with_handler_keeps_stack`) and so produces a plain value.
-    /// See "The Continuation of a `with`" in
+    /// computation does. See "The Continuation of a `with`" in
     /// `docs/effect-implementation.md`.
     fn takes_continuation(&self, expr: &Expr) -> bool {
         super::effect_position::is_effectful(expr, &|node| match &node.kind {
-            ExprKind::With {
-                expr: inner,
-                handler,
-            } => !self.with_handler_keeps_stack(handler) && self.takes_continuation(inner),
+            ExprKind::With { expr: inner, .. } => self.takes_continuation(inner),
             _ => self.performs_effect(node),
         })
     }

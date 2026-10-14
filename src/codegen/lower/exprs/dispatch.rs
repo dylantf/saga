@@ -150,64 +150,45 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `resume v` for an already-bound value: call the handler arm's
-    /// continuation K. When a `finally` block is active, the K call is wrapped
-    /// in try/catch so cleanup runs after K completes or panics.
-    pub(crate) fn lower_resume_of_var(&mut self, v: &str) -> CExpr {
+    /// continuation K. When the arm has a `finally` block the resumed
+    /// computation is a region whose end runs the cleanup
+    /// (`fin_resume`). Not in tail position (`non_tail`), the call is
+    /// delimited by the arm's `with`: an abort of that `with` inside it is
+    /// the value of `resume`.
+    pub(crate) fn lower_resume_of_var(&mut self, v: &str, non_tail: bool) -> CExpr {
         let k_name = self
             .current_handler_k
             .clone()
             .expect("resume used outside handler");
+        if let Some(finally_expr) = self.current_handler_finally.clone() {
+            // The cleanup is lowered here, where the arm's variables are in
+            // scope. It is called by the runtime, which needs a plain value.
+            let cleanup_body = evidence::meta_run(self.lower_expr(&finally_expr));
+            let cleanup = CExpr::Fun(vec![], Box::new(cleanup_body));
+            return evidence::fin_resume(
+                self.abort_ref_value(),
+                cleanup,
+                CExpr::Var(k_name),
+                CExpr::Var(v.to_string()),
+            );
+        }
         let k_call = CExpr::Apply(
             Box::new(CExpr::Var(k_name)),
             vec![CExpr::Var(v.to_string())],
         );
-        if let Some(ref finally_expr) = self.current_handler_finally.clone() {
-            // let Cleanup = fun() -> finally_body in
-            // try run(apply K(V))
-            // of OkVar -> let _ = apply Cleanup() in OkVar
-            // catch <C, R, T> -> let _ = apply Cleanup() in raise(C, R, T)
-            // Cleanup follows the resumed computation on the Erlang stack,
-            // so a suspension is run to its end here.
-            let k_call = evidence::meta_run(k_call);
-            let cleanup_var = self.fresh();
-            let cleanup_body = evidence::meta_run(self.lower_expr(finally_expr));
-            let cleanup_lambda = CExpr::Fun(vec![], Box::new(cleanup_body));
-            let cleanup_call_ok = CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
-            let cleanup_call_catch =
-                CExpr::Apply(Box::new(CExpr::Var(cleanup_var.clone())), vec![]);
-            let ok_var = self.fresh();
-            let class_var = self.fresh();
-            let reason_var = self.fresh();
-            let trace_var = self.fresh();
-            CExpr::Let(
-                cleanup_var,
-                Box::new(cleanup_lambda),
-                Box::new(CExpr::Try {
-                    expr: Box::new(k_call),
-                    ok_var: ok_var.clone(),
-                    ok_body: Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_call_ok),
-                        Box::new(CExpr::Var(ok_var)),
-                    )),
-                    catch_vars: (class_var.clone(), reason_var.clone(), trace_var.clone()),
-                    catch_body: Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_call_catch),
-                        Box::new(CExpr::Call(
-                            "erlang".to_string(),
-                            "raise".to_string(),
-                            vec![
-                                CExpr::Var(class_var),
-                                CExpr::Var(reason_var),
-                                CExpr::Var(trace_var),
-                            ],
-                        )),
-                    )),
-                }),
-            )
-        } else {
-            k_call
+        match (&self.current_abort_ref, non_tail) {
+            (Some(abort_ref), true) => {
+                let abort_ref = abort_ref.clone();
+                let vars = [
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                ];
+                evidence::catch_own_abort(k_call, &abort_ref, vars)
+            }
+            _ => k_call,
         }
     }
 
@@ -547,15 +528,13 @@ impl<'a> Lowerer<'a> {
                     self.lower_effect_call(expr.id, name, qualifier.as_deref(), args, None)
                 }),
 
-            // `resume value` -- inside a handler arm, calls the continuation K.
-            // When a `finally` block is active, the K call is wrapped in try/catch
-            // so cleanup runs after K completes or panics. The cleanup is lowered
-            // once into a lambda (at the resume site, where arm body variables are
-            // in scope) and called in both the ok and catch branches.
+            // `resume value` -- inside a handler arm, calls the continuation K
+            // (`lower_resume_of_var`).
             ExprKind::Resume { .. } => self.lower_tail(expr, None),
 
-            // Handler expression as a value (e.g. returned from a function).
-            // Produce a tuple of per-op handler lambdas for runtime use.
+            // Handler expression as a value (e.g. returned from a function):
+            // a function of the abort reference of the `with` that installs
+            // it, returning the tuple of per-op handler lambdas.
             ExprKind::HandlerExpr { body } => self.lower_handler_expr_to_tuple(body),
 
             ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),

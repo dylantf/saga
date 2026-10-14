@@ -13,6 +13,22 @@ impl<'a> Lowerer<'a> {
     /// `lower_expr` sends the branching forms back here with no
     /// continuation, so there is one implementation of each.
     pub(crate) fn lower_tail(&mut self, expr: &Expr, k: Option<CExpr>) -> CExpr {
+        // The tail of an arm that does not resume aborts (`k` is the arm's
+        // abort continuation). A tail that resumes, or keeps the
+        // continuation in a value it returns (`fun s -> (resume s) s`), is
+        // the arm's value as it stands.
+        let aborts = self.is_abort_continuation(k.as_ref());
+        let k = match &expr.kind {
+            ExprKind::Resume { .. } if aborts => None,
+            ExprKind::Block { .. }
+            | ExprKind::With { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Case { .. }
+            | ExprKind::Do { .. }
+            | ExprKind::Receive { .. } => k,
+            _ if aborts && expr.contains_resume() => None,
+            _ => k,
+        };
         match &expr.kind {
             ExprKind::Block { stmts, .. } => self.with_continuation_var(k, |this, k| {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
@@ -78,9 +94,12 @@ impl<'a> Lowerer<'a> {
             ExprKind::Resume { value } => {
                 let v = self.fresh();
                 let ce = self.lower_operand(value, "resume");
-                let resumed = self.lower_resume_of_var(&v);
+                // Only a tail of the arm itself is not delimited again: a
+                // `resume` with a continuation, or in the body of a function
+                // inside the arm, catches the arm's aborts.
+                let resumed = self.lower_resume_of_var(&v, !aborts);
                 let resumed = match k {
-                    Some(k) => evidence::meta_mbind(resumed, k),
+                    Some(k) => evidence::meta_mbind(resumed, k, self.abort_ref_value()),
                     None => resumed,
                 };
                 CExpr::Let(v, Box::new(ce), Box::new(resumed))
@@ -96,6 +115,19 @@ impl<'a> Lowerer<'a> {
                     self.apply_return_k_with(Some(k), value)
                 }
             }
+        }
+    }
+
+    fn is_abort_continuation(&self, k: Option<&CExpr>) -> bool {
+        matches!((k, &self.current_abort_k), (Some(CExpr::Var(var)), Some(abort)) if var == abort)
+    }
+
+    /// The abort reference of the `with` whose arm is being lowered, or
+    /// `none` in an arm of a chained `with`.
+    pub(crate) fn abort_ref_value(&self) -> CExpr {
+        match &self.current_abort_ref {
+            Some(var) => CExpr::Var(var.clone()),
+            None => CExpr::Lit(CLit::Atom("none".to_string())),
         }
     }
 

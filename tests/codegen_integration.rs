@@ -1459,9 +1459,9 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // The handler function should call its K parameter (resume).
-    // K uses a fresh name, so just verify the handler body applies *something*.
-    assert_contains(&out, "apply _Cor");
+    // With a `finally` block the arm resumes through the runtime, which
+    // calls K inside the region whose end runs the cleanup.
+    assert_contains(&out, "call 'std_evidence_bridge':'fin_resume'");
 }
 
 #[test]

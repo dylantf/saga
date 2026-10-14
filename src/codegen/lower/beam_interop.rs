@@ -412,21 +412,26 @@ pub fn build_native_call(
                 {
                     let result = fresh();
                     // The callback is the whole computation of the new
-                    // process: nothing there binds what it leaves suspended.
+                    // process: nothing there binds what it leaves suspended,
+                    // and no `with` of the spawning process can catch an
+                    // abort thrown in it.
                     CExpr::Fun(
                         vec![],
-                        Box::new(super::evidence::meta_run(CExpr::Call(
-                            "saga_runtime".to_string(),
-                            "apply_cps".to_string(),
-                            vec![
-                                CExpr::Var(v.clone()),
-                                CExpr::Cons(
-                                    Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
-                                    Box::new(CExpr::Nil),
-                                ),
-                                evidence.clone(),
-                                CExpr::Fun(vec![result.clone()], Box::new(CExpr::Var(result))),
-                            ],
+                        Box::new(super::evidence::run_process(CExpr::Fun(
+                            vec![],
+                            Box::new(CExpr::Call(
+                                "saga_runtime".to_string(),
+                                "apply_cps".to_string(),
+                                vec![
+                                    CExpr::Var(v.clone()),
+                                    CExpr::Cons(
+                                        Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
+                                        Box::new(CExpr::Nil),
+                                    ),
+                                    evidence.clone(),
+                                    CExpr::Fun(vec![result.clone()], Box::new(CExpr::Var(result))),
+                                ],
+                            )),
                         ))),
                     )
                 } else if i == *idx {

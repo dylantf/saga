@@ -6843,8 +6843,7 @@ handler n_needs_return for Ask needs {Stop} {
 /// the enclosing body as the handled computation's return continuation (the
 /// value of `resume` would then be the answer of that rest). The rest is
 /// supplied as a meta continuation instead, and the operations of the
-/// inherited frame are lifted to capture it; a `finally` handler still runs
-/// its handled computation to a plain value.
+/// inherited frame are lifted to capture it.
 const NON_TAIL_WITH_HANDLERS: &[(&str, &str, i64)] = &[
     // The handled computation performs the outer effect.
     (
@@ -7135,16 +7134,11 @@ fn non_tail_with_delimited_handler_under_aborting_outer_handler() {
     );
 }
 
-/// Known gap: a handler with a `finally` block runs its handled computation
-/// to a plain value on the Erlang stack, so that cleanup follows it. The
-/// cleanup has to run when an outer handler aborts as well, and before that
-/// handler's continuation; with CPS the only point at which an abort can be
-/// observed is the return of the resumed computation, so the outer abort
-/// returns its value there, it becomes the value of the `with`, and the rest
-/// of the body runs. Expected 1000 everywhere; gives e.g. 1100 for the `let`
-/// position.
+/// A handler with a `finally` block under an outer handler that aborts: the
+/// abort is thrown through the resumed computation, so the cleanup runs and
+/// the rest of the host's body is skipped. It used to return through the
+/// `with` and become its value (1100 for the `let` position).
 #[test]
-#[ignore = "`finally`: an outer abort returns through the `with` so that cleanup runs, and becomes its value"]
 fn non_tail_with_finally_handler_under_aborting_outer_handler() {
     check_non_tail_with(
         "non_tail_with_finally_abort",
@@ -7797,13 +7791,11 @@ result () = show ((work () with { stop i = resume i }) with beam_actor)
     check_result_string("spawn_inside_delimited", src, "117");
 }
 
-/// Known gap: a handler value only known at runtime (here a parameter)
-/// keeps its handled computation on the Erlang stack, like a `finally`
-/// handler: whether its arms use the value of `resume` or have a `finally`
-/// block is not known where the `with` is lowered. Under the aborting outer
-/// handler: expected 1000, gives 1100.
+/// A handler value only known at runtime (here a parameter) is installed by
+/// the general lowering: whether its arms use the value of `resume` or have
+/// a `finally` block is not known where the `with` is lowered. Under the
+/// aborting outer handler it used to give 1100.
 #[test]
-#[ignore = "a `with` whose handler is only known at runtime is not given a continuation"]
 fn runtime_handler_value_under_aborting_outer_handler() {
     check_delimited_cells(
         "delimited_runtime_handler",
@@ -7956,14 +7948,13 @@ result () = {
     check_result_string("multi_arm_inline_resumes_once", src, "1111");
 }
 
-/// Known gap: an operation that is passed a callback is not lifted (the
-/// meta continuation current when its arm resumes, after running the
-/// callback, cannot reach the continuation built when it was performed
-/// without process state). It is performed inside the extent of the `with`,
-/// so an arm for it further out that aborts returns its value to the `with`.
-/// Expected 1000, gives 1100.
+/// An operation that is passed a callback is not lifted (the meta
+/// continuation current when its arm resumes, after running the callback,
+/// cannot reach the continuation built when it was performed). It is
+/// performed inside the extent of the inner `with`; an arm for it further
+/// out that aborts throws through that `with`. It used to return its value
+/// to the inner `with` (1100).
 #[test]
-#[ignore = "an operation carrying a callback is not lifted: an outer arm for it that aborts returns to the inner `with`"]
 fn callback_operation_aborted_by_outer_handler() {
     let src = r#"module Main
 
@@ -7986,4 +7977,290 @@ pub fun result : Unit -> String
 result () = show (aborted ())
 "#;
     check_result_string("callback_operation_outer_abort", src, "1000");
+}
+
+// ---------------------------------------------------------------------------
+// Explicit aborts. An arm that does not resume throws the abort of its
+// `with`, caught where that `with` delimits the computation, so `finally`
+// cleanups between the operation and the `with` run before the `with`'s
+// continuation proceeds, and nothing in between can take the abort for a
+// value.
+// ---------------------------------------------------------------------------
+
+const ABORT_PRELUDE: &str = r#"module Main
+
+import Std.Ref (MutRef, Ref, beam_ref)
+
+effect Fail { fun fail : String -> a }
+effect Res { fun acquire : String -> String }
+effect Log { fun log : String -> Unit }
+
+handler to_result for Fail {
+  fail reason = Err reason
+  return value = Ok value
+}
+
+handler managed for Res needs {Log} {
+  acquire name = {
+    log! ("open " <> name)
+    resume name
+  } finally {
+    log! ("close " <> name)
+  }
+}
+
+fun collect : MutRef String -> (Unit -> String needs {Log}) -> String needs {Ref}
+collect out f = f () with {
+  log m = {
+    let _ = modify! out (fun s -> s <> m <> ", ")
+    resume ()
+  }
+}
+
+fun logged : (Unit -> String needs {Log}) -> String
+logged f = {
+  let out = new! ""
+  let v = collect out f
+  get! out <> "= " <> v
+} with beam_ref
+"#;
+
+fn check_abort(fixture: &str, body: &str, expected: &str) {
+    check_result_string(fixture, &format!("{ABORT_PRELUDE}\n{body}"), expected);
+}
+
+/// A `finally` handler inside a function called under an aborting handler
+/// whose `with` has a continuation (the rest of `host`). The cleanup runs
+/// before that continuation; with the `finally` `with` not in tail position,
+/// the rest of its body is skipped. Both used to run the continuation
+/// first, and the second then fed its answer to `v <> "!"`.
+#[test]
+fn finally_cleans_up_before_the_continuation_of_an_aborting_handler() {
+    check_abort(
+        "abort_finally_before_k",
+        r#"
+fun work : Unit -> String needs {Res, Fail, Log}
+work () = {
+  let db = acquire! "db"
+  log! ("work " <> db)
+  fail! "boom"
+}
+
+fun inner_tail : Unit -> String needs {Fail, Log}
+inner_tail () = work () with managed
+
+fun inner_let : Unit -> String needs {Fail, Log}
+inner_let () = {
+  let v = work () with managed
+  v <> "!"
+}
+
+fun host : (Unit -> String needs {Fail, Log}) -> String needs {Log}
+host f = {
+  let r = f () with to_result
+  log! "after"
+  case r {
+    Ok v -> v
+    Err e -> "err " <> e
+  }
+}
+
+pub fun result : Unit -> String
+result () = logged (fun () -> host inner_tail <> "; " <> host inner_let)
+"#,
+        "open db, work db, close db, after, open db, work db, close db, after, = err boom; err boom",
+    );
+}
+
+/// The same with a handler value only known at runtime that has a `finally`
+/// arm, and with the aborting arm performing an operation before it aborts:
+/// the cleanup still runs before the aborting handler's continuation.
+#[test]
+fn runtime_finally_handler_value_and_logging_abort() {
+    check_abort(
+        "abort_runtime_finally",
+        r#"
+handler to_result_logging for Fail needs {Log} {
+  fail reason = {
+    log! "failing"
+    Err reason
+  }
+  return value = Ok value
+}
+
+fun make : Bool -> Handler Res needs {Log}
+make b = if b then handler for Res needs {Log} {
+  acquire name = {
+    resume name
+  } finally {
+    log! ("close " <> name)
+  }
+} else handler for Res needs {Log} { acquire name = resume name }
+
+fun work : Bool -> String needs {Res, Fail, Log}
+work f = {
+  let db = acquire! "db"
+  if f then fail! "boom" else db
+}
+
+fun inner : Handler Res -> Bool -> String needs {Fail, Log}
+inner h f = {
+  let v = work f with h
+  v <> "!"
+}
+
+fun host : Bool -> Bool -> String needs {Log}
+host b f = {
+  let r = inner (make b) f with to_result_logging
+  log! "after"
+  case r {
+    Ok v -> v
+    Err e -> "err " <> e
+  }
+}
+
+pub fun result : Unit -> String
+result () = logged (fun () -> host True True <> "; " <> host True False <> "; " <> host False True)
+"#,
+        "failing, close db, after, close db, after, failing, after, = err boom; db!; err boom",
+    );
+}
+
+/// Nested regions are cleaned up innermost first, then the aborting
+/// handler's continuation runs.
+#[test]
+fn nested_finally_regions_clean_up_innermost_first() {
+    check_abort(
+        "abort_nested_finally",
+        r#"
+fun work : Unit -> String needs {Res, Fail, Log}
+work () = {
+  let a = acquire! "a"
+  let b = acquire! "b"
+  fail! (a <> b)
+}
+
+fun twice : Unit -> String needs {Fail, Log}
+twice () = (work () with managed) with managed
+
+fun host : Unit -> String needs {Log}
+host () = {
+  let r = twice () with to_result
+  log! "after"
+  case r {
+    Ok v -> v
+    Err e -> "err " <> e
+  }
+}
+
+pub fun result : Unit -> String
+result () = logged (fun () -> host ())
+"#,
+        "open a, open b, close b, close a, after, = err ab",
+    );
+}
+
+/// An abort of a `with` inside a region ends that `with`, not the region:
+/// the regions are cleaned up when the computation they are in finishes.
+#[test]
+fn inner_abort_does_not_clean_up_an_outer_region() {
+    check_abort(
+        "abort_inner_keeps_region",
+        r#"
+fun work : Unit -> String needs {Res, Log}
+work () = {
+  let db = acquire! "db"
+  let v = {
+    let c = acquire! "cache"
+    fail! c
+  } with { fail e = "caught " <> e }
+  log! v
+  db
+}
+
+pub fun result : Unit -> String
+result () = logged (fun () -> work () with managed)
+"#,
+        "open db, open cache, caught cache, close cache, close db, = db",
+    );
+}
+
+/// `catch_panic` does not take the abort of a `with` around it for a panic.
+#[test]
+fn catch_panic_does_not_swallow_an_abort() {
+    let src = r#"module Main
+
+import Std.Process (catch_panic)
+
+effect Fail { fun fail : String -> a }
+
+fun guarded : Unit -> String needs {Fail}
+guarded () = case catch_panic (fun () -> fail! "boom") {
+  Ok v -> "ok " <> v
+  Err m -> "panic " <> m
+}
+
+pub fun result : Unit -> String
+result () = guarded () with { fail e = "aborted " <> e }
+"#;
+    check_result_string("abort_catch_panic", src, "aborted boom");
+}
+
+/// A spawned process that performs an operation whose aborting handler was
+/// installed in the spawning process: the abort cannot be delivered there,
+/// and the spawned process ends with an error naming the effect.
+#[test]
+fn abort_across_a_process_boundary_is_an_error() {
+    let src = r#"module Main
+
+import Std.Actor (Actor, Process, Monitor, ExitReason, beam_actor)
+
+effect Stop { fun stop : Int -> Int }
+
+fun watch : Unit -> String needs {Process, Actor Int, Monitor, Stop}
+watch () = {
+  let pid = spawn! (fun () -> {
+    let _ = stop! 1
+    ()
+  })
+  let _ref = monitor! pid
+  receive {
+    Down _ reason -> case reason {
+      Error msg -> msg
+      _ -> "other exit"
+    }
+    after 5000 -> "timeout"
+  }
+}
+
+pub fun result : Unit -> String
+result () = (watch () with { stop _ = "aborted in the parent" }) with beam_actor
+"#;
+    check_result_string(
+        "abort_across_processes",
+        src,
+        "the handler of effect Main.Stop aborted in a process spawned inside its `with`: an abort cannot cross a process boundary",
+    );
+}
+
+/// An outer handler that resumes twice, around an inner `with` that aborts
+/// in the first resumption: the abort ends the inner `with` in that
+/// resumption only, and the outer arm still adds the second.
+#[test]
+fn multishot_outer_handler_around_an_inner_abort() {
+    let src = r#"module Main
+
+effect Ask { fun ask : Unit -> Int }
+effect Stop { fun stop : Int -> Int }
+
+fun f : Unit -> Int needs {Ask}
+f () = {
+  let a = ask! ()
+  if a == 1 then stop! 0 else a
+} with { stop _ = 100 }
+
+pub fun result : Unit -> String
+result () = show (f () with { ask () = (resume 1) + (resume 2) })
+"#;
+    check_result_string("abort_multishot_outer", src, "102");
 }

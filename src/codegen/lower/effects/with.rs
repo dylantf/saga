@@ -25,15 +25,19 @@ impl<'a> Lowerer<'a> {
 
         // One lowering, `bind(handled, k)` (see "The Continuation of a
         // `with`" in docs/effect-implementation.md): the handled computation
-        // returns to the `with`, and the operations of the inherited frame
-        // are lifted so that they capture `k` as a meta continuation. It is
-        // fused when no arm needs the value of the handled computation back
-        // (`chains`: `k` goes into the handled computation and the arms that
-        // abort, and nothing is lifted). A handler that keeps the stack is
-        // the exception: its handled computation is run to a plain value.
-        let keeps_stack = self.with_handler_keeps_stack(handler);
-        let general = !keeps_stack && !self.with_handler_chains_continuation(handler);
-        let fused_k = if general { None } else { inherited_return_k.clone() };
+        // returns to the `with`, the operations of the inherited frame are
+        // lifted so that they capture `k` as a meta continuation, and an arm
+        // that does not resume throws the abort of this `with`, which is
+        // caught where it delimits the computation. It is fused when every
+        // arm only resumes in tail position (`chains`: `k` goes into the
+        // handled computation, and nothing is lifted or caught).
+        let general = !self.with_handler_chains_continuation(handler);
+        let fused_k = if general {
+            None
+        } else {
+            inherited_return_k.clone()
+        };
+        let abort_ref = general.then(|| self.fresh());
 
         let normalized = self.normalize_with_handler(handler);
         let (inline_arms, explicit_return_clause) = match &normalized {
@@ -48,12 +52,27 @@ impl<'a> Lowerer<'a> {
         let named_item = match &normalized {
             WithHandlerLayer::Named { reference } => {
                 self.pre_register_local_with_binding(expr, &reference.name);
-                let item = self.resolve_named_handler_item(reference);
+                let mut item = self.resolve_named_handler_item(reference);
                 if let NamedHandlerItem::Conditional {
                     cond_var, cond_ce, ..
                 } = &item
                 {
                     condition_bindings.push((cond_var.clone(), cond_ce.as_ref().clone()));
+                }
+                // A handler value is a function of the abort reference of the
+                // `with` that installs it, which its arms throw with.
+                if let (NamedHandlerItem::Dynamic { tuple_var, .. }, Some(abort_ref)) =
+                    (&mut item, &abort_ref)
+                {
+                    let installed = self.fresh();
+                    condition_bindings.push((
+                        installed.clone(),
+                        CExpr::Apply(
+                            Box::new(CExpr::Var(tuple_var.clone())),
+                            vec![CExpr::Var(abort_ref.clone())],
+                        ),
+                    ));
+                    *tuple_var = installed;
                 }
                 Some(item)
             }
@@ -165,10 +184,14 @@ impl<'a> Lowerer<'a> {
         let saved_evidence = self.current_evidence.clone();
         // The lifted frame has the inherited one's tags and layout. The
         // handled computation and the arms both see it.
-        let lifted_evidence = saved_evidence.as_ref().filter(|_| general).map(|frame| {
-            let lifted = evidence::lift_evidence(CExpr::Var(frame.var.clone()));
-            (EvidenceFrame::new(self.fresh(), frame.abi.clone()), lifted)
-        });
+        let lifted_evidence = saved_evidence
+            .as_ref()
+            .zip(abort_ref.as_ref())
+            .map(|(frame, r)| {
+                let lifted =
+                    evidence::lift_evidence(CExpr::Var(frame.var.clone()), CExpr::Var(r.clone()));
+                (EvidenceFrame::new(self.fresh(), frame.abi.clone()), lifted)
+            });
         let inherited_evidence = match &lifted_evidence {
             Some((frame, _)) => Some(frame.clone()),
             None => saved_evidence.clone(),
@@ -258,15 +281,28 @@ impl<'a> Lowerer<'a> {
             (None, None) => (None, fused_k.clone()),
         };
         let result = self.lower_handled_inner_expr(expr, return_k_lambda, outer_return_k);
-        // With no continuation the value of the `with` is returned: the
-        // continuation is the identity. Nothing suspends unless a frame was
-        // lifted.
+        // The entry of the `with` delimits its handled computation: an abort
+        // thrown by one of its arms becomes the value. With no continuation
+        // the value of the `with` is returned: the continuation is the
+        // identity. Nothing suspends unless a frame was lifted.
+        let result = match &abort_ref {
+            Some(r) => {
+                let vars = [
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                ];
+                evidence::catch_own_abort(result, r, vars)
+            }
+            None => result,
+        };
         let result = match &inherited_return_k {
             Some(k) if general => evidence::meta_bind(result, k.clone()),
             None if general && lifted_evidence.is_some() => {
                 evidence::meta_bind(result, self.identity_return_lambda())
             }
-            None if keeps_stack => evidence::meta_run(result),
             _ => result,
         };
 
@@ -292,6 +328,7 @@ impl<'a> Lowerer<'a> {
         // terminal value flows through the host context's CPS chain.
         let saved_handler_inherited_k =
             std::mem::replace(&mut self.current_handler_inherited_k, fused_k);
+        let saved_abort_ref = std::mem::replace(&mut self.current_abort_ref, abort_ref.clone());
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
@@ -336,6 +373,7 @@ impl<'a> Lowerer<'a> {
             handler_bindings.push((var_name.clone(), binding));
         }
         self.current_handler_inherited_k = saved_handler_inherited_k;
+        self.current_abort_ref = saved_abort_ref;
 
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
@@ -397,11 +435,19 @@ impl<'a> Lowerer<'a> {
             self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings);
         let mut used = HashSet::new();
         Self::collect_var_refs(&attached, &mut used);
-        match lifted_evidence {
+        let lowered = match lifted_evidence {
             Some((frame, lifted)) if used.contains(&frame.var) => {
                 CExpr::Let(frame.var, Box::new(lifted), Box::new(attached))
             }
             _ => attached,
+        };
+        match abort_ref {
+            Some(r) => CExpr::Let(
+                r,
+                Box::new(CExpr::Call("erlang".into(), "make_ref".into(), vec![])),
+                Box::new(lowered),
+            ),
+            None => lowered,
         }
     }
 
@@ -510,10 +556,10 @@ impl<'a> Lowerer<'a> {
     /// Each op gets its own function with natural arity.
     ///
     /// When the arm has a `finally` block, `current_handler_finally` is set so
-    /// that each `resume` site inlines try/catch around the K call. This ensures
-    /// the cleanup code is lowered in the correct lexical scope (where arm body
-    /// variables like `conn` are bound). For abort handlers (no resume), cleanup
-    /// is appended after the arm body.
+    /// that each `resume` site makes the resumed computation a region whose
+    /// end runs the cleanup (`fin_resume`), lowered where the arm's variables
+    /// (like `conn`) are bound. An arm that does not resume runs the cleanup
+    /// before it aborts.
     pub(crate) fn build_op_handler_fun(
         &mut self,
         arm: &HandlerArm,
@@ -531,12 +577,14 @@ impl<'a> Lowerer<'a> {
         effect_hint: Option<&str>,
     ) -> CExpr {
         let has_resume = arm.body.contains_resume();
-        let op_info = self
+        let effect_name = self
             .effect_for_handler_arm(arm, source_module)
-            .or_else(|| effect_hint.map(str::to_string))
+            .or_else(|| effect_hint.map(str::to_string));
+        let op_info = effect_name
+            .as_ref()
             .and_then(|effect_name| {
                 self.effect_defs
-                    .get(&effect_name)
+                    .get(effect_name)
                     .and_then(|info| info.ops.get(&arm.op_name))
             })
             .cloned();
@@ -590,16 +638,22 @@ impl<'a> Lowerer<'a> {
         // enclosing function-level return continuation.
         let prev_handler_k = self.current_handler_k.replace(k_var);
 
-        // Resume handlers reach the rest of the computation via their own
-        // K parameter (the resume continuation), so threading inherited_K
-        // into their body would double-apply. Only abort arms (no resume)
-        // should pick up inherited_K — that's where the body's terminal
-        // value needs an explicit path to the host's outer K.
-        let saved_inherited = if has_resume {
-            self.current_handler_inherited_k.take()
-        } else {
-            None
-        };
+        // The tail of an arm of a general `with` that does not resume
+        // throws the abort of that `with`; a tail `resume` is left as it is
+        // (`lower_tail`). An arm of a chained `with` resumes in every tail.
+        let abort_k = self.arm_abort_continuation(
+            effect_name.as_deref(),
+            arm.finally_block.as_deref(),
+            has_resume,
+        );
+        let saved_inherited = std::mem::replace(
+            &mut self.current_handler_inherited_k,
+            abort_k.as_ref().map(|(var, _)| CExpr::Var(var.clone())),
+        );
+        let saved_abort_k = std::mem::replace(
+            &mut self.current_abort_k,
+            abort_k.as_ref().map(|(var, _)| var.clone()),
+        );
 
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
         let saved_finally = self.current_handler_finally.take();
@@ -642,6 +696,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut body_ce = self.lower_handler_owned_expr(&arm.body);
+        body_ce = Self::bind_abort_continuation(abort_k, body_ce);
 
         for (capture_name, previous) in saved_capture_handlers.into_iter().rev() {
             if let Some(previous) = previous {
@@ -662,27 +717,6 @@ impl<'a> Lowerer<'a> {
                 .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
             let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
             body_ce = CExpr::Let(var, Box::new(bound_value), Box::new(wrapped_body));
-        }
-
-        // For abort handlers (no resume) with finally: append cleanup after body.
-        // The cleanup is lowered here because the arm body's let-bindings are not
-        // in scope — but for abort handlers, the typical pattern is that the resource
-        // was never acquired (the handler failed early), so cleanup referencing
-        // body-local variables is unlikely. If it does reference arm params, those
-        // are in scope via the param bindings above.
-        if let (Some(fb), false) = (&arm.finally_block, has_resume) {
-            let fb = &*self.effect_normal_body(fb, "finally block");
-            let cleanup_ce = evidence::meta_run(self.lower_expr(fb));
-            let result_var = self.fresh();
-            body_ce = CExpr::Let(
-                result_var.clone(),
-                Box::new(evidence::meta_run(body_ce)),
-                Box::new(CExpr::Let(
-                    "_".to_string(),
-                    Box::new(cleanup_ce),
-                    Box::new(CExpr::Var(result_var)),
-                )),
-            );
         }
 
         for (name, value) in captures.iter().rev() {
@@ -708,10 +742,55 @@ impl<'a> Lowerer<'a> {
 
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
-        if has_resume {
-            self.current_handler_inherited_k = saved_inherited;
-        }
+        self.current_handler_inherited_k = saved_inherited;
+        self.current_abort_k = saved_abort_k;
         CExpr::Fun(fun_params, Box::new(body_ce))
+    }
+
+    /// Bind an arm's abort continuation around its body, if the body uses it.
+    fn bind_abort_continuation(abort_k: Option<(String, CExpr)>, body: CExpr) -> CExpr {
+        let Some((var, value)) = abort_k else {
+            return body;
+        };
+        let mut used = HashSet::new();
+        Self::collect_var_refs(&body, &mut used);
+        if used.contains(&var) {
+            CExpr::Let(var, Box::new(value), Box::new(body))
+        } else {
+            body
+        }
+    }
+
+    /// The abort continuation of an arm of the `with` being built, when it
+    /// has an abort reference: `(variable, fun(V) -> abort(Ref, Tag, V))`.
+    /// An arm with a `finally` block that does not resume runs the cleanup
+    /// first.
+    fn arm_abort_continuation(
+        &mut self,
+        effect_name: Option<&str>,
+        finally_block: Option<&Expr>,
+        has_resume: bool,
+    ) -> Option<(String, CExpr)> {
+        let abort_ref = self.current_abort_ref.clone()?;
+        let tag = effect_name.unwrap_or("unknown");
+        let var = self.fresh();
+        let param = self.fresh();
+        let abort = evidence::abort_continuation(param.clone(), CExpr::Var(abort_ref), tag);
+        let value = match (finally_block, has_resume) {
+            (Some(fb), false) => {
+                let fb = self.effect_normal_body(fb, "finally block").into_owned();
+                let cleanup = evidence::meta_run(self.lower_expr(&fb));
+                let CExpr::Fun(params, body) = abort else {
+                    unreachable!()
+                };
+                CExpr::Fun(
+                    params,
+                    Box::new(CExpr::Let("_".to_string(), Box::new(cleanup), body)),
+                )
+            }
+            _ => abort,
+        };
+        Some((var, value))
     }
 
     pub(crate) fn build_inline_op_handler_fun(&mut self, arms: &[HandlerArm]) -> CExpr {
@@ -784,30 +863,24 @@ impl<'a> Lowerer<'a> {
                 .finally_block
                 .as_ref()
                 .map(|fb| self.effect_normal_body(fb, "finally block").into_owned());
-            // As for a single arm: one that resumes reaches the rest through
-            // its own continuation, not the inherited one.
-            let saved_inherited = arm
-                .body
-                .contains_resume()
-                .then(|| self.current_handler_inherited_k.take());
+            let effect_name = self.effect_for_handler_arm(arm, None);
+            let abort_k = self.arm_abort_continuation(
+                effect_name.as_deref(),
+                arm.finally_block.as_deref(),
+                arm.body.contains_resume(),
+            );
+            let saved_inherited = std::mem::replace(
+                &mut self.current_handler_inherited_k,
+                abort_k.as_ref().map(|(var, _)| CExpr::Var(var.clone())),
+            );
+            let saved_abort_k = std::mem::replace(
+                &mut self.current_abort_k,
+                abort_k.as_ref().map(|(var, _)| var.clone()),
+            );
             let mut body_ce = self.lower_handler_owned_expr(&arm.body);
-            if let Some(saved) = saved_inherited {
-                self.current_handler_inherited_k = saved;
-            }
-            if let (Some(fb), false) = (&arm.finally_block, arm.body.contains_resume()) {
-                let fb = &*self.effect_normal_body(fb, "finally block");
-                let cleanup_ce = evidence::meta_run(self.lower_expr(fb));
-                let result_var = self.fresh();
-                body_ce = CExpr::Let(
-                    result_var.clone(),
-                    Box::new(evidence::meta_run(body_ce)),
-                    Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_ce),
-                        Box::new(CExpr::Var(result_var)),
-                    )),
-                );
-            }
+            self.current_handler_inherited_k = saved_inherited;
+            self.current_abort_k = saved_abort_k;
+            body_ce = Self::bind_abort_continuation(abort_k, body_ce);
 
             for (source_idx, pat) in arm.params.iter().enumerate().rev() {
                 if !runtime_param_positions.contains(&source_idx) {

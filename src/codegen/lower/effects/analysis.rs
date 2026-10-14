@@ -63,7 +63,10 @@ impl<'a> Lowerer<'a> {
                     Self::collect_free_var_refs(arg, bound, out);
                 }
             }
-            CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => {
+            CExpr::Call(_, _, args)
+            | CExpr::PrimOp(_, args)
+            | CExpr::Tuple(args)
+            | CExpr::Values(args) => {
                 for arg in args {
                     Self::collect_free_var_refs(arg, bound, out);
                 }

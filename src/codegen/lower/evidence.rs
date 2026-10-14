@@ -27,7 +27,7 @@
 //!   n is typically ≤5.
 
 use super::util::cerl_call;
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::runtime_shape::{
     EvidenceAbi, EvidenceInstallKind, EvidenceInstallPlan, EvidenceReframeKind,
     EvidenceReframePlan, EvidenceSelector,
@@ -209,7 +209,10 @@ pub(super) fn append_tail(
     named_tags: &[String],
 ) -> CExpr {
     let tags = named_tags.iter().rev().fold(CExpr::Nil, |tail, tag| {
-        CExpr::Cons(Box::new(CExpr::Lit(CLit::Atom(tag.clone()))), Box::new(tail))
+        CExpr::Cons(
+            Box::new(CExpr::Lit(CLit::Atom(tag.clone()))),
+            Box::new(tail),
+        )
     });
     cerl_call(
         EVIDENCE_BRIDGE_MODULE,
@@ -219,9 +222,14 @@ pub(super) fn append_tail(
 }
 
 /// The inherited frame of a `with`, every operation suspending until the
-/// `with` supplies its continuation. Same tags and layout.
-pub(super) fn lift_evidence(evidence: CExpr) -> CExpr {
-    cerl_call(EVIDENCE_BRIDGE_MODULE, "lift_evidence", vec![evidence])
+/// `with` supplies its continuation, and every resumption delimited again by
+/// the `with` whose abort reference is `abort_ref`. Same tags and layout.
+pub(super) fn lift_evidence(evidence: CExpr, abort_ref: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "lift_evidence",
+        vec![evidence, abort_ref],
+    )
 }
 
 /// Give the result of a handled computation (a plain value or a suspension)
@@ -230,16 +238,99 @@ pub(super) fn meta_bind(result: CExpr, continuation: CExpr) -> CExpr {
     cerl_call(EVIDENCE_BRIDGE_MODULE, "bind", vec![result, continuation])
 }
 
-/// `let r = resume x; rest`: `rest` gets the value of the handled
-/// computation and runs before the continuation of the `with`.
-pub(super) fn meta_mbind(resumed: CExpr, rest: CExpr) -> CExpr {
-    cerl_call(EVIDENCE_BRIDGE_MODULE, "mbind", vec![resumed, rest])
+/// `let r = resume x; rest` in an arm of the `with` `abort_ref`: `rest` gets
+/// the value of the handled computation and runs before the continuation of
+/// the `with`.
+pub(super) fn meta_mbind(resumed: CExpr, rest: CExpr, abort_ref: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "mbind",
+        vec![resumed, rest, abort_ref],
+    )
 }
 
 /// `meta_bind` with the identity continuation: a plain value for a caller
 /// that is not CPS code.
 pub(super) fn meta_run(result: CExpr) -> CExpr {
     cerl_call(EVIDENCE_BRIDGE_MODULE, "run", vec![result])
+}
+
+/// The continuation of an arm's tail that does not resume: the abort of the
+/// `with` `abort_ref`, from effect `tag`.
+pub(super) fn abort_continuation(param: String, abort_ref: CExpr, tag: &str) -> CExpr {
+    CExpr::Fun(
+        vec![param.clone()],
+        Box::new(cerl_call(
+            EVIDENCE_BRIDGE_MODULE,
+            "abort",
+            vec![
+                abort_ref,
+                CExpr::Lit(CLit::Atom(tag.to_string())),
+                CExpr::Var(param),
+            ],
+        )),
+    )
+}
+
+/// `resume` in an arm with a `finally` block: the resumed computation
+/// `k(value)` is a region whose end runs `cleanup` (a fun of no arguments).
+pub(super) fn fin_resume(abort_ref: CExpr, cleanup: CExpr, k: CExpr, value: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "fin_resume",
+        vec![abort_ref, cleanup, k, value],
+    )
+}
+
+/// The computation of a spawned process, `thunk` a fun of no arguments.
+pub(super) fn run_process(thunk: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "run_process", vec![thunk])
+}
+
+/// `body` delimited by the `with` whose abort reference is the variable
+/// `abort_ref`: its abort becomes the value. `vars` are four fresh names.
+pub(super) fn catch_own_abort(body: CExpr, abort_ref: &str, vars: [String; 5]) -> CExpr {
+    let [ok, class, reason, trace, value] = vars;
+    let owner = format!("{value}Ref");
+    let is_own = CArm {
+        pat: CPat::Tuple(vec![
+            CPat::Lit(CLit::Atom("throw".to_string())),
+            CPat::Tuple(vec![
+                CPat::Lit(CLit::Atom("$saga_abort".to_string())),
+                CPat::Var(owner.clone()),
+                CPat::Wildcard,
+                CPat::Var(value.clone()),
+            ]),
+        ]),
+        guard: Some(cerl_call(
+            "erlang",
+            "=:=",
+            vec![CExpr::Var(owner), CExpr::Var(abort_ref.to_string())],
+        )),
+        body: CExpr::Var(value),
+    };
+    let other = CArm {
+        pat: CPat::Wildcard,
+        guard: None,
+        body: CExpr::PrimOp(
+            "raw_raise".to_string(),
+            vec![
+                CExpr::Var(class.clone()),
+                CExpr::Var(reason.clone()),
+                CExpr::Var(trace.clone()),
+            ],
+        ),
+    };
+    CExpr::Try {
+        expr: Box::new(body),
+        ok_var: ok.clone(),
+        ok_body: Box::new(CExpr::Var(ok)),
+        catch_vars: (class.clone(), reason.clone(), trace),
+        catch_body: Box::new(CExpr::Case(
+            Box::new(CExpr::Tuple(vec![CExpr::Var(class), CExpr::Var(reason)])),
+            vec![is_own, other],
+        )),
+    }
 }
 
 #[cfg(test)]

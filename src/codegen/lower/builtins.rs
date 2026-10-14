@@ -133,6 +133,32 @@ impl Lowerer<'_> {
         let catch_body = CExpr::Case(
             Box::new(CExpr::Var(reason_var.clone())),
             vec![
+                // The abort of a `with` around the thunk is not a panic: it
+                // goes on to that `with`.
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Lit(CLit::Atom("$saga_abort".into())),
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                    ]),
+                    guard: Some(cerl_call(
+                        "erlang",
+                        "=:=",
+                        vec![
+                            CExpr::Var(class_var.clone()),
+                            CExpr::Lit(CLit::Atom("throw".into())),
+                        ],
+                    )),
+                    body: CExpr::PrimOp(
+                        "raw_raise".to_string(),
+                        vec![
+                            CExpr::Var(class_var.clone()),
+                            CExpr::Var(reason_var.clone()),
+                            CExpr::Var(trace_var.clone()),
+                        ],
+                    ),
+                },
                 // Match {saga_error, _Kind, Msg, _Module, _Fun, _File, _Line}
                 CArm {
                     pat: CPat::Tuple(vec![

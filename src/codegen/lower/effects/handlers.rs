@@ -13,6 +13,25 @@ impl<'a> Lowerer<'a> {
     /// The tuple layout is: ops sorted alphabetically by "Effect.op" key,
     /// with an optional return clause lambda as the last element.
     pub(crate) fn lower_handler_expr_to_tuple(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
+        self.handler_value(|this| this.lower_handler_expr_ops(body))
+    }
+
+    /// A handler value is a function of the abort reference of the `with`
+    /// that installs it, returning the tuple of its operations (and return
+    /// clause): its arms throw with that reference.
+    fn handler_value(&mut self, build: impl FnOnce(&mut Self) -> CExpr) -> CExpr {
+        let abort_ref = self.fresh();
+        let saved_ref = self.current_abort_ref.replace(abort_ref.clone());
+        let saved_k = self.current_handler_inherited_k.take();
+        let saved_abort_k = self.current_abort_k.take();
+        let tuple = build(self);
+        self.current_abort_ref = saved_ref;
+        self.current_handler_inherited_k = saved_k;
+        self.current_abort_k = saved_abort_k;
+        CExpr::Fun(vec![abort_ref], Box::new(tuple))
+    }
+
+    fn lower_handler_expr_ops(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
         let semantic_module_name = self.current_semantic_module_name().to_string();
         let canonical_effects =
             self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects);
@@ -65,6 +84,10 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_handler_def_to_tuple(&mut self, handler_name: &str) -> Option<CExpr> {
         let canonical = self.resolve_handler_name(handler_name);
         let info = self.handler_defs.get(&canonical)?.clone();
+        Some(self.handler_value(|this| this.lower_handler_def_ops(&info)))
+    }
+
+    fn lower_handler_def_ops(&mut self, info: &crate::codegen::lower::HandlerInfo) -> CExpr {
         let handler_ops = self.effect_handler_ops(&info.effects);
 
         let mut tuple_elements = Vec::new();
@@ -97,7 +120,7 @@ impl<'a> Lowerer<'a> {
             };
             tuple_elements.push(CExpr::Fun(vec![param], Box::new(body)));
         }
-        Some(CExpr::Tuple(tuple_elements))
+        CExpr::Tuple(tuple_elements)
     }
 
     pub(crate) fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
@@ -277,32 +300,23 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Whether a `with` using `handler` keeps its handled computation on the
-    /// Erlang stack instead of taking a meta continuation: an arm has a
-    /// `finally` block, whose cleanup must see an abort from further out
-    /// return, or the handler is only known at runtime and may have one.
-    pub(crate) fn with_handler_keeps_stack(&self, handler: &Handler) -> bool {
-        self.static_with_arms(handler)
-            .is_none_or(|arms| arms.iter().any(|arm| arm.finally_block.is_some()))
-    }
-
-    /// Whether the general lowering of a `with` using `handler` may be fused:
-    /// the continuation of the whole `with` (the rest of the enclosing body)
-    /// becomes the return continuation of its handled computation.
+    /// Whether a `with` using `handler` is lowered by the chained
+    /// optimisation: the continuation of the whole `with` (the rest of the
+    /// enclosing body) becomes the return continuation of its handled
+    /// computation, and nothing is lifted or caught.
     ///
-    /// That is equivalent only when no arm looks at the value `resume`
-    /// returns, which would then be the answer of everything after the
-    /// `with` and not the value of the `with`: arms that never resume, and
-    /// arms whose every `resume` is in tail position.
+    /// That is equivalent only when every arm of the handler, known where
+    /// the `with` is lowered, resumes in every tail position and nowhere
+    /// else, and none has a `finally` block: no arm then looks at the value
+    /// `resume` returns or aborts.
     pub(crate) fn with_handler_chains_continuation(&self, handler: &Handler) -> bool {
         use crate::codegen::handler_analysis::{ResumptionKind, classify_body};
-        !self.with_handler_keeps_stack(handler)
-            && self.static_with_arms(handler).is_some_and(|arms| {
-                arms.iter().all(|arm| {
-                    !arm.body.contains_resume()
-                        || classify_body(&arm.body) == ResumptionKind::TailResumptive
-                })
+        self.static_with_arms(handler).is_some_and(|arms| {
+            arms.iter().all(|arm| {
+                arm.finally_block.is_none()
+                    && classify_body(&arm.body) == ResumptionKind::TailResumptive
             })
+        })
     }
 
     pub(crate) fn effect_for_handler_arm(
