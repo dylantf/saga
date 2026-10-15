@@ -8,7 +8,7 @@ examples/05-records.saga 4c641163b7b260e9
 examples/06-lists.saga 11cc62edcf0dfe89
 examples/07-pattern-matching.saga c13fce220801d360
 examples/08-bst.saga b061fbb7fd580a8a
-examples/09-sorting.saga dd63d7f64c41d8e0
+examples/09-sorting.saga 07986aa12068c370
 examples/10-log-effect.saga 2732ad1bde287a02
 examples/11-fail-effect.saga f4174ed882a0c5c4
 examples/12-effect-continuation.saga 56e3b9ea3711c823
@@ -20,7 +20,7 @@ examples/17-tuples.saga 70cc2338b8555945
 examples/18-destructuring.saga ab7e0e021551a960
 examples/19-string-interpolation.saga e396c439c742c2f6
 examples/20-validation-applicative.saga af8c3a642cbdf5b9
-examples/21-do-else.saga c1044fa5a152b12d
+examples/21-do-else.saga 13ba82a6bb5f4587
 examples/22-dictionaries.saga 4875a01eb4ca7ff3
 examples/23-list-comprehensions.saga 16d5ec362aead386
 examples/24-double-shot-continuation.saga 710e8487cc891b81
@@ -53,8 +53,8 @@ examples/50-refs.saga 3f3a4c5566e37c97
 examples/51-shared-refs.saga a31a2dab166a4698
 examples/52-atomic-refs.saga 226d4405bbf9d478
 examples/53-mutable-vectors.saga 641bcb431b530c98
-examples/54-choose-backtracking.saga a920590d733988d6
-examples/55-nqueens-solver.saga ae4d465d44b64a15
+examples/54-choose-backtracking.saga a9648defecf750ad
+examples/55-nqueens-solver.saga 2bd0705bddf50336
 examples/56-ambient-reader.saga 9a7897de780af0db
 examples/57-ambient-writer.saga 26c58f6387fe36c4
 examples/58-streams.saga f9f9685e7ebca958
@@ -168,7 +168,7 @@ stdlib/Std.Set 5487e3f9058cd732
 stdlib/Std.Stream df9f97211105b60b
 stdlib/Std.String e780c80dee5cda5b
 stdlib/Std.Supervisor 61e4968d825cc91b
-stdlib/Std.Test 8c71058f3bee9d04
+stdlib/Std.Test 5cb3f87a77a9381e
 stdlib/Std.Time 71f0d5c5195d61c1
 stdlib/Std.Tuple ac444803cbf4d432
 stdlib/Std.Vec b8efdbcbf19c400b

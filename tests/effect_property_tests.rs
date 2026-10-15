@@ -7796,7 +7796,9 @@ result () = show ((work () with { stop i = resume i }) with beam_actor)
 /// A handler value only known at runtime (here a parameter) is installed by
 /// the general lowering: whether its arms use the value of `resume` or have
 /// a `finally` block is not known where the `with` is lowered. Under the
-/// aborting outer handler it used to give 1100.
+/// aborting outer handler it used to give 1100. The arms keep the answer
+/// type free (`let r = resume ..; r`), since only a uniform handler may be
+/// passed as a `Handler` value.
 #[test]
 fn runtime_handler_value_under_aborting_outer_handler() {
     check_delimited_cells(
@@ -7809,7 +7811,7 @@ with_h h = {
 }
 
 fun make : Int -> Handler Ask
-make n = if n > 0 then handler for Ask { ask () = (resume n) + 10 } else handler for Ask { ask () = resume n }
+make n = if n > 0 then handler for Ask { ask () = { let r = resume (n + 10); r } } else handler for Ask { ask () = resume n }
 "#,
         &[("runtime", "  with_h (make 1)", [1000, 114, 228, 114 + 115])],
     );
