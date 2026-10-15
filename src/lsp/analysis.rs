@@ -252,6 +252,8 @@ fn hash_handler_info<H: Hasher>(info: &typechecker::HandlerInfo, state: &mut H) 
     }
     hash_effect_row(&info.needs_effects, state);
     info.forall.hash(state);
+    info.uniform.hash(state);
+    info.resume_row_closed.hash(state);
     let where_constraints: BTreeMap<_, _> = info.where_constraints.iter().collect();
     hash_vec(
         &where_constraints.into_iter().collect::<Vec<_>>(),

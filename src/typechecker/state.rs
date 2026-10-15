@@ -63,6 +63,14 @@ pub struct HandlerInfo {
     /// handler's `needs`: the rest of the handled computation, bound to what
     /// it leaves unhandled at each `with`.
     pub resume_row: Option<u32>,
+    /// The arms put a function that resumes where no effects may be
+    /// performed, which closed the handler's `ρ_R` to `{}` (so `resume_row`
+    /// is `None`). The handler then only handles computations that leave
+    /// nothing unhandled: every `with` installing it checks that, which is
+    /// what makes the resuming function pure wherever it runs. Not uniform
+    /// (`Checker::check_handler_value`): a `with` that knows the handler only
+    /// by its type could not check it.
+    pub resume_row_closed: bool,
     /// The handler leaves the answer type to the computation it is
     /// installed around (no `return` clause but the identity, arms that do
     /// not decide the answer type). See `Checker::check_handler_value`.

@@ -7918,6 +7918,115 @@ total xs = List.foldl (fun acc x -> acc + x) 0 xs
     );
 }
 
+/// A named handler shaped like kraken's `collect_query`: its arms resume
+/// inside the pure function field of a state-passing type, which closes
+/// what resuming may perform to nothing. It is accepted, and installed only
+/// around computations that perform nothing but the handled effect.
+const PURE_REST_STEP_HANDLER: &str = r#"
+type Step a = Step (Int -> (a, Int))
+
+handler collect for Ask {
+  ask () = Step (fun total -> {
+    let Step run_rest = resume total
+    run_rest (total + 1)
+  })
+  return value = Step (fun total -> (value, total))
+}
+
+fun two_asks : Unit -> Int needs {Ask}
+two_asks () = ask! () + ask! () * 10
+
+fun run_step : (Unit -> Int needs {Ask}) -> (Int, Int)
+run_step make = {
+  let Step run = make () with collect
+  run 0
+}
+"#;
+
+/// Installed around a computation that performs only `Ask`, under an outer
+/// `Stop` handler (aborting, resuming, non-tail, twice) for an effect the
+/// handled computation does not perform: `Stop` is performed before the
+/// `with` and after the stored function has run.
+#[test]
+fn pure_rest_named_handler_under_aborting_outer_handler() {
+    check_delimited_cells(
+        "delimited_pure_rest_handler",
+        PURE_REST_STEP_HANDLER,
+        &[
+            (
+                "pre",
+                "  let a = stop! 3\n  let (v, t) = run_step two_asks\n  a + v + t + 100",
+                [1000, 115, 230, 115 + 116],
+            ),
+            (
+                "post",
+                "  let Step run = two_asks () with collect\n  let (v, t) = run 0\n  let a = stop! v\n  a + t + 100",
+                [1000, 112, 224, 112 + 113],
+            ),
+        ],
+    );
+}
+
+/// The same handler around a computation that also performs `Stop` is
+/// rejected at the `with`; declared in another module, the requirement
+/// travels with it.
+#[test]
+fn pure_rest_named_handler_rejects_a_computation_with_other_effects() {
+    let message = typecheck_error(&format!(
+        "{DELIMITED_PRELUDE}{PURE_REST_STEP_HANDLER}
+fun leaky : Unit -> (Int, Int) needs {{Stop}}
+leaky () = {{
+  let Step run = ask_stop () with collect
+  run 0
+}}
+"
+    ));
+    assert!(
+        message.contains(
+            "handler 'collect' stores a function that resumes the handled computation where no \
+             effects are allowed, so it can only handle computations that perform nothing else; \
+             this one also performs {Stop}"
+        ),
+        "{message}"
+    );
+    let lib = r#"module Steps
+
+pub effect Ask { fun ask : Unit -> Int }
+
+pub type Step a = Step (Int -> (a, Int))
+
+pub handler collect for Ask {
+  ask () = Step (fun total -> {
+    let Step run_rest = resume total
+    run_rest (total + 1)
+  })
+  return value = Step (fun total -> (value, total))
+}
+"#;
+    let main_src = r#"module Main
+
+import Steps (Ask, Step, collect)
+
+effect Stop { fun stop : Int -> Int }
+
+fun leaky : Unit -> (Int, Int) needs {Stop}
+leaky () = {
+  let Step run = { stop! (ask! ()) } with collect
+  run 0
+}
+"#;
+    let message = typecheck_error_cross_module(
+        "pure_rest_named_handler_cross_module",
+        &[("lib/Steps.saga", lib)],
+        main_src,
+    );
+    assert!(
+        message.contains("handler 'collect' stores a function")
+            && message.contains("this one also performs {Stop}"),
+        "{message}"
+    );
+}
+
 /// Code that is not CPS calling code that is, inside a `with` that lifted
 /// the frame: what the call leaves suspended is run to a plain value. Here a
 /// local function in an arm that resumes, the thunk of `catch_panic`, and a

@@ -674,17 +674,33 @@ leak () = apply_pure (counter () with passing)
     );
 }
 
-/// A named handler does not know the computation it is installed around,
-/// so its arms may not pass a resuming function where a pure one is
-/// expected.
+/// A named handler does not know the computation it is installed around.
+/// If its arms pass a resuming function where a pure one is expected, the
+/// declaration is accepted, but only for computations that leave nothing
+/// unhandled: every `with` installing it checks that.
 #[test]
-fn named_handler_resuming_in_a_pure_function_is_rejected() {
-    rejected(
-        "handler bad for Ask {
+fn named_handler_resuming_in_a_pure_function_requires_a_pure_rest() {
+    let bad = "handler bad for Ask {
   ask () = apply_pure (fun x -> resume x)
 }
-",
-        &["handler 'bad' resumes inside a function", "no effects"],
+";
+    accepted(&format!(
+        "{bad}
+fun use_bad : Unit -> Int
+use_bad () = ask_only () with bad
+"
+    ));
+    rejected(
+        &format!(
+            "{bad}
+fun use_bad : Unit -> Int needs {{Stop}}
+use_bad () = ask_stop () with bad
+"
+        ),
+        &[
+            "handler 'bad' stores a function that resumes the handled computation",
+            "this one also performs {Stop}",
+        ],
     );
     accepted(
         "fun apply_open : (Int -> Int needs {..e}) -> Int needs {..e}
@@ -697,6 +713,187 @@ handler fine for Ask {
 fun use_fine : Unit -> Int needs {Stop}
 use_fine () = ask_stop () with fine
 ",
+    );
+}
+
+/// Only closing what resuming performs to nothing is kept as a requirement
+/// on the `with`: an arm that needs it to be exactly some effects is still
+/// rejected at the declaration.
+#[test]
+fn named_handler_pinning_the_resumed_row_to_effects_is_rejected() {
+    rejected(
+        "fun apply_stop : (Int -> Int needs {Stop}) -> Int needs {Stop}
+apply_stop g = g 20
+
+handler bad for Ask {
+  ask () = apply_stop (fun x -> resume x)
+}
+",
+        &["handler 'bad' resumes inside a function", "only {Stop}"],
+    );
+}
+
+/// The shape of kraken's `collect_query`: a state-passing type with a pure
+/// function field, arms that resume inside it.
+const STEP_HANDLER: &str = "type Step a = Step (Int -> (a, Int))
+
+handler collect for Ask {
+  ask () = Step (fun total -> {
+    let Step run_rest = resume total
+    run_rest (total + 1)
+  })
+  return value = Step (fun total -> (value, total))
+}
+";
+
+/// Accepted as a declaration; installed around a computation that performs
+/// only the handled effect (concrete, or an inferred row that is closed by
+/// the `with`, or through a `let` alias or an `if`); rejected at a `with`
+/// whose computation performs something else, named or a declared row
+/// variable.
+#[test]
+fn state_passing_named_handler_with_a_pure_field() {
+    accepted(&format!(
+        "{STEP_HANDLER}
+fun run_step : (Unit -> a needs {{Ask}}) -> (a, Int)
+run_step make = {{
+  let Step run = make () with collect
+  run 0
+}}
+
+fun go : Unit -> (Int, Int)
+go () = run_step ask_only
+
+fun aliased : Unit -> (Int, Int)
+aliased () = {{
+  let h = collect
+  let Step run = ask_only () with h
+  run 0
+}}
+
+infer_run make = {{
+  let Step run = make () with collect
+  run 0
+}}
+
+fun go_inferred : Unit -> (Int, Int)
+go_inferred () = infer_run ask_only
+"
+    ));
+    let checker = accepted(&format!(
+        "{STEP_HANDLER}
+infer_run make = {{
+  let Step run = make () with collect
+  run 0
+}}
+"
+    ));
+    let ty = type_of(&checker, "infer_run");
+    let Type::Fun(make, _, _) = &ty else {
+        panic!("{ty:?}")
+    };
+    let make_rows = spine_rows(make);
+    assert!(
+        make_rows[0].tails.is_empty() && names(&make_rows[0]) == vec!["Ask"],
+        "the computation's row is closed to {{Ask}}: {ty:?}"
+    );
+    rejected(
+        &format!(
+            "{STEP_HANDLER}
+fun go : Unit -> (Int, Int) needs {{Stop}}
+go () = {{
+  let Step run = ask_stop () with collect
+  run 0
+}}
+"
+        ),
+        &[
+            "handler 'collect' stores a function that resumes the handled computation \
+             where no effects are allowed, so it can only handle computations that perform \
+             nothing else; this one also performs {Stop}",
+        ],
+    );
+    rejected(
+        &format!(
+            "{STEP_HANDLER}
+fun go : (Unit -> Int needs {{Ask, ..e}}) -> (Int, Int) needs {{..e}}
+go make = {{
+  let Step run = make () with collect
+  run 0
+}}
+"
+        ),
+        &["handler 'collect' stores a function", "this one also performs {..e}"],
+    );
+    rejected(
+        &format!(
+            "{STEP_HANDLER}
+fun go : Unit -> (Int, Int) needs {{Stop}}
+go () = {{
+  let h = collect
+  let Step run = ask_stop () with h
+  run 0
+}}
+"
+        ),
+        &["handler 'h' stores a function", "this one also performs {Stop}"],
+    );
+    rejected(
+        &format!(
+            "{STEP_HANDLER}
+handler collect2 for Ask {{
+  ask () = Step (fun total -> {{
+    let Step run_rest = resume (total * 2)
+    run_rest total
+  }})
+  return value = Step (fun total -> (value, total))
+}}
+
+fun go : Bool -> (Int, Int) needs {{Stop}}
+go c = {{
+  let h = if c then collect2 else collect
+  let Step run = ask_stop () with h
+  run 0
+}}
+"
+        ),
+        &["handler 'h' stores a function", "this one also performs {Stop}"],
+    );
+}
+
+/// Such a handler cannot be passed as a `Handler` value: a `with` that
+/// knows it only by its type could not check what the computation leaves
+/// unhandled. (`collect` above is not uniform anyway; this one is, apart
+/// from the requirement.)
+#[test]
+fn handler_value_with_a_pure_rest_requirement_is_rejected() {
+    let decl = "fun apply_unit : (Unit -> a) -> a
+apply_unit g = g ()
+
+handler later for Ask {
+  ask () = apply_unit (fun () -> resume 1)
+}
+
+fun use_h : Handler Ask -> Int
+use_h h = ask_only () with h
+";
+    accepted(&format!(
+        "{decl}
+fun direct : Unit -> Int
+direct () = ask_only () with later
+"
+    ));
+    rejected(
+        &format!(
+            "{decl}
+fun go : Unit -> Int
+go () = use_h later
+"
+        ),
+        &[
+            "handler `later` cannot be used as a `Handler` value",
+            "only a `with` that names it can check",
+        ],
     );
 }
 

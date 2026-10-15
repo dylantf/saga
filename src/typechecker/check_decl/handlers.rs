@@ -702,34 +702,37 @@ impl Checker {
         }
 
         // The arms may not have relied on what the handled computation
-        // performs: `ρ_R` must still be open (renamed at most).
+        // performs: `ρ_R` must still be open (renamed at most), or closed to
+        // `{}` (a function that resumes was put where no effects may be
+        // performed). The latter is kept as a requirement on every `with`
+        // installing the handler: the computation must leave nothing
+        // unhandled (`resume_row_closed`). Any other binding (`ρ_R` given
+        // named effects) would hold only for computations performing
+        // exactly those, and stays an error.
         self.close_slack(*def_id, vars_before, *span)?;
         self.rigid_row_vars.remove(&resume_rest_id);
         let resume_rest_row = self.sub.apply_effect_row(&EffectRow {
             effects: vec![],
             tails: vec![resume_rest.clone()],
         });
-        if resume_rest_row.tails.is_empty() || !resume_rest_row.effects.is_empty() {
-            let allowed = if resume_rest_row.effects.is_empty() {
-                "no effects".to_string()
-            } else {
-                let mut names: Vec<String> = resume_rest_row
-                    .effects
-                    .iter()
-                    .map(|e| self.prettify_effect_entry(e))
-                    .collect();
-                names.sort();
-                format!("only {{{}}}", names.join(", "))
-            };
+        let resume_row_closed = resume_rest_row.is_empty();
+        if !resume_rest_row.effects.is_empty() {
+            let mut names: Vec<String> = resume_rest_row
+                .effects
+                .iter()
+                .map(|e| self.prettify_effect_entry(e))
+                .collect();
+            names.sort();
             let err_span = arms.first().map(|a| a.node.span).unwrap_or(*span);
             return Err(Diagnostic::error_at(
                 err_span,
                 format!(
-                    "handler '{name}' resumes inside a function that is used where {allowed} \
+                    "handler '{name}' resumes inside a function that is used where only {{{}}} \
                      may be performed, but resuming runs the rest of the computation the \
                      handler is installed around, which can perform any effect the handler \
                      does not handle. Use the function where its effects are allowed, or \
-                     write the handler inline at the `with`, where that computation is known"
+                     write the handler inline at the `with`, where that computation is known",
+                    names.join(", ")
                 ),
             ));
         }
@@ -989,6 +992,7 @@ impl Checker {
             uniform,
             alternatives: vec![],
             resume_row: resume_rest_roots.first().copied(),
+            resume_row_closed,
             effects: canonical_effects,
             effect_entries: applied_effects,
             return_type: handler_return_type,

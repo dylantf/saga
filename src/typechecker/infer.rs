@@ -1689,6 +1689,7 @@ impl Checker {
             }
             Some(super::HandlerInfo {
                 resume_row: None,
+                resume_row_closed: false,
                 uniform: true,
                 alternatives: vec![],
                 effects,

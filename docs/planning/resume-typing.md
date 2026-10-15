@@ -228,8 +228,10 @@ Open questions from the study, as found:
 - `R` known before slack closing: the arms' effects are coerced into `R`
   after all arms, and `ρ_R`/`ρ_arm` are closed only then; deferred lambda
   arguments are inferred within the arm. Not seen to fail.
-- Row parameters on type declarations: not explored; `Std.Stream` was
-  fixed by an inline handler instead.
+- Row parameters on type declarations: not explored. The pure-field case
+  is instead accepted when the handler only handles computations that leave
+  nothing unhandled (see "A closed `ρ_R`" below), which also restored
+  `Std.Stream.stream_of`.
 
 Found and not fixed (outside this plan): an arm may pin an operation's own
 type variable (`pick : List a -> a`, `pick xs = resume 1`, step 3).
@@ -439,13 +441,10 @@ Newly rejected (sound):
   resume x) }`.
 - `Std.Stream.stream_of` (`yield v = More v (Stream (fun () -> resume
   ()))`): the `Stream` thunk is pure, but forcing it resumes whatever
-  computation the handler was installed around. Edited: `stream_of` is
-  removed (it was `pub`, but nothing in the repository used it outside
-  `from_gen`) and `from_gen` installs the same arms inline, where the
-  producer is known to perform only `Gen a`, so the thunk is pure. The
-  emitted code for `Std.Stream` is identical (named handlers are compiled
-  at their `with`). This removes a public name: user code that wrote
-  `with stream_of` must use `Stream.from_gen`.
+  computation the handler was installed around. Edited at this step:
+  `stream_of` was removed and `from_gen` installed the same arms inline.
+  Undone later (see "A closed `ρ_R`"): `stream_of` is accepted again, for
+  producers that perform nothing but `Gen a`.
 - The state function of a named state-passing handler now carries the
   computation's unhandled effects (`counter () with passing : Int -> Int
   needs {Stop}`), so using it as a pure function is rejected.
@@ -536,3 +535,49 @@ the version naming Log) and the `loose` case of
 Examples, stdlib, snapshot, matrix unchanged; `codegen_integration`,
 `module_codegen_integration`, `e2e` and `stdlib_tests` pass. Non-test
 `src/`: +38 / -18.
+
+### After the merge with `abort-exc`: a closed `ρ_R`
+
+Branch `sound-handlers`. Step 5 rejected every named handler whose arms
+close `ρ_R`, which rejected kraken's `collect_query` (`type QueryStep a =
+QueryStep (QueryState -> (a, QueryState))`, arms that resume inside the
+pure function) and `Std.Stream.stream_of`. Both are only ever installed
+around computations that perform nothing but the handled effect, where
+the stored function really is pure.
+
+Rule: when the arms close `ρ_R` to `{}` (and only then; `ρ_R` given named
+effects, or any other declared row variable pinned, is still an error),
+the declaration is accepted and `HandlerInfo::resume_row_closed` is set
+(`resume_row` is `None`). A `with` installing the handler (by name,
+through a `let` alias, through a function in `handler_funs`, or as an
+alternative of an `if`) binds `ρ_R := remaining` as before, which now
+means `remaining = {}` (`require_nothing_unhandled`): an inference tail of
+`remaining` is closed to `{}`; named effects, a declared row variable or a
+where-bound row are reported at that `with`:
+
+    handler 'collect_query' stores a function that resumes the handled
+    computation where no effects are allowed, so it can only handle
+    computations that perform nothing else; this one also performs {Log}
+
+(the handler is named as the `with` writes it, so an alias `h` is shown as
+`h`). Sound because `R = needs ∪ ρ_R = needs` holds at every installation,
+so the function the arms store performs exactly what its type says.
+
+Handler values: a handler with the requirement is rejected by
+`check_handler_value` wherever a `with` would know it only by its `Handler
+E` type ("it stores a function that resumes the handled computation where
+no effects are allowed, so it can only handle computations that perform
+nothing else, which only a `with` that names it can check"). Carrying the
+requirement in the type would need new type machinery.
+
+`Std.Stream.stream_of` is restored as it was before step 5; `from_gen`
+installs it again. The emitted code for `Std.Stream` is unchanged.
+
+Tests: `resume_typing_tests.rs` (`named_handler_resuming_in_a_pure_function_requires_a_pure_rest`,
+`named_handler_pinning_the_resumed_row_to_effects_is_rejected`,
+`state_passing_named_handler_with_a_pure_field`,
+`handler_value_with_a_pure_rest_requirement_is_rejected`) and
+`effect_property_tests` (`pure_rest_named_handler_under_aborting_outer_handler`,
+`pure_rest_named_handler_rejects_a_computation_with_other_effects`, which
+includes the handler declared in another module). kraken and sesh-importer
+typecheck unchanged.

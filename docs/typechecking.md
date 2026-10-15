@@ -328,9 +328,17 @@ HANDLE rule), and a function an arm builds around it (`get () = fun s ->
 (resume s) s`) carries `R` on its arrow. For an inline `with`, `R` is that
 row with a slack tail `ρ_arm` that takes the arms' effects; for a named
 handler, the computation is unknown at the declaration, so `R = needs ∪
-..ρ_R`, where `ρ_R` is rigid while the arms are checked (an arm that lets a
-resuming function reach a place that allows fewer effects is rejected) and
-is bound to what the computation leaves unhandled at each `with`. The
+..ρ_R`, where `ρ_R` is rigid while the arms are checked and is bound to
+what the computation leaves unhandled at each `with`. An arm that lets a
+resuming function reach a place that allows only some named effects is
+rejected. One that puts it where no effects are allowed (a pure function
+field, as in a state-passing `type Step a = Step (S -> (a, S))`) closes
+`ρ_R` to `{}`: the declaration is accepted with
+`HandlerInfo::resume_row_closed`, and every `with` installing it (directly,
+through a `let` alias or an `if` over handlers) requires the computation to
+leave nothing unhandled (`require_nothing_unhandled`: an inference tail is
+closed, named effects or a declared row variable are an error at that
+`with`). Such a handler is not passed as a `Handler` value. The
 answer type gets one slack tail per arrow of its spine, which takes what
 the arms' function values perform; all slack is closed to `{}` once the
 `with` (or the handler declaration) has been checked, so a `with` whose
@@ -350,8 +358,8 @@ the inclusion to hold. Elsewhere closed rows must be equal. A declared
 open row must also name every effect the body performs (`..e` is the
 caller's). Handler values that reach a `with` only through their `Handler
 E` type must be uniform: no `return` clause but the identity, arms that do
-not decide the answer type, and (for a declared handler) no `needs`
-(`check_handler_value`).
+not decide the answer type, (for a declared handler) no `needs`, and no
+closed `ρ_R` (`check_handler_value`).
 
 ### Trait constraint collection
 

@@ -502,7 +502,13 @@ impl Checker {
                         // What the arms' `resume` runs beyond the handler's
                         // `needs`: here, what this computation leaves
                         // unhandled.
-                        if let Some(Type::Var(resume_rest)) = handler_info
+                        if handler_info.resume_row_closed {
+                            self.require_nothing_unhandled(
+                                &named.name,
+                                &remaining_effs,
+                                with_span,
+                            );
+                        } else if let Some(Type::Var(resume_rest)) = handler_info
                             .resume_row
                             .and_then(|id| mapping.get(&id).cloned())
                         {
@@ -573,6 +579,7 @@ impl Checker {
                         self.emit_effects(&final_effs, with_span)?;
                         for alternative in &handler_info.alternatives {
                             self.check_alternative_handler(
+                                &named.name,
                                 alternative,
                                 &expr_ty,
                                 &fresh_ret,
@@ -888,6 +895,7 @@ impl Checker {
     /// it needs is needed here too.
     fn check_alternative_handler(
         &mut self,
+        handler_name: &str,
         info: &super::HandlerInfo,
         expr_ty: &Type,
         ret_ty: &Type,
@@ -912,7 +920,9 @@ impl Checker {
             self.unify_at(&param, expr_ty, span).map_err(disagree)?;
             self.unify_at(&ret, ret_ty, span).map_err(disagree)?;
         }
-        if let Some(Type::Var(resume_rest)) =
+        if info.resume_row_closed {
+            self.require_nothing_unhandled(handler_name, remaining, span);
+        } else if let Some(Type::Var(resume_rest)) =
             info.resume_row.and_then(|id| mapping.get(&id).cloned())
         {
             self.bind_row_checked(resume_rest, remaining.clone())
@@ -920,6 +930,52 @@ impl Checker {
         }
         let needs = self.replace_vars_in_effect_row(&info.needs_effects, &mapping);
         self.emit_effects(&needs, span)
+    }
+
+    /// `ρ_R := remaining` for a handler whose arms closed `ρ_R` to `{}`
+    /// (`HandlerInfo::resume_row_closed`): the computation this `with`
+    /// installs it around must leave nothing unhandled. A tail of
+    /// `remaining` that inference may still choose is closed; named effects
+    /// or a row variable fixed by a signature are reported here.
+    fn require_nothing_unhandled(&mut self, handler_name: &str, remaining: &EffectRow, span: Span) {
+        let remaining = self.sub.apply_effect_row(remaining);
+        let mut leftover: Vec<String> = remaining
+            .effects
+            .iter()
+            .map(|e| self.prettify_effect_entry(e))
+            .collect();
+        leftover.sort();
+        let mut open = Vec::new();
+        for tail in remaining.tail_var_ids() {
+            if let Some(rigid) = self.rigid_row_var_for(tail) {
+                leftover.push(format!("..{}", rigid.name));
+            } else if self.is_where_bound_var(tail) {
+                leftover.push(format!("..{}", self.prettify_type(&Type::Var(tail))));
+            } else {
+                open.push(tail);
+            }
+        }
+        if leftover.is_empty() {
+            let mut closed = Ok(());
+            for tail in open {
+                if let Type::Var(id) = self.sub.apply(&Type::Var(tail)) {
+                    closed = closed.and(self.bind_row_checked(id, EffectRow::empty()));
+                }
+            }
+            if let Err(e) = closed {
+                self.collected_diagnostics.push(e.with_span(span));
+            }
+            return;
+        }
+        self.collected_diagnostics.push(Diagnostic::error_at(
+            span,
+            format!(
+                "handler '{handler_name}' stores a function that resumes the handled \
+                 computation where no effects are allowed, so it can only handle computations \
+                 that perform nothing else; this one also performs {{{}}}",
+                leftover.join(", ")
+            ),
+        ));
     }
 
     /// A handler used as a value, anywhere but as a `let`'s right-hand
@@ -943,7 +999,12 @@ impl Checker {
         if self.handler_alias_sites.contains(&expr_id) {
             return Ok(());
         }
-        let reason = if !info.uniform {
+        let reason = if info.resume_row_closed {
+            "it stores a function that resumes the handled computation where no effects are \
+             allowed, so it can only handle computations that perform nothing else, which only \
+             a `with` that names it can check"
+                .to_string()
+        } else if !info.uniform {
             "it decides the type of the `with` that installs it (with a `return` clause, \
              or with what its arms return)"
                 .to_string()

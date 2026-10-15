@@ -16,6 +16,13 @@ pub effect Gen a {
   fun yield : a -> Unit
 }
 
+#@ Handler that converts a Gen-style producer into a Stream. Each `yield!`
+#@ captures the continuation and packages it as the next Stream cell.
+pub handler stream_of for Gen a {
+  yield v = More v (Stream (fun () -> resume ()))
+  return _ = Done
+}
+
 # ---------- Constructors ----------
 
 #@ Build a Stream from a generator function that uses the Gen effect.
@@ -26,13 +33,7 @@ pub effect Gen a {
 #@
 #@   let nats = Stream.from_gen (fun () -> nats_from 0)
 pub fun from_gen : (Unit -> Unit needs {Gen a}) -> Stream a
-from_gen producer = Stream (fun () -> producer () with {
-  # Each `yield!` captures the continuation and packages it as the next
-  # Stream cell. Forcing that cell resumes the producer, which performs
-  # nothing but Gen, so the cell's thunk is pure.
-  yield v = More v (Stream (fun () -> resume ()))
-  return _ = Done
-})
+from_gen producer = Stream (fun () -> producer () with stream_of)
 
 #@ The empty stream.
 pub fun empty : Unit -> Stream a
