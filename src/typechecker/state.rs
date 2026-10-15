@@ -59,6 +59,17 @@ pub type HandlerWhereConstraints = HashMap<(String, usize), Vec<(String, Vec<u32
 pub struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
+    /// The row variable (one of `forall`) for what `resume` runs beyond the
+    /// handler's `needs`: the rest of the handled computation, bound to what
+    /// it leaves unhandled at each `with`.
+    pub resume_row: Option<u32>,
+    /// The handler leaves the answer type to the computation it is
+    /// installed around (no `return` clause but the identity, arms that do
+    /// not decide the answer type). See `Checker::check_handler_value`.
+    pub uniform: bool,
+    /// For a `let` bound to an `if` over handlers: the declarations of the
+    /// other branches, each checked at the `with` like this one.
+    pub alternatives: Vec<HandlerInfo>,
     /// Fully applied handled effects, used to select exact evidence slots.
     pub effect_entries: Vec<EffectEntry>,
     /// Frozen return clause: (param_type, body_type). Sub-applied at register time so
@@ -226,6 +237,17 @@ pub struct Checker {
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
     pub(crate) resume_return_type: Option<Type>,
+    /// What `resume` performs, inside a handler arm: the rest of the handled
+    /// computation (what the `with` does not handle), the `return` clause
+    /// and the arms themselves (see `infer_with_inner`).
+    pub(crate) resume_effects: Option<EffectRow>,
+    /// For each `with` (by node) whose arms resume: what resuming performs,
+    /// for the note on errors about a function that resumes.
+    pub(crate) resume_rows: HashMap<NodeId, EffectRow>,
+    /// The handler references making up the right-hand side of a `let` or a
+    /// function body being inferred, where a handler value keeps its
+    /// declaration (see `Checker::check_handler_value`).
+    pub(crate) handler_alias_sites: Vec<NodeId>,
     /// Metadata for effect inference (instantiation caches, declared rows, name registries).
     pub(crate) effect_meta: EffectMeta,
     /// Effect accumulator: effects from the current scope are pushed here automatically
@@ -297,9 +319,14 @@ pub struct Checker {
     /// Steps taken so far by the unification in progress (see
     /// `unify::UnifyStep`). Empty outside `unify`.
     pub(crate) unify_path: Vec<super::unify::UnifyStep>,
-    /// Unequal closed effect rows accepted by the unification in progress,
-    /// drained by the top-level unification entry point.
-    pub(crate) row_subsumptions: Vec<super::unify::RowSubsumption>,
+    /// The position of the unification in progress, as far as effect-row
+    /// subsumption is concerned (`unify::RowMode`). `Lenient` at rest.
+    pub(crate) row_mode: super::unify::RowMode,
+    /// Row variables created for typing `resume`, which are closed to the
+    /// empty row once the `with` or handler that made them has been checked
+    /// (see `unify::Slack`). A coercion that needs room in a row containing
+    /// one widens it there rather than binding the row's other variables.
+    pub(crate) slack_rows: HashMap<u32, (super::unify::Slack, NodeId)>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -697,6 +724,7 @@ pub(crate) struct InferScope {
     pub(crate) field_candidates: FieldCandidates,
     pub(crate) resume_type: Option<Type>,
     pub(crate) resume_return_type: Option<Type>,
+    pub(crate) resume_effects: Option<EffectRow>,
 }
 
 /// What accumulated inside an InferScope while it was active.

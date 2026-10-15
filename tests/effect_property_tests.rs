@@ -1464,7 +1464,9 @@ result () = {
 #[test]
 fn open_row_inner_handler_preserves_sibling_instance_in_tail() {
     // Was `Fail Int` travelling through the open tail next to a handled
-    // `Fail String`; now two `neweffect` instances.
+    // `Fail String`; now two `neweffect` instances. `FailInt` reaches the
+    // tail through the callback: a body may not perform an effect its open
+    // row does not name.
     let src = r#"
 effect Fail e {
   fun fail : e -> a
@@ -1491,11 +1493,11 @@ from_string () = FailString.fail! "nope"
 fun from_int : Unit -> Int needs {FailInt}
 from_int () = FailInt.fail! 7
 
-fun wrapped : Unit -> Int needs {FailString, ..r}
-wrapped () = (from_string () with inner_string) + from_int ()
+fun wrapped : (Unit -> Int needs {..r}) -> Int needs {FailString, ..r}
+wrapped g = (from_string () with inner_string) + g ()
 
 pub fun result : Unit -> String
-result () = show (wrapped () with {outer_string, outer_int})
+result () = show (wrapped from_int with {outer_string, outer_int})
 "#;
     check_result_string("open_row_inner_applied_handler", src, "34");
 }
@@ -7813,20 +7815,20 @@ make n = if n > 0 then handler for Ask { ask () = (resume n) + 10 } else handler
     );
 }
 
-/// Known gap: a `resume` inside a pure function (state passing: `get () =
-/// fun s -> (resume s) s`) runs when the function is called, by a caller that
-/// is not CPS code and has no continuation to bind into (`f 20` after the
-/// `with`). The resumed computation is run to a plain value there: an outer
-/// abort becomes the value of that `resume`, and an outer handler that uses
-/// the value of its own `resume` gets the value of the handled computation.
-/// Operations performed before the first such `resume` are fine. Expected
-/// 1000 under the aborting handler; gives 1100.
-#[test]
-#[ignore = "`resume` under a lambda runs the resumed computation to a plain value"]
-fn resume_under_lambda_under_aborting_outer_handler() {
-    check_delimited_cells(
-        "delimited_state_passing",
-        r#"
+/// A `resume` inside a function value (state passing: `get () = fun s ->
+/// (resume s) s`) runs the rest of the handled computation when that
+/// function is called (`f 20`, after the `with`). That computation performs
+/// `Stop`, which the `with` does not handle, so calling `f` performs `Stop`:
+/// `f` must be typed (and called) as effectful, or an outer abort has
+/// nowhere to go. Expected 1000 under the aborting handler; gives 1100
+/// (180 and 181 under the non-tail ones), because `resume` is typed as pure.
+///
+/// Typing `resume` with the residual row of the `with` is not enough on its
+/// own: the closure is then CPS code, but it hands the suspension of the
+/// resumed computation (`mbind`) back to its caller as its value instead of
+/// binding it to its own continuation, so every cell gives
+/// `{'$saga_meta', _}`.
+const RESUME_UNDER_LAMBDA_STATE: &str = r#"
 effect State {
   fun get : Unit -> Int
   fun put : Int -> Unit
@@ -7839,12 +7841,78 @@ counter () = {
   put! (s + t)
   get! ()
 }
-"#,
+
+handler passing for State {
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}
+"#;
+
+#[test]
+#[ignore = "`resume` is typed as pure, so the function that resumes is called as pure code"]
+fn resume_under_lambda_under_aborting_outer_handler() {
+    check_delimited_cells(
+        "delimited_state_passing",
+        RESUME_UNDER_LAMBDA_STATE,
         &[(
             "state",
             "  let f = counter () with {\n    get () = fun s -> (resume s) s\n    put n = fun _ -> (resume ()) n\n    return v = fun _ -> v\n  }\n  f 20 + 100",
             [1000, 140, 280, 140 + 141],
         )],
+    );
+}
+
+/// The same state-passing handler declared as a named handler: what its
+/// `resume` performs is only known where it is installed.
+#[test]
+#[ignore = "`resume` is typed as pure; a named handler has no residual row to give it"]
+fn resume_under_lambda_in_named_handler_under_aborting_outer_handler() {
+    check_delimited_cells(
+        "delimited_state_passing_named",
+        RESUME_UNDER_LAMBDA_STATE,
+        &[(
+            "named",
+            "  let f = counter () with passing\n  f 20 + 100",
+            [1000, 140, 280, 140 + 141],
+        )],
+    );
+}
+
+/// A multishot handler that resumes inside the callback of a higher-order
+/// function (`List.flat_map`), and one that keeps a resuming closure in a
+/// list before calling it. The resumed computation performs `Stop`. The
+/// closures are pure code, so the resumed computation is run to a plain
+/// value: the aborting cells crash or give 1110.
+#[test]
+#[ignore = "`resume` is typed as pure, so the closures that resume are pure code"]
+fn resume_under_callback_or_in_data_under_outer_handlers() {
+    check_delimited_cells(
+        "delimited_resume_in_callback",
+        r#"
+effect Choose { fun choose : Unit -> Bool }
+
+fun pick_stop : Unit -> Int needs {Stop, Choose}
+pick_stop () = {
+  let b = choose! ()
+  stop! (if b then 1 else 2)
+}
+
+fun total : List Int -> Int
+total xs = List.foldl (fun acc x -> acc + x) 0 xs
+"#,
+        &[
+            (
+                "collect",
+                "  let xs = pick_stop () with {\n    choose () = List.flat_map (fun b -> resume b) [True, False]\n    return v = [v]\n  }\n  total xs + 100",
+                [1000, 103, 412, 416],
+            ),
+            (
+                "stored",
+                "  let r = ask_stop () with {\n    ask () = {\n      let ks = [fun x -> resume x]\n      List.foldl (fun acc k -> acc + k 1) 10 ks\n    }\n  }\n  r + 100",
+                [1000, 121, 242, 243],
+            ),
+        ],
     );
 }
 

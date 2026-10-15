@@ -42,6 +42,8 @@ mod expr_types_tests;
 #[cfg(test)]
 mod guard_purity_tests;
 #[cfg(test)]
+mod resume_typing_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
@@ -91,6 +93,9 @@ impl Checker {
             let_binding_handlers: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
+            resume_effects: None,
+            resume_rows: HashMap::new(),
+            handler_alias_sites: Vec::new(),
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
             trait_forward_row_vars: std::collections::HashMap::new(),
@@ -109,7 +114,8 @@ impl Checker {
             evidence: Vec::new(),
             let_dict_params: HashMap::new(),
             unify_path: Vec::new(),
-            row_subsumptions: Vec::new(),
+            row_mode: unify::RowMode::Lenient,
+            slack_rows: HashMap::new(),
             collected_diagnostics: Vec::new(),
             pending_warnings: Vec::new(),
             internal_handler_normalization_warnings: HashSet::new(),
@@ -716,8 +722,8 @@ impl Checker {
     }
 
     /// Enter an isolated inference scope. Saves and clears
-    /// effect_type_param_cache, field_candidates, resume_type, and
-    /// resume_return_type. Call `exit_scope` to restore and collect
+    /// effect_type_param_cache, field_candidates, resume_type,
+    /// resume_return_type and resume_effects. Call `exit_scope` to restore and collect
     /// what the scope accumulated.
     pub(crate) fn enter_scope(&mut self) -> InferScope {
         InferScope {
@@ -725,6 +731,7 @@ impl Checker {
             field_candidates: std::mem::take(&mut self.field_candidates),
             resume_type: self.resume_type.take(),
             resume_return_type: self.resume_return_type.take(),
+            resume_effects: self.resume_effects.take(),
         }
     }
 
@@ -740,6 +747,7 @@ impl Checker {
         };
         self.resume_type = scope.resume_type;
         self.resume_return_type = scope.resume_return_type;
+        self.resume_effects = scope.resume_effects;
         result
     }
 }

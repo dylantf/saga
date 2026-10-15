@@ -753,12 +753,14 @@ fun fine : Unit -> Int
 fine () = honest () with { oops s = resume (String.length s) }
 ",
     );
-    // An effect without type arguments still flows through an open row.
-    accepted(
+    // So does one without type arguments: a caller choosing `..r` empty
+    // would not handle it.
+    rejected(
         "
 fun loose : Unit -> Int needs {..r}
 loose () = plain! ()
 ",
+        &["uses the effect `Plain`", "does not name"],
     );
 }
 

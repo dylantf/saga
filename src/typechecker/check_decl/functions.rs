@@ -177,11 +177,17 @@ impl Checker {
                 self.check_guard(guard)?;
             }
 
-            let body_ty = if annotation.is_some() {
-                self.infer_expr_against(body, &result_ty)?
+            // A handler returned as the body stays known to `with`s through
+            // `handler_funs` (see `check_handler_value`).
+            let sites = self.static_handler_sites(body);
+            let saved_alias_sites = std::mem::replace(&mut self.handler_alias_sites, sites);
+            let inferred = if annotation.is_some() {
+                self.infer_expr_against(body, &result_ty)
             } else {
-                self.infer_expr(body)?
+                self.infer_expr(body)
             };
+            self.handler_alias_sites = saved_alias_sites;
+            let body_ty = inferred?;
             if returned_handler_info.is_none() {
                 returned_handler_info = self.extract_handler_info(body);
             }
@@ -249,7 +255,7 @@ impl Checker {
         if let Some(ann) = annotation {
             let declared_row_for_check = declared_effect_row
                 .map(|row| self.sub.apply_effect_row(row))
-                .or_else(|| innermost_effect_row(&self.sub.apply(ann)))
+                .or_else(|| saturated_effect_row(&self.sub.apply(ann), arity))
                 .unwrap_or_else(EffectRow::empty);
             let declared_names: std::collections::HashSet<String> = declared_row_for_check
                 .effects
@@ -323,8 +329,19 @@ impl Checker {
 
         let declared_row = declared_effect_row
             .map(|row| self.sub.apply_effect_row(row))
-            .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
+            .or_else(|| annotation.and_then(|ann| saturated_effect_row(&self.sub.apply(ann), arity)))
             .unwrap_or_else(EffectRow::empty);
+
+        // The tails a function forwards to its caller: those of its declared
+        // row, and, for a function that returns a function, those on the
+        // returned function's arrows (`fun wrap : (A needs {..e}) -> (B needs
+        // {..e})`), which the caller performs by calling what it got back.
+        let mut forwarding_tails: Vec<Type> = declared_row.tails.clone();
+        let mut current = self.sub.apply(&result_ty);
+        while let Type::Fun(_, ret, row) = current {
+            forwarding_tails.extend(self.sub.apply_effect_row(&row).tails);
+            current = *ret;
+        }
 
         // A callback parameter with an open effect row (..e) represents
         // unknown effects that can't be handled with `with` — they must be
@@ -347,8 +364,7 @@ impl Checker {
                     if !matches!(cb_resolved, Type::Var(_)) {
                         return false;
                     }
-                    !declared_row
-                        .tails
+                    !forwarding_tails
                         .iter()
                         .any(|t| self.sub.apply(t) == cb_resolved)
                 })
@@ -379,8 +395,7 @@ impl Checker {
         // The surfaced tail rides through `all_body_effs`; per-method precision
         // comes from surfacing only happening when the method is actually called.
         if annotation.is_some() && !self.trait_forward_row_vars.is_empty() {
-            let declared_tail_ids: std::collections::HashSet<u32> = declared_row
-                .tails
+            let declared_tail_ids: std::collections::HashSet<u32> = forwarding_tails
                 .iter()
                 .filter_map(|t| match self.sub.apply(t) {
                     Type::Var(id) => Some(id),
@@ -452,9 +467,13 @@ impl Checker {
             // Unannotated functions are necessarily private (pub requires an
             // annotation); let their inferred effect row stand and propagate.
             if annotation.is_some() {
+                let written = declared_effect_row
+                    .cloned()
+                    .or_else(|| annotation.and_then(|ann| saturated_effect_row(ann, arity)));
                 self.check_effects_via_row(
                     &all_body_effs,
                     &declared_row,
+                    written.as_ref(),
                     &format!("function '{}'", name),
                     err_span,
                 )?;
@@ -580,7 +599,7 @@ impl Checker {
         let mut fun_ty = result_ty;
         let effect_row = declared_effect_row
             .map(|row| self.sub.apply_effect_row(row))
-            .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
+            .or_else(|| annotation.and_then(|ann| saturated_effect_row(&self.sub.apply(ann), arity)))
             .or_else(|| {
                 // A recursive call to a function whose type is still being
                 // inferred performs "whatever this function performs": that

@@ -28,6 +28,26 @@ mod program;
 mod types;
 
 /// Walk an arrow chain and return the EffectRow from the innermost Fun.
+/// The effect row of the arrow that `arity` applications saturate: what a
+/// function of that arity, declared with type `ty`, performs when called
+/// with all its parameters. That is the innermost arrow's row only when `ty`
+/// has exactly `arity` arrows; a function that returns a function
+/// (`fun wrap : A -> (B -> C needs {E})`, `wrap g = fun b -> ..`) performs
+/// the row of its own arrow, not the returned function's. Falls back to the
+/// innermost row when `ty` has fewer arrows than `arity`.
+pub(crate) fn saturated_effect_row(ty: &Type, arity: usize) -> Option<EffectRow> {
+    let mut current = ty;
+    let mut seen = 0;
+    while let Type::Fun(_, ret, row) = current {
+        seen += 1;
+        if seen == arity {
+            return Some(row.clone());
+        }
+        current = ret;
+    }
+    innermost_effect_row(ty)
+}
+
 pub(crate) fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
     match ty {
         Type::Fun(_, ret, row) => innermost_effect_row(ret).or_else(|| Some(row.clone())),
