@@ -7825,11 +7825,18 @@ make n = if n > 0 then handler for Ask { ask () = { let r = resume (n + 10); r }
 /// nowhere to go. Expected 1000 under the aborting handler; gives 1100
 /// (180 and 181 under the non-tail ones), because `resume` is typed as pure.
 ///
-/// Typing `resume` with the residual row of the `with` is not enough on its
-/// own: the closure is then CPS code, but it hands the suspension of the
-/// resumed computation (`mbind`) back to its caller as its value instead of
-/// binding it to its own continuation, so every cell gives
-/// `{'$saga_meta', _}`.
+/// `resume` is now typed with the residual row of the `with`, so `f` is a
+/// CPS closure and the aborting and tail-resuming cells pass. The non-tail
+/// cells give `{'$saga_meta', _}`: `f` is called after its `with` has
+/// returned, so the suspension of the resumed computation (an outer `Stop`
+/// lifted by that `with`) is returned up to the outer `with`, which has no
+/// `bind` for it, or would treat it as an operation handled further out.
+/// Binding it in the closure instead (`bind` with a meta continuation that
+/// ends in the closure's own return) makes these cells pass but breaks a
+/// closure called while its `with` is still pending (the `stored` cell of
+/// `resume_under_callback_or_in_data_under_outer_handlers` gives 42 for
+/// 242). Which one is right depends on whether that `with`'s `bind` is
+/// still to come, which is not known where the closure is compiled.
 const RESUME_UNDER_LAMBDA_STATE: &str = r#"
 effect State {
   fun get : Unit -> Int
@@ -7852,7 +7859,7 @@ handler passing for State {
 "#;
 
 #[test]
-#[ignore = "`resume` is typed as pure, so the function that resumes is called as pure code"]
+#[ignore = "codegen: a resuming closure called after its `with` returned leaks the suspension of an outer operation (non-tail cells give {'$saga_meta', _})"]
 fn resume_under_lambda_under_aborting_outer_handler() {
     check_delimited_cells(
         "delimited_state_passing",
@@ -7868,7 +7875,7 @@ fn resume_under_lambda_under_aborting_outer_handler() {
 /// The same state-passing handler declared as a named handler: what its
 /// `resume` performs is only known where it is installed.
 #[test]
-#[ignore = "`resume` is typed as pure; a named handler has no residual row to give it"]
+#[ignore = "codegen: a resuming closure called after its `with` returned leaks the suspension of an outer operation (non-tail cells give {'$saga_meta', _})"]
 fn resume_under_lambda_in_named_handler_under_aborting_outer_handler() {
     check_delimited_cells(
         "delimited_state_passing_named",
@@ -7883,11 +7890,12 @@ fn resume_under_lambda_in_named_handler_under_aborting_outer_handler() {
 
 /// A multishot handler that resumes inside the callback of a higher-order
 /// function (`List.flat_map`), and one that keeps a resuming closure in a
-/// list before calling it. The resumed computation performs `Stop`. The
-/// closures are pure code, so the resumed computation is run to a plain
-/// value: the aborting cells crash or give 1110.
+/// list before calling it. The resumed computation performs `Stop`, so the
+/// closures are typed with it and compiled as CPS closures, called while
+/// their `with` is still pending: the suspension they return reaches that
+/// `with`'s `bind`. (While `resume` was typed pure they were run to a plain
+/// value, and the aborting cells crashed or gave 1110.)
 #[test]
-#[ignore = "`resume` is typed as pure, so the closures that resume are pure code"]
 fn resume_under_callback_or_in_data_under_outer_handlers() {
     check_delimited_cells(
         "delimited_resume_in_callback",

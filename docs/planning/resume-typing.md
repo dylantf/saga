@@ -238,7 +238,9 @@ type variable (`pick : List a -> a`, `pick xs = resume 1`, step 3).
 
 Not done here: step 8. Until it lands, a function that resumes is typed
 with `R`, so where `R` is not empty it is compiled as a tagged CPS closure;
-the ignored runtime tests in `effect_property_tests` stay ignored.
+the ignored runtime tests in `effect_property_tests` stay ignored. (On
+`sound-handlers`, merged with `abort-exc`, the callback/stored-closure test
+passes; the two state-passing ones do not, see step 8 below.)
 
 ### Step 0: reproductions
 
@@ -581,3 +583,35 @@ Tests: `resume_typing_tests.rs` (`named_handler_resuming_in_a_pure_function_requ
 `pure_rest_named_handler_rejects_a_computation_with_other_effects`, which
 includes the handler declared in another module). kraken and sesh-importer
 typecheck unchanged.
+
+### Step 8 (codegen): stopped
+
+On `sound-handlers` the closure that resumes is already CPS code that
+passes the value of `resume` on through `mbind` to the rest of its body,
+which ends in its `_ReturnK`. Un-ignored:
+`resume_under_callback_or_in_data_under_outer_handlers` passes as is (the
+closures are called while their `with` is pending, and the suspension they
+return reaches that `with`'s `bind`). The two state-passing tests still
+fail in their non-tail cells with `{'$saga_meta', _}`: the closure is
+called after its `with` returned, so nothing binds the suspension of the
+outer `Stop` that `with` lifted. Tried and reverted: binding it in the
+closure (`M([ret])`, with `bind(V, [ret]) = V` and a suspension passed on
+unchanged at `[ret]`) makes both state-passing tests pass, and makes the
+`stored` cell give 42 for 242 and the `collect` cells crash, because there
+the `with`'s `bind` was still to come and has the rest of the meta
+continuation. Which is right depends on whether a `bind` of that `with` is
+pending on the stack, a run-time property; deciding it needs new run-time
+machinery (for example a per-`with` count of pending delimiters, kept by
+the `with`'s entry, `resume_into` and the `{k, Ref, F}` frames), which
+changes the handler scheme. Not done.
+
+Also found (present on `abort-exc` too): a function that resumes keeps the
+frame its `with` lifted, so called under another handler than the one in
+scope at its `with` it still performs the first handler's operations;
+`f = { counter () with {state passing} } with { stop x = if x == 0 then
+resume x else fun _ -> 1000 }`, then `(f 20) with { stop x = resume (x + 1)
+}` is accepted and fails with an uncaught `'$saga_abort'` throw.
+
+The `run` site in `lower_fun_body` stays: a pure function that resumes is
+still reached, now exactly when `R = {}` (a closed `ρ_R`, an inline `with`
+over a computation with nothing left), where nothing it runs suspends.

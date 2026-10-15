@@ -968,7 +968,7 @@ is not CPS but calls code that is cannot pass one on, so it runs the result:
 
 | Site | Why |
 | --- | --- |
-| the body of a pure lambda or local function inside an arm, when it resumes (`fun s -> (resume s) s`; `lower_fun_body`) | its type is pure, so its caller is an ordinary call |
+| the body of a pure lambda or local function inside an arm, when it resumes (`fun s -> (resume s) s`; `lower_fun_body`) | its type is pure, so its caller is an ordinary call. Since `resume` is typed with what resuming performs (`docs/planning/resume-typing.md`), such a function is pure only when that is nothing, so nothing it runs suspends |
 | a `finally` cleanup | called by the runtime when the region ends |
 | `catch_panic`, and the thunk a spawned process runs (`run_process`) | native code calling a function value |
 | `saga_runtime:apply_n/2` on a tagged closure | a callback passed to an operation keeps its perform-site frame; an arm that sees its row as empty calls it as a pure function |
@@ -996,11 +996,23 @@ aborts throws through the inner `with` like any other abort.
 
 #### Known gaps
 
-- `resume` in a pure function inside an arm (state passing): an outer
-  handler that uses the value of its own `resume`, after the first such
-  `resume`, gets the value of the computation run there
-  (`resume_under_lambda_under_aborting_outer_handler`). Fixing it needs the
-  typechecker to put the residual effects of the `with` on that function.
+- `resume` in a function an arm returns (state passing), called after its
+  `with` has returned: the function is typed with what resuming performs
+  and compiled as a CPS closure, and returns the suspension of an outer
+  operation (`mbind`) to its caller. No `bind` of that `with` is left to
+  take it, so it reaches the `with` further out, whose `bind` treats it as
+  an operation handled outside itself (an outer arm that uses the value of
+  its `resume` sees that `with`'s continuation too), or none
+  (`resume_under_lambda_under_aborting_outer_handler`: `{'$saga_meta', _}`).
+  Binding the suspension in the closure (a meta continuation ending in the
+  closure's return) fixes that case but is wrong for a closure called while
+  its `with`'s `bind` is still to come (a resuming closure kept in a list
+  and called in the arm: 42 for 242). The closure would need to know at run
+  time whether that `bind` is pending.
+- A function that resumes keeps the frame its `with` lifted: called under
+  another handler for the operations it performs (it escaped the handler
+  that was in scope at its `with`), those operations still go to the first
+  handler, and an abort of that handler is an uncaught throw.
 - An operation that carries a callback, or of more than seven arguments, is
   performed in place: its handler further out runs on top of the inner
   `with`. An arm for it that uses the value of its `resume` sees the extent
