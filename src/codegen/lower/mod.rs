@@ -207,6 +207,14 @@ pub(super) struct LowererResolution {
     pub(super) carried_constructor_names: HashMap<String, String>,
 }
 
+/// Previous handler-binding entries for one name; see `handler_binding_undo`.
+type HandlerBindingUndo = (
+    String,
+    Option<String>,
+    Option<(String, CExpr, String, String)>,
+    Option<(String, Vec<String>, bool)>,
+);
+
 pub struct Lowerer<'a> {
     counter: usize,
     /// Numbers the temporaries effect normalization introduces, across all
@@ -362,6 +370,11 @@ pub struct Lowerer<'a> {
     /// resolvable, the RHS is lowered to a tuple-of-lambdas and bound to a variable.
     /// At `with` sites, the tuple is destructured to extract per-op handler functions.
     handle_dynamic_vars: HashMap<String, (String, Vec<String>, bool)>,
+    /// Undo log for `let`-bound handler names: each entry is a name and its
+    /// previous entries in `handler_canonical`, `handle_cond_vars` and
+    /// `handle_dynamic_vars`. A block rolls the log back to where it started
+    /// when it is lowered, so a handler bound in a block is not visible after it.
+    handler_binding_undo: Vec<HandlerBindingUndo>,
     /// Optional function name that should be exported even if it is not `pub`.
     /// Used by the build pipeline to mark the chosen entrypoint explicitly.
     /// Subsumed by Core-level export-all (every function is exported), but kept
@@ -444,6 +457,7 @@ impl<'a> Lowerer<'a> {
             optimization,
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
+            handler_binding_undo: Vec::new(),
             entry_export,
             impl_effects_by_dict: HashMap::new(),
             impl_method_effects_by_dict: HashMap::new(),

@@ -235,9 +235,13 @@ impl<'a> Lowerer<'a> {
         pat_id: Option<crate::ast::NodeId>,
         value: &Expr,
     ) {
-        self.handler_canonical.remove(name);
-        self.handle_dynamic_vars.remove(name);
-        self.handle_cond_vars.remove(name);
+        let undo = (
+            name.to_string(),
+            self.handler_canonical.remove(name),
+            self.handle_cond_vars.remove(name),
+            self.handle_dynamic_vars.remove(name),
+        );
+        self.handler_binding_undo.push(undo);
 
         // Direct handler reference: compile-time alias
         if let ExprKind::Var { name: handler_name } = &value.kind

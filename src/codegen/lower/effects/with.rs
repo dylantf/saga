@@ -15,6 +15,20 @@ impl<'a> Lowerer<'a> {
         handler: &Handler,
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
+        // A handler name registered from inside the wrapped block (see
+        // `pre_register_local_with_binding`) is scoped to this `with`.
+        let undo_mark = self.handler_binding_undo.len();
+        let lowered = self.lower_with_scoped(expr, handler, inherited_return_k);
+        self.undo_handler_bindings(undo_mark);
+        lowered
+    }
+
+    fn lower_with_scoped(
+        &mut self,
+        expr: &Expr,
+        handler: &Handler,
+        inherited_return_k: Option<CExpr>,
+    ) -> CExpr {
         if let Some(rewritten) = self.lower_with_chain_after_local_handler_bindings(
             expr,
             handler,
