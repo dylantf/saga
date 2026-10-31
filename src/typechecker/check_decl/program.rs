@@ -334,39 +334,9 @@ impl Checker {
                     format!("undefined effect: {}", e.name),
                 ));
             }
-            if effect_refs
-                .iter()
-                .any(|seen: &EffectEntry| seen.name == name && seen.args == args)
-            {
-                continue;
-            }
-            for seen in effect_refs
-                .iter()
-                .filter(|seen: &&EffectEntry| seen.name == name)
-            {
-                let saved = self.sub.clone();
-                let overlaps = seen.args.len() == args.len()
-                    && seen
-                        .args
-                        .iter()
-                        .zip(&args)
-                        .all(|(left, right)| self.unify(left, right).is_ok());
-                self.sub = saved;
-                if overlaps {
-                    return Err(Diagnostic::error_at(
-                        e.span,
-                        format!(
-                            "ambiguous overlapping effect applications in `needs`: `{}` may be the same runtime slot as another `{}` entry",
-                            self.prettify_effect_entry(&EffectEntry {
-                                name: name.clone(),
-                                args: args.clone(),
-                            }),
-                            e.name.rsplit('.').next().unwrap_or(&e.name),
-                        ),
-                    ));
-                }
-            }
-            effect_refs.push(EffectEntry::unnamed(name, args));
+            // One application per effect family: `needs {Fail String, Fail Int}`
+            // is rejected where it is written.
+            self.push_declared_effect(&mut effect_refs, EffectEntry::unnamed(name, args), e.span)?;
         }
         let tails: Vec<Type> = effect_row_var
             .iter()
@@ -767,8 +737,16 @@ impl Checker {
                 let ty = self.infer_expr(value)?;
                 if let Some(ann) = annotation {
                     let ann_ty = self.convert_user_type_expr(ann, &mut vec![]);
-                    self.unify_at(&ty, &ann_ty, *span)?;
+                    self.coerce_at(&ty, &ann_ty, *span, Some(value))?;
                 }
+                // An open-row trait method bound as a value keeps its
+                // effects as `..a` on the generalised type.
+                let about_to_generalize = self.generalize(&ty).forall;
+                self.resolve_open_row_refs(
+                    crate::typechecker::open_row_refs::OpenRowFinish::Generalized(
+                        &about_to_generalize,
+                    ),
+                );
                 let scheme = self.generalize(&ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
                 self.lsp.node_spans.insert(*id, *name_span);
@@ -1159,6 +1137,18 @@ impl Checker {
                 }
 
                 let mut scheme = self.generalize(&fun_ty);
+                // An effect argument left out of the signature
+                // (`needs {Fail}`) is filled in from the body. Until the body
+                // has been checked it is one unknown type, not a type each
+                // caller picks: generalising it would let code checked before
+                // the body (impl methods) use the function at a type its
+                // body does not support.
+                let mut effect_arg_vars = Vec::new();
+                self.collect_effect_arg_vars(&fun_ty, &mut effect_arg_vars);
+                scheme.forall.retain(|id| {
+                    params_list.iter().any(|(_, named)| named == id)
+                        || !effect_arg_vars.iter().any(|(var, _)| var == id)
+                });
                 if let Some(c) = annotation_constraints.get(name) {
                     scheme.constraints = c.clone();
                 }

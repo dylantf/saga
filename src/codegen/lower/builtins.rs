@@ -8,60 +8,25 @@
 
 use super::Lowerer;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::ir::Val;
+use crate::intrinsics::IntrinsicId;
 
 use super::util::cerl_call;
 
 impl Lowerer<'_> {
-    pub(super) fn lower_intrinsic(
-        &mut self,
-        intrinsic: crate::intrinsics::IntrinsicId,
-        args: &[&crate::ast::Expr],
-    ) -> Option<CExpr> {
-        match intrinsic {
-            crate::intrinsics::IntrinsicId::PrintStdout => {
-                self.lower_builtin_print(args, false, false)
-            }
-            crate::intrinsics::IntrinsicId::PrintStderr => {
-                self.lower_builtin_print(args, true, false)
-            }
-            crate::intrinsics::IntrinsicId::Dbg => self.lower_builtin_dbg(args),
-            crate::intrinsics::IntrinsicId::CatchPanic => match args {
-                [thunk] => Some(self.lower_catch_panic(thunk)),
-                _ => None,
-            },
-        }
-    }
-
-    pub(super) fn lower_intrinsic_values(
-        &mut self,
-        intrinsic: crate::intrinsics::IntrinsicId,
-        args: Vec<CExpr>,
-    ) -> Option<CExpr> {
-        match intrinsic {
-            crate::intrinsics::IntrinsicId::PrintStdout => {
-                self.lower_builtin_print_values(args, false, false)
-            }
-            crate::intrinsics::IntrinsicId::PrintStderr => {
-                self.lower_builtin_print_values(args, true, false)
-            }
-            crate::intrinsics::IntrinsicId::Dbg => self.lower_builtin_dbg_values(args),
-            crate::intrinsics::IntrinsicId::CatchPanic => None,
-        }
-    }
-
-    /// Lower print/println/eprint/eprintln to io:format.
-    /// `x` is always a String.
-    pub(super) fn lower_builtin_print(
-        &mut self,
-        args: &[&crate::ast::Expr],
-        stderr: bool,
-        newline: bool,
-    ) -> Option<CExpr> {
-        if args.len() != 1 {
-            return None;
-        }
-        let val = self.lower_expr(args[0]);
-        self.lower_builtin_print_values(vec![val], stderr, newline)
+    /// Lower a call of an intrinsic. The builder made it only for a number
+    /// of arguments the intrinsic is lowered for.
+    pub(super) fn lower_intrinsic(&mut self, intrinsic: IntrinsicId, args: &[Val<'_>]) -> CExpr {
+        let args: Vec<CExpr> = match intrinsic {
+            IntrinsicId::CatchPanic => return self.lower_catch_panic(&args[0]),
+            _ => args.iter().map(|arg| self.lower_val(arg)).collect(),
+        };
+        let lowered = match intrinsic {
+            IntrinsicId::PrintStdout => self.lower_builtin_print_values(args, false, false),
+            IntrinsicId::PrintStderr => self.lower_builtin_print_values(args, true, false),
+            _ => self.lower_builtin_dbg_values(args),
+        };
+        lowered.expect("the builder checked the intrinsic's argument count")
     }
 
     fn lower_builtin_print_values(
@@ -87,26 +52,9 @@ impl Lowerer<'_> {
         Some(CExpr::Let(v, Box::new(val), Box::new(format_call)))
     }
 
-    /// Lower `dbg(dict, x)` to: let s = debug(x) in io:format(stderr, "~ts~n", [s])
-    /// After elaboration, `dbg x` becomes `dbg(__dict_Debug_a, x)`.
-    ///
-    /// Also handles the 1-arg case (partial application / eta reduction):
-    /// `dbg(dict)` returns a lambda `fun(value) -> ...dbg logic...`.
-    pub(super) fn lower_builtin_dbg(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {
-        match args.len() {
-            1 => {
-                let dict = self.lower_expr(args[0]);
-                self.lower_builtin_dbg_values(vec![dict])
-            }
-            2 => {
-                let dict = self.lower_expr(args[0]);
-                let val = self.lower_expr(args[1]);
-                self.lower_builtin_dbg_values(vec![dict, val])
-            }
-            _ => None,
-        }
-    }
-
+    /// `dbg(dict, x)`: let s = debug(x) in io:format(stderr, "~ts~n", [s]).
+    /// After elaboration, `dbg x` is `dbg(__dict_Debug_a, x)`. With the
+    /// dictionary alone (partial application) it is `fun(value) -> ...`.
     fn lower_builtin_dbg_values(&mut self, mut args: Vec<CExpr>) -> Option<CExpr> {
         match args.len() {
             1 => {
@@ -159,10 +107,18 @@ impl Lowerer<'_> {
     /// Lower `catch_panic thunk` to a Core Erlang try/catch.
     /// Clears the CPS return continuation so the thunk returns its value
     /// normally instead of tail-calling into the caller's continuation.
-    pub(super) fn lower_catch_panic(&mut self, thunk_expr: &crate::ast::Expr) -> CExpr {
-        let thunk = self.lower_expr_value(thunk_expr);
+    pub(super) fn lower_catch_panic(&mut self, thunk: &Val<'_>) -> CExpr {
+        let thunk = self.lower_val(thunk);
 
-        let applied = CExpr::Apply(Box::new(thunk), vec![CExpr::Lit(CLit::Atom("unit".into()))]);
+        // The thunk's type is effectful, so it may be a tagged closure:
+        // call it with the current evidence and an identity continuation.
+        let (ev_var, ev_ce) = self.current_frame_binding();
+        let call = self.tagged_cps_apply_value(
+            thunk,
+            vec![CExpr::Lit(CLit::Atom("unit".into()))],
+            CExpr::Var(ev_var.clone()),
+        );
+        let applied = CExpr::Let(ev_var, Box::new(ev_ce), Box::new(call));
         let ok_var = self.fresh();
         let class_var = self.fresh();
         let reason_var = self.fresh();
@@ -177,6 +133,32 @@ impl Lowerer<'_> {
         let catch_body = CExpr::Case(
             Box::new(CExpr::Var(reason_var.clone())),
             vec![
+                // The abort of a `with` around the thunk is not a panic: it
+                // goes on to that `with`.
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Lit(CLit::Atom("$saga_abort".into())),
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                    ]),
+                    guard: Some(cerl_call(
+                        "erlang",
+                        "=:=",
+                        vec![
+                            CExpr::Var(class_var.clone()),
+                            CExpr::Lit(CLit::Atom("throw".into())),
+                        ],
+                    )),
+                    body: CExpr::PrimOp(
+                        "raw_raise".to_string(),
+                        vec![
+                            CExpr::Var(class_var.clone()),
+                            CExpr::Var(reason_var.clone()),
+                            CExpr::Var(trace_var.clone()),
+                        ],
+                    ),
+                },
                 // Match {saga_error, _Kind, Msg, _Module, _Fun, _File, _Line}
                 CArm {
                     pat: CPat::Tuple(vec![

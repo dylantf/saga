@@ -355,6 +355,13 @@ const BEAM_NATIVE_OPS: &[(&str, BeamNativeOp)] = &[
     ),
 ];
 
+/// Whether a BEAM-native op runs one of its arguments as a Saga callback.
+pub fn native_op_runs_callback(op_name: &str) -> bool {
+    BEAM_NATIVE_OPS
+        .iter()
+        .any(|(name, op)| *name == op_name && matches!(op.arg_transform, ArgTransform::WrapThunk(_)))
+}
+
 /// Look up a BEAM-native op by name. Returns `(module, func, param_count)`.
 pub fn lookup_native_op(op_name: &str) -> Option<(&'static str, &'static str, usize)> {
     BEAM_NATIVE_OPS
@@ -366,10 +373,16 @@ pub fn lookup_native_op(op_name: &str) -> Option<(&'static str, &'static str, us
 /// Build the BEAM call expression for a native op, applying arg transforms
 /// and any ExitReason conversion. Returns a `CExpr` that performs the call
 /// (possibly wrapped in let-bindings for conversion).
+///
+/// `callback_evidence` is supplied with tagged closures for an op that runs
+/// a Saga callback (`spawn`): the callback is a function value of effectful
+/// type, so it is called through `saga_runtime:apply_cps/4` with that
+/// evidence and an identity continuation instead of applied as a bare fun.
 pub fn build_native_call(
     op_name: &str,
     param_vars: &[String],
     constructor_atoms: &HashMap<String, String>,
+    callback_evidence: Option<&CExpr>,
     fresh: &mut dyn FnMut() -> String,
 ) -> CExpr {
     let (_, op) = BEAM_NATIVE_OPS
@@ -394,7 +407,34 @@ pub fn build_native_call(
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                if i == *idx {
+                if i == *idx
+                    && let Some(evidence) = callback_evidence
+                {
+                    let result = fresh();
+                    // The callback is the whole computation of the new
+                    // process: nothing there binds what it leaves suspended,
+                    // and no `with` of the spawning process can catch an
+                    // abort thrown in it.
+                    CExpr::Fun(
+                        vec![],
+                        Box::new(super::evidence::run_process(CExpr::Fun(
+                            vec![],
+                            Box::new(CExpr::Call(
+                                "saga_runtime".to_string(),
+                                "apply_cps".to_string(),
+                                vec![
+                                    CExpr::Var(v.clone()),
+                                    CExpr::Cons(
+                                        Box::new(CExpr::Lit(CLit::Atom("unit".into()))),
+                                        Box::new(CExpr::Nil),
+                                    ),
+                                    evidence.clone(),
+                                    CExpr::Fun(vec![result.clone()], Box::new(CExpr::Var(result))),
+                                ],
+                            )),
+                        ))),
+                    )
+                } else if i == *idx {
                     CExpr::Fun(
                         vec![],
                         Box::new(CExpr::Apply(

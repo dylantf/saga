@@ -136,7 +136,17 @@ impl<'a> Lowerer<'a> {
         runtime_param_positions: &[usize],
         continuation: Option<CExpr>,
     ) -> Option<CExpr> {
-        let body = self.static_tail_resume_direct_body(&plan.arm.body)?;
+        // The arm of a handler declaration reaches here as written: it is a
+        // lowering root. Normalizing keeps the shape the plan was made for
+        // (a `resume` of plain data, or a block of statements that take no
+        // continuation ending in one); it only adds `let`s to the block.
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = plan.source_module.clone();
+        let arm_body = self
+            .effect_normal_body(&plan.arm.body, "inlined handler arm")
+            .into_owned();
+        self.current_handler_source_module = saved_source_module;
+        let body = self.static_tail_resume_direct_body(&arm_body)?;
 
         let param_bindings = self.static_tail_resume_bindings(
             &plan.arm.params,
@@ -177,7 +187,7 @@ impl<'a> Lowerer<'a> {
             .map(|(name, value)| {
                 (
                     crate::codegen::lower::core_var(name),
-                    self.lower_expr_value(value),
+                    self.lower_expr(value),
                 )
             })
             .collect();
@@ -196,12 +206,10 @@ impl<'a> Lowerer<'a> {
         self.current_handler_source_module = plan.source_module;
         let lowered_body = match body {
             StaticTailResumeDirectBody::Expr(value) => {
-                let resumed_value = self.lower_expr_value(&value);
+                let resumed_value = self.lower_expr(&value);
                 self.lower_direct_op_result(resumed_value, continuation)
             }
-            StaticTailResumeDirectBody::Block(stmts) => {
-                self.lower_block_with_return_k(&stmts, continuation)
-            }
+            StaticTailResumeDirectBody::Block(stmts) => self.lower_block(&stmts, continuation),
         };
         self.current_handler_source_module = saved_source_module;
 
@@ -237,7 +245,7 @@ impl<'a> Lowerer<'a> {
             Stmt::Let { value, .. } | Stmt::Expr(value) => value,
             Stmt::LetFun { .. } => return false,
         };
-        !value.contains_resume() && !self.branch_is_effectful(value)
+        !value.contains_resume() && !self.takes_continuation(value)
     }
 
     pub(crate) fn static_tail_resume_direct_body(
@@ -352,27 +360,13 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
-        // For abort handler arm bodies inside an effectful host context
-        // (e.g. an impl method that has its own `_ReturnK`), the abort
-        // value must flow through the with's outer K — not just return
-        // raw up the Erlang stack, which would bypass the host's CPS
-        // chain. `current_handler_inherited_k` carries the with's outer
-        // K when applicable. For non-effectful hosts (None) we fall back
-        // to plain value-mode lowering: the abort value just becomes the
-        // closure's Erlang return value.
-        if let Some(k) = self.current_handler_inherited_k.clone() {
-            self.lower_expr_with_installed_return_k(expr, Some(k))
-        } else {
-            self.lower_expr_value(expr)
-        }
-    }
-
-    pub(crate) fn lower_handled_expr_with_return_k(
-        &mut self,
-        expr: &Expr,
-        return_k: Option<CExpr>,
-    ) -> CExpr {
-        self.lower_expr_with_installed_return_k(expr, return_k)
+        let expr = &*self.effect_normal_body(expr, "handler arm");
+        // Inside an effectful host (e.g. an impl method with its own
+        // `_ReturnK`), `current_handler_inherited_k` carries the `with`'s
+        // outer continuation, so the arm's value flows through the host's
+        // CPS chain. Without one the value is the closure's return value.
+        let k = self.current_handler_inherited_k.clone();
+        self.lower_tail(expr, k)
     }
 
     pub(crate) fn lower_handled_inner_expr(
@@ -382,11 +376,7 @@ impl<'a> Lowerer<'a> {
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
         let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
-        if self.expr_is_effectful_call(expr) {
-            self.lower_expr_with_call_return_k(expr, return_k)
-        } else {
-            self.lower_handled_expr_with_return_k(expr, return_k)
-        }
+        self.lower_tail(expr, return_k)
     }
 
     pub(crate) fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
@@ -423,17 +413,23 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// Build the handled computation's return continuation from a `return`
+    /// clause.
+    ///
+    /// With `outer_k`, the continuation of the whole `with` expression, the
+    /// clause's body is lowered with it as its continuation: an effect the
+    /// body performs captures the rest of the enclosing computation, so a
+    /// handler that aborts it skips that rest. Without it the lambda returns
+    /// the clause's value and the caller applies any outer continuation.
     pub(crate) fn build_return_lambda(
         &mut self,
         ret: &HandlerArm,
         source_module: Option<&str>,
+        outer_k: Option<CExpr>,
     ) -> CExpr {
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = source_module.map(str::to_string);
-        // Return-lambda body flows through the lambda's caller (which itself
-        // applies inherited_K to the lambda result). Threading inherited_K
-        // into the body would double-apply it.
-        let saved_inherited = self.current_handler_inherited_k.take();
+        let saved_inherited = std::mem::replace(&mut self.current_handler_inherited_k, outer_k);
         let ret_body = self.lower_handler_owned_expr(&ret.body);
         self.current_handler_inherited_k = saved_inherited;
         let (param, body) = if ret.params.is_empty() {
@@ -491,10 +487,9 @@ impl<'a> Lowerer<'a> {
     /// alphabetically by op name (matches `effect_handler_ops` ordering for a
     /// single effect and the canonical shape produced by handler emission).
     pub(crate) fn evidence_op_index(&self, effect_name: &str, op_name: &str) -> usize {
-        let effect_family = crate::typechecker::applied_effect_family(effect_name);
         let info = self
             .effect_defs
-            .get(effect_family)
+            .get(effect_name)
             .unwrap_or_else(|| panic!("unknown effect '{}'", effect_name));
         let mut ops: Vec<&String> = info.ops.keys().collect();
         ops.sort();

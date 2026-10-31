@@ -27,7 +27,7 @@
 //!   n is typically ≤5.
 
 use super::util::cerl_call;
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::runtime_shape::{
     EvidenceAbi, EvidenceInstallKind, EvidenceInstallPlan, EvidenceReframeKind,
     EvidenceReframePlan, EvidenceSelector,
@@ -54,10 +54,6 @@ impl EvidenceFrame {
 fn lower_selector(selector: &EvidenceSelector) -> CExpr {
     match selector {
         EvidenceSelector::Position(position) => CExpr::Lit(CLit::Int(*position as i64)),
-        EvidenceSelector::Relabel { position, target } => CExpr::Tuple(vec![
-            CExpr::Lit(CLit::Int(*position as i64)),
-            CExpr::Lit(CLit::Atom(target.clone())),
-        ]),
         EvidenceSelector::DynamicTag(tag) => CExpr::Lit(CLit::Atom(tag.clone())),
     }
 }
@@ -100,11 +96,33 @@ pub(super) fn apply_install(
 /// Build a single `{EffectAtom, OpTuple}` Core Erlang tuple. `op_closures`
 /// must already be sorted alphabetically by op name; today's
 /// `lower_handler_def_to_tuple` produces them in that order.
-pub(super) fn build_evidence_entry(tag: &str, op_closures: Vec<CExpr>) -> CExpr {
-    CExpr::Tuple(vec![
+///
+/// With `lifted`, the entry is `{EffectAtom, OpTuple, lift}`: a `with` inside
+/// the one installing it lifts its operations (`lift_evidence`). Without, its
+/// arms can run where the operation is performed.
+pub(super) fn build_evidence_entry(tag: &str, op_closures: Vec<CExpr>, lifted: bool) -> CExpr {
+    let mut entry = vec![
         CExpr::Lit(CLit::Atom(tag.to_string())),
         CExpr::Tuple(op_closures),
-    ])
+    ];
+    if lifted {
+        entry.push(CExpr::Lit(CLit::Atom("lift".to_string())));
+    }
+    CExpr::Tuple(entry)
+}
+
+/// An entry whose arms have the shape of a direct one but perform, through
+/// `frame`: direct exactly when every entry of `frame` is (`entry/3`).
+pub(super) fn entry_for_frame(tag: &str, op_closures: Vec<CExpr>, frame: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "entry",
+        vec![
+            CExpr::Lit(CLit::Atom(tag.to_string())),
+            CExpr::Tuple(op_closures),
+            frame,
+        ],
+    )
 }
 
 /// Emit a runtime canonical-insert. The bridge walks the source tuple,
@@ -203,32 +221,167 @@ pub(super) fn reframe_evidence(
     )
 }
 
-/// Combine handler-supplied callback evidence with the unknown tail captured
-/// at the original effect-operation call site. The call-time frame remains the
-/// positional static prefix and is relabeled to the target ABI's static tags;
-/// exact entries
-/// replaced at call time are omitted from the captured frame while independent
-/// tail entries are appended.
+/// Combine handler-supplied callback evidence with the frame captured at the
+/// original effect-operation call site: the entries for `named_tags` (the
+/// effects the callback's type names) come from the call-time frame, every
+/// other entry from the captured one. The result has no positional layout.
 pub(super) fn append_tail(
     call_evidence: CExpr,
     captured_evidence: CExpr,
-    target_abi: &EvidenceAbi,
+    named_tags: &[String],
 ) -> CExpr {
-    let tag_list = target_abi
-        .static_slots()
-        .iter()
-        .rev()
-        .fold(CExpr::Nil, |tail, tag| {
-            CExpr::Cons(
-                Box::new(CExpr::Lit(CLit::Atom(tag.clone()))),
-                Box::new(tail),
-            )
-        });
+    let tags = named_tags.iter().rev().fold(CExpr::Nil, |tail, tag| {
+        CExpr::Cons(
+            Box::new(CExpr::Lit(CLit::Atom(tag.clone()))),
+            Box::new(tail),
+        )
+    });
     cerl_call(
         EVIDENCE_BRIDGE_MODULE,
         "append_tail",
-        vec![call_evidence, captured_evidence, tag_list],
+        vec![call_evidence, captured_evidence, tags],
     )
+}
+
+/// The inherited frame of a `with`, every operation suspending until the
+/// `with` supplies its continuation, and every resumption delimited again by
+/// the `with` whose abort reference is `abort_ref`. Same tags and layout.
+pub(super) fn lift_evidence(evidence: CExpr, abort_ref: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "lift_evidence",
+        vec![evidence, abort_ref],
+    )
+}
+
+/// Give the result of a handled computation (a plain value or a suspension)
+/// to the continuation of its `with`.
+pub(super) fn meta_bind(result: CExpr, continuation: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "bind", vec![result, continuation])
+}
+
+/// `meta_bind` for the result of a handled computation, with the common
+/// case, a plain value, applied directly: `case R of {'$saga_meta', _} ->
+/// bind(R, K); V -> K(V)`. `vars` are two fresh names.
+pub(super) fn meta_bind_inline(result: CExpr, continuation: CExpr, vars: [String; 2]) -> CExpr {
+    let [r, v] = vars;
+    CExpr::Let(
+        r.clone(),
+        Box::new(result),
+        Box::new(CExpr::Case(
+            Box::new(CExpr::Var(r.clone())),
+            vec![
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Lit(CLit::Atom("$saga_meta".to_string())),
+                        CPat::Wildcard,
+                    ]),
+                    guard: None,
+                    body: meta_bind(CExpr::Var(r), continuation.clone()),
+                },
+                CArm {
+                    pat: CPat::Var(v.clone()),
+                    guard: None,
+                    body: CExpr::Apply(Box::new(continuation), vec![CExpr::Var(v)]),
+                },
+            ],
+        )),
+    )
+}
+
+/// `let r = resume x; rest` in an arm of the `with` `abort_ref`: `rest` gets
+/// the value of the handled computation and runs before the continuation of
+/// the `with`.
+pub(super) fn meta_mbind(resumed: CExpr, rest: CExpr, abort_ref: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "mbind",
+        vec![resumed, rest, abort_ref],
+    )
+}
+
+/// `meta_bind` with the identity continuation: a plain value for a caller
+/// that is not CPS code.
+pub(super) fn meta_run(result: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "run", vec![result])
+}
+
+/// The continuation of an arm's tail that does not resume: the abort of the
+/// `with` `abort_ref`, from effect `tag`.
+pub(super) fn abort_continuation(param: String, abort_ref: CExpr, tag: &str) -> CExpr {
+    CExpr::Fun(
+        vec![param.clone()],
+        Box::new(cerl_call(
+            EVIDENCE_BRIDGE_MODULE,
+            "abort",
+            vec![
+                abort_ref,
+                CExpr::Lit(CLit::Atom(tag.to_string())),
+                CExpr::Var(param),
+            ],
+        )),
+    )
+}
+
+/// `resume` in an arm with a `finally` block: the resumed computation
+/// `k(value)` is a region whose end runs `cleanup` (a fun of no arguments).
+pub(super) fn fin_resume(abort_ref: CExpr, cleanup: CExpr, k: CExpr, value: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "fin_resume",
+        vec![abort_ref, cleanup, k, value],
+    )
+}
+
+/// The computation of a spawned process, `thunk` a fun of no arguments.
+pub(super) fn run_process(thunk: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "run_process", vec![thunk])
+}
+
+/// `body` delimited by the `with` whose abort reference is the variable
+/// `abort_ref`: its abort becomes the value. `vars` are four fresh names.
+pub(super) fn catch_own_abort(body: CExpr, abort_ref: &str, vars: [String; 5]) -> CExpr {
+    let [ok, class, reason, trace, value] = vars;
+    let owner = format!("{value}Ref");
+    let is_own = CArm {
+        pat: CPat::Tuple(vec![
+            CPat::Lit(CLit::Atom("throw".to_string())),
+            CPat::Tuple(vec![
+                CPat::Lit(CLit::Atom("$saga_abort".to_string())),
+                CPat::Var(owner.clone()),
+                CPat::Wildcard,
+                CPat::Var(value.clone()),
+            ]),
+        ]),
+        guard: Some(cerl_call(
+            "erlang",
+            "=:=",
+            vec![CExpr::Var(owner), CExpr::Var(abort_ref.to_string())],
+        )),
+        body: CExpr::Var(value),
+    };
+    let other = CArm {
+        pat: CPat::Wildcard,
+        guard: None,
+        body: CExpr::PrimOp(
+            "raw_raise".to_string(),
+            vec![
+                CExpr::Var(class.clone()),
+                CExpr::Var(reason.clone()),
+                CExpr::Var(trace.clone()),
+            ],
+        ),
+    };
+    CExpr::Try {
+        expr: Box::new(body),
+        ok_var: ok.clone(),
+        ok_body: Box::new(CExpr::Var(ok)),
+        catch_vars: (class.clone(), reason.clone(), trace),
+        catch_body: Box::new(CExpr::Case(
+            Box::new(CExpr::Tuple(vec![CExpr::Var(class), CExpr::Var(reason)])),
+            vec![is_own, other],
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -250,44 +403,19 @@ mod tests {
     }
 
     #[test]
-    fn installing_applied_effect_specializes_bare_family_slot() {
+    fn installing_an_effect_already_in_the_prefix_keeps_one_slot() {
         let abi = EvidenceAbi::new(["Std.Fail.Fail"], true)
-            .plan_install("Std.Fail.Fail<SagaJson.Error>")
+            .plan_install("Std.Fail.Fail")
             .target;
-        assert_eq!(abi.static_slots(), &["Std.Fail.Fail<SagaJson.Error>"]);
+        assert_eq!(abi.static_slots(), &["Std.Fail.Fail"]);
     }
 
     #[test]
-    fn installing_concrete_effect_specializes_generic_family_slot() {
-        let abi = EvidenceAbi::new(["Main.Abort<$799>"], true)
-            .plan_install("Main.Abort<Std.String.String>")
+    fn installing_another_effect_adds_a_slot() {
+        let abi = EvidenceAbi::new(["Main.UserRepo"], true)
+            .plan_install("Main.OrderRepo")
             .target;
-        assert_eq!(abi.static_slots(), &["Main.Abort<Std.String.String>"]);
-    }
-
-    #[test]
-    fn installing_distinct_concrete_applications_keeps_both_slots() {
-        let abi = EvidenceAbi::new(["Std.Fail.Fail<Std.Int.Int>"], true)
-            .plan_install("Std.Fail.Fail<Std.String.String>")
-            .target;
-        assert_eq!(
-            abi.static_slots(),
-            &[
-                "Std.Fail.Fail<Std.Int.Int>",
-                "Std.Fail.Fail<Std.String.String>"
-            ]
-        );
-    }
-
-    #[test]
-    fn closed_abi_keeps_bare_and_applied_runtime_entries() {
-        let abi = EvidenceAbi::closed(["Std.Fail.Fail"])
-            .plan_install("Std.Fail.Fail<Std.String.String>")
-            .target;
-        assert_eq!(
-            abi.static_slots(),
-            &["Std.Fail.Fail", "Std.Fail.Fail<Std.String.String>"]
-        );
+        assert_eq!(abi.static_slots(), &["Main.OrderRepo", "Main.UserRepo"]);
     }
 
     #[test]
@@ -299,6 +427,7 @@ mod tests {
                 dummy_closure("Print"),
                 dummy_closure("Read"),
             ],
+            false,
         );
         let CExpr::Tuple(top) = entry else {
             panic!("expected outer tuple")
@@ -327,7 +456,7 @@ mod tests {
     #[test]
     fn insert_canonical_is_bridge_call() {
         let ev = CExpr::Var("_Evidence".to_string());
-        let entry = build_evidence_entry("Std.Fail.Fail", vec![dummy_closure("Fail")]);
+        let entry = build_evidence_entry("Std.Fail.Fail", vec![dummy_closure("Fail")], false);
         let call = insert_canonical(ev, entry);
         match call {
             CExpr::Call(m, f, args) => {
@@ -343,7 +472,7 @@ mod tests {
 
     #[test]
     fn insert_static_is_bridge_call_with_prefix_size() {
-        let entry = build_evidence_entry("Router.Skip", vec![dummy_closure("Skip")]);
+        let entry = build_evidence_entry("Router.Skip", vec![dummy_closure("Skip")], false);
         let call = insert_static(CExpr::Var("_Evidence".to_string()), 1, entry);
         let CExpr::Call(module, function, args) = call else {
             panic!("expected bridge call")
@@ -357,9 +486,9 @@ mod tests {
     #[test]
     fn apply_install_executes_the_abi_planned_strategy() {
         let source = EvidenceAbi::new(["Main.Fail"], true);
-        let plan = source.plan_install("Main.Fail<Std.String.String>");
+        let plan = source.plan_install("Main.Fail");
         let entry =
-            build_evidence_entry("Main.Fail<Std.String.String>", vec![dummy_closure("Fail")]);
+            build_evidence_entry("Main.Fail", vec![dummy_closure("Fail")], false);
         let CExpr::Call(module, function, args) =
             apply_install(CExpr::Var("_Evidence".to_string()), entry, &plan)
         else {
@@ -460,11 +589,10 @@ mod tests {
 
     #[test]
     fn append_tail_is_bridge_call() {
-        let target = EvidenceAbi::new(["Abort<String>", "Repo"], true);
         let call = append_tail(
             CExpr::Var("CallEvidence".to_string()),
             CExpr::Var("CapturedEvidence".to_string()),
-            &target,
+            &["Counter".to_string()],
         );
         let CExpr::Call(module, function, args) = call else {
             panic!("expected bridge call")
@@ -472,12 +600,17 @@ mod tests {
         assert_eq!(module, "std_evidence_bridge");
         assert_eq!(function, "append_tail");
         assert_eq!(args.len(), 3);
+        let CExpr::Cons(tag, rest) = &args[2] else {
+            panic!("expected a list of named tags")
+        };
+        assert!(matches!(tag.as_ref(), CExpr::Lit(CLit::Atom(tag)) if tag == "Counter"));
+        assert!(matches!(rest.as_ref(), CExpr::Nil));
     }
 
     #[test]
     fn build_entry_with_empty_ops_is_legal() {
         // An effect with no live ops at the moment (degenerate but representable).
-        let entry = build_evidence_entry("Std.Fail.Fail", vec![]);
+        let entry = build_evidence_entry("Std.Fail.Fail", vec![], false);
         let CExpr::Tuple(top) = entry else {
             panic!("expected tuple")
         };
@@ -492,7 +625,7 @@ mod tests {
     fn build_entry_atom_uses_tag_unmangled() {
         // Evidence tags are canonical effect names emitted as-is; they must
         // not be lowercase-mangled like constructor atoms.
-        let entry = build_evidence_entry("Std.Fail.Fail", vec![dummy_closure("F")]);
+        let entry = build_evidence_entry("Std.Fail.Fail", vec![dummy_closure("F")], false);
         let CExpr::Tuple(top) = entry else { panic!() };
         match &top[0] {
             CExpr::Lit(CLit::Atom(a)) => assert_eq!(a, "Std.Fail.Fail"),

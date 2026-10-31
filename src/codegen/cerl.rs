@@ -26,6 +26,9 @@ pub enum CExpr {
     Apply(Box<CExpr>, Vec<CExpr>),
     /// `call 'Mod':'Fun'(Args)` -- inter-module call
     Call(String, String, Vec<CExpr>),
+    /// `primop 'Name'(Args)` -- e.g. `raw_raise` to rethrow an exception
+    /// caught by a `try` with its raw stack trace
+    PrimOp(String, Vec<CExpr>),
     /// `case Scrutinee of Arms end`
     Case(Box<CExpr>, Vec<CArm>),
     /// `{Elems}` -- tuple
@@ -161,7 +164,7 @@ impl CExpr {
                     a.collect_handle_refs(out);
                 }
             }
-            CExpr::Call(_, _, args) => {
+            CExpr::Call(_, _, args) | CExpr::PrimOp(_, args) => {
                 for a in args {
                     a.collect_handle_refs(out);
                 }
@@ -352,6 +355,12 @@ impl Printer {
                     p.print_expr_list(args);
                     p.push(")");
                 });
+            }
+
+            CExpr::PrimOp(name, args) => {
+                self.push(&format!("primop '{}'(", name));
+                self.print_expr_list(args);
+                self.push(")");
             }
 
             CExpr::Case(scrutinee, arms) => {

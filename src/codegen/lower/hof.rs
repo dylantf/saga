@@ -46,7 +46,6 @@ impl<'a> Lowerer<'a> {
     pub(super) fn try_hof_direct_specialized_call(
         &mut self,
         lookup_name: &str,
-        _emit_name: &str,
         head: &Expr,
         args: &[&Expr],
         return_k: Option<CExpr>,
@@ -62,27 +61,11 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
-        let callback_indexes: HashSet<usize> = specialization
-            .callback_params
-            .iter()
-            .map(|param| param.index)
-            .collect();
-        let param_types = self
-            .resolved_fun_info(head.id, lookup_name)
-            .map(|f| f.expected_arg_types(args.len()));
-
         let mut arg_vars = Vec::with_capacity(args.len());
         let mut bindings = Vec::with_capacity(args.len());
-        for (idx, arg) in args.iter().enumerate() {
+        for arg in args {
             let var = self.fresh();
-            let ce = if callback_indexes.contains(&idx) {
-                self.lower_expr_value(arg)
-            } else {
-                self.lower_expr_value_with_expected_type(
-                    arg,
-                    param_types.as_ref().and_then(|tys| tys.get(idx)),
-                )
-            };
+            let ce = self.lower_expr(arg);
             arg_vars.push(var.clone());
             bindings.push((var, ce));
         }
@@ -138,7 +121,7 @@ impl<'a> Lowerer<'a> {
         let mut bindings = Vec::with_capacity(args.len());
         for arg in args {
             let var = self.fresh();
-            let ce = self.lower_expr_value(arg);
+            let ce = self.lower_expr(arg);
             arg_vars.push(var.clone());
             bindings.push((var, ce));
         }
@@ -236,35 +219,16 @@ impl<'a> Lowerer<'a> {
     }
 
     fn hof_direct_callback_arg_supported(&self, arg: &Expr, expected_arity: usize) -> bool {
-        if self.expr_cps_function_shape(arg).is_some() {
-            return false;
-        }
-        if let Some(ty) = self.check_result.resolved_type_for_node(arg.id) {
-            let ty = self.check_result.sub.apply(&ty);
-            let (arity, effects) = super::util::arity_and_effects_from_type(&ty);
-            return arity == expected_arity
-                && effects.is_empty()
-                && matches!(ty, crate::typechecker::Type::Fun(_, _, _));
-        }
-        match &arg.kind {
-            ExprKind::Var { name, .. } => {
-                self.resolved_fun_info(arg.id, name).is_some_and(|info| {
-                    info.arity() == expected_arity
-                        && info.effects().is_empty()
-                        && !info.is_open_row()
-                })
-            }
-            ExprKind::QualifiedName { module, name, .. } => {
-                let qualified = format!("{}.{}", module, name);
-                self.resolved_fun_info(arg.id, &qualified)
-                    .is_some_and(|info| {
-                        info.arity() == expected_arity
-                            && info.effects().is_empty()
-                            && !info.is_open_row()
-                    })
-            }
-            _ => false,
-        }
+        // The direct variant calls its callback as a bare fun, so the
+        // argument's own type must be pure at every arrow. A dictionary
+        // slot is excluded: an open-row method instantiated at the empty
+        // row has a pure type here but a tagged closure in the slot.
+        !matches!(arg.kind, ExprKind::DictMethodAccess { .. })
+            && self.value_type(arg.id).is_some_and(|ty| {
+                crate::codegen::runtime_shape::value_repr(&ty)
+                    == crate::codegen::runtime_shape::ValueRepr::Bare
+                    && super::util::arity_and_effects_from_type(&ty).0 == expected_arity
+            })
     }
 
     pub(super) fn direct_hof_callback_arity(&self, name: &str) -> Option<usize> {
@@ -341,7 +305,8 @@ impl<'a> Lowerer<'a> {
         let saved_function = self.current_function.clone();
         self.current_evidence = None;
         self.current_function = specialization.entry_name.clone();
-        let body = self.lower_expr_with_installed_return_k(body, None);
+        let body = &*self.effect_normal_body(body, "direct-callback variant");
+        let body = self.lower_tail(body, None);
         self.current_function = saved_function;
         self.current_evidence = saved_evidence;
         self.direct_hof_callback_params = saved_callbacks;

@@ -59,6 +59,31 @@ impl Checker {
             self.unify(fun_var, &pre_ty)?;
         }
 
+        // The row variables written in the signature are fixed for the body:
+        // the caller chooses them (see `Checker::rigid_row_vars`).
+        let mut own_rigid_rows: HashMap<u32, crate::typechecker::RigidRowVar> = HashMap::new();
+        if let Some(ann_ty) = annotation {
+            let names = self
+                .fun_type_param_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            Self::collect_rigid_row_vars(ann_ty, &names, &mut own_rigid_rows);
+            if let Some(row) = declared_effect_row {
+                Self::collect_rigid_row_vars_in_row(row, &names, &mut own_rigid_rows);
+            }
+        }
+        self.rigid_row_vars = own_rigid_rows.clone();
+        // Likewise the type variables written as effect arguments.
+        let mut own_effect_arg_vars: Vec<(u32, String)> = Vec::new();
+        if let Some(ann_ty) = annotation {
+            self.collect_effect_arg_vars(ann_ty, &mut own_effect_arg_vars);
+            if let Some(row) = declared_effect_row {
+                let as_fun = Type::Fun(Box::new(Type::unit()), Box::new(Type::unit()), row.clone());
+                self.collect_effect_arg_vars(&as_fun, &mut own_effect_arg_vars);
+            }
+        }
+
         // Register where clause bounds on type variable IDs
         for (trait_name, var_id, extra_types) in where_constraints {
             self.trait_state
@@ -109,6 +134,11 @@ impl Checker {
             }
         }
 
+        // References left over from a declaration whose checking stopped at
+        // an error do not belong to this body.
+        self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Scope {
+            forward: false,
+        });
         // Save effects and start fresh for this function body
         let saved_trait_forward = std::mem::take(&mut self.trait_forward_row_vars);
         let saved_effs = self.save_effects();
@@ -144,34 +174,44 @@ impl Checker {
             }
 
             if let Some(guard) = guard {
-                if let Some(span) = crate::typechecker::find_effect_call(guard) {
-                    return Err(Diagnostic::error_at(
-                        span,
-                        "Effect calls are not allowed in guard expressions".to_string(),
-                    ));
-                }
-                let guard_saved = self.save_effects();
-                let guard_ty = self.infer_expr(guard)?;
-                self.restore_effects(guard_saved);
-                self.unify_at(&guard_ty, &Type::bool(), guard.span)?;
+                self.check_guard(guard)?;
             }
 
-            let body_ty = if annotation.is_some() {
-                self.infer_expr_against(body, &result_ty)?
+            // A handler returned as the body stays known to `with`s through
+            // `handler_funs` (see `check_handler_value`).
+            let sites = self.static_handler_sites(body);
+            let saved_alias_sites = std::mem::replace(&mut self.handler_alias_sites, sites);
+            let inferred = if annotation.is_some() {
+                self.infer_expr_against(body, &result_ty)
             } else {
-                self.infer_expr(body)?
+                self.infer_expr(body)
             };
+            self.handler_alias_sites = saved_alias_sites;
+            let body_ty = inferred?;
             if returned_handler_info.is_none() {
                 returned_handler_info = self.extract_handler_info(body);
             }
-            self.unify_at(&result_ty, &body_ty, body.span)?;
+            // Function return position.
+            self.coerce_expected_first_at(&result_ty, &body_ty, body.span, Some(body))?;
 
             self.env = saved_env;
             self.handlers = saved_handlers;
         }
+        // Every type the body could decide has been decided. An open-row
+        // trait method used as a value at a type that is still a variable
+        // forwards that variable's row (see `open_row_refs.rs`).
+        self.resolve_open_row_refs(crate::typechecker::open_row_refs::OpenRowFinish::Scope {
+            forward: true,
+        });
         // Collect accumulated effects and restore outer scope
         let raw_all_body_effs = self.restore_effects(saved_effs);
-        let all_body_effs = self.sub.apply_effect_row(&raw_all_body_effs);
+        let all_body_effs = {
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            self.normalize_row_at(&raw_all_body_effs, span)?
+        };
 
         // Absorption (boundary half): when a function directly calls a callback
         // parameter like `f ()` in `run_state init f = (f (), init)`, the callee's
@@ -215,7 +255,7 @@ impl Checker {
         if let Some(ann) = annotation {
             let declared_row_for_check = declared_effect_row
                 .map(|row| self.sub.apply_effect_row(row))
-                .or_else(|| innermost_effect_row(&self.sub.apply(ann)))
+                .or_else(|| saturated_effect_row(&self.sub.apply(ann), arity))
                 .unwrap_or_else(EffectRow::empty);
             let declared_names: std::collections::HashSet<String> = declared_row_for_check
                 .effects
@@ -289,8 +329,19 @@ impl Checker {
 
         let declared_row = declared_effect_row
             .map(|row| self.sub.apply_effect_row(row))
-            .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
+            .or_else(|| annotation.and_then(|ann| saturated_effect_row(&self.sub.apply(ann), arity)))
             .unwrap_or_else(EffectRow::empty);
+
+        // The tails a function forwards to its caller: those of its declared
+        // row, and, for a function that returns a function, those on the
+        // returned function's arrows (`fun wrap : (A needs {..e}) -> (B needs
+        // {..e})`), which the caller performs by calling what it got back.
+        let mut forwarding_tails: Vec<Type> = declared_row.tails.clone();
+        let mut current = self.sub.apply(&result_ty);
+        while let Type::Fun(_, ret, row) = current {
+            forwarding_tails.extend(self.sub.apply_effect_row(&row).tails);
+            current = *ret;
+        }
 
         // A callback parameter with an open effect row (..e) represents
         // unknown effects that can't be handled with `with` — they must be
@@ -313,8 +364,7 @@ impl Checker {
                     if !matches!(cb_resolved, Type::Var(_)) {
                         return false;
                     }
-                    !declared_row
-                        .tails
+                    !forwarding_tails
                         .iter()
                         .any(|t| self.sub.apply(t) == cb_resolved)
                 })
@@ -345,8 +395,7 @@ impl Checker {
         // The surfaced tail rides through `all_body_effs`; per-method precision
         // comes from surfacing only happening when the method is actually called.
         if annotation.is_some() && !self.trait_forward_row_vars.is_empty() {
-            let declared_tail_ids: std::collections::HashSet<u32> = declared_row
-                .tails
+            let declared_tail_ids: std::collections::HashSet<u32> = forwarding_tails
                 .iter()
                 .filter_map(|t| match self.sub.apply(t) {
                     Type::Var(id) => Some(id),
@@ -418,9 +467,13 @@ impl Checker {
             // Unannotated functions are necessarily private (pub requires an
             // annotation); let their inferred effect row stand and propagate.
             if annotation.is_some() {
+                let written = declared_effect_row
+                    .cloned()
+                    .or_else(|| annotation.and_then(|ann| saturated_effect_row(ann, arity)));
                 self.check_effects_via_row(
                     &all_body_effs,
                     &declared_row,
+                    written.as_ref(),
                     &format!("function '{}'", name),
                     err_span,
                 )?;
@@ -476,6 +529,31 @@ impl Checker {
             }
         }
 
+        {
+            let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            });
+            self.check_rigid_row_vars_abstract(
+                &own_rigid_rows,
+                &format!("`{}`", name),
+                err_span,
+                false,
+            )?;
+            let names = self
+                .fun_type_param_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            self.check_effect_arg_vars_abstract(
+                &own_effect_arg_vars,
+                &names,
+                false,
+                &format!("`{}`", name),
+                err_span,
+            )?;
+        }
+
         self.trait_forward_row_vars = saved_trait_forward;
 
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates
@@ -502,6 +580,18 @@ impl Checker {
             self.handler_funs.remove(name);
         }
 
+        // `main` is the program entry: nothing calls it, so nothing chooses a
+        // row variable left in its inferred row and nothing can handle what
+        // that variable stands for. Close each one to the empty row before
+        // the type is built, so `main` and the calls in its body that
+        // mention the variable are pure rather than open-row. Named effects
+        // are left alone and reported by `validate_main`.
+        if name == "main" && annotation.is_none() && declared_effect_row.is_none() {
+            for id in self.sub.apply_effect_row(&all_body_effs).tail_var_ids() {
+                self.bind_row_checked(id, EffectRow::empty())?;
+            }
+        }
+
         // Build curried function type. Effect row comes from:
         // 1. The annotation's EffectRow (for annotated functions)
         // 2. The inferred body effects (for unannotated functions)
@@ -509,14 +599,39 @@ impl Checker {
         let mut fun_ty = result_ty;
         let effect_row = declared_effect_row
             .map(|row| self.sub.apply_effect_row(row))
-            .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
+            .or_else(|| annotation.and_then(|ann| saturated_effect_row(&self.sub.apply(ann), arity)))
             .or_else(|| {
-                if all_body_effs.is_empty() {
-                    None
-                } else {
-                    Some(all_body_effs.clone())
-                }
+                // A recursive call to a function whose type is still being
+                // inferred performs "whatever this function performs": that
+                // is the function's own row variable, and it adds nothing.
+                let own = self.spine_row_tails(fun_var);
+                let mut row = self.sub.apply_effect_row(&all_body_effs);
+                row.tails
+                    .retain(|t| !matches!(t, Type::Var(id) if own.contains(id)));
+                if row.is_empty() { None } else { Some(row) }
             });
+        // When the clauses bind fewer parameters than the annotation has
+        // arrows, the annotation's innermost row sits on an arrow of the
+        // *result* (`fun via : a -> (a -> Int needs {..a})`, `via _ = meth`).
+        // Putting its `..a` on this function's last parameter arrow as well
+        // would unify it with that arrow's declared row, usually empty, and
+        // so erase the impl's effects from the returned function's type.
+        let effect_row = effect_row.map(|mut row| {
+            let annotated_arrows = annotation.map_or(0, |ann| {
+                let mut n = 0;
+                let mut current = self.sub.apply(ann);
+                while let Type::Fun(_, ret, _) = current {
+                    n += 1;
+                    current = *ret;
+                }
+                n
+            });
+            if annotated_arrows > arity {
+                row.tails
+                    .retain(|t| !matches!(t, Type::Var(id) if self.is_where_bound_var(*id)));
+            }
+            row
+        });
         let mut first_arrow = true;
         for param_ty in param_types.into_iter().rev() {
             if first_arrow {
@@ -533,6 +648,15 @@ impl Checker {
 
         // Unify with the pre-bound variable (resolves recursive uses)
         self.unify(fun_var, &fun_ty)?;
+        {
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            let resolved = self.sub.apply(&fun_ty);
+            self.check_type_rows(&resolved)
+                .map_err(|e| e.with_span(span))?;
+        }
 
         // Check against type annotation if present
         if let Some(ann_ty) = annotation {
@@ -555,6 +679,32 @@ impl Checker {
             annotation.is_some(),
             where_constraints,
         )?;
+        if annotation.is_none() {
+            // An inferred signature cannot say "this open row may contain
+            // `State` only as `State Int`"; a written one can, by naming the
+            // effect next to the row variable.
+            let resolved = self.sub.apply(&scheme.ty);
+            for var in scheme.forall.clone() {
+                if let Some(companion) = self.unexpressed_row_companion(&resolved, var) {
+                    let span = match clauses[0] {
+                        Decl::FunBinding { span, .. } => *span,
+                        _ => unreachable!(),
+                    };
+                    let family = companion.name.rsplit('.').next().unwrap_or(&companion.name);
+                    let shown = self.prettify_effect_entry(&companion);
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "`{name}` passes on an open effect row that it uses together with \
+                             `{shown}`: a caller's `{family}` at another type would be treated as \
+                             `{shown}`. An inferred type cannot express that restriction; give \
+                             `{name}` a signature that names the effect next to the open row \
+                             (`needs {{{shown}, ..r}}`)"
+                        ),
+                    ));
+                }
+            }
+        }
         self.env.insert(name.into(), scheme);
         self.outer_named_type_vars = saved_outer_named;
         Ok(())

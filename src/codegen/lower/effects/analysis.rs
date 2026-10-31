@@ -63,7 +63,10 @@ impl<'a> Lowerer<'a> {
                     Self::collect_free_var_refs(arg, bound, out);
                 }
             }
-            CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => {
+            CExpr::Call(_, _, args)
+            | CExpr::PrimOp(_, args)
+            | CExpr::Tuple(args)
+            | CExpr::Values(args) => {
                 for arg in args {
                     Self::collect_free_var_refs(arg, bound, out);
                 }
@@ -313,7 +316,7 @@ impl<'a> Lowerer<'a> {
             NamedHandlerItem::Static { info, .. } => info
                 .return_clause
                 .as_ref()
-                .map(|ret| self.build_return_lambda(ret, info.source_module.as_deref())),
+                .map(|ret| self.build_return_lambda(ret, info.source_module.as_deref(), None)),
             NamedHandlerItem::Conditional {
                 cond_var,
                 then_info,
@@ -325,14 +328,14 @@ impl<'a> Lowerer<'a> {
                         .return_clause
                         .as_ref()
                         .map(|ret| {
-                            self.build_return_lambda(ret, then_info.source_module.as_deref())
+                            self.build_return_lambda(ret, then_info.source_module.as_deref(), None)
                         })
                         .unwrap_or_else(|| self.identity_return_lambda());
                     let else_fun = else_info
                         .return_clause
                         .as_ref()
                         .map(|ret| {
-                            self.build_return_lambda(ret, else_info.source_module.as_deref())
+                            self.build_return_lambda(ret, else_info.source_module.as_deref(), None)
                         })
                         .unwrap_or_else(|| self.identity_return_lambda());
                     let param = self.fresh();
@@ -394,12 +397,7 @@ impl<'a> Lowerer<'a> {
     /// so any use inside the lambda body lowers to a direct erlang call.
     pub(crate) fn beam_native_handler_for_effect(&self, effect: &str) -> Option<String> {
         for (canonical, info) in &self.handler_defs {
-            let family = crate::typechecker::applied_effect_family(effect);
-            if !info
-                .effects
-                .iter()
-                .any(|candidate| crate::typechecker::applied_effect_family(candidate) == family)
-            {
+            if !info.effects.iter().any(|candidate| candidate == effect) {
                 continue;
             }
             if let Some(module) = info.source_module.as_deref()

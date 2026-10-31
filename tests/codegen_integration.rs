@@ -79,23 +79,12 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     for (name, info) in codegen_info_map.iter() {
         modules.insert(
             name.clone(),
-            codegen::CompiledModule {
-                codegen_info: info.clone(),
-                elaborated: Vec::new(),
-                resolution: codegen::resolve::ResolutionMap::new(),
-                front_resolution: Default::default(),
-                effect_at_node: Default::default(),
-                type_at_node: Default::default(),
-                type_at_span: Default::default(),
-                effect_abi_plan: codegen::call_effects::EffectAbiPlan::default(),
-                effect_abi_plan_ready: false,
-                optimization: codegen::optimize::OptimizationFacts::default(),
-            },
+            codegen::CompiledModule::metadata_only(info.clone()),
         );
     }
     // Overlay elaborated modules with their resolution maps
     for (name, elab) in elaborated_modules {
-        let normalized = codegen::normalize::normalize_effects(&elab);
+        let normalized = elab;
         let front_resolution = result
             .module_check_results()
             .get(&name)
@@ -109,7 +98,9 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
             &front_resolution,
             &std::collections::HashMap::new(),
         );
-        let entry = modules.entry(name.clone()).or_default();
+        let entry = modules
+            .entry(name.clone())
+            .or_insert_with(|| codegen::CompiledModule::metadata_only(Default::default()));
         entry.elaborated = normalized;
         entry.resolution = resolution;
         entry.front_resolution = front_resolution;
@@ -121,7 +112,6 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
     }
     let ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     codegen::emit_module_with_context("_script", &elaborated, &ctx, &result, None, None)
@@ -158,24 +148,35 @@ fn assert_core_compiles(out: &str) {
     );
 }
 
-/// Compile the Phase 1 evidence bridge module into `dir` so tests that
-/// emit `std_evidence_bridge:*` calls (every `with`-boundary in 3b) can
-/// resolve them at runtime.
+/// Compile the runtime support modules into `dir` so emitted calls resolve
+/// at runtime: the evidence bridge (`std_evidence_bridge:*`, used at every
+/// `with` boundary) and `saga_runtime` (`apply_n`/`apply_cps`, the slow path
+/// of calls through function values).
 fn compile_evidence_bridge_into(dir: &std::path::Path) {
-    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
-    let bridge_path = dir.join("std_evidence_bridge.erl");
-    std::fs::write(&bridge_path, bridge_src).unwrap();
-    let status = std::process::Command::new("erlc")
-        .arg("-o")
-        .arg(dir)
-        .arg(&bridge_path)
-        .output()
-        .expect("failed to run erlc on evidence bridge");
-    assert!(
-        status.status.success(),
-        "erlc failed on evidence bridge:\n{}",
-        String::from_utf8_lossy(&status.stderr)
-    );
+    for (file, src) in [
+        (
+            "std_evidence_bridge.erl",
+            include_str!("../src/stdlib/evidence.bridge.erl"),
+        ),
+        (
+            "saga_runtime.erl",
+            include_str!("../src/stdlib/runtime.erl"),
+        ),
+    ] {
+        let path = dir.join(file);
+        std::fs::write(&path, src).unwrap();
+        let status = std::process::Command::new("erlc")
+            .arg("-o")
+            .arg(dir)
+            .arg(&path)
+            .output()
+            .expect("failed to run erlc on runtime support module");
+        assert!(
+            status.status.success(),
+            "erlc failed on {file}:\n{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
 }
 
 fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
@@ -1458,9 +1459,9 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // The handler function should call its K parameter (resume).
-    // K uses a fresh name, so just verify the handler body applies *something*.
-    assert_contains(&out, "apply _Cor");
+    // With a `finally` block the arm resumes through the runtime, which
+    // calls K inside the region whose end runs the cleanup.
+    assert_contains(&out, "call 'std_evidence_bridge':'fin_resume'");
 }
 
 #[test]
@@ -2679,8 +2680,12 @@ main () = try_it (fun () -> fail! "oops")
     let out = emit_elaborated(src);
     // The lambda should have _HandleFail as a parameter
     assert_contains(&out, "_Handle__script_Fail_fail");
-    // try_it's body should call computation with the handler param
-    assert_contains(&out, "apply Computation(");
+    // try_it's body calls the callback as a function value of effectful
+    // type: dispatch on the closure tag, threading evidence and a
+    // continuation; the lambda itself is a tagged closure.
+    assert_contains(&out, "<{'$saga_cps', ");
+    assert_contains(&out, "call 'saga_runtime':'apply_cps'");
+    assert_contains(&out, "{'$saga_cps', fun (_Arg0, _Evidence, _ReturnK) ->");
 }
 
 #[test]
@@ -2706,7 +2711,8 @@ main () = try_it (fun () -> {
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "_Handle__script_Fail_fail");
-    assert_contains(&out, "apply Computation(");
+    assert_contains(&out, "<{'$saga_cps', ");
+    assert_contains(&out, "call 'saga_runtime':'apply_cps'");
 }
 
 #[test]

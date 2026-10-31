@@ -61,7 +61,7 @@ impl Elaborator {
                     //   g  -->  fun (__p0, ..) -> g(dict.., __p0, ..)
                     // Top-level functions don't need this: their under-saturated
                     // call sites are turned into partial-application closures during
-                    // lowering (`lower_resolved_fun_call`).
+                    // lowering (`ir::Expr::Partial`).
                     if matches!(
                         self.resolution.value(node_id),
                         Some(ResolvedValue::Local { .. })
@@ -497,8 +497,13 @@ impl Elaborator {
                                             .get(let_name)
                                             .copied()
                                             .unwrap_or(1);
+                                        // The eta parameters are made here, so they
+                                        // have no entry in the type table. They are
+                                        // only ever arguments; where the generic fold
+                                        // substitutes one for a typed parameter, the
+                                        // occurrence keeps that parameter's type.
                                         let eta_params: Vec<String> =
-                                            (0..arity).map(|i| format!("__let_arg{}", i)).collect();
+                                            (0..arity).map(|i| format!("__let_arg{i}")).collect();
                                         for p in &eta_params {
                                             lambda_params.push(Pat::Var {
                                                 id: NodeId::fresh(),

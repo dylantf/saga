@@ -22,7 +22,9 @@ pub(crate) use crate::ast::{
     HandlerBody, HandlerItem, NodeId, Pat, Program, Stmt, StringPart,
 };
 pub(crate) use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind, ResolvedSymbol};
-pub(crate) use crate::desugar::{freshen_expr_ids, freshen_pat_ids};
+pub(crate) use crate::desugar::{
+    freshen_expr_ids, freshen_pat_ids, record_freshened_ids, take_freshened_ids,
+};
 pub(crate) use std::collections::HashMap;
 
 mod externals;
@@ -50,6 +52,11 @@ pub(crate) const INLINE_FUEL: u32 = 64;
 /// helpers like `apply_name_style`) and bounds the code a single inline can add.
 pub(crate) const FUN_INLINE_SIZE_CAP: usize = 64;
 
+/// For a node the fold copied (it has a fresh id), the node the typechecker
+/// saw: its module (`None` for the module being folded) and its id there.
+/// Every table keyed by node id is read through this.
+pub type NodeOrigins = HashMap<NodeId, (Option<std::sync::Arc<str>>, NodeId)>;
+
 /// A parameterized `DictConstructor` defined in another compiled module, with
 /// the producer's resolution map for carrying its body's name resolutions.
 pub struct ExternalCtor<'a> {
@@ -57,6 +64,7 @@ pub struct ExternalCtor<'a> {
     pub dict_params: &'a [String],
     pub methods: &'a [Expr],
     pub resolution: &'a ResolutionMap,
+    pub origins: &'a NodeOrigins,
     pub record_types: &'a HashMap<NodeId, String>,
     pub constructors: &'a HashMap<NodeId, String>,
 }
@@ -74,6 +82,7 @@ pub struct ExternalFun<'a> {
     pub params: &'a [Pat],
     pub body: &'a Expr,
     pub resolution: &'a ResolutionMap,
+    pub origins: &'a NodeOrigins,
     pub record_types: &'a HashMap<NodeId, String>,
     pub constructors: &'a HashMap<NodeId, String>,
 }
@@ -87,6 +96,8 @@ pub type ExternalFuns<'a> = HashMap<String, ExternalFun<'a>>;
 /// consumer-scope resolution of those fresh nodes.
 pub struct FoldOutput {
     pub program: Program,
+    /// Origins of every node this fold or an earlier one copied.
+    pub origins: NodeOrigins,
     pub carried_resolution: ResolutionMap,
     pub carried_record_types: HashMap<NodeId, String>,
     pub carried_constructors: HashMap<NodeId, String>,
@@ -110,6 +121,7 @@ pub(crate) struct CtorView<'a> {
     pub(crate) dict_params: &'a [String],
     pub(crate) methods: &'a [Expr],
     pub(crate) resolution: Option<&'a ResolutionMap>,
+    pub(crate) origins: Option<&'a NodeOrigins>,
     pub(crate) record_types: Option<&'a HashMap<NodeId, String>>,
     pub(crate) constructors: Option<&'a HashMap<NodeId, String>>,
 }
@@ -121,6 +133,7 @@ pub(crate) struct FunView<'a> {
     pub(crate) params: &'a [Pat],
     pub(crate) body: &'a Expr,
     pub(crate) resolution: Option<&'a ResolutionMap>,
+    pub(crate) origins: Option<&'a NodeOrigins>,
     pub(crate) record_types: Option<&'a HashMap<NodeId, String>>,
     pub(crate) constructors: Option<&'a HashMap<NodeId, String>>,
 }
@@ -129,6 +142,7 @@ pub(crate) struct Folder<'a> {
     pub(crate) ctors: HashMap<&'a str, CtorView<'a>>,
     pub(crate) funs: HashMap<&'a str, FunView<'a>>,
     pub(crate) carried: ResolutionMap,
+    pub(crate) origins: NodeOrigins,
     pub(crate) carried_record_types: HashMap<NodeId, String>,
     pub(crate) carried_constructors: HashMap<NodeId, String>,
     pub(crate) carried_constructor_names: HashMap<String, String>,

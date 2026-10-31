@@ -13,6 +13,25 @@ impl<'a> Lowerer<'a> {
     /// The tuple layout is: ops sorted alphabetically by "Effect.op" key,
     /// with an optional return clause lambda as the last element.
     pub(crate) fn lower_handler_expr_to_tuple(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
+        self.handler_value(|this| this.lower_handler_expr_ops(body))
+    }
+
+    /// A handler value is a function of the abort reference of the `with`
+    /// that installs it, returning the tuple of its operations (and return
+    /// clause): its arms throw with that reference.
+    fn handler_value(&mut self, build: impl FnOnce(&mut Self) -> CExpr) -> CExpr {
+        let abort_ref = self.fresh();
+        let saved_ref = self.current_abort_ref.replace(abort_ref.clone());
+        let saved_k = self.current_handler_inherited_k.take();
+        let saved_abort_k = self.current_abort_k.take();
+        let tuple = build(self);
+        self.current_abort_ref = saved_ref;
+        self.current_handler_inherited_k = saved_k;
+        self.current_abort_k = saved_abort_k;
+        CExpr::Fun(vec![abort_ref], Box::new(tuple))
+    }
+
+    fn lower_handler_expr_ops(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
         let semantic_module_name = self.current_semantic_module_name().to_string();
         let canonical_effects =
             self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects);
@@ -47,7 +66,8 @@ impl<'a> Lowerer<'a> {
             }
         }
         if let Some(rc) = &body.return_clause {
-            let ret_body = self.lower_expr(&rc.body);
+            let rc_body = self.effect_normal_body(&rc.body, "handler value return clause");
+            let ret_body = self.lower_expr(&rc_body);
             let (param, body) = if rc.params.is_empty() {
                 (self.fresh(), ret_body)
             } else {
@@ -64,6 +84,10 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_handler_def_to_tuple(&mut self, handler_name: &str) -> Option<CExpr> {
         let canonical = self.resolve_handler_name(handler_name);
         let info = self.handler_defs.get(&canonical)?.clone();
+        Some(self.handler_value(|this| this.lower_handler_def_ops(&info)))
+    }
+
+    fn lower_handler_def_ops(&mut self, info: &crate::codegen::lower::HandlerInfo) -> CExpr {
         let handler_ops = self.effect_handler_ops(&info.effects);
 
         let mut tuple_elements = Vec::new();
@@ -87,7 +111,8 @@ impl<'a> Lowerer<'a> {
             }
         }
         if let Some(rc) = &info.return_clause {
-            let ret_body = self.lower_expr(&rc.body);
+            let rc_body = self.effect_normal_body(&rc.body, "handler value return clause");
+            let ret_body = self.lower_expr(&rc_body);
             let (param, body) = if rc.params.is_empty() {
                 (self.fresh(), ret_body)
             } else {
@@ -95,7 +120,7 @@ impl<'a> Lowerer<'a> {
             };
             tuple_elements.push(CExpr::Fun(vec![param], Box::new(body)));
         }
-        Some(CExpr::Tuple(tuple_elements))
+        CExpr::Tuple(tuple_elements)
     }
 
     pub(crate) fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
@@ -232,6 +257,68 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The statically known handler declarations a named `with` layer can
+    /// resolve to, or `None` for a handler value only known at runtime.
+    /// Unlike [`Self::resolve_named_handler_item`] this never panics, so it
+    /// can be asked before a handler bound later in the block is registered.
+    fn static_named_handler_infos(
+        &self,
+        reference: &crate::ast::NamedHandlerRef,
+    ) -> Option<Vec<&crate::codegen::lower::HandlerInfo>> {
+        let name = &reference.name;
+        if self.handle_dynamic_vars.contains_key(name) {
+            return None;
+        }
+        if let Some((_, _, then_canonical, else_canonical)) = self.handle_cond_vars.get(name) {
+            return Some(vec![
+                self.handler_defs.get(then_canonical)?,
+                self.handler_defs.get(else_canonical)?,
+            ]);
+        }
+        if let Some(info) = self
+            .handler_canonical
+            .get(name)
+            .and_then(|canonical| self.handler_defs.get(canonical))
+        {
+            return Some(vec![info]);
+        }
+        let canonical = self.resolved_handler_binding_name(reference.id)?;
+        Some(vec![self.handler_defs.get(&canonical)?])
+    }
+
+    /// The arms a `with` using `handler` installs, when the handler is known
+    /// where the `with` is lowered.
+    fn static_with_arms<'h>(&'h self, handler: &'h Handler) -> Option<Vec<&'h HandlerArm>> {
+        match handler {
+            Handler::Inline { .. } => Some(handler.inline_arms().collect()),
+            Handler::Named(reference) => Some(
+                self.static_named_handler_infos(reference)?
+                    .into_iter()
+                    .flat_map(|info| info.arms.iter())
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Whether a `with` using `handler` is lowered by the chained
+    /// optimisation: the continuation of the whole `with` (the rest of the
+    /// enclosing body) becomes the return continuation of its handled
+    /// computation, and nothing is lifted or caught.
+    ///
+    /// That is equivalent only when every arm of the handler, known where
+    /// the `with` is lowered, resumes in every tail position and nowhere
+    /// else, and none has a `finally` block: no arm then looks at the value
+    /// `resume` returns or aborts.
+    pub(crate) fn with_handler_chains_continuation(&self, handler: &Handler) -> bool {
+        use crate::codegen::handler_analysis::{ResumptionKind, classify_body};
+        self.static_with_arms(handler).is_some_and(|arms| {
+            arms.iter().all(|arm| {
+                arm.finally_block.is_none()
+                    && classify_body(&arm.body) == ResumptionKind::TailResumptive
+            })
+        })
+    }
+
     pub(crate) fn effect_for_handler_arm(
         &self,
         arm: &HandlerArm,
@@ -280,9 +367,7 @@ impl<'a> Lowerer<'a> {
             .as_deref()
             .unwrap_or_else(|| self.current_semantic_module_name());
         if let Some(resolved) = self.effect_for_handler_arm(arm, Some(module_name)) {
-            return resolved == eff
-                || crate::typechecker::applied_effect_family(&resolved)
-                    == crate::typechecker::applied_effect_family(eff);
+            return resolved == eff;
         }
 
         self.handler_arm_fallback_matches_effect_op(info, arm, eff)

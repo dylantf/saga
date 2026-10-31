@@ -111,7 +111,7 @@ Files declare `module Foo.Bar` and are imported with `import Foo.Bar`. Projects 
 
 ### Testing Patterns
 
-Typechecker tests use `check(src)` which loads the prelude then checks the source. Codegen tests use `emit(src)` (lowering only, no typechecking) and `emit_full(src)` (full pipeline). To test codegen changes end-to-end, build and run via `cargo run -- run` rather than the Rust interpreter.
+Typechecker tests use `check(src)` which loads the prelude then checks the source. Codegen tests use `emit(src)` and `emit_full(src)`; both run the full pipeline (parse, typecheck, elaborate, lower), `emit` being an alias of `emit_full`. To test codegen changes end-to-end, build and run via `cargo run -- run` rather than the Rust interpreter.
 
 ### Build Output
 

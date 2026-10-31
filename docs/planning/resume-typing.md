@@ -1,0 +1,617 @@
+# Sound typing of `resume`
+
+Status: approved 2026-10-14. Branch `resume-type`. From a read-only design
+study (nothing in it was built or run; line numbers are as read at
+`bf0345da`). The owner asked for the sound fix, not a workaround, regardless
+of which existing programs break.
+
+## The unsoundness
+
+`resume v` is typed as a pure function (`infer.rs`, `ExprKind::Resume`). But
+resuming runs the rest of the handled computation under the same handler,
+then the `return` clause, so it performs at least
+
+    R = (inner − handled) ∪ eff(return clause) ∪ eff(arms) ∪ handler needs
+
+(arms belong in R because later operations re-run arms inside the extent of
+an earlier `resume`). This is Koka's HANDLE rule (Leijen, POPL'17 / MSR-TR
+2016-29, Fig. 3): `resume` performs the handler context's row. Because Saga
+types it pure, `fun s -> (resume s) s` is a pure lambda, `f 20` after the
+`with` is a pure call, and an outer abort has nowhere to go.
+
+The obvious fix (`resume` emits R) rejected good programs because of a
+second, separable cause: the effect system cannot express "pure ≤ R" when R
+is an open row. In `unify_effect_rows`, closed-vs-closed accepts a subset as
+a recorded subsumption, but open-vs-closed and open-vs-open are equality, so
+`{} ~ {..ρ}` binds `ρ := {}`. A pure arm value, a `return v = fun _ -> v`, or
+a pure lambda returned at a rigid `..e` then pins R to empty.
+
+## Unifier holes found by reading (to be confirmed by tests)
+
+- **U1** (`unify.rs` ~409-411): open-vs-closed never looks at entries only
+  the open side has, so `{Stop | e} ~ {}` succeeds with `e := {}` and Stop is
+  lost. Example: `wrap : (Unit -> Int needs {..e}) -> (Unit -> Int needs
+  {Stop, ..e})`, `apply_pure : (Unit -> Int) -> Int`, `bad g = apply_pure
+  (wrap g)`.
+- **U2** (~463-468): same single tail on both sides returns Ok even when the
+  extras differ, so `{Stop | ρ} ~ {| ρ}` drops Stop. Example: `eq : a -> a ->
+  a`, `bad f = (eq f (wrap f)) ()`.
+- **U3**: `{..a, ..b} ~ {..b}` binds `b := {..a, ..b}` and reports an
+  infinite row; common tails must cancel first.
+- **H1** (`effects.rs` `check_effects_via_row` ~213-233): a declared open
+  row accepts unparameterised extras: `h : (Unit -> Int needs {..e}) -> Int
+  needs {..e}` with body `{ log! "x"; f () }` is accepted; a caller
+  instantiating `e := {}` is typed pure and `Log` is unhandled at run time.
+- **H2** (`generalize`): the answer type and R live in the resume context,
+  not in `env`, so `let k = fun x -> resume x` inside an arm can be
+  generalised over them.
+- **H3**: `with h` where `h` is only known by its type `Handler E` never
+  relates the arms' answer type to the computation's; `extract_handler_info`
+  on an `if` takes the first branch.
+
+## The design: directional row subsumption at coercion positions, a `with`-scoped R, answer slack
+
+This is Koka's OPEN rule applied only at the existing coercion positions
+(decision D2a), not at every lambda. Lambda types stay closed and exact, so
+the runtime representation rule (`value_repr`, bare unless the type performs
+something) does not change.
+
+1. **`subsume_rows(actual ⊆ expected)`**, used where the coercion path is
+   direct (`coercion_path_is_direct`), decided during unification rather than
+   judged afterwards. Normalise both rows; unify arguments of families on
+   both sides. `missing` = actual entries absent from expected, plus actual
+   tails absent from expected's tails. If nothing is missing, accept without
+   binding anything (`{} ⊆ {..e}`, `{Stop} ⊆ {Stop, ..e}` pass: no pinning).
+   Otherwise pick an absorber: a flexible tail of expected, preferring one
+   marked slack; if exactly one candidate, bind `absorber := {missing,
+   ..missing tails, ..fresh}` (missing tails exclude expected's own tails, so
+   no cycle). With no absorber: missing entries are an error (today's
+   message); a missing flexible tail is bound to the expected row; a missing
+   rigid tail is bound to `{}` as today so `check_rigid_row_vars_abstract`
+   keeps its message. Equality positions (at depth, exact) are unchanged
+   except U1–U3.
+2. **Inline `with`.** Compute remaining as today. Check the `return` clause
+   first (`T_ret`, `E_ret`). `A := open_spine(T_ret)` (or `T` without a
+   return clause): each own-arrow row of the answer gets one fresh slack
+   tail. `R := {remaining, E_ret, ..ρ_arm}` with `ρ_arm` slack. In each arm,
+   `resume` coerces its argument as today, emits R, returns A; arm values are
+   coerced to A through `subsume_rows`. After all arms, require arms' own
+   effects ⊆ R (`ρ_arm` absorbs them). Then close every slack variable this
+   `with` created to `{}` (an instantiation, so sound; no leaked variables; A
+   is widened only by what some arm forced in). Emit remaining ∪ E_ret ∪ arm
+   effects outward as today. The `with`'s type is A after closing: e.g.
+   `Int -> Int needs {Stop}` for a state-passing handler over a computation
+   that performs Stop; unchanged when no arm resumes under a lambda.
+3. **Named handlers.** Allocate `ρ_R`, registered as rigid while arms and
+   return clause are checked (display name "the handled computation's
+   effects"). `R = needs ∪ ..ρ_R`. Slack on A as in 2, closed at the end of
+   registration. `check_rigid_row_vars_abstract(allow_closing = false)` on
+   `ρ_R`. Strip `ρ_R` from the handler's stored `needs`. Add `ρ_R` to
+   `HandlerInfo.forall` and a field `resume_row`. At `with`: instantiate and
+   bind `ρ_R := remaining`.
+4. **Handler values whose provenance is lost** (parameter, data, `if`
+   branch) must be *uniform*: no `return` clause (or identity), answer type a
+   generalisable variable not constrained by the arms, `ρ_R` not in the
+   answer — Koka's first-class handler type `∀ε a. (() → ⟨E|ε⟩ a) → ε a`. A
+   non-uniform handler may only be named directly in `with` or aliased
+   statically. (Decision; the alternative is extending `Handler E` to carry
+   the answer and R, a larger language change.) Closes H3.
+5. **Generalisation.** Inside an arm, the free variables of the resume
+   argument type, the answer type and R are treated as environment variables
+   in `generalize` / `generalize_let_binding`. Closes H2.
+
+Soundness sketch: effects are sets; a substitution only replaces a variable
+with a row containing a fresh variable or with `{}`, which preserves every
+established inclusion. `subsume_rows` either finds the inclusion, binds a
+flexible variable to make it hold, or fails. Closing slack is an
+instantiation. R contains remaining ∪ E_ret ∪ arm effects ∪ needs by
+construction, so every function whose body performs `resume` carries R on
+the arrow that runs it, and every call site sees R. With U1/U2 fixed no
+unification drops an entry.
+
+Accepts/rejects compared with today: `make` becomes `Int -> Int needs
+{Stop}`; passing it where a pure function is expected is rejected naming
+Stop; `run_state_fail` (open `..e`, pure `fail` arm) still accepted; pure
+lambdas returned at a rigid `..e` newly accepted; U1/U2/H1 programs rejected;
+a resuming thunk stored in a pure field when R ≠ ∅ rejected (correctly);
+non-uniform handlers passed as `Handler E` values rejected.
+
+Errors keep the three existing `effect row mismatch` messages, plus a
+provenance note when the offending row contains R ("this function resumes
+the computation handled by the `with` at L:C; resuming runs the rest of that
+computation, which performs {Stop} that this `with` does not handle").
+
+Code generation: unchanged representation rule. Named-handler arm lambdas
+carry `..ρ_R` and are tagged at every site (correct; per-site bare is an
+optional later optimisation). Separate codegen step: a CPS closure that
+resumes must pass the result of `resume`/`mbind` to its own `_ReturnK`
+instead of returning a suspension.
+
+## Steps (each mergeable and tested)
+
+0. Tests first (ignored where needed): U1, U2, H1, H2, H3 reproductions and
+   the snippet list below.
+1. Unifier fixes U1–U3 (~80 lines). Measure with the function-shape matrix
+   and the parameterised-effect generator how many programs change.
+2. `subsume_rows` at direct coercion paths, slack-variable tracking (~200,
+   minus ~100 of the old after-the-fact judging). `effect_row_rule_tests`
+   unchanged; `multi_row_var_two_open_tails_in_callback_are_ambiguous` stays.
+3. Resume-context variables monomorphic (H2, ~30).
+4. Inline `with` per 2 (~150). Un-ignore the two typechecker tests; the guard
+   `generic_state_runner_with_an_aborting_arm_is_accepted` stays green.
+5. Named handlers per 3 (~120). Expect snapshot diffs for examples 54, 55.
+6. Uniformity rule for `Handler E` values per 4 (~80).
+7. H1 (declared open rows reject unnamed extras).
+8. Codegen: resuming CPS closures return through `_ReturnK`; un-ignore the
+   runtime tests. (After the abort work on `abort-exc` lands.)
+
+Estimated 650–800 lines of non-test code, ~400 of tests.
+
+## Snippets to add as tests
+
+1. `make` (inline, concrete): result arrow contains Stop; `leak` (passing it
+   to `apply_pure`) rejected naming Stop.
+2. `run_state_fail` guard accepted; at run time under `stop _ = 1000`; the
+   unannotated `rsf init f = …` infers `f : Unit -> a needs {State, Fail, ..e}`.
+3. Named `passing`: `counter () with passing : Int -> Int needs {Stop}`;
+   `apply_pure (counter () with passing)` rejected; `handler bad for Ask {
+   ask () = apply_pure (fun x -> resume x) }` rejected at the declaration.
+4. Inline counterpart: accepted when the computation performs only Ask,
+   rejected when it also performs Stop.
+5. Multishot: `pick_stop () with { choose () = List.flat_map (fun b ->
+   resume b) [True, False]; return v = [v] }`; the lambda node's type carries
+   Stop (`expr_types_tests.rs`).
+6. Stored resume: a list of resumptions folded over (accepted, performs
+   Stop); `Box { run: fun x -> resume x }` with a pure field rejected when
+   R ∋ Stop, accepted when R = {}; a `Step` type with a pure thunk field
+   rejected.
+7. Generalisation: `let k = fun x -> resume x; apply_pure k` rejected when
+   R ∋ Stop; a named handler using `k` at two types around a String
+   computation rejected.
+8. Arm and return effects in R: `get () = { log! "g"; fun s -> (resume s) s }`
+   and `return v = { log! "r"; fun _ -> v }` make the state function perform
+   Log; calling it outside a Log handler rejected.
+9. Nested handlers of the same effect: inner state-passing arm lambda calling
+   the outer `get! ()` carries {State, Stop}; returning it past the outer
+   `with` into a pure context rejected.
+10. Open-row trait methods: resuming over `next x` for a where-bound `x : a`
+    carries `..a` (accepted under `needs {..a}`, rejected when pure); with
+    `impl Src Text needs {Stop}` the concrete call carries Stop.
+11. Uniformity: `use : Handler Ask -> Int needs {Stop}`, `use h = ask_stop ()
+    with h` accepted; non-uniform handler values and `if c then to_result else
+    to_result2` rejected.
+12. Unifier holes U1, U2, H1: rejected.
+13. No pinning: a pure lambda in one arm, the `return` clause, and a resuming
+    lambda over a rigid `..e`, in inline and named handlers: accepted.
+
+## Open questions from the study
+
+- Completeness of the greedy absorber choice in `subsume_rows` (expected not
+  to reject anything today's unifier accepts, not proven).
+- Closing slack at the end of the `with` could reject a later equality-
+  position use at a larger row (today's closed rows reject those too).
+- Callbacks given to outer operations that capture `resume`: typed with R,
+  evidence routing in `append_tail` not checked.
+- Whether R is fully known before slack closing in every arm shape (deferred
+  lambda arguments, open-row reference settlement run late).
+- Whether type declarations can take row parameters (`Step e a`), which
+  would give the pure-field case a non-breaking spelling.
+
+## Outcome
+
+Steps 0-7 landed on `resume-type` (step 8, codegen, is not part of this
+branch). Tests are in `src/typechecker/resume_typing_tests.rs` unless
+noted. Non-test `src/` since the plan: +1056 / -192 lines (about a third of
+`unify.rs`'s share is moved code and comments).
+
+Deviations from the design, each explained in its step: the U1 hole was
+reached through `check_fun_clauses` placing a returned function's row on
+the function's own arrow (fixed with `saturated_effect_row`, step 1);
+`subsume_rows` applies only to rows with a declared or slack tail (step 2);
+slack closing also closes the inference variables it was bound to, but
+never a declared one (step 4); the provenance note has no line and column
+(step 4); named handlers have their own error for a pinned `ρ_R` (step 5);
+an `if` over handlers keeps every branch's declaration and checks each at
+the `with` instead of being rejected outright, and a declared handler with
+`needs` is not uniform (step 6).
+
+Open questions from the study, as found:
+
+- Greedy absorber: with the step-2 restriction, an absorber is chosen only
+  when a declared or slack tail is involved, preferring answer slack, then
+  `ρ_arm`, then a single inference variable; two inference candidates with
+  named effects to place is the existing ambiguous-row error. Nothing in
+  the test suites, examples or stdlib was rejected by it. Not proven.
+- Closing slack rejecting a later use at a larger row: not seen.
+- Callbacks given to outer operations that capture `resume`: typed with
+  `R`; evidence routing not checked (codegen).
+- `R` known before slack closing: the arms' effects are coerced into `R`
+  after all arms, and `ρ_R`/`ρ_arm` are closed only then; deferred lambda
+  arguments are inferred within the arm. Not seen to fail.
+- Row parameters on type declarations: not explored. The pure-field case
+  is instead accepted when the handler only handles computations that leave
+  nothing unhandled (see "A closed `ρ_R`" below), which also restored
+  `Std.Stream.stream_of`.
+
+Found and not fixed (outside this plan): an arm may pin an operation's own
+type variable (`pick : List a -> a`, `pick xs = resume 1`, step 3).
+
+Not done here: step 8. Until it lands, a function that resumes is typed
+with `R`, so where `R` is not empty it is compiled as a tagged CPS closure;
+the ignored runtime tests in `effect_property_tests` stay ignored. (On
+`sound-handlers`, merged with `abort-exc`, the callback/stored-closure test
+passes; the two state-passing ones do not, see step 8 below.)
+
+### Step 0: reproductions
+
+All five holes reproduce, but U1 not as described. `thunk_pure (wrap g)`
+was already rejected, for the wrong reason: `check_fun_clauses` put the row
+of the function a declaration *returns* (`innermost_effect_row`) on the
+function's own first arrow as well, and unified that with the declared
+(empty) first arrow through `unify` (no position), where U1 dropped Stop and
+closed `..e` in `wrap`'s own scheme. So `wrap` was typed `(Unit -> Int) ->
+(Unit -> Int needs {Stop})`. The same placement accepted a function that
+performs an effect before returning a function while its first arrow was
+declared pure (`early`, unsound). U2 and U3 reproduce once U1 is fixed (U2:
+`bad f = (eq f (wrap f)) ()` typed without Stop). H1, H2 and both H3
+programs are accepted as described.
+
+### Step 1: U1-U3
+
+- `unify_effect_rows` cancels tails both rows share before comparing (U3).
+  When only shared tails remain, a single shared tail takes the named
+  effects that only one side has (`{Stop | r} ~ {| r}` binds `r := {Stop |
+  r'}`, U2); more than one shared tail is the ambiguous-row error.
+- Open-vs-closed: the open side's named effects that the closed side lacks
+  (U1) go into a shared tail if there is one, else they are recorded like a
+  closed-vs-closed subset with the open side larger, so the position judges
+  them (a coercion accepts `{} ⊆ {Stop | e}`, rejects the reverse).
+- `check_fun_clauses` checks a body against, and builds the function's own
+  arrow from, the row of the arrow its arity saturates
+  (`saturated_effect_row`), not the innermost one. The two "forwarded
+  tail" checks (callback `..e`, open-row trait method `..a`) also accept a
+  tail forwarded on the returned function's arrows.
+
+Newly rejected (breaking-change list):
+
+- A function that performs an effect before returning a function whose
+  type names the effect only on the returned arrow (`fun early : Int -> Int
+  -> Int needs {Log}`, `early x = { log! ".."; fun y -> x + y }`): calling
+  `early 1` performs Log, which its first arrow does not allow. Sound.
+- Function-shape matrix, 9 entries added to
+  `function_shape_matrix_typecheck_rejected.txt`: `eta_op.{returned,
+  returned_let, cross_module_ret}.{e1, e2, eu}`, i.e. `fun make : Unit ->
+  (Int -> Int needs {Bump})`, `make () = bump!`. An effect operation
+  referenced without arguments captures the handler in scope where the
+  reference is written (`lower_eta_reduced_effect_op_ref`; the typechecker
+  emits the effect at the reference, which is also why
+  `eta_op.let_outside_handler` was already rejected). So calling `make`
+  needs a Bump handler, which its pure first arrow does not provide; it was
+  accepted only through the misplaced row. Writing `make () = fun x -> bump!
+  x` is accepted.
+
+Examples and stdlib: unchanged, all typecheck. `effect_property_tests` and
+`core_snapshot` unchanged. Non-test `src/`: +117 / -12.
+
+### Step 2: directional subsumption at direct coercion positions
+
+- The position of a unification is kept on the checker while it runs
+  (`RowMode`, with the coerced expression's literal structure as an owned
+  `DirectShape`), and `unify_effect_rows` decides each pair of rows as it
+  meets them (`unequal_rows`). The recorded `row_subsumptions` judged after
+  the fact are gone; the three `effect row mismatch` messages are unchanged.
+- `subsume_rows(actual ⊆ expected)` as designed, with one deviation: it is
+  used only when one of the two rows has a *protected* tail, i.e. a row
+  variable fixed by a declared signature (or a where-bound type's), or one
+  created for `resume` (`slack_rows`, from step 4 on). Rows of inference
+  variables only are still unified as equal, which is one solution of the
+  inclusion and the one inference made so far. Reason: "nothing missing,
+  bind nothing" for an ordinary variable leaves it unbound, so a pure
+  callback passed to `List.map` would leave the call's `..e` open and give
+  the enclosing unannotated function an open row (and a different calling
+  convention); and binding an actual tail's missing part into the expected
+  tail lets an effect the callee handles (`{Log, ..e}`) flow into its
+  result row through `e`. For protected rows the absorber gets no fresh
+  tail unless it is slack (whose rest is slack too and closed later).
+- With no tail to absorb into, a missing *declared* tail is closed to the
+  expected row's named effects (so `check_rigid_row_vars_abstract` reports
+  it as before); an inference or slack tail is bound to the expected row.
+
+Newly rejected (all sound):
+
+- A declared row variable no longer takes on effects to make a coercion
+  hold: `with_log : (Unit -> Int needs {..e}) -> (Unit -> Int needs
+  {..e})`, `with_log f = fun () -> { log! ".."; f () }` was accepted (the
+  caller's `..e` widened with Log); now "a function that uses {Log} is used
+  where ..." is reported. Returning `fun () -> { log! ..; 1 }` at `Unit ->
+  Int needs {..e}` is still rejected, now with that message instead of
+  "requires that row to be exactly {Log}".
+- Two independent declared row variables are no longer merged:
+  `mix : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b})`, `mix f =
+  f` ("declares the open effect row `..a`, but its body requires that row
+  to be empty").
+- U2 at a declared row variable (`fun bad : (Unit -> Int needs {..e}) ->
+  Int needs {..e}`, `bad f = (eq f (wrap f)) ()`), accepted at step 1.
+
+Newly accepted: a pure function returned or passed where a function over a
+declared `..e` is expected (`fun mk : Unit -> (Unit -> Int needs {..e})`,
+`mk () = fun () -> 1`), which closed `..e` and was rejected.
+
+Core snapshot: 09-sorting and 21-do-else changed only in the numbering of
+dictionary parameters (`___dict_Ord_v801` -> `v786`; fewer fresh variables
+are allocated); blessed. Matrix, examples, stdlib, `effect_property_tests`:
+unchanged. Non-test `src/`: +330 / -110 (`unify.rs` mostly moved code).
+
+### Step 3: the resume context is monomorphic (H2)
+
+`generalize` leaves out the free variables of the `resume` in scope (its
+argument type and answer type; R is added at step 4), as it does those of
+the environment. So `let k = fun x -> resume x` (or `let k = resume ()`) in
+an arm is one function at the handled operation's types.
+
+Newly rejected: the H2 program (a named handler using `k` at String while
+the handled computation is an Int: "type mismatch: expected String, got
+Int"). Sound.
+
+Core snapshot: `Std.Test`'s `collect` handler binds `let k = resume ()`
+and calls `k (...)` inside a `fun entries -> ...`. `k` was generalised, so
+the call was compiled at an instantiated open row (`apply_cps` with an
+empty frame); it is now at the answer type, which is pure, so the call is
+a direct one (`is_function`/`apply_n`). Either path runs either closure
+representation; `stdlib_tests` (the stdlib's own test suite, run by this
+handler) passes. Blessed. Examples were not rechecked at this step (not
+required); matrix and `effect_property_tests` unchanged. Not fixed, found
+on the way: an arm may pin an operation's own type variable (`pick : List
+a -> a`, `pick xs = resume 1` is accepted); that is not about
+generalisation and is left for a separate fix. Non-test `src/`: +20.
+
+### Step 4: inline `with`
+
+As designed: the `return` clause is checked first; the answer type `A` is
+the return type with one `Slack::Answer` tail per arrow of its spine
+(`open_answer_spine`); `R = remaining ∪ E_ret ∪ ..ρ_arm` (`ρ_arm` is
+`Slack::Arm`); in each arm `resume` coerces its argument, emits `R`
+(`resume_effects`, saved and restored like `resume_type`, and in
+`enter_scope`) and returns `A`; arm values are coerced to `A`. After the
+arms, their effects (and `finally` blocks') are coerced into `R`, then
+`close_slack` binds this `with`'s slack, and what is left of it, to `{}`.
+The `with`'s type is `A`. `generalize` also leaves out the variables of
+`R`. Deviations:
+
+- `close_slack` also closes the inference variables made while the `with`
+  was checked that slack was bound to (an equality position such as an
+  `if` join binds a slack tail to a fresh shared one), so none stays open
+  in the answer type. It does not close declared row variables: an arm's
+  callback parameter has the operation's own `..r` (registered rigid), and
+  closing it typed the callback as pure, which compiled its call as a pure
+  call (`callbacks_across_a_delimited_with` caught this).
+- The provenance note has no line and column (the checker has no source
+  text): "This function resumes the computation handled by the enclosing
+  `with`: resuming runs the rest of that computation, which performs {Stop}
+  that the `with` does not handle." while the arm is being checked (the
+  function's row still has the `with`'s slack), and "This function is the
+  value of a `with` whose handler resumes inside it: calling it runs the
+  rest of the handled computation, which performs {Stop} that the `with`
+  does not handle." when the coerced expression is the `with` itself.
+  Appended to the existing "a function that uses ..." message.
+
+Tests: the two ignored typechecker tests in `tests.rs` are un-ignored and
+pass; `generic_state_runner_with_an_aborting_arm_is_accepted` stays green.
+Snippets 1, 2, 4-10 and 13 (inline forms) are in `resume_typing_tests.rs`.
+
+Newly rejected (all sound; R ≠ ∅ in each):
+
+- A function that resumes, or the value of such a `with`, used where a
+  pure function (or one with fewer effects) is expected: `apply_pure (fun
+  x -> resume x)` over a computation that also performs Stop; `apply_pure
+  (counter () with {get () = fun s -> (resume s) s ...})`; `let k = fun x
+  -> resume x; apply_pure k`.
+- A resuming function stored in a field typed pure (`Box { run: fun x ->
+  resume x }`, `More(fun () -> resume 1)` of `type Step = Done(Int) |
+  More(Unit -> Step)`) when the rest of the computation performs something.
+- Calling a state function outside a handler for what the arms or the
+  `return` clause perform (`get () = { log! ..; fun s -> ... }` makes the
+  state function perform Log).
+
+Examples, stdlib, core snapshot, matrix and `effect_property_tests`:
+unchanged (no inline handler in them resumes under a function over a
+computation with effects left; `Std.Control.run_writer`'s `R` is `{}`).
+Non-test `src/`: +198 / -16.
+
+### Step 5: named handlers
+
+As designed: `register_handler` checks the `return` clause before the arms
+(its types are frozen after them), allocates `ρ_R`, registered rigid while
+the arms are checked, sets `R = needs ∪ ..ρ_R` and opens the answer type's
+spine with slack, closed after the arms. `ρ_R` is stripped from the stored
+`needs`, added to `forall` and recorded as `HandlerInfo.resume_row`; a
+`with` naming the handler binds its instance to what the computation
+leaves unhandled. Deviation: instead of `check_rigid_row_vars_abstract`
+(whose message names a written `..e`), the handler gets its own error when
+`ρ_R` was closed or given named effects: "handler 'bad' resumes inside a
+function that is used where no effects may be performed, but resuming runs
+the rest of the computation the handler is installed around, which can
+perform any effect the handler does not handle. Use the function where its
+effects are allowed, or write the handler inline at the `with`, where that
+computation is known". The note on the value of a `with` (step 4) also
+covers named handlers (`apply_pure (counter () with passing)`).
+
+Newly rejected (sound):
+
+- A named handler whose arm puts a resuming function where its effects
+  are not allowed: `handler bad for Ask { ask () = apply_pure (fun x ->
+  resume x) }`.
+- `Std.Stream.stream_of` (`yield v = More v (Stream (fun () -> resume
+  ()))`): the `Stream` thunk is pure, but forcing it resumes whatever
+  computation the handler was installed around. Edited at this step:
+  `stream_of` was removed and `from_gen` installed the same arms inline.
+  Undone later (see "A closed `ρ_R`"): `stream_of` is accepted again, for
+  producers that perform nothing but `Gen a`.
+- The state function of a named state-passing handler now carries the
+  computation's unhandled effects (`counter () with passing : Int -> Int
+  needs {Stop}`), so using it as a pure function is rejected.
+
+Core snapshot: 54 and 55 (`choose options = List.flat_map (fun x -> resume
+x) options`): the callback now carries `..ρ_R` and is a tagged CPS closure
+that passes `resume`'s result to its `_ReturnK` through `mbind`. Output of
+`saga run` checked unchanged for 54, 55 (and 58, which uses
+`Stream.from_gen`); matches the expected output in their headers. 09 and 21
+changed only in dictionary-parameter numbering again. Blessed. Matrix and
+`effect_property_tests` unchanged; all examples and the stdlib typecheck;
+`stdlib_tests` passes. Non-test `src/` (incl. Stream.saga): +145 / -41.
+
+### Step 6: handler values (H3)
+
+- `HandlerInfo::uniform`: no `return` clause but the identity, and an
+  answer type that is still a free variable after the arms (not one of an
+  enclosing signature). Not checked separately: `ρ_R` in the answer, which
+  a free answer variable cannot contain.
+- `check_handler_value` at every expression that produces a handler value
+  (a reference to a declared or `let`-bound handler, a handler expression,
+  a call of a function in `handler_funs`): unless the expression is a
+  *static site*, the handler must be uniform. Static sites
+  (`static_handler_sites`) are the right-hand side of a block `let` and a
+  function body (`handler_funs`), when it is such a reference or an `if`
+  whose branches all are; that is exactly where `extract_handler_info`
+  keeps the declaration for the `with`. A top-level `let` is not one (it
+  never registered handler info).
+- Deviation (more precise than "reject `if c then to_result else
+  to_result2`", still sound): `extract_handler_info` on an `if` keeps every
+  branch's declaration (`HandlerInfo::alternatives`) instead of the first,
+  and a `with` installing it checks each alternative as it checks the first
+  (its return clause against the computation and the first's result, its
+  `ρ_R`, its `needs`). Branches that give the `with` different types are
+  rejected ("the handlers this `with` may install (chosen by an `if`) give
+  it different types: ..."), which is the H3 program; branches that agree
+  (the runtime tests `handler_chosen_conditionally` and
+  `conditional_and_mixed_handlers_are_delimited`, which the flat rule broke)
+  are accepted. An `if` with a branch that is not a static handler
+  reference has no static info and goes the type-only way.
+- Addition: a *declared* handler with `needs` is not uniform as a value
+  either. A `with` that knows a handler only by its type does not provide
+  its `needs` (a handler expression's are taken where it is built, a
+  declared handler's only at a `with` naming it), so `use_h noisy` for
+  `handler noisy for Ask needs {Log}` passed `check` and then failed in the
+  lowering ("no evidence in scope for op 'Log.log'"); it is now a type
+  error.
+
+Newly rejected (sound):
+
+- A non-uniform handler passed, stored or returned where only its `Handler
+  E` type travels: `use_h (handler for Ask { ask () = "oops" })`,
+  `use_h counting` for `ask () = (resume 1) + 1` (its arms fix the answer
+  type to Int). Bind it with `let` and install it with `with` where the
+  computation is known instead.
+- A declared handler with `needs` passed as a value (`use_h noisy`).
+- `let h = if c then to_result else to_list` with the two giving the
+  `with` different types.
+
+Examples, stdlib, snapshot, matrix and `effect_property_tests` unchanged.
+Non-test `src/`: +220 / -8.
+
+### Step 7: a declared open row names what the body performs (H1)
+
+`check_effects_via_row` rejects, for every effect (not only effects with
+type parameters), a named effect the body performs that the declared row
+does not name, comparing against the row *as written*
+(`saturated_effect_row` of the unresolved annotation): a declared tail may
+have been bound to more effects through an equality, and those do not
+count as named. Message: "function 'h' uses the effect `Log`, which its
+'needs' clause does not name. An open row (`..r`) stands for the caller's
+effects; an effect the body performs must be named so that callers handle
+it. Add `Log` to the 'needs' clause".
+
+Newly rejected (sound): any annotated function whose open row leaves out an
+effect its body performs, e.g. `fun h : (Unit -> Int needs {..e}) -> Int
+needs {..e}`, `h f = { log! "x"; f () }`; `fun loose : Unit -> Int needs
+{..r}`, `loose () = plain! ()` (whose callers dropped `..r` entirely, so
+Plain was never handled). Tests that asserted the old behaviour, changed:
+`effect_row_var_function_open_needs` (now expects the error, and accepts
+the version naming Log) and the `loose` case of
+`parameterised_effect_cannot_hide_in_a_declared_open_row`; and
+`open_row_inner_handler_preserves_sibling_instance_in_tail` in
+`effect_property_tests`, whose `wrapped` performed `FailInt` under `needs
+{FailString, ..r}`: `FailInt` now reaches the open tail through a callback
+(`wrapped from_int`), same result.
+
+Examples, stdlib, snapshot, matrix unchanged; `codegen_integration`,
+`module_codegen_integration`, `e2e` and `stdlib_tests` pass. Non-test
+`src/`: +38 / -18.
+
+### After the merge with `abort-exc`: a closed `ρ_R`
+
+Branch `sound-handlers`. Step 5 rejected every named handler whose arms
+close `ρ_R`, which rejected kraken's `collect_query` (`type QueryStep a =
+QueryStep (QueryState -> (a, QueryState))`, arms that resume inside the
+pure function) and `Std.Stream.stream_of`. Both are only ever installed
+around computations that perform nothing but the handled effect, where
+the stored function really is pure.
+
+Rule: when the arms close `ρ_R` to `{}` (and only then; `ρ_R` given named
+effects, or any other declared row variable pinned, is still an error),
+the declaration is accepted and `HandlerInfo::resume_row_closed` is set
+(`resume_row` is `None`). A `with` installing the handler (by name,
+through a `let` alias, through a function in `handler_funs`, or as an
+alternative of an `if`) binds `ρ_R := remaining` as before, which now
+means `remaining = {}` (`require_nothing_unhandled`): an inference tail of
+`remaining` is closed to `{}`; named effects, a declared row variable or a
+where-bound row are reported at that `with`:
+
+    handler 'collect_query' stores a function that resumes the handled
+    computation where no effects are allowed, so it can only handle
+    computations that perform nothing else; this one also performs {Log}
+
+(the handler is named as the `with` writes it, so an alias `h` is shown as
+`h`). Sound because `R = needs ∪ ρ_R = needs` holds at every installation,
+so the function the arms store performs exactly what its type says.
+
+Handler values: a handler with the requirement is rejected by
+`check_handler_value` wherever a `with` would know it only by its `Handler
+E` type ("it stores a function that resumes the handled computation where
+no effects are allowed, so it can only handle computations that perform
+nothing else, which only a `with` that names it can check"). Carrying the
+requirement in the type would need new type machinery.
+
+`Std.Stream.stream_of` is restored as it was before step 5; `from_gen`
+installs it again. The emitted code for `Std.Stream` is unchanged.
+
+Tests: `resume_typing_tests.rs` (`named_handler_resuming_in_a_pure_function_requires_a_pure_rest`,
+`named_handler_pinning_the_resumed_row_to_effects_is_rejected`,
+`state_passing_named_handler_with_a_pure_field`,
+`handler_value_with_a_pure_rest_requirement_is_rejected`) and
+`effect_property_tests` (`pure_rest_named_handler_under_aborting_outer_handler`,
+`pure_rest_named_handler_rejects_a_computation_with_other_effects`, which
+includes the handler declared in another module). kraken and sesh-importer
+typecheck unchanged.
+
+### Step 8 (codegen): stopped
+
+On `sound-handlers` the closure that resumes is already CPS code that
+passes the value of `resume` on through `mbind` to the rest of its body,
+which ends in its `_ReturnK`. Un-ignored:
+`resume_under_callback_or_in_data_under_outer_handlers` passes as is (the
+closures are called while their `with` is pending, and the suspension they
+return reaches that `with`'s `bind`). The two state-passing tests still
+fail in their non-tail cells with `{'$saga_meta', _}`: the closure is
+called after its `with` returned, so nothing binds the suspension of the
+outer `Stop` that `with` lifted. Tried and reverted: binding it in the
+closure (`M([ret])`, with `bind(V, [ret]) = V` and a suspension passed on
+unchanged at `[ret]`) makes both state-passing tests pass, and makes the
+`stored` cell give 42 for 242 and the `collect` cells crash, because there
+the `with`'s `bind` was still to come and has the rest of the meta
+continuation. Which is right depends on whether a `bind` of that `with` is
+pending on the stack, a run-time property; deciding it needs new run-time
+machinery (for example a per-`with` count of pending delimiters, kept by
+the `with`'s entry, `resume_into` and the `{k, Ref, F}` frames), which
+changes the handler scheme. Not done.
+
+Also found (present on `abort-exc` too): a function that resumes keeps the
+frame its `with` lifted, so called under another handler than the one in
+scope at its `with` it still performs the first handler's operations;
+`f = { counter () with {state passing} } with { stop x = if x == 0 then
+resume x else fun _ -> 1000 }`, then `(f 20) with { stop x = resume (x + 1)
+}` is accepted and fails with an uncaught `'$saga_abort'` throw.
+
+The `run` site in `lower_fun_body` stays: a pure function that resumes is
+still reached, now exactly when `R = {}` (a closed `ρ_R`, an inline `with`
+over a computation with nothing left), where nothing it runs suspends.

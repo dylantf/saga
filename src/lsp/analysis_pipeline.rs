@@ -325,6 +325,9 @@ pub(super) fn checker_base_for_project(
     project_root: Option<PathBuf>,
 ) -> std::result::Result<typechecker::Checker, typechecker::Diagnostic> {
     let mut checker = typechecker::Checker::with_prelude(project_root.clone())?;
+    // The language server never runs codegen, so skip the codegen-only
+    // per-expression type table.
+    checker.disable_expr_types();
     if let Some(root) = &project_root {
         let config = project_config::ProjectConfig::load(root);
         if let Some(deps) = &config.deps

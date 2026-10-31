@@ -3,23 +3,35 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Compile the Phase 1 evidence bridge into `dir` so emitted code can resolve
-/// the `std_evidence_bridge:*` calls produced at every `with`-boundary.
+/// Compile the runtime support modules into `dir` so emitted code can
+/// resolve the `std_evidence_bridge:*` calls produced at every
+/// `with`-boundary and the `saga_runtime:apply_n`/`apply_cps` slow path of
+/// calls through function values.
 fn compile_evidence_bridge_into(dir: &Path) {
-    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
-    let bridge_path = dir.join("std_evidence_bridge.erl");
-    std::fs::write(&bridge_path, bridge_src).unwrap();
-    let status = std::process::Command::new("erlc")
-        .arg("-o")
-        .arg(dir)
-        .arg(&bridge_path)
-        .output()
-        .expect("failed to run erlc on evidence bridge");
-    assert!(
-        status.status.success(),
-        "erlc failed on evidence bridge:\n{}",
-        String::from_utf8_lossy(&status.stderr)
-    );
+    for (file, src) in [
+        (
+            "std_evidence_bridge.erl",
+            include_str!("../src/stdlib/evidence.bridge.erl"),
+        ),
+        (
+            "saga_runtime.erl",
+            include_str!("../src/stdlib/runtime.erl"),
+        ),
+    ] {
+        let path = dir.join(file);
+        std::fs::write(&path, src).unwrap();
+        let status = std::process::Command::new("erlc")
+            .arg("-o")
+            .arg(dir)
+            .arg(&path)
+            .output()
+            .expect("failed to run erlc on runtime support module");
+        assert!(
+            status.status.success(),
+            "erlc failed on {file}:\n{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
 }
 
 fn fixtures_root() -> PathBuf {
@@ -87,18 +99,17 @@ fn emit_from_program(
             let info = result.codegen_info().get(name).cloned().unwrap_or_default();
             modules.insert(
                 name.clone(),
-                codegen::CompiledModule {
-                    codegen_info: info,
-                    ..Default::default()
-                },
+                codegen::CompiledModule::metadata_only(info),
             );
         }
     }
-    let ctx = codegen::CodegenContext {
+    let mut ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
+    // As the build does: plan every module against its own check result. A
+    // module's own result does not hold the results of its siblings.
+    codegen::precompute_context_call_effects(&mut ctx, &result);
     codegen::emit_module_with_context(
         module_name,
         &elaborated,
@@ -939,7 +950,6 @@ main () = 42
     }
     let ctx = codegen::CodegenContext {
         modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     let out =
@@ -992,14 +1002,24 @@ main () = run_log greet
     let main_program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&main_program, "main", &checker);
 
-    // Effectful imported function used as a value without handlers in
-    // scope (they're provided by run_log's `with`) falls back to make_fun.
+    // An effectful imported function used as a value is a tagged closure
+    // taking the user argument, evidence and a continuation, which calls the
+    // imported function at its CPS-expanded arity of 3.
     assert!(
-        out.contains("call 'erlang':'make_fun'"),
-        "expected imported effectful function value to lower as make_fun\n{out}"
+        out.contains("{'$saga_cps', fun ("),
+        "expected imported effectful function value to be a tagged closure\n{out}"
     );
-    assert!(
-        out.contains("'logger', 'greet', 3"),
+    let call = out
+        .split("call 'logger':'greet'")
+        .nth(1)
+        .unwrap_or_else(|| panic!("expected a direct call to logger:greet\n{out}"));
+    let args = call
+        .split_once(')')
+        .map(|(args, _)| args)
+        .unwrap_or_default();
+    assert_eq!(
+        args.matches(',').count(),
+        2,
         "expected imported effectful function value to use CPS-expanded arity 3\n{out}"
     );
 }

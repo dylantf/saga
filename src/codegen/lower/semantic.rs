@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::ast::HandlerArm;
 
 use super::{FunInfo, Lowerer};
@@ -109,171 +107,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(super) fn substitute_type_vars(
-        ty: &crate::typechecker::Type,
-        subst: &HashMap<u32, crate::typechecker::Type>,
-    ) -> crate::typechecker::Type {
-        use crate::typechecker::{EffectEntry, EffectRow, Type};
-
-        match ty {
-            Type::Var(id) => subst.get(id).cloned().unwrap_or(Type::Var(*id)),
-            Type::Fun(param, ret, row) => Type::Fun(
-                Box::new(Self::substitute_type_vars(param, subst)),
-                Box::new(Self::substitute_type_vars(ret, subst)),
-                EffectRow {
-                    effects: row
-                        .effects
-                        .iter()
-                        .map(|entry| EffectEntry {
-                            name: entry.name.clone(),
-                            args: entry
-                                .args
-                                .iter()
-                                .map(|arg| Self::substitute_type_vars(arg, subst))
-                                .collect(),
-                        })
-                        .collect(),
-                    tails: row
-                        .tails
-                        .iter()
-                        .map(|tail| Self::substitute_type_vars(tail, subst))
-                        .collect(),
-                },
-            ),
-            Type::Con(name, args) => Type::Con(
-                name.clone(),
-                args.iter()
-                    .map(|arg| Self::substitute_type_vars(arg, subst))
-                    .collect(),
-            ),
-            Type::Record(fields) => Type::Record(
-                fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), Self::substitute_type_vars(ty, subst)))
-                    .collect(),
-            ),
-            Type::Error => Type::Error,
-        }
-    }
-
-    pub(super) fn bind_type_vars_from_match(
-        actual: &crate::typechecker::Type,
-        pattern: &crate::typechecker::Type,
-        subst: &mut HashMap<u32, crate::typechecker::Type>,
-    ) {
-        use crate::typechecker::Type;
-
-        match (actual, pattern) {
-            (_, Type::Var(id)) => {
-                subst.entry(*id).or_insert_with(|| actual.clone());
-            }
-            (Type::Fun(a1, b1, _), Type::Fun(a2, b2, _)) => {
-                Self::bind_type_vars_from_match(a1, a2, subst);
-                Self::bind_type_vars_from_match(b1, b2, subst);
-            }
-            (Type::Con(n1, xs1), Type::Con(n2, xs2)) if n1 == n2 && xs1.len() == xs2.len() => {
-                for (x1, x2) in xs1.iter().zip(xs2.iter()) {
-                    Self::bind_type_vars_from_match(x1, x2, subst);
-                }
-            }
-            (Type::Record(fs1), Type::Record(fs2)) if fs1.len() == fs2.len() => {
-                for ((n1, t1), (n2, t2)) in fs1.iter().zip(fs2.iter()) {
-                    if n1 == n2 {
-                        Self::bind_type_vars_from_match(t1, t2, subst);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Resolve a record's declared `field -> type` map from its name, trying the
-    /// canonical `record_name` pinned on a node first, then the surface name, then
-    /// a `<module>.<Name>` lookup. Used to recover per-field expected types at
-    /// `RecordCreate` so an effectful function-typed field (e.g.
-    /// `run: Int -> Int needs {Logger}`) is lowered with the evidence-passing CPS
-    /// convention rather than as a plain closure. The field types may still carry
-    /// the record's type-parameter vars (we don't substitute concrete args here),
-    /// which is sufficient since a field's effect row is independent of them.
-    pub(super) fn record_field_types_by_name(
-        &self,
-        record_name: Option<&str>,
-        source_name: &str,
-    ) -> Option<HashMap<String, crate::typechecker::Type>> {
-        let module_name = self.current_semantic_module_name();
-        let info = record_name
-            .and_then(|rn| self.check_result.records.get(rn))
-            .or_else(|| self.check_result.records.get(source_name))
-            .or_else(|| {
-                self.check_result
-                    .records
-                    .get(crate::typechecker::bare_type_name(source_name))
-            })
-            .or_else(|| {
-                self.check_result
-                    .records
-                    .get(&format!("{module_name}.{source_name}"))
-            })?;
-        Some(info.fields.iter().cloned().collect())
-    }
-
-    pub(super) fn record_field_types_from_expected(
-        &self,
-        expected_ty: &crate::typechecker::Type,
-    ) -> Option<HashMap<String, crate::typechecker::Type>> {
-        use crate::typechecker::Type;
-
-        match expected_ty {
-            Type::Record(fields) => Some(fields.iter().cloned().collect()),
-            Type::Con(name, args) => {
-                let info = self.check_result.records.get(name).or_else(|| {
-                    self.check_result
-                        .records
-                        .get(crate::typechecker::bare_type_name(name))
-                })?;
-                let mut subst = HashMap::new();
-                for (param_id, arg_ty) in info.type_params.iter().zip(args.iter()) {
-                    subst.insert(*param_id, arg_ty.clone());
-                }
-                Some(
-                    info.fields
-                        .iter()
-                        .map(|(field, ty)| (field.clone(), Self::substitute_type_vars(ty, &subst)))
-                        .collect(),
-                )
-            }
-            _ => None,
-        }
-    }
-
-    pub(super) fn constructor_arg_types_from_expected(
-        &self,
-        ctor_name: &str,
-        expected_ty: &crate::typechecker::Type,
-    ) -> Option<Vec<crate::typechecker::Type>> {
-        if matches!(
-            expected_ty,
-            crate::typechecker::Type::Var(_) | crate::typechecker::Type::Error
-        ) {
-            return None;
-        }
-        let scheme = self.constructor_scheme_for(ctor_name)?;
-        let mut param_tys = Vec::new();
-        let mut current = &scheme.ty;
-        while let crate::typechecker::Type::Fun(param, ret, _) = current {
-            param_tys.push((**param).clone());
-            current = ret;
-        }
-        let mut subst = HashMap::new();
-        Self::bind_type_vars_from_match(expected_ty, current, &mut subst);
-        Some(
-            param_tys
-                .into_iter()
-                .map(|ty| Self::substitute_type_vars(&ty, &subst))
-                .collect(),
-        )
-    }
-
     pub(super) fn function_tail_type_after_params(
         &self,
         name: &str,
@@ -299,6 +132,25 @@ impl<'a> Lowerer<'a> {
             .unwrap_or(&self.current_source_module)
     }
 
+    /// The module and id under which the typechecker's tables hold
+    /// `node_id`, a node of `module`. They differ from the arguments for a
+    /// node the generic fold copied, possibly from another module.
+    pub(super) fn origin<'s>(
+        &'s self,
+        module: &'s str,
+        node_id: crate::ast::NodeId,
+    ) -> (&'s str, crate::ast::NodeId) {
+        let origins = if module == self.current_source_module {
+            Some(&self.origins)
+        } else {
+            self.ctx.modules.get(module).map(|m| &m.origins)
+        };
+        match origins.and_then(|origins| origins.get(&node_id)) {
+            Some((source, id)) => (source.as_deref().unwrap_or(module), *id),
+            None => (module, node_id),
+        }
+    }
+
     /// Resolve a source node's inferred type against the module whose code is
     /// currently being lowered. Imported handler arms retain their defining
     /// module's NodeIds, so consulting only the consumer's CheckResult loses
@@ -307,7 +159,7 @@ impl<'a> Lowerer<'a> {
         &self,
         node_id: crate::ast::NodeId,
     ) -> Option<&crate::typechecker::Type> {
-        let module_name = self.current_semantic_module_name();
+        let (module_name, node_id) = self.origin(self.current_semantic_module_name(), node_id);
         if module_name == self.current_source_module {
             self.check_result.type_at_node.get(&node_id)
         } else {
@@ -348,16 +200,6 @@ impl<'a> Lowerer<'a> {
             .get(bare)
             .map(String::as_str)
             .filter(|module| *module != self.current_source_module)
-    }
-
-    pub(super) fn constructor_origin_module_for(
-        &self,
-        node_id: crate::ast::NodeId,
-        name: &str,
-    ) -> Option<&str> {
-        self.carried_constructor_origin_module(node_id)
-            .or_else(|| self.carried_constructor_name_origin_module(name))
-            .or_else(|| self.handler_origin_module())
     }
 
     pub(super) fn resolved_constructor_name_for(
@@ -429,20 +271,6 @@ impl<'a> Lowerer<'a> {
             }
         }
         None
-    }
-
-    pub(super) fn constructor_scheme_for(
-        &self,
-        canonical_name: &str,
-    ) -> Option<&crate::typechecker::Scheme> {
-        self.check_result
-            .constructors
-            .get(canonical_name)
-            .or_else(|| {
-                canonical_name
-                    .strip_prefix(&format!("{}.", self.current_source_module))
-                    .and_then(|bare| self.check_result.constructors.get(bare))
-            })
     }
 
     /// Check whether a name refers to a known constructor, accounting for
@@ -550,6 +378,7 @@ impl<'a> Lowerer<'a> {
         module_name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<String> {
+        let (module_name, node_id) = self.origin(module_name, node_id);
         self.front_resolution_for_module(module_name)
             .and_then(|r| r.effect_call(node_id))
             .map(|resolved| resolved.effect.as_str())

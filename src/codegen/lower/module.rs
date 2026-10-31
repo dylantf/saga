@@ -8,7 +8,7 @@ use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
 
 use super::init::{PendingAnnotation, extract_external};
 use super::pats::lower_params;
-use super::util::{self, core_var};
+use super::util::{self, cerl_call, core_var};
 use super::{EvidenceFrame, FunInfo, GeneratedHelperVariant, HoistedDictMethod, Lowerer};
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
@@ -58,71 +58,6 @@ fn count_lambda_params(body: &Expr) -> usize {
     }
 }
 
-pub(super) fn lower_head_debug_label(head: &Expr) -> String {
-    match &head.kind {
-        ExprKind::Var { name } => format!("var({name})"),
-        ExprKind::QualifiedName { module, name, .. } => format!("qualified({module}.{name})"),
-        ExprKind::DictMethodAccess {
-            trait_name,
-            method_index,
-            ..
-        } => format!("dict-method({trait_name}#{method_index})"),
-        ExprKind::DictSuperAccess {
-            trait_name,
-            supertrait_index,
-            ..
-        } => format!("dict-super({trait_name}#{supertrait_index})"),
-        ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
-        ExprKind::Constructor { name } => format!("ctor({name})"),
-        ExprKind::DictRef { name } => format!("dict-ref({name})"),
-        ExprKind::ForeignCall { module, func, args } => {
-            format!("foreign({module}.{func}/{})", args.len())
-        }
-        ExprKind::EffectCall {
-            qualifier,
-            name,
-            args,
-        } => format!(
-            "effect-call({}{name}!/{})",
-            qualifier
-                .as_ref()
-                .map(|qualifier| format!("{qualifier}."))
-                .unwrap_or_default(),
-            args.len()
-        ),
-        ExprKind::Lit { value } => format!("lit({value:?})"),
-        ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
-        ExprKind::RecordCreate { name, fields, .. } => format!("record({name}/{})", fields.len()),
-        ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
-        ExprKind::RecordBuild { fields, .. } => format!("record-build/{}", fields.len()),
-        ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
-        ExprKind::App { .. } => "app-head".to_string(),
-        ExprKind::BinOp { .. } => "binop".to_string(),
-        ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),
-        ExprKind::If { .. } => "if".to_string(),
-        ExprKind::Case { .. } => "case".to_string(),
-        ExprKind::Block { .. } => "block".to_string(),
-        ExprKind::FieldAccess { field, .. } => format!("field-access(.{field})"),
-        ExprKind::RecordUpdate { .. } => "record-update".to_string(),
-        ExprKind::With { .. } => "with".to_string(),
-        ExprKind::Resume { .. } => "resume".to_string(),
-        ExprKind::Do { .. } => "do".to_string(),
-        ExprKind::Receive { .. } => "receive".to_string(),
-        ExprKind::BitString { segments } => format!("bitstring/{}", segments.len()),
-        ExprKind::Ascription { .. } => "ascription".to_string(),
-        ExprKind::Pipe { segments, .. } => format!("pipe/{}", segments.len()),
-        ExprKind::BinOpChain { segments, .. } => format!("binop-chain/{}", segments.len()),
-        ExprKind::PipeBack { segments } => format!("pipe-back/{}", segments.len()),
-        ExprKind::ComposeForward { segments } => format!("compose-forward/{}", segments.len()),
-        ExprKind::Cons { .. } => "cons".to_string(),
-        ExprKind::ListLit { elements, .. } => format!("list/{}", elements.len()),
-        ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
-        ExprKind::ListComprehension { qualifiers, .. } => {
-            format!("list-comprehension/{}", qualifiers.len())
-        }
-    }
-}
-
 fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
     match ty {
         ast::TypeExpr::Named { name, .. } => {
@@ -132,6 +67,31 @@ fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
         ast::TypeExpr::Labeled { inner, .. } => is_unit_type_expr(inner),
         _ => false,
     }
+}
+
+/// The number of arguments an external function's parameter takes when its
+/// declared type is a pure function type, which the Erlang side calls as a
+/// plain fun of that arity.
+fn pure_callback_arity(ty: &ast::TypeExpr) -> Option<usize> {
+    let mut current = ty;
+    while let ast::TypeExpr::Labeled { inner, .. } = current {
+        current = inner;
+    }
+    let mut arity = 0;
+    while let ast::TypeExpr::Arrow {
+        to,
+        effects,
+        effect_row_var,
+        ..
+    } = current
+    {
+        if !effects.is_empty() || !effect_row_var.is_empty() {
+            return None;
+        }
+        arity += 1;
+        current = to;
+    }
+    (arity > 0).then_some(arity)
 }
 
 impl<'a> Lowerer<'a> {
@@ -148,10 +108,6 @@ impl<'a> Lowerer<'a> {
         } = annotation;
         let scheme = self.check_result.env.get(name);
         let resolved_ty = scheme.map(|scheme| self.check_result.sub.apply(&scheme.ty));
-        let param_types = resolved_ty
-            .as_ref()
-            .map(util::param_types_from_type)
-            .unwrap_or_default();
         if effects.is_empty()
             && let Some(ty) = resolved_ty.as_ref()
         {
@@ -167,6 +123,19 @@ impl<'a> Lowerer<'a> {
             .as_ref()
             .map(|ty| util::arity_and_effects_from_type(ty).0)
             .unwrap_or(0);
+        // Elaborated `where` dictionaries are leading parameters that the
+        // declared type does not count. Importers derive the arity from the
+        // scheme (`CallableAbi::from_scheme`), dictionaries included; the
+        // definition does too, so a binding with fewer source parameters
+        // than its type eta-expands up to the arrow that carries its effects.
+        let declared_arity = if declared_arity > 0 {
+            declared_arity
+                + scheme
+                    .map(|scheme| util::dict_param_count(&scheme.constraints))
+                    .unwrap_or(0)
+        } else {
+            declared_arity
+        };
         let base_arity = source_arity.max(declared_arity);
         let mut abi = resolved_ty
             .as_ref()
@@ -186,7 +155,6 @@ impl<'a> Lowerer<'a> {
         FunInfo::from_abi(
             abi,
             param_absorbed_effects,
-            param_types,
             scheme
                 .map(|scheme| util::dict_param_count(&scheme.constraints))
                 .unwrap_or(0),
@@ -228,9 +196,6 @@ impl<'a> Lowerer<'a> {
                 .plan
         });
         self.effect_abi_plan = plan;
-        timed_lower_phase(module_name, "plan_contextual_effect_abis", || {
-            self.plan_contextual_function_value_abis(program)
-        });
         self.effect_abi_plan.freeze();
         std::mem::take(&mut self.effect_abi_plan)
     }
@@ -272,7 +237,6 @@ impl<'a> Lowerer<'a> {
                         FunInfo::from_abi(
                             CallableAbi::pure(dict_params.len()),
                             HashMap::new(),
-                            Vec::new(),
                             0,
                         ),
                     );
@@ -303,7 +267,7 @@ impl<'a> Lowerer<'a> {
             for (idx, method) in methods.iter().enumerate() {
                 let mut effects =
                     self.canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
-                if Self::contains_direct_effect_call(method) {
+                if self.dict_method_performs(method) {
                     effects.extend(impl_effects.iter().cloned());
                 }
                 effects.sort();
@@ -429,7 +393,6 @@ impl<'a> Lowerer<'a> {
                             FunInfo::from_abi(
                                 CallableAbi::pure(dict_params.len()),
                                 HashMap::new(),
-                                Vec::new(),
                                 0,
                             ),
                         );
@@ -484,9 +447,6 @@ impl<'a> Lowerer<'a> {
             );
         }
         self.effect_abi_plan = call_effects.plan;
-        timed_lower_phase(module_name, "plan_contextual_effect_abis", || {
-            self.plan_contextual_function_value_abis(program)
-        });
         self.effect_abi_plan.freeze();
         timed_lower_phase(module_name, "precompute_missing_context_abis", || {
             self.precompute_missing_context_plans()
@@ -518,7 +478,17 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .zip(params.iter())
                     .filter(|(_, (_, ty))| !is_unit_type_expr(ty))
-                    .map(|(v, _)| CExpr::Var(v.clone()))
+                    .map(|(v, (_, ty))| match pure_callback_arity(ty) {
+                        // Erlang code calls a callback as a plain fun, so a
+                        // tagged closure used at a pure type (or a fun of
+                        // another arity) is wrapped at this boundary.
+                        Some(arity) => cerl_call(
+                            "saga_runtime",
+                            "bare_fun",
+                            vec![CExpr::Var(v.clone()), CExpr::Lit(CLit::Int(arity as i64))],
+                        ),
+                        None => CExpr::Var(v.clone()),
+                    })
                     .collect();
                 let call = CExpr::Call(erl_module.clone(), erl_func.clone(), call_args);
                 fun_defs.push(CFunDef {
@@ -533,6 +503,21 @@ impl<'a> Lowerer<'a> {
 
         for (name, arity, clauses, fun_span) in clause_groups {
             self.current_function = name.clone();
+            // Clause guards and bodies are lowering roots.
+            let normal_clauses: Vec<(Option<Box<Expr>>, std::borrow::Cow<'_, Expr>)> = clauses
+                .iter()
+                .map(|&(_, guard, body)| {
+                    let guard = guard.as_deref().map(|guard| {
+                        Box::new(self.effect_normal_guard(guard, "clause guard").into_owned())
+                    });
+                    (guard, self.effect_normal_body(body, "function clause"))
+                })
+                .collect();
+            let clauses: Vec<Clause> = clauses
+                .iter()
+                .zip(&normal_clauses)
+                .map(|(&(params, _, _), (guard, body))| (params, guard, body.as_ref()))
+                .collect();
             // Export every function in the emitted Core, not just `pub` ones.
             // Privacy is a front-end concern (the typechecker/resolver already
             // rejected illegal cross-module references in source); at the Core
@@ -594,7 +579,17 @@ impl<'a> Lowerer<'a> {
                     ..
                 } = &body.kind
                 {
-                    params_ce.extend(lower_params(lam_params));
+                    for lam_param in lower_params(lam_params) {
+                        // Unit and wildcard parameters are named by their
+                        // position in their own list, so an absorbed one can
+                        // collide with an outer one (`mk () = fun () -> ...`).
+                        let lam_param = if params_ce.contains(&lam_param) {
+                            format!("_Arg{}", params_ce.len())
+                        } else {
+                            lam_param
+                        };
+                        params_ce.push(lam_param);
+                    }
                     for param in lam_params {
                         saved_handler_vars
                             .extend(self.register_dynamic_handler_pattern_vars(param));
@@ -605,7 +600,16 @@ impl<'a> Lowerer<'a> {
                 // declares (e.g. `pg_text = coerce_value` with type String -> Value).
                 // Without this, the function is emitted as /0 but cross-module
                 // callers derive arity from the type and call /1.
-                let body_expected_ty = self.function_tail_type_after_params(&name, params_ce.len());
+                // Leading `where` dictionaries are not arrows of the declared
+                // type (see `fun_binding_runtime_info`).
+                let dict_params = self
+                    .fun_info
+                    .get(&name)
+                    .map_or(0, |info| info.dict_param_count);
+                let body_expected_ty = self.function_tail_type_after_params(
+                    &name,
+                    params_ce.len().saturating_sub(dict_params),
+                );
                 let eta_count = base_arity.saturating_sub(params_ce.len());
                 let eta_params: Vec<String> =
                     (0..eta_count).map(|i| format!("_Eta{}", i)).collect();
@@ -618,16 +622,24 @@ impl<'a> Lowerer<'a> {
                     let eta_args: Vec<CExpr> =
                         eta_params.iter().map(|p| CExpr::Var(p.clone())).collect();
                     if let Some(body_ty) = body_expected_ty {
-                        let body_fun =
-                            self.lower_expr_value_with_expected_type(body, Some(&body_ty));
+                        let body_fun = self.lower_expr(body);
                         let body_is_cps = self.cps_function_shape_from_type(&body_ty).is_some();
-                        let mut call_args = eta_args;
                         if body_is_cps {
-                            call_args.push(CExpr::Var("_Evidence".to_string()));
-                            call_args.push(CExpr::Var("_ReturnK".to_string()));
-                            CExpr::Apply(Box::new(body_fun), call_args)
+                            // The body's value is a function value of effectful
+                            // type: dispatch on its representation.
+                            let body_var = self.fresh();
+                            let call = self.tagged_cps_apply(
+                                &body_var,
+                                &eta_params,
+                                "_Evidence",
+                                "_ReturnK",
+                            );
+                            CExpr::Let(body_var, Box::new(body_fun), Box::new(call))
                         } else {
-                            let call = CExpr::Apply(Box::new(body_fun), call_args);
+                            // The body's value is a pure function of unknown
+                            // arity (`f = ident g`, or a body that returns a
+                            // lambda after doing some work).
+                            let call = self.apply_function_value(body_fun, &eta_params);
                             if has_effects {
                                 CExpr::Apply(
                                     Box::new(CExpr::Var("_ReturnK".to_string())),
@@ -638,24 +650,15 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                     } else {
-                        // For non-block bodies, lower_block didn't run, so apply return_k.
-                        // Special case: if the body is a terminal effect call, pass _ReturnK
-                        // directly as K so abort-style handlers skip the rest (proper CPS).
-                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
-                        {
-                            self.lower_terminal_effectful_expr_with_return_k(
-                                body,
-                                effect_return_k.clone(),
-                            )
+                        let body_ce = self.lower_tail(body, effect_return_k.clone());
+                        if has_effects {
+                            CExpr::Apply(Box::new(body_ce), eta_args)
                         } else {
-                            self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
-                        };
-                        CExpr::Apply(Box::new(body_ce), eta_args)
+                            self.apply_function_value(body_ce, &eta_params)
+                        }
                     }
-                } else if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
-                    self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
-                    self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
+                    self.lower_tail(body, effect_return_k.clone())
                 };
                 self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                 CExpr::Fun(params_ce, Box::new(body_ce))
@@ -701,16 +704,8 @@ impl<'a> Lowerer<'a> {
                                     .collect(),
                             )
                         };
-                        let guard_ce = guard.as_deref().map(|g| self.lower_expr(g));
-                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
-                        {
-                            self.lower_terminal_effectful_expr_with_return_k(
-                                body,
-                                effect_return_k.clone(),
-                            )
-                        } else {
-                            self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
-                        };
+                        let guard_ce = guard.as_deref().map(|g| self.lower_guard(g));
+                        let body_ce = self.lower_tail(body, effect_return_k.clone());
                         self.restore_dynamic_handler_pattern_vars(saved_handler_vars);
                         CArm {
                             pat,
@@ -757,9 +752,9 @@ impl<'a> Lowerer<'a> {
             dict_params,
             super_dicts,
             methods,
-            _method_effects,
-            _method_open_rows,
-            _impl_effects,
+            method_effects,
+            method_open_rows,
+            impl_effects,
         ) in dict_constructors
         {
             let arity = dict_params.len();
@@ -772,9 +767,26 @@ impl<'a> Lowerer<'a> {
             let mut method_exprs: Vec<CExpr> =
                 Vec::with_capacity(super_dicts.len() + methods.len());
             for super_dict in super_dicts {
-                method_exprs.push(self.lower_expr_value(super_dict));
+                method_exprs.push(self.lower_expr(super_dict));
             }
             for (idx, m) in methods.iter().enumerate() {
+                // A slot holds a bare fun or a tagged one according to the
+                // method's own convention. The method is lowered as a raw fun
+                // (so it can be hoisted) and the tag is applied to the slot
+                // below.
+                let slot_is_cps = matches!(&m.kind, ExprKind::Lambda { params, .. } if !params.is_empty())
+                    && {
+                        let (is_cps, _, _) = self.method_cps_shape(
+                            m,
+                            method_effects,
+                            method_open_rows,
+                            impl_effects,
+                            idx,
+                        );
+                        self.forced_lambda_cps = Some((m.id, is_cps));
+                        is_cps
+                    };
+                let m = &*self.effect_normal_body(m, "dictionary method");
                 let ce = self.lower_expr(m);
                 // Phase 2: if this method is a planned specialization target,
                 // hoist the lowered closure into a top-level function and put a
@@ -802,6 +814,11 @@ impl<'a> Lowerer<'a> {
                     CExpr::FunRef(hoist.fn_name, hoisted_arity)
                 } else {
                     ce
+                };
+                let slot = if slot_is_cps {
+                    super::tagged::tag_cps(slot)
+                } else {
+                    slot
                 };
                 method_exprs.push(slot);
             }
@@ -963,7 +980,7 @@ impl<'a> Lowerer<'a> {
     ) -> (bool, Vec<String>, bool) {
         let mut static_effects =
             self.canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
-        if Self::contains_direct_effect_call(m) {
+        if self.dict_method_performs(m) {
             static_effects.extend(self.canonicalize_effects(impl_effects.to_vec()));
         }
         static_effects.sort();

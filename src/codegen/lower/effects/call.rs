@@ -2,7 +2,6 @@ use super::*;
 use crate::ast::{Expr, ExprKind};
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::lower::*;
-use crate::codegen::runtime_shape::EvidenceAbi;
 
 impl<'a> Lowerer<'a> {
     /// Lower an effect call: `op! args`.
@@ -55,19 +54,6 @@ impl<'a> Lowerer<'a> {
             .saturating_sub(runtime_param_count + dict_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
-        // An argument that performs effects when evaluated (e.g. `add! (make_frag
-        // ())`, or one nested deeper like `add! (combine [make_frag ()])`) cannot
-        // be lowered as a plain value: a CPS-compiled function delivers its result
-        // through its own `_ReturnK`, not as the value of `apply`. Lowering it with
-        // an identity continuation would feed the *handler's* yielded value into
-        // the op call instead of the argument's actual value. Defer each such arg
-        // and sequence it through the op call's continuation below, mirroring the
-        // statement-position path that already handles arbitrary nesting.
-        //
-        // `branch_is_effectful` is depth-aware (it descends through constructor
-        // calls, records, tuples, etc.) but does NOT flag lambda bodies, so
-        // callback arguments stay on the normal value path.
-        let mut effectful_chain: Vec<(String, &Expr)> = Vec::new();
         for (source_idx, arg) in args.iter().enumerate() {
             let is_unit_literal = matches!(
                 arg.kind,
@@ -81,18 +67,12 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
-            if self.branch_is_effectful(arg) {
-                // Real runtime param, but its value is produced by sequencing the
-                // argument through a continuation rather than a let-binding here.
-                param_vars.push(v.clone());
-                effectful_chain.push((v, arg));
-                continue;
-            }
+            let _ = self.operand(arg, "an operation call");
             // Effect call args are generally not CPS-expanded — the handler
             // arm receives the callback as a plain value. However, if the op's
             // parameter declares absorbed effects, the lambda always gets its
             // own evidence/continuation params: the handler arm invokes it via
-            // lower_effectful_var_call with the evidence the *handler* chooses
+            // a call of a function value with the evidence the *handler* chooses
             // (it may install its own handler around the call, e.g. a nested
             // `with`), so capturing the caller's in-scope evidence would both
             // mismatch the arm's CPS calling convention and pin the callback
@@ -101,17 +81,12 @@ impl<'a> Lowerer<'a> {
             // calls, not handler params.
             let saved_direct_ops = self.direct_ops.clone();
             let mut captured_evidence_scope = None;
+            let mut tagged_callback_capture: Option<(String, Vec<String>)> = None;
             let absorbed_effects = op_param_absorbed
                 .as_ref()
                 .and_then(|pae| pae.get(&source_idx));
             let has_open_row = op_param_open_rows.contains(&source_idx);
             if absorbed_effects.is_some() || has_open_row {
-                let actual_callback_effects = self
-                    .semantic_type_at_node(arg.id)
-                    .and_then(|ty| self.cps_function_shape_from_type(ty))
-                    .map(|shape| shape.static_slots().to_vec())
-                    .unwrap_or_default();
-                let mut uncapturable: Vec<String> = Vec::new();
                 let mut uses_native_callback_context = false;
                 for eff in absorbed_effects.into_iter().flatten() {
                     let ops = self.effect_handler_ops(std::slice::from_ref(eff));
@@ -131,60 +106,39 @@ impl<'a> Lowerer<'a> {
                             self.direct_ops
                                 .insert(format!("{}.{}", e, op), handler_canonical.clone());
                         }
-                        continue;
                     }
-                    let concrete = if actual_callback_effects.contains(eff) {
-                        eff.clone()
-                    } else {
-                        let family = crate::typechecker::applied_effect_family(eff);
-                        let matches = actual_callback_effects
-                            .iter()
-                            .filter(|actual| {
-                                crate::typechecker::applied_effect_family(actual) == family
-                            })
-                            .collect::<Vec<_>>();
-                        if matches.len() == 1 {
-                            matches[0].to_string()
-                        } else {
-                            eff.clone()
-                        }
-                    };
-                    uncapturable.push(concrete);
                 }
-                uncapturable.sort();
-                uncapturable.dedup();
-                let cps_open_row = has_open_row && !uses_native_callback_context;
-                if !uncapturable.is_empty() || cps_open_row {
-                    let planned = self
-                        .planned_function_value_implementation(arg.id)
-                        .and_then(|abi| abi.evidence.as_ref())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "internal ABI planning error: missing effect callback ABI for {:?}",
-                                arg.id
-                            )
-                        });
-                    assert_eq!(
-                        planned,
-                        &EvidenceAbi::new(uncapturable, cps_open_row),
-                        "internal ABI planning error: effect callback ABI disagrees with lowering"
-                    );
-                    if cps_open_row {
-                        // Named callback effects are supplied by the handler
-                        // at invocation time. Capture the perform-site frame
-                        // only as a source for the callback's `..r` entries;
-                        // lambda lowering overlays the call-time static frame
-                        // and removes exact duplicates.
-                        if let Some(frame) = self.current_evidence.clone() {
-                            captured_evidence_scope =
-                                Some((arg.id, self.capture_function_value_evidence(arg.id, frame)));
-                        }
-                    }
+                // The callback is shaped by its own type. The language rule
+                // applied here: a callback with an open row tail runs with
+                // the handler's call-time frame for its named effects and
+                // the perform-site frame for the tail. A callback run in a
+                // native context (`spawn`) likewise keeps the perform-site
+                // frame for everything that context does not provide.
+                if (has_open_row || uses_native_callback_context)
+                    && let Some(frame) = self.current_evidence.clone()
+                {
+                    let named_effects = absorbed_effects.cloned().unwrap_or_default();
+                    tagged_callback_capture = Some((frame.var.clone(), named_effects.clone()));
+                    captured_evidence_scope = Some((
+                        arg.id,
+                        self.capture_function_value_evidence(arg.id, frame, named_effects),
+                    ));
                 }
             }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr_value(arg));
+                .unwrap_or_else(|| self.lower_expr(arg));
+            // A lambda overlays the captured frame itself. Any other
+            // callback value (a named function, a variable) is wrapped in a
+            // tagged closure that does the same before calling it.
+            let ce = match tagged_callback_capture {
+                Some((captured, named_effects))
+                    if !matches!(arg.kind, ExprKind::Lambda { .. }) =>
+                {
+                    self.overlay_callback_value(arg, ce, &captured, &named_effects)
+                }
+                _ => ce,
+            };
             if let Some((node_id, previous)) = captured_evidence_scope {
                 self.restore_function_value_captured_evidence(node_id, previous);
             }
@@ -193,7 +147,7 @@ impl<'a> Lowerer<'a> {
             param_vars.push(v);
         }
 
-        let mut result = match self.effect_op_lowering_plan(&effect_key, &effect_name) {
+        match self.effect_op_lowering_plan(&effect_key, &effect_name) {
             EffectOpLoweringPlan::DirectNative { handler_canonical } => {
                 // Direct path: ops that always resume exactly once can be
                 // inlined as `let Result = <native call> in <continuation
@@ -222,10 +176,12 @@ impl<'a> Lowerer<'a> {
                     )
                 } else {
                     let ctor_atoms = self.constructor_atoms.clone();
+                    let callback_evidence = self.native_callback_evidence(op_name);
                     crate::codegen::lower::beam_interop::build_native_call(
                         op_name,
                         &param_var_strs,
                         &ctor_atoms,
+                        callback_evidence.as_ref(),
                         &mut || self.fresh(),
                     )
                 };
@@ -329,23 +285,7 @@ impl<'a> Lowerer<'a> {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
             }
-        };
-
-        // Sequence deferred effectful arguments. Rightmost first so the outermost
-        // wrapper is the leftmost arg, preserving left-to-right evaluation: `arg0`
-        // resolves and binds its var, then `arg1`, then the op call runs. Each arg
-        // is threaded to a continuation that binds its result var (referenced by
-        // the op call in `param_vars`) and proceeds with `result`.
-        // `lower_terminal_effectful_expr_to_k` dispatches on the argument's shape:
-        // a bare effectful call, an effectful call nested inside a constructor /
-        // record / tuple, or (degenerately) a pure value.
-        for (v, arg) in effectful_chain.into_iter().rev() {
-            let k_fun = CExpr::Fun(vec![v], Box::new(result));
-            let k_var = self.fresh();
-            let threaded = self.lower_terminal_effectful_expr_to_k(arg, &k_var);
-            result = CExpr::Let(k_var, Box::new(k_fun), Box::new(threaded));
         }
-        result
     }
 
     /// Build a per-op handler function for a single BEAM-native operation.
@@ -353,6 +293,109 @@ impl<'a> Lowerer<'a> {
     ///
     /// `handler_canonical` identifies which handler is providing this op,
     /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
+    /// Tagged closures: wrap a callback value passed to an effect operation
+    /// so that it runs with the perform-site frame `captured`, except that
+    /// `named_effects` (those its parameter type names) come from the frame
+    /// it is called with. See
+    /// "Effect-Operation Callbacks With Open Tails" in
+    /// `docs/effect-implementation.md`. A value that is not of effectful
+    /// function type needs no evidence and is returned as is.
+    fn overlay_callback_value(
+        &mut self,
+        arg: &Expr,
+        value: CExpr,
+        captured: &str,
+        named_effects: &[String],
+    ) -> CExpr {
+        let Some(ty) = self.value_type(arg.id) else {
+            return value;
+        };
+        if crate::codegen::runtime_shape::value_repr(&ty)
+            != crate::codegen::runtime_shape::ValueRepr::Tagged
+        {
+            return value;
+        }
+        // One call consumes the arguments up to the first effectful arrow.
+        let mut arity = 0;
+        let mut current = &ty;
+        while let crate::typechecker::Type::Fun(_, ret, row) = current {
+            arity += 1;
+            if !row.effects.is_empty() || !row.tails.is_empty() {
+                break;
+            }
+            current = ret;
+        }
+        let func_var = self.fresh();
+        let ev_param = self.fresh();
+        let merged = self.fresh();
+        let mut params: Vec<String> = (0..arity).map(|_| self.fresh()).collect();
+        let user_params = params.clone();
+        params.push(ev_param.clone());
+        params.push("_ReturnK".to_string());
+        let call = self.tagged_cps_apply(&func_var, &user_params, &merged, "_ReturnK");
+        let body = CExpr::Let(
+            merged,
+            Box::new(evidence::append_tail(
+                CExpr::Var(ev_param),
+                CExpr::Var(captured.to_string()),
+                named_effects,
+            )),
+            Box::new(call),
+        );
+        CExpr::Let(
+            func_var,
+            Box::new(value),
+            Box::new(crate::codegen::lower::tagged::tag_cps(CExpr::Fun(
+                params,
+                Box::new(body),
+            ))),
+        )
+    }
+
+    /// Tagged closures: the evidence a BEAM-native op hands to the Saga
+    /// callback it runs (`spawn`). The callback is called in a fresh native
+    /// context, so the effects that context provides natively (Actor) are
+    /// installed as entries of native op closures over the current frame.
+    /// `None` for an op that runs no callback.
+    pub(crate) fn native_callback_evidence(&mut self, op_name: &str) -> Option<CExpr> {
+        if !crate::codegen::lower::beam_interop::native_op_runs_callback(op_name) {
+            return None;
+        }
+        let mut native_effects: Vec<String> = self
+            .effect_defs
+            .values()
+            .filter_map(|effect| effect.ops.get(op_name))
+            .flat_map(|op| op.param_absorbed_effects.values().flatten().cloned())
+            .collect();
+        native_effects.sort();
+        native_effects.dedup();
+        let mut evidence = match &self.current_evidence {
+            Some(frame) => CExpr::Var(frame.var.clone()),
+            None => CExpr::Tuple(Vec::new()),
+        };
+        for effect in native_effects {
+            let Some(handler_canonical) = self.beam_native_handler_for_effect(&effect) else {
+                continue;
+            };
+            let ops = self.effect_handler_ops(std::slice::from_ref(&effect));
+            if ops.is_empty()
+                || ops.iter().any(|(_, op)| {
+                    crate::codegen::lower::beam_interop::lookup_native_op(op).is_none()
+                        || crate::codegen::lower::beam_interop::native_op_runs_callback(op)
+                })
+            {
+                continue;
+            }
+            let op_closures: Vec<CExpr> = ops
+                .iter()
+                .map(|(_, op)| self.build_beam_native_op_fun(op, &handler_canonical))
+                .collect();
+            let entry = evidence::build_evidence_entry(&effect, op_closures, false);
+            evidence = evidence::insert_static(evidence, 0, entry);
+        }
+        Some(evidence)
+    }
+
     pub(crate) fn build_beam_native_op_fun(
         &mut self,
         op_name: &str,
@@ -382,10 +425,12 @@ impl<'a> Lowerer<'a> {
             )
         } else {
             let ctor_atoms = self.constructor_atoms.clone();
+            let callback_evidence = self.native_callback_evidence(op_name);
             crate::codegen::lower::beam_interop::build_native_call(
                 op_name,
                 &param_vars,
                 &ctor_atoms,
+                callback_evidence.as_ref(),
                 &mut || self.fresh(),
             )
         };

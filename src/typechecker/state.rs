@@ -59,6 +59,25 @@ pub type HandlerWhereConstraints = HashMap<(String, usize), Vec<(String, Vec<u32
 pub struct HandlerInfo {
     /// Which effects this handler handles
     pub effects: Vec<std::string::String>,
+    /// The row variable (one of `forall`) for what `resume` runs beyond the
+    /// handler's `needs`: the rest of the handled computation, bound to what
+    /// it leaves unhandled at each `with`.
+    pub resume_row: Option<u32>,
+    /// The arms put a function that resumes where no effects may be
+    /// performed, which closed the handler's `ρ_R` to `{}` (so `resume_row`
+    /// is `None`). The handler then only handles computations that leave
+    /// nothing unhandled: every `with` installing it checks that, which is
+    /// what makes the resuming function pure wherever it runs. Not uniform
+    /// (`Checker::check_handler_value`): a `with` that knows the handler only
+    /// by its type could not check it.
+    pub resume_row_closed: bool,
+    /// The handler leaves the answer type to the computation it is
+    /// installed around (no `return` clause but the identity, arms that do
+    /// not decide the answer type). See `Checker::check_handler_value`.
+    pub uniform: bool,
+    /// For a `let` bound to an `if` over handlers: the declarations of the
+    /// other branches, each checked at the `with` like this one.
+    pub alternatives: Vec<HandlerInfo>,
     /// Fully applied handled effects, used to select exact evidence slots.
     pub effect_entries: Vec<EffectEntry>,
     /// Frozen return clause: (param_type, body_type). Sub-applied at register time so
@@ -78,6 +97,15 @@ pub struct HandlerInfo {
     pub where_constraints: HandlerWhereConstraints,
     /// Which module this handler is defined in (None = main file).
     pub source_module: Option<String>,
+}
+
+/// A row variable fixed by a declared signature. See `Checker::rigid_row_vars`.
+#[derive(Debug, Clone, Default)]
+pub struct RigidRowVar {
+    /// Name as written (`r` for `..r`).
+    pub name: String,
+    /// Effects named in a declared row alongside this variable.
+    pub companions: Vec<EffectEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +245,17 @@ pub struct Checker {
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
     pub(crate) resume_return_type: Option<Type>,
+    /// What `resume` performs, inside a handler arm: the rest of the handled
+    /// computation (what the `with` does not handle), the `return` clause
+    /// and the arms themselves (see `infer_with_inner`).
+    pub(crate) resume_effects: Option<EffectRow>,
+    /// For each `with` (by node) whose arms resume: what resuming performs,
+    /// for the note on errors about a function that resumes.
+    pub(crate) resume_rows: HashMap<NodeId, EffectRow>,
+    /// The handler references making up the right-hand side of a `let` or a
+    /// function body being inferred, where a handler value keeps its
+    /// declaration (see `Checker::check_handler_value`).
+    pub(crate) handler_alias_sites: Vec<NodeId>,
     /// Metadata for effect inference (instantiation caches, declared rows, name registries).
     pub(crate) effect_meta: EffectMeta,
     /// Effect accumulator: effects from the current scope are pushed here automatically
@@ -230,6 +269,18 @@ pub struct Checker {
     /// checked for required forwarding in `check_fun_clauses`. Cleared at the
     /// start of each function body. See docs/planning/effect-polymorphic-traits.md.
     pub(crate) trait_forward_row_vars: std::collections::HashMap<u32, String>,
+    /// The head of the application being inferred and how many arguments it
+    /// is applied to, set only while that head is inferred. Lets a name tell
+    /// a call that supplies every argument from a use as a value (see
+    /// `open_row_refs.rs`).
+    pub(crate) call_head: Option<(crate::ast::NodeId, usize)>,
+    /// Row variables the code being checked may not refine: the `..r` tails
+    /// written in the enclosing function's signature (or in the signature of
+    /// the trait method or effect operation being implemented). Whoever calls
+    /// the function chooses what they stand for. Each maps to its source name
+    /// and to the effects written next to it in a declared row
+    /// (`needs {Fail e, ..r}`), which is all the body may assume about it.
+    pub(crate) rigid_row_vars: std::collections::HashMap<u32, RigidRowVar>,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -273,6 +324,17 @@ pub struct Checker {
     /// Keyed by (name, pat_node_id) to avoid collisions between same-named
     /// bindings in different scopes (e.g. multiple test bodies).
     pub(crate) let_dict_params: HashMap<(String, NodeId), result::LetDictInfo>,
+    /// Steps taken so far by the unification in progress (see
+    /// `unify::UnifyStep`). Empty outside `unify`.
+    pub(crate) unify_path: Vec<super::unify::UnifyStep>,
+    /// The position of the unification in progress, as far as effect-row
+    /// subsumption is concerned (`unify::RowMode`). `Lenient` at rest.
+    pub(crate) row_mode: super::unify::RowMode,
+    /// Row variables created for typing `resume`, which are closed to the
+    /// empty row once the `with` or handler that made them has been checked
+    /// (see `unify::Slack`). A coercion that needs room in a row containing
+    /// one widens it there rather than binding the row's other variables.
+    pub(crate) slack_rows: HashMap<u32, (super::unify::Slack, NodeId)>,
     /// Diagnostics collected during block inference (for multi-error reporting).
     pub(crate) collected_diagnostics: Vec<Diagnostic>,
     /// Warnings deferred until after inference, when substitutions are complete.
@@ -281,6 +343,14 @@ pub struct Checker {
     pub(crate) internal_handler_normalization_warnings: HashSet<String>,
     /// LSP/IDE state: type info, references, definitions, go-to-def targets.
     pub(crate) lsp: LspState,
+    /// Codegen type table: the type of every expression node whose inference
+    /// completed, keyed by `NodeId`. Unlike `lsp.type_at_node` (first write
+    /// wins, hover-oriented coverage) this is written for every expression
+    /// and the last write wins, so a node that is inferred more than once
+    /// holds the type from the attempt that was kept. Stored unresolved and
+    /// zonked at the `CheckResult` boundary. Not populated when
+    /// `modules.skip_expr_types` is set (the language server).
+    pub(crate) expr_types: HashMap<crate::ast::NodeId, Type>,
     /// When true, function annotations without matching bodies are allowed
     /// (used for builtin stdlib modules where implementations are in Rust).
     pub(crate) allow_bodyless_annotations: bool,
@@ -520,6 +590,9 @@ pub(crate) struct TraitState {
     pub where_bound_trait_args: HashMap<(u32, String), Vec<Type>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
     pub where_bound_var_names: HashMap<u32, String>,
+    /// Open-row trait methods referenced as values whose impl effects have
+    /// not been put on their arrows yet (see `open_row_refs.rs`).
+    pub open_row_refs: Vec<super::open_row_refs::OpenRowRef>,
 }
 
 /// Metadata for effect inference: instantiation caches and name registries.
@@ -604,6 +677,10 @@ pub struct ModuleContext {
     /// Kept out of the global map so private module names don't collide with
     /// other packages or the consumer's own modules.
     pub private_modules: Option<HashMap<String, check_module::ModuleMap>>,
+    /// When true, checkers do not populate the codegen expression type table
+    /// (`Checker::expr_types`). Set by the language server, which never runs
+    /// codegen; inherited by the module checkers spawned for imports.
+    pub(crate) skip_expr_types: bool,
     /// Cache of already-typechecked modules: module name -> all public exports.
     ///
     /// All module-cache products are write-once snapshots shared via `Arc`.
@@ -655,6 +732,7 @@ pub(crate) struct InferScope {
     pub(crate) field_candidates: FieldCandidates,
     pub(crate) resume_type: Option<Type>,
     pub(crate) resume_return_type: Option<Type>,
+    pub(crate) resume_effects: Option<EffectRow>,
 }
 
 /// What accumulated inside an InferScope while it was active.

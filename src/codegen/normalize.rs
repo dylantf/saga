@@ -1,30 +1,59 @@
-//! A-normalization pass for effect calls.
+//! Value-normal form.
 //!
-//! Effect calls in CPS-compiled code must appear at the top level of a block
-//! statement so that `lower_block` can capture the continuation. When an effect
-//! call is nested inside another expression (e.g. `1 + ask!()`), this pass
-//! lifts it into its own `let` binding and replaces it with the bound variable.
+//! Brings a body into the form `effect_position::check_body` accepts: every
+//! operand is a value (`effect_position::is_value`: a name, literal, lambda,
+//! handler value or operation reference, a projection out of a value, or
+//! data built only from values). Everything that computes is lifted out of
+//! operand position into a `let` of its own, in evaluation order: every call
+//! (pure ones too), operator, record update, bit string, `resume`, `with`,
+//! and every branching form (`if`, `case`, block, `do`, `receive`). After
+//! the pass such an expression is the value of a block-level
+//! `let`/statement or is in tail position, and nowhere else.
 //!
-//! This runs on the saga AST before lowering. The interpreter is unaffected.
+//! Lowering then needs two rules for a computation: in tail position it
+//! gets the body's continuation; as `let x = e; rest` its continuation is
+//! `fun x -> rest`.
 //!
-//! Subexpressions containing effect calls are evaluated left-to-right.
+//! The variable that replaces a lifted expression keeps the expression's
+//! `NodeId`, and an application chain is rebuilt on its own `App` nodes, so
+//! the tables keyed by id (types, the call plan) still answer.
+//!
+//! Parts that are evaluated conditionally or later (`if`/`case` branches,
+//! lambda bodies, handler arms, return clauses, `finally` blocks, guards)
+//! are their own scope: what is lifted out of them stays inside them.
+//!
+//! Two forms are treated specially:
+//!
+//! - `a && b` / `a || b`: the right operand is evaluated only when the left
+//!   one does not decide the result, so it cannot be lifted ahead of the
+//!   operator. When it is a value the operator stays; otherwise the
+//!   operator becomes `if a then b else False` / `if a then True else b`,
+//!   whose branch is a scope of its own.
+//! - A guard that is a BEAM guard expression
+//!   (`effect_position::is_guard_safe`) is left exactly as written: it is
+//!   emitted as a guard, where operators nest. Any other guard is a body of
+//!   its own.
+//!
+//! The pass runs once, at each lowering root, when the call plan is frozen
+//! (`normalize_body`). The nodes that perform an effect by themselves are
+//! given to it only to tell an operation that takes no parameters (which
+//! performs where it stands) from a reference to an operation (a value).
 
+use super::effect_position;
 use crate::ast::*;
 
 /// Counter for generating unique temporary variable names.
-struct Normalizer {
+struct Normalizer<'a> {
     counter: usize,
+    /// The nodes that perform an effect by themselves.
+    performs: &'a dyn Fn(&Expr) -> bool,
 }
 
-impl Normalizer {
-    fn new() -> Self {
-        Self { counter: 0 }
-    }
-
+impl<'a> Normalizer<'a> {
     fn fresh(&mut self) -> String {
         let n = self.counter;
         self.counter += 1;
-        format!("__eff{}", n)
+        format!("__anf{}", n)
     }
 
     /// Normalize a block's statements: lift nested effect calls to their own
@@ -63,7 +92,7 @@ impl Normalizer {
                     span,
                 } => {
                     let new_body = self.normalize_expr(body);
-                    let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_expr(g)));
+                    let new_guard = guard.as_ref().map(|g| Box::new(self.normalize_guard(g)));
                     result.push(Annotated::bare(Stmt::LetFun {
                         id: *id,
                         name: name.clone(),
@@ -95,55 +124,80 @@ impl Normalizer {
         } else {
             // Not an effect call at root: walk sub-expressions, lifting any
             // nested effect calls.
-            self.normalize_and_lift(expr, lifted)
+            self.walk_expr(expr, lifted)
         }
     }
 
-    /// Normalize an expression, lifting any effect calls (including this one)
-    /// into `lifted` as let-bindings. This is called for sub-expressions where
-    /// effect calls must not remain nested.
+    /// Normalize an operand: its own operands first, then the expression
+    /// itself, lifted into a `let` unless it is a value.
     fn normalize_and_lift(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        if is_effect_call(expr) {
-            // This effect call is nested inside another expression.
-            // Normalize its args, then lift the whole thing.
-            let normalized = self.normalize_effect_args(expr, lifted);
-            self.lift_to_let(normalized, lifted)
+        let normalized = self.normalize_top(expr, lifted);
+        if effect_position::is_operand(&normalized, self.performs) {
+            normalized
         } else {
-            self.walk_expr(expr, lifted)
+            self.lift_operand_to_let(normalized, lifted)
+        }
+    }
+
+    /// A guard: left as written when it is a BEAM guard expression,
+    /// otherwise a scope of its own.
+    fn normalize_guard(&mut self, guard: &Expr) -> Expr {
+        if effect_position::is_guard_safe(guard) {
+            guard.clone()
+        } else {
+            self.normalize_expr(guard)
         }
     }
 
     /// Normalize the arguments of an effect call (or App-chain around one),
     /// but keep the effect call itself in place.
     fn normalize_effect_args(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
-        match &expr.kind {
+        let (head, apps) = peel_app_chain(expr);
+        let ExprKind::EffectCall {
+            name,
+            qualifier,
+            args: op_args,
+        } = &head.kind
+        else {
+            return self.walk_expr(expr, lifted);
+        };
+        let parts: Vec<&Expr> = op_args
+            .iter()
+            .chain(apps.iter().map(|(_, arg)| *arg))
+            .collect();
+        let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
+        let new_head = Expr::rebuild_like(
+            head,
             ExprKind::EffectCall {
-                name,
-                qualifier,
-                args,
-            } => Expr::rebuild_like(
-                expr,
-                ExprKind::EffectCall {
-                    name: name.clone(),
-                    qualifier: qualifier.clone(),
-                    args: args
-                        .iter()
-                        .map(|a| self.normalize_and_lift(a, lifted))
-                        .collect(),
-                },
-            ),
-            ExprKind::App { func, arg } => {
-                let new_arg = self.normalize_and_lift(arg, lifted);
-                let new_func = self.normalize_effect_args(func, lifted);
-                Expr::rebuild_like(
-                    expr,
-                    ExprKind::App {
-                        func: Box::new(new_func),
-                        arg: Box::new(new_arg),
-                    },
-                )
-            }
-            _ => self.normalize_and_lift(expr, lifted),
+                name: name.clone(),
+                qualifier: qualifier.clone(),
+                args: new_parts.by_ref().take(op_args.len()).collect(),
+            },
+        );
+        rebuild_app_chain(new_head, &apps, new_parts)
+    }
+
+    /// Normalize operands that are evaluated one after another, in the
+    /// order given. Each one that is not a value is lifted, so the lifted
+    /// ones keep their relative order.
+    fn normalize_parts(&mut self, parts: &[&Expr], lifted: &mut Vec<Stmt>) -> Vec<Expr> {
+        parts
+            .iter()
+            .map(|part| self.normalize_and_lift(part, lifted))
+            .collect()
+    }
+
+    /// Lift an operand into its own let-binding. The variable that replaces
+    /// it keeps the expression's `NodeId`, so lookups keyed on the id (the
+    /// expression's type, which decides how a function value is called or
+    /// passed) still answer for the value now reached through the variable.
+    fn lift_operand_to_let(&mut self, expr: Expr, lifted: &mut Vec<Stmt>) -> Expr {
+        let (id, span) = (expr.id, expr.span);
+        let var = self.lift_to_let(expr, lifted);
+        Expr {
+            id,
+            span,
+            kind: var.kind,
         }
     }
 
@@ -169,10 +223,52 @@ impl Normalizer {
     /// The expression itself is NOT an effect call (that's handled by the caller).
     fn walk_expr(&mut self, expr: &Expr, lifted: &mut Vec<Stmt>) -> Expr {
         match &expr.kind {
+            // Short-circuit operators: the right operand is evaluated only
+            // when the left one does not decide the result, so it is its own
+            // scope, like an `if` branch.
+            ExprKind::BinOp {
+                op: op @ (BinOp::And | BinOp::Or),
+                left,
+                right,
+            } => {
+                let new_left = self.normalize_and_lift(left, lifted);
+                let new_right = self.normalize_expr(right);
+                let kind = if !effect_position::is_operand(&new_right, self.performs) {
+                    // The right operand computes, and it may only do so
+                    // when the left one does not decide the result:
+                    // `a && b` is `if a then b else False`, `a || b` is
+                    // `if a then True else b`.
+                    let decided = Box::new(Expr::synth(
+                        expr.span,
+                        ExprKind::Lit {
+                            value: Lit::Bool(matches!(op, BinOp::Or)),
+                        },
+                    ));
+                    let (then_branch, else_branch) = match op {
+                        BinOp::And => (Box::new(new_right), decided),
+                        _ => (decided, Box::new(new_right)),
+                    };
+                    ExprKind::If {
+                        cond: Box::new(new_left),
+                        then_branch,
+                        else_branch,
+                        multiline: false,
+                    }
+                } else {
+                    ExprKind::BinOp {
+                        op: op.clone(),
+                        left: Box::new(new_left),
+                        right: Box::new(new_right),
+                    }
+                };
+                Expr::rebuild_like(expr, kind)
+            }
+
             // Binary op: left-to-right normalization of operands.
             ExprKind::BinOp { op, left, right } => {
-                let new_left = self.normalize_and_lift(left, lifted);
-                let new_right = self.normalize_and_lift(right, lifted);
+                let mut parts = self.normalize_parts(&[left, right], lifted).into_iter();
+                let new_left = parts.next().expect("left operand");
+                let new_right = parts.next().expect("right operand");
                 Expr::rebuild_like(
                     expr,
                     ExprKind::BinOp {
@@ -183,17 +279,18 @@ impl Normalizer {
                 )
             }
 
-            // Function application (non-effect): normalize func and arg.
-            ExprKind::App { func, arg } => {
-                let new_func = self.normalize_and_lift(func, lifted);
-                let new_arg = self.normalize_and_lift(arg, lifted);
-                Expr::rebuild_like(
-                    expr,
-                    ExprKind::App {
-                        func: Box::new(new_func),
-                        arg: Box::new(new_arg),
-                    },
-                )
+            // Function application (non-effect): the head, then the
+            // arguments left to right. The chain is rebuilt on the same `App`
+            // nodes: a partial application is never split off, since the call
+            // is classified by its head and argument count.
+            ExprKind::App { .. } => {
+                let (head, apps) = peel_app_chain(expr);
+                let parts: Vec<&Expr> = std::iter::once(head)
+                    .chain(apps.iter().map(|(_, arg)| *arg))
+                    .collect();
+                let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
+                let new_head = new_parts.next().expect("application head");
+                rebuild_app_chain(new_head, &apps, new_parts)
             }
 
             // If: lift effect calls from condition; branches are their own scope.
@@ -225,7 +322,7 @@ impl Normalizer {
                     .map(|ann| {
                         Annotated::bare(CaseArm {
                             pattern: ann.node.pattern.clone(),
-                            guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                            guard: ann.node.guard.as_ref().map(|g| self.normalize_guard(g)),
                             body: self.normalize_expr(&ann.node.body),
                             span: ann.node.span,
                         })
@@ -255,10 +352,8 @@ impl Normalizer {
 
             // Tuple: normalize each element left-to-right.
             ExprKind::Tuple { elements } => {
-                let new_elems = elements
-                    .iter()
-                    .map(|e| self.normalize_and_lift(e, lifted))
-                    .collect();
+                let parts: Vec<&Expr> = elements.iter().collect();
+                let new_elems = self.normalize_parts(&parts, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::Tuple {
@@ -295,7 +390,7 @@ impl Normalizer {
                 expr,
                 ExprKind::With {
                     expr: Box::new(self.normalize_expr(inner)),
-                    handler: handler.clone(),
+                    handler: Box::new(self.normalize_handler(handler)),
                 },
             ),
 
@@ -333,10 +428,7 @@ impl Normalizer {
                 fields,
                 record_name,
             } => {
-                let new_fields = fields
-                    .iter()
-                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
-                    .collect();
+                let new_fields = self.normalize_fields(fields, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::RecordCreate {
@@ -349,10 +441,7 @@ impl Normalizer {
 
             // AnonRecordCreate: normalize field values.
             ExprKind::AnonRecordCreate { fields } => {
-                let new_fields = fields
-                    .iter()
-                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
-                    .collect();
+                let new_fields = self.normalize_fields(fields, lifted);
                 Expr::rebuild_like(expr, ExprKind::AnonRecordCreate { fields: new_fields })
             }
 
@@ -366,10 +455,15 @@ impl Normalizer {
                 fields,
                 record_name,
             } => {
-                let new_record = self.normalize_and_lift(record, lifted);
+                let parts: Vec<&Expr> = std::iter::once(record.as_ref())
+                    .chain(fields.iter().map(|(_, _, e)| e))
+                    .collect();
+                let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
+                let new_record = new_parts.next().expect("updated record");
                 let new_fields = fields
                     .iter()
-                    .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
+                    .zip(new_parts)
+                    .map(|((n, s, _), e)| (n.clone(), *s, e))
                     .collect();
                 Expr::rebuild_like(
                     expr,
@@ -403,7 +497,7 @@ impl Normalizer {
                             .map(|ann| {
                                 Annotated::bare(CaseArm {
                                     pattern: ann.node.pattern.clone(),
-                                    guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                                    guard: ann.node.guard.as_ref().map(|g| self.normalize_guard(g)),
                                     body: self.normalize_expr(&ann.node.body),
                                     span: ann.node.span,
                                 })
@@ -447,10 +541,8 @@ impl Normalizer {
             }
 
             ExprKind::ForeignCall { module, func, args } => {
-                let new_args = args
-                    .iter()
-                    .map(|a| self.normalize_and_lift(a, lifted))
-                    .collect();
+                let parts: Vec<&Expr> = args.iter().collect();
+                let new_args = self.normalize_parts(&parts, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::ForeignCall {
@@ -485,7 +577,7 @@ impl Normalizer {
                         .map(|ann| {
                             Annotated::bare(CaseArm {
                                 pattern: ann.node.pattern.clone(),
-                                guard: ann.node.guard.as_ref().map(|g| self.normalize_expr(g)),
+                                guard: ann.node.guard.as_ref().map(|g| self.normalize_guard(g)),
                                 body: self.normalize_expr(&ann.node.body),
                                 span: ann.node.span,
                             })
@@ -493,27 +585,40 @@ impl Normalizer {
                         .collect(),
                     dangling_trivia: vec![],
                     after_clause: after_clause.as_ref().map(|(timeout, body)| {
-                        (
-                            Box::new(self.normalize_expr(timeout)),
-                            Box::new(self.normalize_expr(body)),
-                        )
+                        // The timeout is an operand of the receive.
+                        let timeout = self.normalize_and_lift(timeout, lifted);
+                        (Box::new(timeout), Box::new(self.normalize_expr(body)))
                     }),
                 },
             ),
 
-            // Handler expressions: clone as-is (arm bodies are normalized when lowered).
-            ExprKind::HandlerExpr { .. } => expr.clone(),
+            // Handler expressions: normalize each arm body in its own scope.
+            ExprKind::HandlerExpr { body } => {
+                let mut body = body.clone();
+                for arm in &mut body.arms {
+                    self.normalize_handler_arm(&mut arm.node);
+                }
+                if let Some(rc) = body.return_clause.as_mut() {
+                    self.normalize_handler_arm(rc);
+                }
+                Expr::rebuild_like(expr, ExprKind::HandlerExpr { body })
+            }
 
             // BitString: normalize segment values and sizes.
             ExprKind::BitString { segments } => {
+                let parts: Vec<&Expr> = segments
+                    .iter()
+                    .flat_map(|seg| std::iter::once(&seg.value).chain(seg.size.as_deref()))
+                    .collect();
+                let mut new_parts = self.normalize_parts(&parts, lifted).into_iter();
                 let new_segs = segments
                     .iter()
                     .map(|seg| BitSegment {
-                        value: self.normalize_and_lift(&seg.value, lifted),
+                        value: new_parts.next().expect("segment value"),
                         size: seg
                             .size
                             .as_ref()
-                            .map(|s| Box::new(self.normalize_and_lift(s, lifted))),
+                            .map(|_| Box::new(new_parts.next().expect("segment size"))),
                         specs: seg.specs.clone(),
                         span: seg.span,
                     })
@@ -527,7 +632,8 @@ impl Normalizer {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. } => expr.clone(),
-            ExprKind::Ascription { expr: inner, .. } => self.walk_expr(inner, lifted),
+            // An ascription is its inner expression, in the same position.
+            ExprKind::Ascription { expr: inner, .. } => self.normalize_top(inner, lifted),
 
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }
@@ -542,6 +648,46 @@ impl Normalizer {
         }
     }
 
+    /// Normalize record field values, evaluated in the order written.
+    fn normalize_fields(
+        &mut self,
+        fields: &[(String, crate::token::Span, Expr)],
+        lifted: &mut Vec<Stmt>,
+    ) -> Vec<(String, crate::token::Span, Expr)> {
+        let parts: Vec<&Expr> = fields.iter().map(|(_, _, e)| e).collect();
+        let new_parts = self.normalize_parts(&parts, lifted);
+        fields
+            .iter()
+            .zip(new_parts)
+            .map(|((n, s, _), e)| (n.clone(), *s, e))
+            .collect()
+    }
+
+    /// Normalize a handler arm (or return clause) body in its own scope.
+    fn normalize_handler_arm(&mut self, arm: &mut HandlerArm) {
+        *arm.body = self.normalize_expr(&arm.body);
+        if let Some(fb) = arm.finally_block.as_mut() {
+            **fb = self.normalize_expr(fb);
+        }
+    }
+
+    /// Normalize the arms and return clause written inline in a `with`, the
+    /// same way the arms of a `handler` declaration are.
+    fn normalize_handler(&mut self, handler: &Handler) -> Handler {
+        let mut handler = handler.clone();
+        if let Handler::Inline { items, .. } = &mut handler {
+            for item in items {
+                match &mut item.node {
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        self.normalize_handler_arm(arm)
+                    }
+                    HandlerItem::Named(_) => {}
+                }
+            }
+        }
+        handler
+    }
+
     /// Normalize an expression that starts its own scope (branches, lambda bodies, etc.).
     /// Effect calls nested here get lifted within their own block context, not the parent's.
     fn normalize_expr(&mut self, expr: &Expr) -> Expr {
@@ -553,13 +699,13 @@ impl Normalizer {
             // Wrap in a block with the lifted bindings.
             let mut stmts: Vec<Annotated<Stmt>> = lifted.into_iter().map(Annotated::bare).collect();
             stmts.push(Annotated::bare(Stmt::Expr(new_expr)));
-            Expr::synth(
-                expr.span,
-                ExprKind::Block {
-                    stmts,
-                    dangling_trivia: vec![],
-                },
-            )
+            let kind = ExprKind::Block {
+                stmts,
+                dangling_trivia: vec![],
+            };
+            // The block stands where `expr` stood and has its value, so
+            // it keeps its id: lookups keyed on the id still answer.
+            Expr::rebuild_like(expr, kind)
         }
     }
 }
@@ -584,98 +730,60 @@ fn is_effect_call_head(expr: &Expr) -> bool {
     }
 }
 
-/// Public entry point: normalize a program's declarations, lifting nested
-/// effect calls in function bodies to block-level statements.
-pub fn normalize_effects(program: &Program) -> Program {
-    let mut normalizer = Normalizer::new();
-    program
-        .iter()
-        .map(|decl| match decl {
-            Decl::FunBinding {
-                id,
-                name,
-                name_span,
-                params,
-                guard,
-                body,
-                span,
-            } => Decl::FunBinding {
-                id: *id,
-                name: name.clone(),
-                name_span: *name_span,
-                params: params.clone(),
-                guard: guard.clone(),
-                body: normalizer.normalize_expr(body),
-                span: *span,
+/// Split an application chain `h a b c` into its head and, outermost last,
+/// each `App` node with its argument.
+fn peel_app_chain(expr: &Expr) -> (&Expr, Vec<(&Expr, &Expr)>) {
+    let mut apps = Vec::new();
+    let mut current = expr;
+    while let ExprKind::App { func, arg } = &current.kind {
+        apps.push((current, arg.as_ref()));
+        current = func;
+    }
+    apps.reverse();
+    (current, apps)
+}
+
+/// Rebuild an application chain peeled by `peel_app_chain` around a new head
+/// and new arguments, keeping every `App` node's identity.
+fn rebuild_app_chain(
+    head: Expr,
+    apps: &[(&Expr, &Expr)],
+    args: impl Iterator<Item = Expr>,
+) -> Expr {
+    apps.iter().zip(args).fold(head, |func, ((app, _), arg)| {
+        Expr::rebuild_like(
+            app,
+            ExprKind::App {
+                func: Box::new(func),
+                arg: Box::new(arg),
             },
-            Decl::HandlerDef {
-                id,
-                doc,
-                public,
-                name,
-                name_span,
-                body,
-                span,
-                ..
-            } => {
-                let new_arms = body
-                    .arms
-                    .iter()
-                    .map(|ann| {
-                        Annotated::bare(HandlerArm {
-                            id: ann.node.id,
-                            op_name: ann.node.op_name.clone(),
-                            qualifier: ann.node.qualifier.clone(),
-                            params: ann.node.params.clone(),
-                            body: Box::new(normalizer.normalize_expr(&ann.node.body)),
-                            finally_block: ann
-                                .node
-                                .finally_block
-                                .as_ref()
-                                .map(|fb| Box::new(normalizer.normalize_expr(fb))),
-                            span: ann.node.span,
-                        })
-                    })
-                    .collect();
-                let new_return = body.return_clause.as_ref().map(|rc| {
-                    Box::new(HandlerArm {
-                        id: rc.id,
-                        op_name: rc.op_name.clone(),
-                        qualifier: rc.qualifier.clone(),
-                        params: rc.params.clone(),
-                        body: Box::new(normalizer.normalize_expr(&rc.body)),
-                        finally_block: None,
-                        span: rc.span,
-                    })
-                });
-                Decl::HandlerDef {
-                    id: *id,
-                    doc: doc.clone(),
-                    public: *public,
-                    name: name.clone(),
-                    name_span: *name_span,
-                    body: HandlerBody {
-                        effects: body.effects.clone(),
-                        needs: body.needs.clone(),
-                        where_clause: body.where_clause.clone(),
-                        arms: new_arms,
-                        return_clause: new_return,
-                    },
-                    recovered_arms: vec![],
-                    span: *span,
-                    dangling_trivia: vec![],
-                }
-            }
-            other => other.clone(),
-        })
-        .collect()
+        )
+    })
+}
+
+/// Bring one body (an expression in tail position) into value-normal form,
+/// the form `effect_position::check_body` accepts, given the nodes that
+/// perform an effect by themselves. `counter` numbers the temporaries and is advanced,
+/// so bodies normalized one after another do not reuse a name.
+pub(crate) fn normalize_body(
+    body: &Expr,
+    performs: &dyn Fn(&Expr) -> bool,
+    counter: &mut usize,
+) -> Expr {
+    let mut normalizer = Normalizer {
+        counter: *counter,
+        performs,
+    };
+    let normalized = normalizer.normalize_expr(body);
+    *counter = normalizer.counter;
+    normalized
 }
 
 #[cfg(test)]
 mod tests {
-    //! Regression: the call-effects pre-pass keys on `NodeId` and assumes
-    //! source `App` ids survive `normalize_effects`. Verify this remains true
-    //! so future normalize changes don't silently break the pre-pass.
+    //! Regression: the call plan is keyed on `NodeId` and assumes source
+    //! `App` ids survive normalization. Verify this remains true so future
+    //! normalize changes don't silently break the plan's lookups.
 
     use super::*;
     use crate::lexer::Lexer;
@@ -684,6 +792,19 @@ mod tests {
     fn parse(source: &str) -> Program {
         let tokens = Lexer::new(source).lex().expect("lex");
         Parser::new(tokens).parse_program().expect("parse")
+    }
+
+    /// Normalize every function body, with applied operations as the nodes
+    /// that perform an effect.
+    fn normalize_effects(program: &Program) -> Program {
+        let mut counter = 0;
+        let mut program = program.clone();
+        for decl in &mut program {
+            if let Decl::FunBinding { body, .. } = decl {
+                *body = normalize_body(body, &is_effect_call, &mut counter);
+            }
+        }
+        program
     }
 
     fn collect_app_ids(program: &Program) -> Vec<NodeId> {
@@ -1034,5 +1155,149 @@ main () = {
             "normalize dropped App NodeIds on the lift path: {:?}",
             missing,
         );
+    }
+
+    /// The body of `f`, normalized with applied operations as the nodes
+    /// that perform.
+    fn normalized_body(src: &str) -> Expr {
+        let program = normalize_effects(&parse(src));
+        program
+            .into_iter()
+            .find_map(|decl| match decl {
+                Decl::FunBinding { name, body, .. } if name == "f" => Some(body),
+                _ => None,
+            })
+            .expect("function f")
+    }
+
+    fn violations(body: &Expr) -> Vec<effect_position::Violation> {
+        let mut out = Vec::new();
+        effect_position::check_body(body, &is_effect_call, &mut out);
+        out
+    }
+
+    /// The statements of a block, each as (bound name, value kind).
+    fn block_shape(body: &Expr) -> Vec<(Option<String>, &'static str)> {
+        let ExprKind::Block { stmts, .. } = &body.kind else {
+            panic!("expected a block, got {:?}", body.kind);
+        };
+        stmts
+            .iter()
+            .map(|stmt| match &stmt.node {
+                Stmt::Let {
+                    pattern: Pat::Var { name, .. },
+                    value,
+                    ..
+                } => (
+                    Some(name.clone()),
+                    effect_position::construct_name(value, &is_effect_call),
+                ),
+                Stmt::Let { value, .. } | Stmt::Expr(value) => {
+                    (None, effect_position::construct_name(value, &is_effect_call))
+                }
+                Stmt::LetFun { .. } => (None, "local function"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_operand_that_computes_is_lifted_in_evaluation_order() {
+        let body = normalized_body("f x = g (h x) (x + 1) (x, Some x)");
+        assert_eq!(violations(&body), vec![]);
+        assert_eq!(
+            block_shape(&body),
+            vec![
+                (Some("__anf0".to_string()), "pure call"),
+                (Some("__anf1".to_string()), "binary operator"),
+                (None, "pure call"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_body_whose_operands_are_values_is_left_alone() {
+        let src = "f x = g x (fun y -> y) (x, Some x)";
+        let before = parse(src);
+        assert_eq!(normalize_effects(&before), before);
+    }
+
+    #[test]
+    fn conditions_scrutinees_and_branches() {
+        let body = normalized_body("f x = if g x then h (x + 1) else 2");
+        assert_eq!(violations(&body), vec![]);
+        // The condition is lifted in the enclosing scope, the operand of
+        // the call in the branch stays in the branch.
+        assert_eq!(
+            block_shape(&body),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "if")]
+        );
+        let ExprKind::Block { stmts, .. } = &body.kind else {
+            unreachable!()
+        };
+        let Stmt::Expr(Expr {
+            kind: ExprKind::If { then_branch, .. },
+            ..
+        }) = &stmts[1].node
+        else {
+            panic!("expected the if last");
+        };
+        assert_eq!(
+            block_shape(then_branch),
+            vec![
+                (Some("__anf1".to_string()), "binary operator"),
+                (None, "pure call")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_short_circuit_operator_whose_right_operand_computes_becomes_an_if() {
+        let body = normalized_body("f x y = g x && h y");
+        assert_eq!(violations(&body), vec![]);
+        assert_eq!(
+            block_shape(&body),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "if")]
+        );
+        // With a value on the right the operator stays.
+        let body = normalized_body("f x y = g x || y");
+        assert_eq!(
+            block_shape(&body),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "`&&`/`||`")]
+        );
+    }
+
+    #[test]
+    fn a_beam_guard_is_not_normalized_and_another_guard_is_its_own_scope() {
+        let src = "f x = case x {\n  y when y + 1 > 2 && y < 9 -> 1\n  y when g (h y) -> 2\n  _ -> 3\n}";
+        let body = normalized_body(src);
+        assert_eq!(violations(&body), vec![]);
+        let ExprKind::Case { arms, .. } = &body.kind else {
+            panic!("expected the case to stay in tail position");
+        };
+        let guard = |i: usize| arms[i].node.guard.as_ref().expect("guard");
+        assert!(matches!(guard(0).kind, ExprKind::BinOp { .. }));
+        assert!(effect_position::is_guard_safe(guard(0)));
+        assert_eq!(
+            block_shape(guard(1)),
+            vec![(Some("__anf0".to_string()), "pure call"), (None, "pure call")]
+        );
+    }
+
+    #[test]
+    fn record_fields_are_lifted_in_written_order() {
+        let body = normalized_body("f x = P { b: g x, a: h x }");
+        assert_eq!(violations(&body), vec![]);
+        let ExprKind::Block { stmts, .. } = &body.kind else {
+            panic!("expected a block");
+        };
+        let callee = |stmt: &Stmt| match stmt {
+            Stmt::Let { value, .. } => match &peel_app_chain(value).0.kind {
+                ExprKind::Var { name } => name.clone(),
+                other => panic!("unexpected head {other:?}"),
+            },
+            _ => panic!("expected a let"),
+        };
+        assert_eq!(callee(&stmts[0].node), "g");
+        assert_eq!(callee(&stmts[1].node), "h");
     }
 }

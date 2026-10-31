@@ -340,6 +340,7 @@ impl Checker {
             .modules
             .programs
             .extend(self.modules.programs.clone());
+        mod_checker.modules.skip_expr_types = self.modules.skip_expr_types;
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.modules.module_graph = self.modules.module_graph.clone();
         mod_checker.modules.source_overlay = self.modules.source_overlay.clone();
@@ -441,6 +442,7 @@ impl Checker {
             Some(root) => super::Checker::with_project_root(root.clone()),
             None => super::Checker::new(),
         };
+        snapshot.modules.skip_expr_types = self.modules.skip_expr_types;
         snapshot.modules.map = self.modules.map.clone();
         snapshot.modules.module_graph = self.modules.module_graph.clone();
         snapshot.modules.source_overlay = self.modules.source_overlay.clone();
@@ -741,6 +743,7 @@ impl Checker {
             .codegen_info
             .extend(self.modules.codegen_info.clone());
         mc.modules.programs.extend(self.modules.programs.clone());
+        mc.modules.skip_expr_types = self.modules.skip_expr_types;
         mc.modules.map = self.modules.map.clone();
         mc.modules.module_graph = self.modules.module_graph.clone();
         mc.modules.source_overlay = self.modules.source_overlay.clone();

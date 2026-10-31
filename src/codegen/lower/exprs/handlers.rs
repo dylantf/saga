@@ -88,12 +88,18 @@ impl<'a> Lowerer<'a> {
     /// Desugars to nested case expressions: each binding is a case on the
     /// scrutinee; a successful pattern match continues to the next binding,
     /// a mismatch routes the raw value to the else arms.
+    ///
+    /// The success expression and the else arms are in tail position: with
+    /// `k`, their values go to it. A binding is a `let` position: one that
+    /// performs effects has the rest of the `do` as its continuation.
     pub(crate) fn lower_do(
         &mut self,
         bindings: &[(Pat, Expr)],
         success: &Expr,
         else_arms: &[CaseArm],
+        k: Option<&CExpr>,
     ) -> CExpr {
+        let lower_body = |this: &mut Self, body: &Expr| this.lower_tail(body, k.cloned());
         // Pre-lower the else arms once; clone them at each failure point.
         let else_arms_ce: Vec<CArm> = else_arms
             .iter()
@@ -103,18 +109,18 @@ impl<'a> Lowerer<'a> {
                     &self.constructor_atoms,
                     self.handler_origin_module(),
                 ),
-                guard: arm.guard.as_ref().map(|g| self.lower_expr_value(g)),
-                body: self.lower_expr(&arm.body),
+                guard: arm.guard.as_ref().map(|g| self.lower_guard(g)),
+                body: lower_body(self, &arm.body),
             })
             .collect();
 
         // Build from the innermost binding outward.
-        let mut inner = self.lower_expr(success);
+        let mut inner = lower_body(self, success);
 
         for (pat, expr) in bindings.iter().rev() {
             let scrut_var = self.fresh();
             let fail_var = self.fresh();
-            let val_ce = self.lower_expr_value(expr);
+            let val_ce = (!self.takes_continuation(expr)).then(|| self.lower_expr(expr));
 
             let success_pat =
                 self.lower_pat(pat, &self.constructor_atoms, self.handler_origin_module());
@@ -135,7 +141,10 @@ impl<'a> Lowerer<'a> {
                 else_with_fallthrough.push(CArm {
                     pat: CPat::Var(fail_var.clone()),
                     guard: None,
-                    body: CExpr::Var(fail_var),
+                    body: match k {
+                        Some(k) => CExpr::Apply(Box::new(k.clone()), vec![CExpr::Var(fail_var)]),
+                        None => CExpr::Var(fail_var),
+                    },
                 });
             }
             let fail_arm = CArm {
@@ -162,7 +171,13 @@ impl<'a> Lowerer<'a> {
                 vec![success_arm, fail_arm]
             };
             let case_expr = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms);
-            inner = CExpr::Let(scrut_var, Box::new(val_ce), Box::new(case_expr));
+            inner = match val_ce {
+                Some(val_ce) => CExpr::Let(scrut_var, Box::new(val_ce), Box::new(case_expr)),
+                None => {
+                    let rest_k = CExpr::Fun(vec![scrut_var], Box::new(case_expr));
+                    self.lower_tail(expr, Some(rest_k))
+                }
+            };
         }
 
         inner
@@ -188,21 +203,6 @@ impl<'a> Lowerer<'a> {
             } => self.is_handler_value(then_branch) || self.is_handler_value(else_branch),
             _ => self.dynamic_handler_info_from_expr(expr).is_some(),
         }
-    }
-
-    pub(crate) fn lower_tuple_elems(&mut self, elems: &[Expr]) -> CExpr {
-        let mut vars: Vec<String> = Vec::new();
-        let mut bindings: Vec<(String, CExpr)> = Vec::new();
-        for elem in elems {
-            let var = self.fresh();
-            let val = self.lower_expr_value(elem);
-            vars.push(var.clone());
-            bindings.push((var, val));
-        }
-        let tuple = CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect());
-        bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
-            CExpr::Let(var, Box::new(val), Box::new(body))
-        })
     }
 
     /// Lower a handle binding statement. Routes the binding into one of four
@@ -285,7 +285,7 @@ impl<'a> Lowerer<'a> {
             let else_canonical = self.resolve_handle_value(else_branch);
 
             if let (Some(then_c), Some(else_c)) = (then_canonical, else_canonical) {
-                let cond_ce = self.lower_expr_value(cond);
+                let cond_ce = self.lower_expr(cond);
                 let cond_var = self.fresh();
                 self.handle_cond_vars.insert(
                     name.to_string(),

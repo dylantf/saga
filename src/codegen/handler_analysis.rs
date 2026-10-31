@@ -264,7 +264,9 @@ fn visit_stmt_for_arms(stmt: &Stmt, out: &mut HandlerAnalysis) {
     }
 }
 
-fn classify_body(body: &Expr) -> ResumptionKind {
+/// Classify one handler arm body. Usable for arms of imported handlers,
+/// which [`analyze`] does not visit.
+pub fn classify_body(body: &Expr) -> ResumptionKind {
     let mut tails = Vec::new();
     collect_tail_positions(body, &mut tails);
 

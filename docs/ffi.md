@@ -111,24 +111,24 @@ Notes:
 
 ## Limitation: Erlang cannot call effectful saga closures
 
-You can pass a saga function value across the FFI boundary, but **Erlang code can only call it if the function is pure** (no `needs` clause). The moment a saga lambda performs effects, the codegen rewrites it into CPS form, injecting two extra parameters on top of the visible ones:
+You can pass a saga function value across the FFI boundary, but **Erlang code can only call it if the function is pure** (no `needs` clause). A function value whose own type is effectful (it has a `needs` clause or an open row) is compiled to CPS form and wrapped in a tagged tuple. The inner fun takes two extra parameters after the visible ones:
 
-1. A handler dictionary for each effect the lambda needs
+1. The evidence vector `_Evidence`, a tuple holding the handlers in scope at the call
 2. A return continuation `_ReturnK`
 
-So a saga value of type `Unit -> Result a needs {Postgres}` does *not* compile to an Erlang `fun/1`. It compiles to a `fun/3`:
+So a saga value of type `Unit -> Result a needs {Postgres}` is *not* an Erlang `fun/1`. It is a tuple:
 
 ```erlang
-fun(_unit, _Handle_SagaPgo_Postgres_raw_execute, _ReturnK) -> ... end
+{'$saga_cps', fun(_Unit, _Evidence, _ReturnK) -> ... end}
 ```
 
-If the bridge tries to call it as `Fun(unit)` you get a runtime "function called with 1 argument(s), but expects 3" error. Even if you knew the arity, Erlang has no way to synthesize the handler value or compose a meaningful continuation — those are runtime artifacts of saga's effect lowering that only saga code can produce.
+If the bridge tries to call it as `Fun(unit)` you get a `badfun` error, because the value is a tuple and not a fun. Even if you unwrapped it, Erlang has no way to synthesize the evidence vector or compose a meaningful continuation — those are runtime artifacts of saga's effect lowering that only saga code can produce.
 
 ### What this means in practice
 
 - **Pure callbacks across the FFI boundary work.** `(Int -> Int)` or `(a -> b)` with no `needs` lower to ordinary Erlang funs and the bridge can call them directly. This is how `lists:sort/2` with a comparator, `maps:map/2`, etc. work in the stdlib bridges.
 
-- **Effectful callbacks across the FFI boundary do not work.** If you find yourself wanting to write an FFI like `wrap : ((Unit -> a needs {E}) -> Erlang) -> ...` where the Erlang side calls back into the saga lambda, **you can't** — the lambda isn't an Erlang `fun/1`.
+- **Effectful callbacks across the FFI boundary do not work.** If you find yourself wanting to write an FFI like `wrap : ((Unit -> a needs {E}) -> Erlang) -> ...` where the Erlang side calls back into the saga lambda, **you can't** — the lambda isn't an Erlang `fun/1`. (A pure function passed where an effectful callback is expected stays a bare fun, so a bridge cannot assume either shape.)
 
 ### Workaround: drive the lifecycle from saga, not the bridge
 
@@ -137,7 +137,7 @@ When you want a "wrap a callback in setup/teardown" shape (transactions, locks, 
 Don't write this:
 
 ```erlang
-%% Won't work — Fun is a 3-arg CPS closure, not a fun/1.
+%% Won't work — Fun is a tagged CPS closure {'$saga_cps', F/3}, not a fun/1.
 with_resource(Setup, Fun) ->
     Resource = acquire(Setup),
     try Fun(Resource)

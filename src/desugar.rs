@@ -669,6 +669,39 @@ fn expand_or_patterns(arms: &mut Vec<Annotated<CaseArm>>) {
     }
 }
 
+thread_local! {
+    /// `(old, new)` for every id replaced while a recording is open.
+    static FRESHENED: std::cell::RefCell<Option<Vec<(NodeId, NodeId)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start (or stop) recording the ids the `freshen_*` functions replace on
+/// this thread. A pass that copies typechecked nodes uses the record to
+/// keep what the typechecker knows about them.
+pub fn record_freshened_ids(on: bool) {
+    FRESHENED.with(|f| *f.borrow_mut() = on.then(Vec::new));
+}
+
+/// The `(old, new)` pairs recorded since the last call, in order.
+pub fn take_freshened_ids() -> Vec<(NodeId, NodeId)> {
+    FRESHENED.with(|f| f.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default())
+}
+
+fn refresh(id: &mut NodeId) {
+    let old = std::mem::replace(id, NodeId::fresh());
+    record_freshened_id(old, *id);
+}
+
+/// Record that the node `new` stands for the node `old`. A later record
+/// for the same `new` replaces an earlier one.
+pub fn record_freshened_id(old: NodeId, new: NodeId) {
+    FRESHENED.with(|f| {
+        if let Some(pairs) = f.borrow_mut().as_mut() {
+            pairs.push((old, new));
+        }
+    });
+}
+
 /// Assign fresh `NodeId`s to every node in an expression subtree.
 ///
 /// Used by [`expand_or_patterns`] so that cloned arms don't share NodeIds —
@@ -676,7 +709,7 @@ fn expand_or_patterns(arms: &mut Vec<Annotated<CaseArm>>) {
 /// have entries overwritten across arms, making earlier arms' pattern bindings
 /// appear unused.
 pub fn freshen_expr_ids(expr: &mut Expr) {
-    expr.id = NodeId::fresh();
+    refresh(&mut expr.id);
     match &mut expr.kind {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
@@ -869,7 +902,7 @@ fn freshen_stmt_ids(stmt: &mut Stmt) {
             body,
             ..
         } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for p in params {
                 freshen_pat_ids(p);
             }
@@ -885,16 +918,16 @@ fn freshen_stmt_ids(stmt: &mut Stmt) {
 pub fn freshen_pat_ids(pat: &mut Pat) {
     match pat {
         Pat::Wildcard { id, .. } | Pat::Lit { id, .. } | Pat::Var { id, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
         }
         Pat::Constructor { id, args, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for a in args {
                 freshen_pat_ids(a);
             }
         }
         Pat::Record { id, fields, .. } | Pat::AnonRecord { id, fields, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for (_, alias) in fields {
                 if let Some(p) = alias {
                     freshen_pat_ids(p);
@@ -902,34 +935,34 @@ pub fn freshen_pat_ids(pat: &mut Pat) {
             }
         }
         Pat::Tuple { id, elements, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for e in elements {
                 freshen_pat_ids(e);
             }
         }
         Pat::StringPrefix { id, rest, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             freshen_pat_ids(rest);
         }
         Pat::BitStringPat { id, segments, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for seg in segments {
                 freshen_pat_ids(&mut seg.value);
             }
         }
         Pat::ListPat { id, elements, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for e in elements {
                 freshen_pat_ids(e);
             }
         }
         Pat::ConsPat { id, head, tail, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             freshen_pat_ids(head);
             freshen_pat_ids(tail);
         }
         Pat::Or { id, patterns, .. } => {
-            *id = NodeId::fresh();
+            refresh(id);
             for p in patterns {
                 freshen_pat_ids(p);
             }

@@ -209,7 +209,7 @@ For each function, it roughly does the following:
 4. Enter an isolated inference scope for effects and ambiguity tracking
 5. Check each clause:
    - bind clause patterns
-   - check the guard
+   - check the guard (must be pure; see "Effect checking")
    - infer the body
    - unify clause result with the function result type
 6. Merge and normalize the effects used by all clauses
@@ -304,6 +304,7 @@ Key behavior:
 - lambdas isolate body effects, then attach them to the resulting function type
 - `with` subtracts handled effects and re-emits escaping ones
 - function and handler bodies are checked against declared `needs` rows using `check_effects_via_row`
+- guards are pure: every guard (`case` arm, `receive` arm, top-level function clause, local `let` function clause) goes through `check_guard` in `infer.rs`, which infers the guard under its own effect accumulator and requires the resulting row to be the empty row. A named effect in it is an error ("Effect calls are not allowed in guard expressions: this guard needs {...}"), whether it comes from an `op!`, an effectful function, or an effectful function value; so is an open tail that belongs to an enclosing declared signature (`..e`), since the caller chooses what it holds. Any other open tail is an inference variable and is bound to the empty row, so an unannotated parameter called in a guard is inferred as a pure function. An effect handled inside the guard (`when (f x with h) == 1`) never reaches the guard's row and is allowed.
 
 ### Handler checking
 
@@ -319,6 +320,46 @@ This includes:
 - checking handler `needs`
 - computing which effects are handled and which still escape
 - inferring the resulting `Handler` type
+
+**What `resume` performs.** Resuming runs the rest of the handled computation
+under the same handler, then the `return` clause, so `resume` performs
+`R = (inner − handled) ∪ eff(return clause) ∪ eff(arms) ∪ needs` (Koka's
+HANDLE rule), and a function an arm builds around it (`get () = fun s ->
+(resume s) s`) carries `R` on its arrow. For an inline `with`, `R` is that
+row with a slack tail `ρ_arm` that takes the arms' effects; for a named
+handler, the computation is unknown at the declaration, so `R = needs ∪
+..ρ_R`, where `ρ_R` is rigid while the arms are checked and is bound to
+what the computation leaves unhandled at each `with`. An arm that lets a
+resuming function reach a place that allows only some named effects is
+rejected. One that puts it where no effects are allowed (a pure function
+field, as in a state-passing `type Step a = Step (S -> (a, S))`) closes
+`ρ_R` to `{}`: the declaration is accepted with
+`HandlerInfo::resume_row_closed`, and every `with` installing it (directly,
+through a `let` alias or an `if` over handlers) requires the computation to
+leave nothing unhandled (`require_nothing_unhandled`: an inference tail is
+closed, named effects or a declared row variable are an error at that
+`with`). Such a handler is not passed as a `Handler` value. The
+answer type gets one slack tail per arrow of its spine, which takes what
+the arms' function values perform; all slack is closed to `{}` once the
+`with` (or the handler declaration) has been checked, so a `with` whose
+arms do not resume under a function keeps its old type. The variables of
+`resume`'s argument, answer type and `R` are monomorphic inside the arm
+(`generalize`). See `docs/planning/resume-typing.md`.
+
+**Effect rows at coercion positions.** At a coercion position (a call
+argument, an annotated `let`, a return, a literal's element, a branch),
+directly on the coerced value's arrows, a row that involves a declared row
+variable (`..e` of a signature, a where-bound type's row) or a slack
+variable is compared by inclusion (`subsume_rows`): nothing is bound when
+`actual ⊆ expected` already holds, and what is missing goes into a tail of
+the expected row that may grow (slack first), never into a declared one.
+Rows of inference variables only are unified as equal, which is one way for
+the inclusion to hold. Elsewhere closed rows must be equal. A declared
+open row must also name every effect the body performs (`..e` is the
+caller's). Handler values that reach a `with` only through their `Handler
+E` type must be uniform: no `return` clause but the identity, arms that do
+not decide the answer type, (for a declared handler) no `needs`, and no
+closed `ρ_R` (`check_handler_value`).
 
 ### Trait constraint collection
 

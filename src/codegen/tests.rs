@@ -27,7 +27,6 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
     let elaborated = elaborate::elaborate(&program, &result);
     let ctx = CodegenContext {
         modules: std::collections::HashMap::new(),
-        let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
     emit_module_with_context("_script", &elaborated, &ctx, &result, source_file, None)
@@ -1274,9 +1273,8 @@ fn dispatch_facts(src: &str) -> Vec<super::trait_dispatch::DictDispatch> {
     let result = checker.check_program(&mut program);
     assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
     let elaborated = elaborate::elaborate(&program, &result);
-    let normalized = super::normalize::normalize_effects(&elaborated);
     let resolution = super::resolve::ResolutionMap::new();
-    super::trait_dispatch::analyze("_script", &normalized, &resolution)
+    super::trait_dispatch::analyze("_script", &elaborated, &resolution)
         .into_values()
         .collect()
 }

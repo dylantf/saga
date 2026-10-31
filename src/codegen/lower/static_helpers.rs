@@ -55,11 +55,8 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
-        let param_types = self
-            .resolved_fun_info(head.id, lookup_name)
-            .map(|f| f.expected_arg_types(args.len()));
-        let (arg_vars, arg_bindings) =
-            self.lower_call_args_with_expected_types(args, param_types.as_deref());
+        let operands = self.operands(args.iter().copied(), "a call");
+        let (arg_vars, arg_bindings) = self.lower_call_args(&operands);
         let params = pats::lower_params(&helper.params);
         if params.len() != arg_vars.len() {
             return None;
@@ -74,7 +71,8 @@ impl<'a> Lowerer<'a> {
         );
 
         self.helper_inline_stack.push(helper_key);
-        let body = self.lower_expr_with_installed_return_k(&helper.body, return_k);
+        let helper_body = self.effect_normal_body(&helper.body, "inlined helper");
+        let body = self.lower_tail(&helper_body, return_k);
         self.helper_inline_stack.pop();
 
         let body = params
@@ -139,18 +137,8 @@ impl<'a> Lowerer<'a> {
         }
         let captures = self.imported_static_helper_variant_captures(&helper_key)?;
 
-        let param_types = self
-            .resolved_fun_info(head.id, &helper_key)
-            .or_else(|| self.resolved_fun_info(head.id, lookup_name))
-            .map(|f| {
-                f.param_types
-                    .iter()
-                    .take(args.len())
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
-        let (arg_vars, arg_bindings) =
-            self.lower_call_args_with_expected_types(args, param_types.as_deref());
+        let operands = self.operands(args.iter().copied(), "a call");
+        let (arg_vars, arg_bindings) = self.lower_call_args(&operands);
         let params = pats::lower_params(&helper.params);
         if params.len() != arg_vars.len() {
             return None;
@@ -171,7 +159,7 @@ impl<'a> Lowerer<'a> {
         let mut capture_arg_vars = Vec::new();
         for capture in &captures {
             let var = self.fresh();
-            let ce = self.lower_expr_value(&capture.arg);
+            let ce = self.lower_expr(&capture.arg);
             capture_arg_bindings.push((var.clone(), ce));
             capture_arg_vars.push(var);
         }
@@ -199,7 +187,8 @@ impl<'a> Lowerer<'a> {
             self.resolved = module_semantics.resolution.clone();
         }
         self.helper_inline_stack.push(helper_key);
-        let body = self.lower_expr_with_installed_return_k(&helper.body, None);
+        let helper_body = self.effect_normal_body(&helper.body, "imported helper variant");
+        let body = self.lower_tail(&helper_body, None);
         self.helper_inline_stack.pop();
         self.resolved = saved_resolved;
         self.static_tail_resume_ops = saved_static_tail_resume_ops;
@@ -238,9 +227,9 @@ impl<'a> Lowerer<'a> {
             || stack.iter().any(|name| name == lookup_name)
             || !Self::static_helper_params_supported(&helper.params)
             || helper.params.len() != args.len()
-            || args.iter().any(|arg| {
-                self.branch_is_effectful(arg) || !self.static_helper_expr_supported(arg, stack)
-            })
+            || args
+                .iter()
+                .any(|arg| !self.static_helper_expr_supported(arg, stack))
         {
             return false;
         }
@@ -391,9 +380,9 @@ impl<'a> Lowerer<'a> {
         };
         let key = format!("{}.{}", effect_name, op_name);
         self.static_tail_resume_ops.contains_key(&key)
-            && args.iter().all(|arg| {
-                !self.branch_is_effectful(arg) && self.static_helper_expr_supported(arg, stack)
-            })
+            && args
+                .iter()
+                .all(|arg| self.static_helper_expr_supported(arg, stack))
     }
 
     fn static_helper_expr_supported(&self, expr: &Expr, stack: &mut Vec<String>) -> bool {
@@ -516,9 +505,9 @@ impl<'a> Lowerer<'a> {
             || stack.iter().any(|name| name == lookup_name)
             || !Self::static_helper_params_supported(&helper.params)
             || helper.params.len() != args.len()
-            || args.iter().any(|arg| {
-                self.branch_is_effectful(arg) || !self.imported_static_helper_arg_supported(arg)
-            })
+            || args
+                .iter()
+                .any(|arg| !self.imported_static_helper_arg_supported(arg))
         {
             return false;
         }
@@ -821,9 +810,9 @@ impl<'a> Lowerer<'a> {
         };
         let key = format!("{}.{}", effect_name, op_name);
         let has_key = self.static_tail_resume_ops.contains_key(&key);
-        let args_ok = args.iter().all(|arg| {
-            !self.branch_is_effectful(arg) && self.imported_static_helper_arg_supported(arg)
-        });
+        let args_ok = args
+            .iter()
+            .all(|arg| self.imported_static_helper_arg_supported(arg));
         has_key && args_ok
     }
 

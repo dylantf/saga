@@ -44,7 +44,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Computation types: `infer_expr` returns `(Type, EffectRow)`, effects flow through the type system
 - [x] Effect rows on all function types (`Type::Fun` carries `EffectRow`)
 - [x] Effect subtyping (pure function accepted where effectful callback expected)
-- [x] Directional callback effect checking (`check_callback_effect_subtype`)
+- [x] Directional effect-row checking: unequal closed rows are accepted only at coercion positions (`RowSubsumption` / `RowPosition` in `unify.rs`)
 - [x] Disallow effect invocations in guard expressions
 - [x] Prelude substitution leak: module checkers started at `next_var: 0`, causing var ID
       collisions with the parent checker. Imported scheme types resolved through the parent's

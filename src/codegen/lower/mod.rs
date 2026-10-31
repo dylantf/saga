@@ -1,4 +1,6 @@
 pub(crate) mod beam_interop;
+mod anf;
+mod build;
 mod builtins;
 mod calls;
 mod effects;
@@ -12,21 +14,27 @@ mod module;
 mod pats;
 mod semantic;
 mod static_helpers;
+mod tagged;
 mod trait_spec_stats;
 pub mod util;
 
-use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
+use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat};
 use crate::codegen::call_effects::CallEffectInfo;
 use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::runtime_shape::{CallableAbi, EvidenceAbi};
+use crate::codegen::runtime_shape::CallableAbi;
 use crate::typechecker::TraitInfo;
 use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
 pub(super) use evidence::EvidenceFrame;
-use util::{cerl_call, collect_effect_call, core_var, lower_string_to_binary};
+pub(crate) use tagged::consumed_arrows_effectful as tagged_consumed_arrows_effectful;
+use util::{cerl_call, core_var, lower_string_to_binary};
 
 pub(super) type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+
+/// A perform-site frame captured by an operation callback, and the effects
+/// the callback's parameter type names.
+pub(super) type CapturedCallbackEvidence = (EvidenceFrame, Vec<String>);
 
 /// Lower a simple expression used as a bitstring segment size.
 /// Handles integer literals and variable references — the common cases
@@ -40,32 +48,6 @@ pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
         ExprKind::Var { name, .. } => CExpr::Var(core_var(name)),
         _ => unreachable!("bitstring segment size must be an integer literal or variable"),
     }
-}
-
-/// Bundled inputs to `Lowerer::lower_resolved_fun_call`, gathered to keep its
-/// signature readable as bare and qualified calls share the same consumer.
-/// `lookup_name` indexes `FunInfo`; `emit_name` is the runtime function name.
-pub(super) struct ResolvedCallSite<'a> {
-    pub app_id: NodeId,
-    pub lookup_name: &'a str,
-    pub emit_name: &'a str,
-    pub head: &'a Expr,
-    pub args: &'a [&'a Expr],
-    pub return_k: Option<CExpr>,
-    pub call_span: Option<&'a crate::token::Span>,
-    pub fallback_erlang_module: Option<&'a str>,
-}
-
-/// Bundled inputs to `Lowerer::lower_qualified_call`, gathered to keep its
-/// wrapper call readable. All borrows tie back to the same lowering invocation.
-pub(super) struct QualifiedCallSite<'a> {
-    pub app_id: NodeId,
-    pub module: &'a str,
-    pub func_name: &'a str,
-    pub head: &'a Expr,
-    pub args: &'a [&'a Expr],
-    pub return_k: Option<CExpr>,
-    pub call_span: Option<&'a crate::token::Span>,
 }
 
 #[derive(Clone)]
@@ -178,10 +160,6 @@ struct FunInfo {
     /// evidence threading into lambdas passed to effectful higher-order
     /// functions.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
-    /// Source-level parameter types from the declared/inferred function type.
-    /// Used to propagate expected callback shapes through containers at call sites
-    /// without depending on fully specialized row-polymorphic instantiations.
-    param_types: Vec<crate::typechecker::Type>,
     /// Number of dictionary arguments prepended by elaboration for `where`
     /// clauses. These runtime arguments are not present in the source-level
     /// function type, so expected user parameter types start after this offset.
@@ -192,13 +170,11 @@ impl FunInfo {
     fn from_abi(
         abi: crate::codegen::runtime_shape::CallableAbi,
         param_absorbed_effects: HashMap<usize, Vec<String>>,
-        param_types: Vec<crate::typechecker::Type>,
         dict_param_count: usize,
     ) -> Self {
         Self {
             abi,
             param_absorbed_effects,
-            param_types,
             dict_param_count,
         }
     }
@@ -220,32 +196,12 @@ impl FunInfo {
             .as_ref()
             .is_some_and(crate::codegen::runtime_shape::EvidenceAbi::is_open)
     }
-
-    fn expected_arg_types(&self, arg_count: usize) -> Vec<crate::typechecker::Type> {
-        let mut out = Vec::with_capacity(arg_count);
-        for idx in 0..arg_count {
-            if idx < self.dict_param_count {
-                out.push(crate::typechecker::Type::Error);
-            } else if let Some(ty) = self.param_types.get(idx - self.dict_param_count) {
-                out.push(ty.clone());
-            }
-        }
-        out
-    }
-}
-
-/// Explicit lowering context for value-producing vs terminal positions.
-#[derive(Clone)]
-pub(crate) enum LowerMode {
-    /// Lower as a value-producing subexpression.
-    Value,
-    /// Lower as a terminal computation whose successful result should flow to K.
-    Tail(CExpr),
 }
 
 #[derive(Default)]
 pub(super) struct LowererResolution {
     pub(super) symbols: super::resolve::ResolutionMap,
+    pub(super) origins: super::generic_fold::NodeOrigins,
     pub(super) carried_record_types: HashMap<crate::ast::NodeId, String>,
     pub(super) carried_constructors: HashMap<crate::ast::NodeId, String>,
     pub(super) carried_constructor_names: HashMap<String, String>,
@@ -253,6 +209,16 @@ pub(super) struct LowererResolution {
 
 pub struct Lowerer<'a> {
     counter: usize,
+    /// Numbers the temporaries effect normalization introduces, across all
+    /// the bodies of the module.
+    anf_counter: usize,
+    /// Set while a BEAM guard expression is being lowered (`lower_guard`).
+    in_beam_guard: bool,
+    /// The lambda with this id is lowered as a raw fun with
+    /// the given convention (CPS or direct) instead of deciding from its own
+    /// type. Set by dictionary-method lowering, which owns the slot's
+    /// representation.
+    forced_lambda_cps: Option<(NodeId, bool)>,
     /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
     ctx: &'a super::CodegenContext,
     /// Source location info for error terms. None for stdlib modules (no user source).
@@ -264,7 +230,7 @@ pub struct Lowerer<'a> {
     /// Current function being lowered (e.g. "handle_request"). Set per function.
     current_function: String,
     /// Maps module alias -> Erlang module atom (e.g. "List" -> "std_list").
-    /// Used by lower_qualified_call as a fallback for unresolved qualified names.
+    /// The builder's module for a qualified head that has no resolution entry.
     module_aliases: HashMap<String, String>,
     /// Names declared as `pub` in the current module (for export filtering).
     pub_names: std::collections::HashSet<String>,
@@ -327,27 +293,34 @@ pub struct Lowerer<'a> {
     /// module-separated and are consulted only by semantic module.
     fallback_effect_abi_plans: HashMap<String, super::call_effects::EffectAbiPlan>,
     /// Perform-site evidence captured by an open-row callback value, keyed by
-    /// that callback expression's identity.
-    function_value_captured_evidence: HashMap<NodeId, EvidenceFrame>,
+    /// that callback expression's identity, with the effects the callback's
+    /// type names (those it takes from its caller instead).
+    function_value_captured_evidence: HashMap<NodeId, CapturedCallbackEvidence>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
     /// When lowering a handler arm with `finally`, this holds the finally block AST.
-    /// At each `resume` site, the cleanup code is lowered inline (wrapped in try/catch
-    /// around the K call) so it can capture variables from the arm body's lexical scope.
+    /// At each `resume` site the cleanup code is lowered inline (as the cleanup of
+    /// the region `fin_resume` makes of the resumed computation) so it can capture
+    /// variables from the arm body's lexical scope.
     current_handler_finally: Option<crate::ast::Expr>,
     /// When inlining a named handler from another module, local function references
     /// inside that handler body should lower against the source module, not the
     /// current module being emitted.
     current_handler_source_module: Option<String>,
-    /// The with's outer return continuation, threaded into abort-handler arm
-    /// bodies so their terminal value flows through the host's CPS chain
-    /// (e.g. an effectful impl method's `_ReturnK`) instead of escaping via
-    /// the Erlang return stack. Set by `lower_with_inherited_return_k` for
-    /// the duration of handler-closure construction; `None` when the host
-    /// context has no continuation to thread (e.g. a top-level non-effectful
-    /// `run_x` function, where direct Erlang return is correct).
+    /// The continuation of the tail of the handler arm being lowered: the
+    /// arm's abort continuation (`current_abort_k`) in an arm of a general
+    /// `with`; `None` in an arm of a chained one, which resumes in every
+    /// tail. A `return` clause is lowered with the continuation of its
+    /// `with` here instead.
     current_handler_inherited_k: Option<CExpr>,
+    /// The variable holding the abort reference of the `with` whose arms are
+    /// being built: an arm that does not resume throws with it, and a
+    /// `resume` that is not in tail position catches it.
+    current_abort_ref: Option<String>,
+    /// The variable holding the abort continuation of the arm being lowered
+    /// (`fun(V) -> abort(Ref, Tag, V)`), given to the arm body's tail.
+    current_abort_k: Option<String>,
     /// Pre-resolved constructor name -> mangled Erlang atom.
     /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
     /// Built by resolve::build_constructor_atoms before lowering.
@@ -355,6 +328,9 @@ pub struct Lowerer<'a> {
     /// Pre-resolved name resolution map: NodeId -> ResolvedSymbol.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
+    /// Origins of the nodes of the module being lowered that the generic
+    /// fold copied. See `Lowerer::origin`.
+    origins: super::generic_fold::NodeOrigins,
     /// Record type facts carried for fresh cross-module inlined nodes.
     /// These mirror typechecker `record_types` entries that would otherwise be
     /// lost when generic folding freshens producer AST into the consumer module.
@@ -419,6 +395,9 @@ impl<'a> Lowerer<'a> {
     ) -> Self {
         Lowerer {
             counter: 0,
+            anf_counter: 0,
+            in_beam_guard: false,
+            forced_lambda_cps: None,
             ctx,
             source_info,
             current_module: String::new(),
@@ -449,6 +428,7 @@ impl<'a> Lowerer<'a> {
             function_value_captured_evidence: HashMap::new(),
             constructor_atoms,
             resolved: resolution.symbols,
+            origins: resolution.origins,
             carried_record_types: resolution.carried_record_types,
             carried_constructors: resolution.carried_constructors,
             carried_constructor_names: resolution.carried_constructor_names,
@@ -456,6 +436,8 @@ impl<'a> Lowerer<'a> {
             current_handler_finally: None,
             current_handler_source_module: None,
             current_handler_inherited_k: None,
+            current_abort_ref: None,
+            current_abort_k: None,
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
             check_result,
@@ -473,11 +455,6 @@ impl<'a> Lowerer<'a> {
         let n = self.counter;
         self.counter += 1;
         format!("_Cor{}", n)
-    }
-
-    pub(super) fn planned_function_value_evidence(&self, node_id: NodeId) -> Option<EvidenceAbi> {
-        self.planned_function_value_implementation(node_id)
-            .and_then(|abi| abi.evidence.clone())
     }
 
     fn semantic_effect_abi_plan(&self) -> Option<&super::call_effects::EffectAbiPlan> {
@@ -499,6 +476,26 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Whether a lambda's innermost body is an effectful call or an applied
+    /// operation, as recorded when the plan was made.
+    pub(super) fn planned_lambda_body_effectful(&self, lambda_id: NodeId) -> Option<bool> {
+        self.effect_abi_plan
+            .lambda_body_effectful(lambda_id)
+            .or_else(|| {
+                self.semantic_effect_abi_plan()
+                    .and_then(|plan| plan.lambda_body_effectful(lambda_id))
+            })
+    }
+
+    /// Whether a dictionary method performs an operation directly. Read
+    /// from the plan once it exists; before that the tree is still in the
+    /// shape the plan will be made from.
+    pub(super) fn dict_method_performs(&self, method: &Expr) -> bool {
+        self.effect_abi_plan
+            .dict_method_performing(method.id)
+            .unwrap_or_else(|| super::effect_position::mentions_operation(method))
+    }
+
     pub(super) fn planned_declaration(&self, node_id: NodeId) -> Option<&CallableAbi> {
         self.effect_abi_plan.declaration(node_id).or_else(|| {
             self.semantic_effect_abi_plan()
@@ -506,49 +503,20 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    pub(super) fn planned_function_value(
-        &self,
-        node_id: NodeId,
-    ) -> Option<&super::call_effects::FunctionValueAbiPlan> {
-        self.effect_abi_plan.function_value(node_id).or_else(|| {
-            self.semantic_effect_abi_plan()
-                .and_then(|plan| plan.function_value(node_id))
-        })
-    }
-
-    pub(super) fn planned_function_value_implementation(
-        &self,
-        node_id: NodeId,
-    ) -> Option<&CallableAbi> {
-        self.effect_abi_plan
-            .function_value_implementation(node_id)
-            .or_else(|| {
-                self.semantic_effect_abi_plan()
-                    .and_then(|plan| plan.function_value_implementation(node_id))
-            })
-    }
-
-    pub(super) fn planned_function_value_boundary(&self, node_id: NodeId) -> Option<&CallableAbi> {
-        self.effect_abi_plan
-            .function_value_boundary(node_id)
-            .or_else(|| {
-                self.semantic_effect_abi_plan()
-                    .and_then(|plan| plan.function_value_boundary(node_id))
-            })
-    }
-
     pub(super) fn capture_function_value_evidence(
         &mut self,
         node_id: NodeId,
         frame: EvidenceFrame,
-    ) -> Option<EvidenceFrame> {
-        self.function_value_captured_evidence.insert(node_id, frame)
+        named_effects: Vec<String>,
+    ) -> Option<CapturedCallbackEvidence> {
+        self.function_value_captured_evidence
+            .insert(node_id, (frame, named_effects))
     }
 
     pub(super) fn restore_function_value_captured_evidence(
         &mut self,
         node_id: NodeId,
-        previous: Option<EvidenceFrame>,
+        previous: Option<CapturedCallbackEvidence>,
     ) {
         if let Some(previous) = previous {
             self.function_value_captured_evidence
@@ -612,13 +580,10 @@ impl<'a> Lowerer<'a> {
 
     /// Resolve a bare effect name to its canonical form.
     fn canonicalize_effect(&self, bare: &str) -> String {
-        let family = crate::typechecker::applied_effect_family(bare);
-        let canonical = self
-            .effect_canonical
-            .get(family)
+        self.effect_canonical
+            .get(bare)
             .cloned()
-            .unwrap_or_else(|| family.to_string());
-        format!("{}{}", canonical, &bare[family.len()..])
+            .unwrap_or_else(|| bare.to_string())
     }
 
     /// Canonicalize a list of effect names from the type system (which uses bare names).
@@ -643,8 +608,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn effect_handler_ops(&self, effects: &[String]) -> Vec<(String, String)> {
         let mut ops = Vec::new();
         for eff_name in effects {
-            let family = crate::typechecker::applied_effect_family(eff_name);
-            if let Some(info) = self.effect_defs.get(family) {
+            if let Some(info) = self.effect_defs.get(eff_name) {
                 // Sort op names for deterministic ordering
                 let mut op_names: Vec<&String> = info.ops.keys().collect();
                 op_names.sort();
@@ -676,189 +640,20 @@ impl<'a> Lowerer<'a> {
         format!("{}__{}", Self::handler_param_name(effect, op), suffix)
     }
 
-    /// Check if an expression contains effectful calls nested inside if/case/block
-    /// branches. Like `has_nested_effect_call` but also detects effectful function
-    /// calls (e.g. `assert_eq 1 1`) that the static utility misses because it has
-    /// no access to the resolution/fun_info tables.
-    fn has_nested_effectful_expr(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.branch_is_effectful(cond)
-                    || self.branch_is_effectful(then_branch)
-                    || self.branch_is_effectful(else_branch)
-            }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                self.branch_is_effectful(scrutinee)
-                    || arms
-                        .iter()
-                        .any(|arm| self.branch_is_effectful(&arm.node.body))
-            }
-            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
-                Stmt::Expr(e) => self.branch_is_effectful(e),
-                Stmt::Let { value, .. } => self.branch_is_effectful(value),
-                Stmt::LetFun { body, .. } => self.branch_is_effectful(body),
-            }),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
-                fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
-            }
-            ExprKind::App { func, arg } => {
-                if let Some((_, args)) = super::lower::util::collect_ctor_call(expr) {
-                    args.iter().any(|a| self.branch_is_effectful(a))
-                } else if self.expr_is_effectful_call(expr) {
-                    // Outer call is itself effectful — it's not "nested",
-                    // and callers should route through
-                    // `expr_is_effectful_call` /
-                    // `lower_expr_with_call_return_k`, not through the
-                    // build-k-from-rest CPS path.
-                    false
-                } else {
-                    // Non-ctor pure outer with potentially effectful
-                    // subexprs — e.g. `from (decode x)` from a routed-
-                    // derive delegating impl. Report nested effects so the
-                    // caller chains them through CPS.
-                    self.branch_is_effectful(func) || self.branch_is_effectful(arg)
-                }
-            }
-            ExprKind::Tuple { elements, .. } => {
-                elements.iter().any(|e| self.branch_is_effectful(e))
-            }
-            ExprKind::BinOp { left, right, .. } => {
-                self.branch_is_effectful(left) || self.branch_is_effectful(right)
-            }
-            ExprKind::FieldAccess { expr, .. } => self.branch_is_effectful(expr),
-            ExprKind::RecordUpdate { record, fields, .. } => {
-                self.branch_is_effectful(record)
-                    || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
-            }
-            // A `with` with an *inline, abort-only* handler over effectful
-            // inner work needs CPS-aware routing in enclosing contexts so
-            // the handler closure receives the host's return K and the
-            // inner effectful calls get handler-arg threading. We restrict
-            // this to inline + abort-only because:
-            //
-            // - Named handlers (`with collect`) keep their own
-            //   return-clause / resume-chain composition that breaks
-            //   under inherited-K composition (would short-circuit
-            //   resume-based accumulators like Std.Test's `collect`).
-            // - Inline resume handlers similarly route values through
-            //   captured `resume` continuations; inheriting K would
-            //   double-route. Leave them as before.
-            //
-            // The repro shape — `Ctor (eff_call) with { fail e = ... }`
-            // inside a case arm — is the abort-only case, which is the
-            // shape that drops K silently today.
-            ExprKind::With {
-                expr: inner,
-                handler,
-            } => {
-                let inline_abort_only = match handler.as_ref() {
-                    ast::Handler::Inline { .. } => {
-                        handler.inline_arms().all(|arm| !arm.body.contains_resume())
-                            && handler.return_clause().is_none()
-                    }
-                    ast::Handler::Named(_) => false,
-                };
-                inline_abort_only && self.branch_is_effectful(inner)
-            }
-            _ => false,
-        }
-    }
-
-    /// Check if an expression is or contains an effectful call — either a direct
-    /// effect op (`!` call), an effectful function call, or nested branches
-    /// containing either.
-    fn branch_is_effectful(&self, expr: &Expr) -> bool {
-        collect_effect_call(expr).is_some()
-            || self.expr_is_effectful_call(expr)
-            || self.has_nested_effectful_expr(expr)
-    }
-
-    fn contains_direct_effect_call(expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::EffectCall { .. } => true,
-            ExprKind::App { func, arg } => {
-                Self::contains_direct_effect_call(func) || Self::contains_direct_effect_call(arg)
-            }
-            ExprKind::Lambda { body, .. } => Self::contains_direct_effect_call(body),
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::contains_direct_effect_call(cond)
-                    || Self::contains_direct_effect_call(then_branch)
-                    || Self::contains_direct_effect_call(else_branch)
-            }
-            ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                Self::contains_direct_effect_call(scrutinee)
-                    || arms.iter().any(|arm| {
-                        arm.node
-                            .guard
-                            .as_ref()
-                            .is_some_and(Self::contains_direct_effect_call)
-                            || Self::contains_direct_effect_call(&arm.node.body)
-                    })
-            }
-            ExprKind::Block { stmts, .. } => stmts.iter().any(|stmt| match &stmt.node {
-                Stmt::Let { value, .. } => Self::contains_direct_effect_call(value),
-                Stmt::LetFun { body, guard, .. } => {
-                    guard
-                        .as_ref()
-                        .is_some_and(|guard| Self::contains_direct_effect_call(guard))
-                        || Self::contains_direct_effect_call(body)
-                }
-                Stmt::Expr(e) => Self::contains_direct_effect_call(e),
-            }),
-            ExprKind::With { expr, handler } => {
-                Self::contains_direct_effect_call(expr)
-                    || handler.inline_arms().any(|arm| {
-                        Self::contains_direct_effect_call(&arm.body)
-                            || arm
-                                .finally_block
-                                .as_ref()
-                                .is_some_and(|body| Self::contains_direct_effect_call(body))
-                    })
-                    || handler
-                        .return_clause()
-                        .is_some_and(|rc| Self::contains_direct_effect_call(&rc.body))
-            }
-            ExprKind::Tuple { elements, .. } => {
-                elements.iter().any(Self::contains_direct_effect_call)
-            }
-            ExprKind::ListLit { elements, .. } => elements
-                .iter()
-                .any(|element| Self::contains_direct_effect_call(&element.node)),
-            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
-                .iter()
-                .any(|(_, _, field)| Self::contains_direct_effect_call(field)),
-            ExprKind::RecordUpdate { record, fields, .. } => {
-                Self::contains_direct_effect_call(record)
-                    || fields
-                        .iter()
-                        .any(|(_, _, field)| Self::contains_direct_effect_call(field))
-            }
-            ExprKind::FieldAccess { expr, .. } | ExprKind::UnaryMinus { expr } => {
-                Self::contains_direct_effect_call(expr)
-            }
-            ExprKind::BinOp { left, right, .. } => {
-                Self::contains_direct_effect_call(left) || Self::contains_direct_effect_call(right)
-            }
-            ExprKind::StringInterp { parts, .. } => parts.iter().any(|part| match part {
-                ast::StringPart::Expr(e) => Self::contains_direct_effect_call(e),
-                ast::StringPart::Lit(_) => false,
-            }),
-            _ => false,
-        }
+    /// Whether `expr`, as a block statement or a `do` binding, takes the
+    /// rest of the block as its continuation (the `let` rule), instead of
+    /// being evaluated to a value that is then bound.
+    ///
+    /// It does when something in it performs (`Lowerer::performs_effect`,
+    /// the one definition of that), composed over sub-expressions by
+    /// `effect_position::is_effectful`. A `with` does when its handled
+    /// computation does. See "The Continuation of a `with`" in
+    /// `docs/effect-implementation.md`.
+    fn takes_continuation(&self, expr: &Expr) -> bool {
+        super::effect_position::is_effectful(expr, &|node| match &node.kind {
+            ExprKind::With { expr: inner, .. } => self.takes_continuation(inner),
+            _ => self.performs_effect(node),
+        })
     }
 
     /// Canonical predicate for "is this a saturated effectful function call?"
@@ -877,8 +672,7 @@ impl<'a> Lowerer<'a> {
         {
             return false;
         }
-        self.planned_call(expr.id)
-            .is_some_and(|info| info.is_cps_call())
+        self.planned(expr).is_cps_call()
     }
 
     fn app_head_and_source_arity(expr: &Expr) -> Option<(&Expr, usize)> {
@@ -889,22 +683,6 @@ impl<'a> Lowerer<'a> {
             current = func;
         }
         (arity > 0).then_some((current, arity))
-    }
-
-    pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
-        let shape = self
-            .planned_call(expr.id)
-            .map(|info| info.debug_label())
-            .unwrap_or_else(|| "missing-call-effect-info".to_string());
-        let head = head.unwrap_or(expr);
-        panic!(
-            "effectful App {:?} at span {:?} was classified by call_effects as {} but no lowerer dispatch path handled it (head {:?}: {})",
-            expr.id,
-            expr.span,
-            shape,
-            head.id,
-            module::lower_head_debug_label(head)
-        );
     }
 
     /// Variant that uses an explicit `CheckResult` for type-at-span lookups.
@@ -928,9 +706,6 @@ impl<'a> Lowerer<'a> {
                     name.clone(),
                     FunSig {
                         abi: info.abi.clone(),
-                        param_absorbed_effects: info.param_absorbed_effects.clone(),
-                        param_types: info.param_types.clone(),
-                        dict_param_count: info.dict_param_count,
                     },
                 )
             })
@@ -960,23 +735,20 @@ impl<'a> Lowerer<'a> {
             .collect();
 
         Populator::new(super::call_effects::PopulatorInputs {
+            module: &self.current_source_module,
+            source_info: self.source_info.as_ref(),
             resolved: &self.resolved,
+            origins: &self.origins,
             check_result,
             ctx: self.ctx,
             fun_sigs: &fun_sigs,
             effect_ops: &effect_ops,
             effect_canonical: &self.effect_canonical,
-            let_effect_bindings: &self.ctx.let_effect_bindings,
             impl_effects_by_dict: &self.impl_effects_by_dict,
             impl_method_effects_by_dict: &self.impl_method_effects_by_dict,
             trait_method_effects_by_key: &trait_method_effects_by_key,
         })
         .populate_with_trace(program)
-    }
-
-    /// Get a function's arity.
-    fn fun_arity(&self, name: &str) -> Option<usize> {
-        self.fun_info.get(name).map(FunInfo::arity)
     }
 
     /// Whether the trait method at `(trait_name, method_index)` takes no
@@ -1019,6 +791,11 @@ pub(crate) fn precompute_call_effects(
         super::resolve::ConstructorAtoms::new(),
         LowererResolution {
             symbols: resolution,
+            origins: ctx
+                .modules
+                .get(module_name)
+                .map(|compiled| compiled.origins.clone())
+                .unwrap_or_default(),
             ..Default::default()
         },
         check_result,
@@ -1027,70 +804,4 @@ pub(crate) fn precompute_call_effects(
         None,
     )
     .precompute_call_effects(module_name, program)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::codegen::CodegenContext;
-    use crate::token::Span;
-
-    #[test]
-    fn unhandled_effectful_app_panic_includes_classifier_shape_and_head_label() {
-        let ctx = CodegenContext::default();
-        let check_result = crate::typechecker::Checker::new().to_result();
-        let mut lowerer = Lowerer::new(
-            &ctx,
-            std::collections::HashMap::new(),
-            LowererResolution::default(),
-            &check_result,
-            super::super::optimize::OptimizationFacts::default(),
-            None,
-            None,
-        );
-        let head = Expr::synth(
-            Span { start: 10, end: 16 },
-            ExprKind::Tuple { elements: vec![] },
-        );
-        let app = Expr::synth(
-            Span { start: 10, end: 22 },
-            ExprKind::App {
-                func: Box::new(head.clone()),
-                arg: Box::new(Expr::synth(
-                    Span { start: 17, end: 22 },
-                    ExprKind::Lit {
-                        value: Lit::String("arg".to_string(), crate::token::StringKind::Normal),
-                    },
-                )),
-            },
-        );
-        lowerer.effect_abi_plan.record_call(
-            app.id,
-            super::super::call_effects::CallEffectInfo::test_cps_static("Main.Log", "log", 1),
-        );
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            lowerer.panic_unhandled_effectful_app(&app, Some(&head));
-        }));
-        let payload = result.expect_err("expected panic for unhandled effectful app");
-        let msg = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload should be a string");
-
-        assert!(
-            msg.contains(&format!("effectful App {:?}", app.id)),
-            "{msg}"
-        );
-        assert!(msg.contains("span Span { start: 10, end: 22 }"), "{msg}");
-        assert!(
-            msg.contains(r#"cps-static(1->3, effects=["Main.Log"])"#),
-            "{msg}"
-        );
-        assert!(
-            msg.contains(&format!("head {:?}: tuple/0", head.id)),
-            "{msg}"
-        );
-    }
 }

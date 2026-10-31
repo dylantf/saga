@@ -9,118 +9,282 @@ use super::{Checker, Diagnostic, EffectEntry, EffectRow, Type};
 impl Checker {
     // --- Handler inference ---
 
+    /// Decide, for each effect family a `with` layer handles, which
+    /// application of it is handled, and make sure nothing inside the handled
+    /// computation can perform the family at another type.
+    ///
+    /// A handler is found by family, so every operation of the family that
+    /// the handled computation performs reaches it, whatever the operation's
+    /// type argument. Three things are therefore checked per family:
+    ///
+    /// - If the computation's row names the family, that entry is the one
+    ///   handled, and a handler declared for specific arguments
+    ///   (`handler for Fail Int`, a `Handler (Fail Int)` value) must agree
+    ///   with it.
+    /// - An open tail of the row that inference is still free to refine is
+    ///   refined to contain the family at the handled arguments, so a
+    ///   callback that turns out to perform the family is typed against this
+    ///   handler.
+    /// - An open tail fixed by a declared signature (`..r`) cannot be
+    ///   refined: the caller chooses it. It is accepted only if the signature
+    ///   itself names the family next to that tail (`needs {Fail e, ..r}`),
+    ///   which obliges every caller to keep `r` consistent with it.
+    ///
+    /// Returns the handled entries (one per family actually handled).
     fn resolve_handled_effect_entries(
         &mut self,
         handled_families: &HashSet<String>,
-        explicitly_handled: &[EffectEntry],
+        declared_entries: &[EffectEntry],
         inner_effs: &EffectRow,
         span: Span,
     ) -> Result<Vec<EffectEntry>, Diagnostic> {
         let mut handled_entries = Vec::new();
+        let mut families: Vec<&String> = handled_families.iter().collect();
+        families.sort();
 
-        for family in handled_families {
-            let mut matches: Vec<EffectEntry> = Vec::new();
-            for entry in &inner_effs.effects {
-                if entry.name != *family {
-                    continue;
-                }
-                let explicit_for_family: Vec<_> = explicitly_handled
-                    .iter()
-                    .filter(|handled| handled.name == *family)
-                    .collect();
-                if !explicit_for_family.is_empty() {
-                    let mut compatible = false;
-                    for handled in explicit_for_family {
-                        let saved = self.sub.clone();
-                        compatible = handled.args.len() == entry.args.len()
-                            && handled
-                                .args
-                                .iter()
-                                .zip(&entry.args)
-                                .all(|(a, b)| self.unify(a, b).is_ok());
-                        self.sub = saved;
-                        if compatible {
-                            break;
-                        }
+        for family in families {
+            let row = self.sub.apply_effect_row(inner_effs);
+            let declared = declared_entries
+                .iter()
+                .find(|entry| entry.name == *family)
+                .cloned();
+            let named = row.effects.iter().find(|e| e.name == *family).cloned();
+
+            let entry = match (&named, &declared) {
+                (Some(named), Some(declared)) => {
+                    if self.unify_family(declared, named).is_err() {
+                        return Err(self.handler_mismatch(declared, named, span));
                     }
-                    if !compatible {
+                    named.clone()
+                }
+                (Some(named), None) => named.clone(),
+                (None, Some(declared)) => declared.clone(),
+                (None, None) => {
+                    let arity = self
+                        .effects
+                        .get(family)
+                        .map(|info| info.type_params.len())
+                        .unwrap_or(0);
+                    EffectEntry {
+                        name: family.clone(),
+                        args: (0..arity).map(|_| self.fresh_var()).collect(),
+                    }
+                }
+            };
+
+            // Only an effect with type parameters can be performed at a type
+            // its handler was not written for. For any other effect a tail
+            // fixed by a signature is left alone, as it always was: the
+            // handler may catch operations the tail turns out to perform,
+            // while the signature still (harmlessly) forwards them.
+            let parameterised = self
+                .effects
+                .get(family)
+                .is_some_and(|info| !info.type_params.is_empty());
+            let mut handled = named.is_some();
+            for tail in row.tail_var_ids() {
+                if let Some(rigid) = self.rigid_row_var_for(tail) {
+                    if !parameterised {
                         continue;
                     }
-                }
-
-                // Under nested handler semantics, one `with` layer still handles
-                // a single effect family. Multiple entries from the same family
-                // may appear here only because they were inferred with different
-                // fresh vars (for example `Actor a` from a handler need and
-                // `Actor msg` from the inner expression). If they can be unified,
-                // treat them as one handled instantiation; otherwise keep both so
-                // we can report a real multi-instantiation error below.
-                let mut merged = false;
-                for seen in &mut matches {
-                    if self.unify_effect_entry_instantiations(seen, entry).is_ok() {
-                        *seen = EffectEntry {
-                            name: seen.name.clone(),
-                            args: seen.args.iter().map(|arg| self.sub.apply(arg)).collect(),
-                        };
-                        merged = true;
-                        break;
+                    // Any declared companion that agrees with the handled
+                    // application will do.
+                    let mut agreed = false;
+                    for companion in rigid.companions.iter().filter(|c| c.name == *family) {
+                        let saved = self.sub.clone();
+                        if self.unify_family(companion, &entry).is_ok() {
+                            agreed = true;
+                            break;
+                        }
+                        self.sub = saved;
                     }
-                }
-
-                if !merged {
-                    matches.push(entry.clone());
+                    if !agreed {
+                        return Err(self.rigid_tail_error(&entry, &rigid, span));
+                    }
+                    handled = true;
+                } else if named.is_none() {
+                    let fresh = self.fresh_var();
+                    self.bind_row_checked(
+                        tail,
+                        EffectRow {
+                            effects: vec![entry.clone()],
+                            tails: vec![fresh],
+                        },
+                    )
+                    .map_err(|e| e.with_span(span))?;
+                    handled = true;
                 }
             }
 
-            if matches.len() > 1 {
-                let mut rendered: Vec<String> = matches
-                    .iter()
-                    .map(|entry| self.prettify_effect_entry(entry))
-                    .collect();
-                rendered.sort();
-                return Err(Diagnostic::error_at(
-                    span,
-                    format!(
-                        "a single `with` cannot handle multiple instantiations of `{}` in the same scope: {}",
-                        family.rsplit('.').next().unwrap_or(family),
-                        rendered.join(", "),
-                    ),
-                ));
-            }
-
-            if let Some(entry) = matches.into_iter().next() {
-                handled_entries.push(entry);
+            if handled {
+                handled_entries.push(EffectEntry {
+                    name: entry.name.clone(),
+                    args: entry.args.iter().map(|arg| self.sub.apply(arg)).collect(),
+                });
             }
         }
 
         Ok(handled_entries)
     }
 
-    fn unify_effect_entry_instantiations(
-        &mut self,
-        a: &EffectEntry,
-        b: &EffectEntry,
-    ) -> Result<(), Diagnostic> {
-        if a.name != b.name || a.args.len() != b.args.len() {
-            return Err(Diagnostic::error("effect instantiations differ"));
+    /// If `tail` is (or has been unified with) a row variable fixed by a
+    /// declared signature, return what the signature says about it.
+    pub(crate) fn rigid_row_var_for(&self, tail: u32) -> Option<super::RigidRowVar> {
+        let mut found: Option<super::RigidRowVar> = None;
+        for (var, info) in &self.rigid_row_vars {
+            let resolved = self.sub.apply_effect_row(&EffectRow {
+                effects: vec![],
+                tails: vec![Type::Var(*var)],
+            });
+            if !resolved.tail_var_ids().contains(&tail) {
+                continue;
+            }
+            let entry = found.get_or_insert_with(|| super::RigidRowVar {
+                name: info.name.clone(),
+                companions: vec![],
+            });
+            entry.companions.extend(info.companions.iter().cloned());
+            // Effects the variable has itself been unified with are named
+            // wherever the variable is.
+            entry.companions.extend(resolved.effects.iter().cloned());
         }
-        let saved_sub = self.sub.clone();
-        for (left, right) in a.args.iter().zip(&b.args) {
-            if let Err(err) = self.unify(left, right) {
-                self.sub = saved_sub;
-                return Err(err);
+        if found.is_none() {
+            // The row of an open-row trait method called on an abstract type
+            // (`..a` for `a: Foo`): the impl chosen by the caller supplies it.
+            for var in self.trait_forward_row_vars.keys() {
+                if self.sub.apply(&Type::Var(*var)) == Type::Var(tail) {
+                    let name = self
+                        .trait_state
+                        .where_bound_var_names
+                        .get(var)
+                        .cloned()
+                        .unwrap_or_else(|| "a".to_string());
+                    found = Some(super::RigidRowVar {
+                        name,
+                        companions: vec![],
+                    });
+                    break;
+                }
             }
         }
-        Ok(())
+        found
+    }
+
+    fn rigid_tail_error(
+        &self,
+        entry: &EffectEntry,
+        rigid: &super::RigidRowVar,
+        span: Span,
+    ) -> Diagnostic {
+        let family = entry.name.rsplit('.').next().unwrap_or(&entry.name);
+        let params = self
+            .effects
+            .get(&entry.name)
+            .map(|info| info.type_params.len())
+            .unwrap_or(0);
+        let example = if params == 0 {
+            family.to_string()
+        } else {
+            format!(
+                "{} {}",
+                family,
+                (0..params)
+                    .map(|i| ((b'e' + i as u8) as char).to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        Diagnostic::error_at(
+            span,
+            format!(
+                "cannot handle `{family}` here: the handled expression has the open effect row \
+                 `..{row}`, which is chosen by the caller and might itself contain `{family}` \
+                 (at any type). Those operations would reach this handler too. Name the effect \
+                 in the type that carries `..{row}`, e.g. `needs {{{example}, ..{row}}}`, so \
+                 that every caller agrees on the one `{family}` this handler handles",
+                row = rigid.name,
+            ),
+        )
+    }
+
+    fn handler_mismatch(
+        &self,
+        handler: &EffectEntry,
+        performed: &EffectEntry,
+        span: Span,
+    ) -> Diagnostic {
+        let family = handler.name.rsplit('.').next().unwrap_or(&handler.name);
+        Diagnostic::error_at(
+            span,
+            format!(
+                "this handler handles `{}`, but the handled expression performs `{}`. A handler \
+                 for `{family}` receives every `{family}` operation performed inside it, \
+                 whatever its type argument; to keep two instances apart, declare one of them \
+                 with `neweffect`",
+                self.prettify_effect_entry(handler),
+                self.prettify_effect_entry(performed),
+            ),
+        )
+    }
+
+    /// The effects named by a `Handler (...)` type, as row entries.
+    fn handler_type_entries(&mut self, ty: &Type) -> Vec<EffectEntry> {
+        let resolved = self.sub.apply(ty);
+        let Type::Con(name, args) = resolved else {
+            return vec![];
+        };
+        if name != super::canonicalize_type_name("Handler") {
+            return vec![];
+        }
+        args.iter()
+            .filter_map(|arg| match self.sub.apply(arg) {
+                Type::Con(effect_name, effect_args) => Some(EffectEntry {
+                    name: self.normalize_handler_effect_name(effect_name),
+                    args: effect_args,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Infer the type of a `with` expression: `expr with handler`
+    ///
+    /// The handler clause is checked in the scope of the wrapped block:
+    /// `{ let db = connect (); ... } with db` names a handler the block bound
+    /// (docs/handler-bindings.md), and inline arms and `return` clauses see
+    /// the block's values the same way. That scope ends with the `with`
+    /// expression as a whole.
     pub(crate) fn infer_with(
+        &mut self,
+        expr: &Expr,
+        handler: &ast::Handler,
+        with_span: Span,
+        with_node_id: crate::ast::NodeId,
+    ) -> Result<Type, Diagnostic> {
+        let saved_env = self.env.clone();
+        let mut wrapped_handlers = Vec::new();
+        let result = self.infer_with_open(
+            expr,
+            handler,
+            with_span,
+            with_node_id,
+            &mut wrapped_handlers,
+        );
+        self.env = saved_env;
+        self.restore_shadowed_handlers(wrapped_handlers);
+        result
+    }
+
+    /// `infer_with` leaving the wrapped block's scope open, for a `with` that
+    /// is itself wrapped by another (`{ ... } with {a, b}` is one `with`
+    /// layer per handler) or followed by a `finally` block.
+    pub(crate) fn infer_with_open(
         &mut self,
         expr: &Expr,
         handler: &ast::Handler,
         _with_span: Span,
         with_node_id: crate::ast::NodeId,
+        wrapped_handlers: &mut super::infer::ShadowedHandlers,
     ) -> Result<Type, Diagnostic> {
         // Check if this with-expression uses handlers that require runtime resource init.
         let handler_names: Vec<String> = match handler {
@@ -189,7 +353,7 @@ impl Checker {
             };
         self.lsp.with_arm_stacks.push(arm_stack_entry);
 
-        let result = self.infer_with_inner(expr, handler, with_node_id)?;
+        let result = self.infer_with_inner(expr, handler, with_node_id, wrapped_handlers)?;
         self.lsp.with_arm_stacks.pop();
 
         Ok(result)
@@ -200,11 +364,15 @@ impl Checker {
         expr: &Expr,
         handler: &ast::Handler,
         with_node_id: crate::ast::NodeId,
+        wrapped_handlers: &mut super::infer::ShadowedHandlers,
     ) -> Result<Type, Diagnostic> {
         // --- Scope 1: infer the inner expression with isolated effect tracking ---
         let inner_scope = self.enter_scope();
         let saved_effs = self.save_effects();
-        let expr_ty = self.infer_expr(expr)?;
+        let expr_ty = self.infer_expr_keeping_block_scope(expr, wrapped_handlers)?;
+        // What the handler is installed around includes the effects of any
+        // open-row trait method the expression used as a value.
+        self.resolve_open_row_refs(super::open_row_refs::OpenRowFinish::Keep);
         match handler {
             ast::Handler::Named(named) => {
                 let resolved_name = self.resolved_handler_name(named.id, &named.name);
@@ -223,43 +391,81 @@ impl Checker {
                 }
             }
         }
+        // Leave the inner scope before anything below can fail.
+        let raw_inner_effs = self.restore_effects(saved_effs);
+        let inner_result = self.exit_scope(inner_scope);
         let handled_families = self.handler_handled_effects(handler);
-        let explicitly_handled = match handler {
+        // A named handler declaration is a scheme: its type variables are
+        // instantiated once per `with`, shared by the effects it handles,
+        // its return clause and its `needs`.
+        let named_handler_info = match handler {
             ast::Handler::Named(named) => {
                 let resolved_name = self.resolved_handler_name(named.id, &named.name);
-                self.handlers
-                    .get(&resolved_name)
-                    .cloned()
-                    .map(|info| {
-                        // Handler declarations are schemes too. Their applied
-                        // effect entries must be freshened per `with`, just as
-                        // the handler's return type is below; otherwise a
-                        // declaration-time `Fail a` variable can retain stale
-                        // substitutions and fail to match `Fail String`.
-                        let mapping: std::collections::HashMap<u32, Type> = info
-                            .forall
-                            .iter()
-                            .map(|&id| (id, self.fresh_var()))
-                            .collect();
-                        info.effect_entries
-                            .iter()
-                            .map(|entry| EffectEntry {
-                                name: entry.name.clone(),
-                                args: entry
-                                    .args
-                                    .iter()
-                                    .map(|arg| Self::replace_vars(arg, &mapping))
-                                    .collect(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
+                self.handlers.get(&resolved_name).cloned()
+            }
+            ast::Handler::Inline { .. } => None,
+        };
+        let handler_mapping: std::collections::HashMap<u32, Type> = named_handler_info
+            .as_ref()
+            .map(|info| {
+                info.forall
+                    .iter()
+                    .map(|&id| (id, self.fresh_var()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let explicitly_handled: Vec<EffectEntry> = match handler {
+            ast::Handler::Named(named) => {
+                if let Some(info) = &named_handler_info {
+                    info.effect_entries
+                        .iter()
+                        .map(|entry| EffectEntry {
+                            name: entry.name.clone(),
+                            args: entry
+                                .args
+                                .iter()
+                                .map(|arg| Self::replace_vars(arg, &handler_mapping))
+                                .collect(),
+                        })
+                        .collect()
+                } else {
+                    // A handler value in scope (a parameter, say): its type
+                    // says what it handles.
+                    let resolved_name = self.resolved_handler_name(named.id, &named.name);
+                    match self.env.get(&resolved_name).map(|scheme| scheme.ty.clone()) {
+                        Some(ty) => {
+                            // What it handles must be known here: this is
+                            // where the handled effects are checked against
+                            // the expression and removed from its row.
+                            let entries = self.handler_type_entries(&ty);
+                            let known = match self.sub.apply(&ty) {
+                                Type::Con(name, args) => {
+                                    name == super::canonicalize_type_name("Handler")
+                                        && !args.is_empty()
+                                        && entries.len() == args.len()
+                                }
+                                _ => false,
+                            };
+                            if !known {
+                                return Err(Diagnostic::error_at(
+                                    named.span,
+                                    format!(
+                                        "cannot tell which effects `{}` handles: its type is not \
+                                         a known `Handler (...)` at this point. Give it a type \
+                                         annotation such as `Handler (Fail String)`",
+                                        named.name
+                                    ),
+                                ));
+                            }
+                            entries
+                        }
+                        None => Vec::new(),
+                    }
+                }
             }
             ast::Handler::Inline { .. } => Vec::new(),
         };
-        let raw_inner_effs = self.restore_effects(saved_effs);
-        let inner_effs = self.sub.apply_effect_row(&raw_inner_effs);
-        let inner_result = self.exit_scope(inner_scope);
+        let inner_effs = self.normalize_row_at(&raw_inner_effs, expr.span)?;
         let outer_effect_cache = self.effect_meta.type_param_cache.clone();
         let handled_entries = self.resolve_handled_effect_entries(
             &handled_families,
@@ -271,7 +477,8 @@ impl Checker {
 
         let inner_effect_cache = inner_result.effect_cache;
 
-        // Remaining effects: inner minus handled
+        // Remaining effects: inner minus handled. Open tails stay: a handler
+        // cannot discharge effects it cannot name.
         let remaining_effs = inner_effs.subtract_entries(&handled_entries);
 
         let with_span = expr.span;
@@ -288,14 +495,33 @@ impl Checker {
                 }
                 if let Some(handler_info) = self.handlers.get(&resolved_name).cloned() {
                     if let Some((param_ty, ret_ty)) = &handler_info.return_type {
-                        let mapping: std::collections::HashMap<u32, Type> = handler_info
-                            .forall
-                            .iter()
-                            .map(|&id| (id, self.fresh_var()))
-                            .collect();
+                        let mapping = handler_mapping.clone();
                         let fresh_param = Self::replace_vars(param_ty, &mapping);
                         let fresh_ret = Self::replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
+                        // What the arms' `resume` runs beyond the handler's
+                        // `needs`: here, what this computation leaves
+                        // unhandled.
+                        if handler_info.resume_row_closed {
+                            self.require_nothing_unhandled(
+                                &named.name,
+                                &remaining_effs,
+                                with_span,
+                            );
+                        } else if let Some(Type::Var(resume_rest)) = handler_info
+                            .resume_row
+                            .and_then(|id| mapping.get(&id).cloned())
+                        {
+                            self.bind_row_checked(resume_rest, remaining_effs.clone())
+                                .map_err(|e| e.with_span(with_span))?;
+                            self.resume_rows.insert(
+                                with_node_id,
+                                EffectRow {
+                                    effects: remaining_effs.effects.clone(),
+                                    tails: vec![Type::Var(resume_rest)],
+                                },
+                            );
+                        }
 
                         for ((effect_name, param_idx), trait_constraints) in
                             &handler_info.where_constraints
@@ -348,8 +574,19 @@ impl Checker {
                                 .collect(),
                             tails: vec![],
                         };
-                        let final_effs = remaining_effs.merge(&fresh_needs);
-                        self.emit_effects(&final_effs);
+                        let final_effs =
+                            self.merge_rows(&remaining_effs, &fresh_needs, with_span)?;
+                        self.emit_effects(&final_effs, with_span)?;
+                        for alternative in &handler_info.alternatives {
+                            self.check_alternative_handler(
+                                &named.name,
+                                alternative,
+                                &expr_ty,
+                                &fresh_ret,
+                                &remaining_effs,
+                                with_span,
+                            )?;
+                        }
                         if handler_info.return_type.is_none()
                             && !handler_info.effects.is_empty()
                             && !handled_entries
@@ -366,8 +603,12 @@ impl Checker {
                         }
                         Ok(self.sub.apply(&fresh_ret))
                     } else {
-                        let final_effs = remaining_effs.merge(&handler_info.needs_effects);
-                        self.emit_effects(&final_effs);
+                        let final_effs = self.merge_rows(
+                            &remaining_effs,
+                            &handler_info.needs_effects,
+                            with_span,
+                        )?;
+                        self.emit_effects(&final_effs, with_span)?;
                         if handler_info.return_type.is_none()
                             && !handler_info.effects.is_empty()
                             && !handled_entries
@@ -385,33 +626,49 @@ impl Checker {
                         Ok(expr_ty)
                     }
                 } else {
-                    self.emit_effects(&remaining_effs);
+                    self.emit_effects(&remaining_effs, with_span)?;
                     Ok(expr_ty)
                 }
             }
             ast::Handler::Inline { .. } => {
                 // After desugaring, Inline handlers contain only Arm and Return
                 // items (no Named refs — those are split into their own With layers).
-                let answer_ty = expr_ty.clone();
-
                 self.effect_meta.type_param_cache = inner_effect_cache.clone();
 
                 // Return clause: wraps the answer type
-                let answer_ty = if let Some(ret_arm) = handler.return_clause() {
+                let (ret_ty, ret_effs) = if let Some(ret_arm) = handler.return_clause() {
                     let saved_env = self.env.clone();
                     let saved_effs = self.save_effects();
                     if let Some(pat) = ret_arm.params.first() {
-                        self.bind_pattern(pat, &answer_ty)?;
+                        self.bind_pattern(pat, &expr_ty)?;
                     }
                     let ret_ty = self.infer_expr(&ret_arm.body)?;
                     let raw_ret_effs = self.restore_effects(saved_effs);
                     let ret_effs = self.sub.apply_effect_row(&raw_ret_effs);
-                    self.emit_effects(&ret_effs);
+                    self.emit_effects(&ret_effs, ret_arm.body.span)?;
                     self.env = saved_env;
-                    ret_ty
+                    (ret_ty, ret_effs)
                 } else {
-                    answer_ty
+                    (expr_ty.clone(), EffectRow::empty())
                 };
+
+                // What `resume` returns and performs. Resuming runs the rest
+                // of the handled computation under this handler, then the
+                // `return` clause, so it performs what this `with` does not
+                // handle, the `return` clause's effects, and (since a later
+                // operation runs an arm inside it) the arms' effects:
+                // `ρ_arm`, which takes them below. A function value an arm
+                // builds around `resume` performs all that when called, so
+                // the answer type's arrows get room for it (slack tails).
+                // Slack that nothing needed is closed again at the end.
+                let vars_before = self.next_var;
+                let answer_ty = self.open_answer_spine(&ret_ty, with_node_id);
+                let arm_slack = self.new_slack(super::unify::Slack::Arm, with_node_id);
+                let mut resume_row = self.merge_rows(&remaining_effs, &ret_effs, with_span)?;
+                resume_row.tails.push(arm_slack);
+                let resume_row = self.normalize_row_at(&resume_row, with_span)?;
+                self.resume_rows.insert(with_node_id, resume_row.clone());
+                let mut arms_effs = EffectRow::empty();
 
                 // Inline handler arms
                 for arm in handler.inline_arms() {
@@ -428,8 +685,45 @@ impl Checker {
                     let saved_env = self.env.clone();
                     let saved_resume = self.resume_type.take();
                     let saved_resume_ret = self.resume_return_type.take();
+                    let saved_resume_effs = self.resume_effects.take();
                     let saved_effect_cache = self.effect_meta.type_param_cache.clone();
 
+                    // The type variables the operation's signature uses as
+                    // effect arguments (`e` in a callback's `needs {Fail e}`)
+                    // are chosen by whoever performs the operation. The
+                    // effect's own parameters are not: the application of
+                    // the effect being handled says what they are.
+                    let arm_effect_arg_vars: Vec<(u32, String)> = match op_sig {
+                        Some(ref sig) => {
+                            let mut own_params = Vec::new();
+                            if let Some(mapping) =
+                                self.effect_meta.type_param_cache.get(&sig.effect_name)
+                            {
+                                for ty in mapping.values() {
+                                    super::unify::collect_free_vars(ty, &mut own_params);
+                                }
+                            }
+                            self.op_sig_effect_arg_vars(sig)
+                                .into_iter()
+                                .filter(|(var, _)| !own_params.contains(var))
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    };
+
+                    let mut arm_rigid_rows = std::collections::HashMap::new();
+                    if let Some(ref sig) = op_sig {
+                        // The operation's signature is a declared type the
+                        // arm implements as written: its row variables are
+                        // chosen by whoever performs the operation.
+                        for (_, param_ty) in &sig.params {
+                            Self::collect_rigid_row_vars(param_ty, &[], &mut arm_rigid_rows);
+                        }
+                        Self::collect_rigid_row_vars(&sig.return_type, &[], &mut arm_rigid_rows);
+                        Self::collect_rigid_row_vars_in_row(&sig.needs, &[], &mut arm_rigid_rows);
+                        self.rigid_row_vars
+                            .extend(arm_rigid_rows.iter().map(|(id, info)| (*id, info.clone())));
+                    }
                     if let Some(ref sig) = op_sig {
                         // Pin the op's effect type parameters (e.g. `e` in
                         // `Fail e`) to the concrete instantiation actually being
@@ -462,6 +756,7 @@ impl Checker {
                         }
                         self.resume_type = Some(sig.return_type.clone());
                         self.resume_return_type = Some(answer_ty.clone());
+                        self.resume_effects = Some(resume_row.clone());
                         for (i, pat) in arm.params.iter().enumerate() {
                             let param_ty = if i < sig.params.len() {
                                 sig.params[i].1.clone()
@@ -494,12 +789,42 @@ impl Checker {
                     // Arm body effects propagate outward (no sibling subtraction
                     // under nested handler semantics).
                     let saved_effs = self.save_effects();
-                    let arm_ty = self.infer_expr(&arm.body)?;
+                    // A `finally` block sees what the arm body's block binds,
+                    // so with one present that block's scope stays open until
+                    // the `finally` block has been checked.
+                    let mut body_handlers = Vec::new();
+                    let arm_ty = if arm.finally_block.is_some() {
+                        self.infer_expr_keeping_block_scope(&arm.body, &mut body_handlers)?
+                    } else {
+                        self.infer_expr(&arm.body)?
+                    };
                     let raw_arm_effs = self.restore_effects(saved_effs);
                     let arm_effs = self.sub.apply_effect_row(&raw_arm_effs);
-                    self.emit_effects(&arm_effs);
+                    self.emit_effects(&arm_effs, arm.span)?;
+                    arms_effs = self.merge_rows(&arms_effs, &arm_effs, arm.span)?;
 
-                    self.unify_at(&arm_ty, &answer_ty, arm.span)?;
+                    // Arm result against the handled expression's answer type.
+                    self.coerce_at(&arm_ty, &answer_ty, arm.span, Some(&arm.body))?;
+                    self.check_rigid_row_vars_abstract(
+                        &arm_rigid_rows,
+                        &format!("operation `{}`", arm.op_name),
+                        arm.span,
+                        true,
+                    )?;
+                    self.check_effect_arg_vars_abstract(
+                        &arm_effect_arg_vars,
+                        &[],
+                        true,
+                        &format!("operation `{}`", arm.op_name),
+                        arm.span,
+                    )?;
+                    self.check_effect_arg_vars_stay_inside(
+                        &arm_effect_arg_vars,
+                        &arm_effs.effects,
+                        Some(&answer_ty),
+                        &format!("operation `{}`", arm.op_name),
+                        arm.span,
+                    )?;
 
                     // Typecheck optional `finally` block. Under nested handler
                     // semantics, its effects propagate outward just like the
@@ -509,17 +834,31 @@ impl Checker {
                         let _finally_ty = self.infer_expr(finally_expr)?;
                         let finally_effs = self.restore_effects(saved_effs2);
                         let finally_effs = self.sub.apply_effect_row(&finally_effs);
-                        self.emit_effects(&finally_effs);
+                        self.emit_effects(&finally_effs, finally_expr.span)?;
+                        arms_effs = self.merge_rows(&arms_effs, &finally_effs, arm.span)?;
                     }
+                    self.restore_shadowed_handlers(body_handlers);
 
                     self.resume_type = saved_resume;
                     self.resume_return_type = saved_resume_ret;
+                    self.resume_effects = saved_resume_effs;
                     self.effect_meta.type_param_cache = saved_effect_cache;
                     self.env = saved_env;
                 }
 
+                // The arms' own effects are part of what resuming performs
+                // (`ρ_arm` takes them); then the slack this `with` made, and
+                // whatever is left of it, is closed.
+                self.coerce_at(
+                    &Self::row_as_fun(arms_effs),
+                    &Self::row_as_fun(resume_row),
+                    with_span,
+                    None,
+                )?;
+                self.close_slack(with_node_id, vars_before, with_span)?;
+
                 // Emit remaining effects from the inner expression
-                self.emit_effects(&remaining_effs);
+                self.emit_effects(&remaining_effs, with_span)?;
 
                 // Unused handler warning
                 let mut unused = Vec::new();
@@ -546,8 +885,217 @@ impl Checker {
                     ));
                 }
 
-                Ok(answer_ty)
+                Ok(self.sub.apply(&answer_ty))
             }
         }
+    }
+
+    /// Another handler a `with` may install (the other branch of the `if`
+    /// it was bound from): it must give the `with` the same type, and what
+    /// it needs is needed here too.
+    fn check_alternative_handler(
+        &mut self,
+        handler_name: &str,
+        info: &super::HandlerInfo,
+        expr_ty: &Type,
+        ret_ty: &Type,
+        remaining: &EffectRow,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mapping: std::collections::HashMap<u32, Type> =
+            info.forall.iter().map(|&id| (id, self.fresh_var())).collect();
+        if let Some((param, ret)) = &info.return_type {
+            let param = Self::replace_vars(param, &mapping);
+            let ret = Self::replace_vars(ret, &mapping);
+            let disagree = |e: Diagnostic| {
+                Diagnostic::error_at(
+                    span,
+                    format!(
+                        "the handlers this `with` may install (chosen by an `if`) give it \
+                         different types: {}",
+                        e.message
+                    ),
+                )
+            };
+            self.unify_at(&param, expr_ty, span).map_err(disagree)?;
+            self.unify_at(&ret, ret_ty, span).map_err(disagree)?;
+        }
+        if info.resume_row_closed {
+            self.require_nothing_unhandled(handler_name, remaining, span);
+        } else if let Some(Type::Var(resume_rest)) =
+            info.resume_row.and_then(|id| mapping.get(&id).cloned())
+        {
+            self.bind_row_checked(resume_rest, remaining.clone())
+                .map_err(|e| e.with_span(span))?;
+        }
+        let needs = self.replace_vars_in_effect_row(&info.needs_effects, &mapping);
+        self.emit_effects(&needs, span)
+    }
+
+    /// `ρ_R := remaining` for a handler whose arms closed `ρ_R` to `{}`
+    /// (`HandlerInfo::resume_row_closed`): the computation this `with`
+    /// installs it around must leave nothing unhandled. A tail of
+    /// `remaining` that inference may still choose is closed; named effects
+    /// or a row variable fixed by a signature are reported here.
+    fn require_nothing_unhandled(&mut self, handler_name: &str, remaining: &EffectRow, span: Span) {
+        let remaining = self.sub.apply_effect_row(remaining);
+        let mut leftover: Vec<String> = remaining
+            .effects
+            .iter()
+            .map(|e| self.prettify_effect_entry(e))
+            .collect();
+        leftover.sort();
+        let mut open = Vec::new();
+        for tail in remaining.tail_var_ids() {
+            if let Some(rigid) = self.rigid_row_var_for(tail) {
+                leftover.push(format!("..{}", rigid.name));
+            } else if self.is_where_bound_var(tail) {
+                leftover.push(format!("..{}", self.prettify_type(&Type::Var(tail))));
+            } else {
+                open.push(tail);
+            }
+        }
+        if leftover.is_empty() {
+            let mut closed = Ok(());
+            for tail in open {
+                if let Type::Var(id) = self.sub.apply(&Type::Var(tail)) {
+                    closed = closed.and(self.bind_row_checked(id, EffectRow::empty()));
+                }
+            }
+            if let Err(e) = closed {
+                self.collected_diagnostics.push(e.with_span(span));
+            }
+            return;
+        }
+        self.collected_diagnostics.push(Diagnostic::error_at(
+            span,
+            format!(
+                "handler '{handler_name}' stores a function that resumes the handled \
+                 computation where no effects are allowed, so it can only handle computations \
+                 that perform nothing else; this one also performs {{{}}}",
+                leftover.join(", ")
+            ),
+        ));
+    }
+
+    /// A handler used as a value, anywhere but as a `let`'s right-hand
+    /// side or a function's body (or a branch of an `if` that is one), where
+    /// its declaration stays known to the `with` that installs it
+    /// (`static_handler_sites`). Elsewhere (an argument, a field) a `with`
+    /// may know it only by its `Handler E` type, which says
+    /// nothing about the answer type, so the handler must be uniform (see
+    /// `HandlerInfo::uniform`). A declared handler's `needs` are provided at
+    /// the `with` that names it; a `with` that has only a value provides
+    /// none, so such a handler may not need anything either. (A handler
+    /// expression's `needs` are taken where it is built.)
+    pub(crate) fn check_handler_value(
+        &self,
+        expr_id: crate::ast::NodeId,
+        info: &super::HandlerInfo,
+        what: &str,
+        declared: bool,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if self.handler_alias_sites.contains(&expr_id) {
+            return Ok(());
+        }
+        let reason = if info.resume_row_closed {
+            "it stores a function that resumes the handled computation where no effects are \
+             allowed, so it can only handle computations that perform nothing else, which only \
+             a `with` that names it can check"
+                .to_string()
+        } else if !info.uniform {
+            "it decides the type of the `with` that installs it (with a `return` clause, \
+             or with what its arms return)"
+                .to_string()
+        } else if declared && !info.needs_effects.effects.is_empty() {
+            let mut names: Vec<String> = info
+                .needs_effects
+                .effects
+                .iter()
+                .map(|e| self.prettify_effect_entry(e))
+                .collect();
+            names.sort();
+            format!(
+                "it needs {{{}}}, which only a `with` that names it provides",
+                names.join(", ")
+            )
+        } else {
+            return Ok(());
+        };
+        Err(Diagnostic::error_at(
+            span,
+            format!(
+                "{what} cannot be used as a `Handler` value here: {reason}. A `with` given a \
+                 handler only by its type cannot account for that. Install it with `with` \
+                 directly, or bind it with `let` first"
+            ),
+        ))
+    }
+
+    /// `ty` with a fresh slack tail (`Slack::Answer`) added to the row of
+    /// each arrow along its result spine: the type of a `with` whose arms
+    /// may return functions that resume.
+    pub(crate) fn open_answer_spine(&mut self, ty: &Type, with: crate::ast::NodeId) -> Type {
+        match self.sub.apply(ty) {
+            Type::Fun(param, ret, mut row) => {
+                let ret = self.open_answer_spine(&ret, with);
+                row.tails
+                    .push(self.new_slack(super::unify::Slack::Answer, with));
+                let _ = self.normalize_row(&row);
+                Type::Fun(param, Box::new(ret), row)
+            }
+            other => other,
+        }
+    }
+
+    pub(crate) fn new_slack(&mut self, kind: super::unify::Slack, with: crate::ast::NodeId) -> Type {
+        let var = self.fresh_var();
+        if let Type::Var(id) = var {
+            self.slack_rows.insert(id, (kind, with));
+        }
+        var
+    }
+
+    /// A row as the row of a function, for comparing two rows through
+    /// `coerce_at`.
+    pub(crate) fn row_as_fun(row: EffectRow) -> Type {
+        Type::Fun(Box::new(Type::unit()), Box::new(Type::unit()), row)
+    }
+
+    /// Close the slack `with` made to the empty row: an instantiation, so
+    /// every inclusion established so far still holds, and the answer type
+    /// keeps exactly what some arm needed. Inference variables made while
+    /// the `with` was checked (from `vars_before` on) that slack was bound
+    /// to are closed too, so none of them is left open in the answer type.
+    pub(crate) fn close_slack(
+        &mut self,
+        with: crate::ast::NodeId,
+        vars_before: u32,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mine: Vec<u32> = self
+            .slack_rows
+            .iter()
+            .filter(|(_, (_, owner))| *owner == with)
+            .map(|(id, _)| *id)
+            .collect();
+        let reached = self.sub.apply_effect_row(&EffectRow {
+            effects: vec![],
+            tails: mine.iter().map(|id| Type::Var(*id)).collect(),
+        });
+        for tail in reached.tail_var_ids() {
+            // A declared row variable is not ours to close: one of the
+            // operation's (an arm's callback) still stands for what the
+            // callback performs where the operation was called.
+            if mine.contains(&tail) || (tail >= vars_before && !self.is_rigid_tail(tail)) {
+                self.bind_row_checked(tail, EffectRow::empty())
+                    .map_err(|e| e.with_span(span))?;
+            }
+        }
+        for id in mine {
+            self.slack_rows.remove(&id);
+        }
+        Ok(())
     }
 }
