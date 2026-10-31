@@ -98,9 +98,24 @@ impl<'a> Lowerer<'a> {
                 // `resume` with a continuation, or in the body of a function
                 // inside the arm, catches the arm's aborts.
                 let resumed = self.lower_resume_of_var(&v, !aborts);
-                let resumed = match k {
-                    Some(k) => evidence::meta_mbind(resumed, k, self.abort_ref_value()),
-                    None => resumed,
+                // In the frame the arm started with, what the resumed
+                // computation suspends goes on to the `with` (`mbind`).
+                // In another one (a function inside the arm, called
+                // anywhere, or a `with` inside the arm) the computation is
+                // delimited again where it is resumed.
+                let frame_here = self.current_evidence.as_ref().map(|f| f.var.clone());
+                let reroot_frame = frame_here.filter(|frame| {
+                    self.current_abort_ref.is_some()
+                        && self.current_arm_frame.as_ref() != Some(frame)
+                });
+                let resumed = match (reroot_frame, k) {
+                    (Some(frame), k) => {
+                        self.arm_reroots = true;
+                        let k = k.unwrap_or_else(|| self.identity_return_lambda());
+                        evidence::meta_reroot(resumed, CExpr::Var(frame), k)
+                    }
+                    (None, Some(k)) => evidence::meta_mbind(resumed, k, self.abort_ref_value()),
+                    (None, None) => resumed,
                 };
                 CExpr::Let(v, Box::new(ce), Box::new(resumed))
             }

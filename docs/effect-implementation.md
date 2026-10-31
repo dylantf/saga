@@ -696,7 +696,7 @@ the value.
 
 The convention is inspired by Koka's evidence passing (Xie & Leijen 2021), with deliberate simplifications enabled by Saga's effect semantics:
 
-- **No `hevv` per entry.** Saga has no non-scoped resumes, so each evidence entry doesn't need to carry the saved evidence at handler installation.
+- **No `hevv` per entry.** An entry does not carry the evidence saved at handler installation. A resumption takes the handlers around its `resume` (deep handlers): one that runs in another frame is delimited again there, with that frame (see "A `resume` in another frame").
 - **No marker integers.** A `with` that is not fused makes a reference on entry, which its aborts carry; that is the only prompt.
 - **No mask levels.** Saga has no surface syntax for accessing shadowed outer handlers; innermost-wins covers all cases.
 - **No yield checks.** Saga's CPS is user-level; there's no equivalent of Koka's `is_yielding` flag. The places a result is inspected are `bind` and `mbind`, for a `with` that is not fused (see "The Continuation of a `with`").
@@ -827,7 +827,8 @@ Inside a `with`, CPS code returns one of two things:
 `Mk` is `k` itself (a fun) or a list of frames ending in it: `{k, Ref, F}`
 for the code after a `resume` in an arm of the `with` `Ref`, `{fin, Key}` for
 the end of a `finally` region, `{held, Keys}` for regions a suspension
-carried out of themselves (below), or `run` in place of `k` at a `run` site.
+carried out of themselves (below), `run` in place of `k` at a `run` site, or
+`{reroot, Frame, F}` in place of `k` at a `resume` in another frame (below).
 `bind(V, Mk)` runs the frames in order; `bind({'$saga_meta', M}, Mk)` is
 `M(Mk)`; `mbind(S, F, Ref)` puts `{k, Ref, F}` in front of the `Mk` a
 suspension gets.
@@ -994,31 +995,51 @@ code, which was compiled without it. Everything the callback itself
 performs is lifted and bound as usual. An arm for such an operation that
 aborts throws through the inner `with` like any other abort.
 
+#### A `resume` in another frame
+
+A `resume` directly in an arm runs in the frame the arm started with (the
+lifted one), and what it suspends travels natively to a binder of its
+`with`. A `resume` inside a function in the arm runs in the frame the
+function is called with (its evidence argument), possibly after the `with`
+has returned and under other handlers; one under a `with` inside the arm
+runs in that `with`'s frame. Handlers are deep: the resumed computation's
+`with` is installed again at the `resume`, and what it performs that its
+`with` does not handle goes to the handlers *there*.
+
+So at such a `resume` the lowerer emits `reroot(R, Frame, F)` in place of
+`mbind` (`lower_tail`, `ExprKind::Resume`: the current frame is not
+`current_arm_frame`). `R` is the resumed computation's result, its own
+aborts caught as for any non-tail `resume`; `F` is the rest. A value goes
+to `F`; a suspension is bound with the meta continuation `[{reroot, Frame,
+F}]`, and a lifted operation whose meta continuation ends in a `reroot`
+takes its handler from `Frame` (by tag and operation index) instead of the
+frame it lifted. Its continuation is the usual `resume_into`, so the later
+suspensions of that resumption go to the same frame. Called while the
+`with`'s binder is still pending (a resuming closure called in the arm),
+the frame is the arm's lifted one, whose operation suspends again, to that
+binder: nothing else is needed.
+
+A direct entry would be called where the operation is performed, from the
+frame the computation was captured with. A `with` whose arms contain such
+a `resume` therefore lifts every entry (`lift_all_evidence`), decided while
+its arms are lowered (`arm_reroots`). The arms of a handler value are
+lowered where it is built; such a value's tuple ends in the atom `reroot`
+and the installing `with` chooses the lifting at run time (`lift_for`). See
+`docs/planning/escaping-resumptions.md`.
+
 #### Known gaps
 
-- `resume` in a function an arm returns (state passing), called after its
-  `with` has returned: the function is typed with what resuming performs
-  and compiled as a CPS closure, and returns the suspension of an outer
-  operation (`mbind`) to its caller. No `bind` of that `with` is left to
-  take it, so it reaches the `with` further out, whose `bind` treats it as
-  an operation handled outside itself (an outer arm that uses the value of
-  its `resume` sees that `with`'s continuation too), or none
-  (`resume_under_lambda_under_aborting_outer_handler`: `{'$saga_meta', _}`).
-  Binding the suspension in the closure (a meta continuation ending in the
-  closure's return) fixes that case but is wrong for a closure called while
-  its `with`'s `bind` is still to come (a resuming closure kept in a list
-  and called in the arm: 42 for 242). The closure would need to know at run
-  time whether that `bind` is pending.
-- A function that resumes keeps the frame its `with` lifted: called under
-  another handler for the operations it performs (it escaped the handler
-  that was in scope at its `with`), those operations still go to the first
-  handler, and an abort of that handler is an uncaught throw.
 - An operation that carries a callback, or of more than seven arguments, is
   performed in place: its handler further out runs on top of the inner
   `with`. An arm for it that uses the value of its `resume` sees the extent
   of the inner `with`, and one that resumes twice around an abort of the
   inner `with` loses its second resumption. A callback held inside other
-  data is not recognised, and the operation is lifted.
+  data is not recognised, and the operation is lifted. Performed by a
+  resumption running in another frame (above), such an operation still goes
+  to the handler of the frame the computation was captured with.
+- A `run` site inside a resumption running in another frame (a `finally`
+  cleanup, `catch_panic`, a spawned process, `apply_n`) binds what it
+  suspends against the frame the computation was captured with.
 - The arms of a handler *value* perform outer operations against the frame
   where the value was built, not the lifted one.
 - A `finally` region whose computation is resumed in another process is
@@ -1040,7 +1061,10 @@ costs a suspension tuple, two closures, a list append, an `apply` and a
 `try` more than the direct call, and that again for every enclosing lifting
 `with`. Each `resume` whose value is used costs a `try`, one `mbind` call
 and, if the resumed computation suspends, a closure and a frame. An abort is
-a `throw` (about 60 ns, against a return).
+a `throw` (about 60 ns, against a return). A `with` whose arms resume in
+another frame also lifts its direct entries, so their operations pay the
+same (a state-passing loop performing a direct outer operation per step
+took about 2.8 times as long).
 
 The `try` at entry makes the handled computation non-tail: a recursion that
 enters a general `with` at every level and recurses inside its handled
@@ -1173,7 +1197,7 @@ nested `with` semantics; the native interop happens inside the handler body.
 - `codegen/normalize.rs`, `codegen/lower/anf.rs` -- value-normal form, and where it is applied and asserted.
 - `codegen/lower/exprs/` -- `lower_tail` (`return_k.rs`), `lower_block` (`blocks.rs`), `lower_expr` (`dispatch.rs`), `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- registers local/imported `FunInfo` entries carrying `CallableAbi` plus non-ABI HOF parameter metadata.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly. `lift_evidence/2`, `bind/2`, `mbind/3`, `resume_into/4`, `abort/3`, `fin_resume/4`, `run/1` and `run_process/1` for the continuation of a `with`, its aborts and `finally` regions.
+- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `insert_static/3`, `select_evidence/2`, `reframe_evidence/3`, and `append_tail/3` for the operations that don't inline cleanly. `lift_evidence/2`, `lift_all_evidence/2`, `lift_for/3`, `bind/2`, `mbind/3`, `reroot/3`, `resume_into/4`, `abort/3`, `fin_resume/4`, `run/1` and `run_process/1` for the continuation of a `with`, its aborts and `finally` regions.
 
 ### Optimization Opportunities
 

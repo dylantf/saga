@@ -144,7 +144,9 @@ rule above, implemented with what the lowering already has.
   a rerouted `resume`, decided while the arms are lowered. A handler value's
   arms are lowered where the value is built; there, a rerouted `resume`
   appends the atom `reroot` to its tuple and the installing `with` chooses
-  the lifting at run time (`lift_for`).
+  the lifting at run time (`lift_for`). The marker comes after the return
+  clause, whose lookup now takes the element after the operations only when
+  it is a function.
 - *Why the pending case still works.* Called while the binder is pending
   (the stored closure, called in the arm), the frame at the call is the arm's
   lifted frame: the suspension is dispatched to the lifted `Stop`, which
@@ -175,13 +177,16 @@ general `with`; 10M steps of a state-passing handler):
 
 | Benchmark | Before | After |
 | --- | --- | --- |
-| `closed_row_hot_op` | 779 | 779 |
-| `open_row_hot_op` | 1340 | 1338 |
-| `deep_call_chain` | 1678 | 1693 |
-| general: enter a `with` | 956 | 960 |
-| general: direct op inside | 817 | 825 |
-| state passing, an outer direct op per step | 337 | 948 |
+| `closed_row_hot_op` | 796 | 793 |
+| `open_row_hot_op` | 1360 | 1400 |
+| `deep_call_chain` | 1718 | 1719 |
+| general: enter a `with` | 970 | 975 |
+| general: direct op inside | 830 | 831 |
+| state passing, an outer direct op per step | 344 | 974 |
 | state passing, no outer op | 282 | 284 |
+
+The `open_row_hot_op` difference is noise (its runs before the change
+ranged from 1336 to 1390, and its loop has no `with`).
 
 The last-but-one row is the price of the fix, and is paid only by a `with`
 whose arms resume in a function or under a `with` and whose computation

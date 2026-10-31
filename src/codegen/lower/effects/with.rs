@@ -63,6 +63,9 @@ impl<'a> Lowerer<'a> {
         };
 
         let mut condition_bindings: Vec<(String, CExpr)> = Vec::new();
+        // The tuple of a handler value applied to the abort reference: bound
+        // ahead of the lifted frame, which depends on it (`lift_for`).
+        let mut dynamic_installed: Option<(String, CExpr)> = None;
         let named_item = match &normalized {
             WithHandlerLayer::Named { reference } => {
                 self.pre_register_local_with_binding(expr, &reference.name);
@@ -79,7 +82,7 @@ impl<'a> Lowerer<'a> {
                     (&mut item, &abort_ref)
                 {
                     let installed = self.fresh();
-                    condition_bindings.push((
+                    dynamic_installed = Some((
                         installed.clone(),
                         CExpr::Apply(
                             Box::new(CExpr::Var(tuple_var.clone())),
@@ -198,13 +201,16 @@ impl<'a> Lowerer<'a> {
         let saved_evidence = self.current_evidence.clone();
         // The lifted frame has the inherited one's tags and layout. The
         // handled computation and the arms both see it.
+        // Which lifting it is depends on the arms (`arm_reroots`), so the
+        // call is made once they are lowered.
         let lifted_evidence = saved_evidence
             .as_ref()
             .zip(abort_ref.as_ref())
             .map(|(frame, r)| {
-                let lifted =
-                    evidence::lift_evidence(CExpr::Var(frame.var.clone()), CExpr::Var(r.clone()));
-                (EvidenceFrame::new(self.fresh(), frame.abi.clone()), lifted)
+                (
+                    EvidenceFrame::new(self.fresh(), frame.abi.clone()),
+                    (CExpr::Var(frame.var.clone()), CExpr::Var(r.clone())),
+                )
             });
         let inherited_evidence = match &lifted_evidence {
             Some((frame, _)) => Some(frame.clone()),
@@ -348,6 +354,7 @@ impl<'a> Lowerer<'a> {
         let saved_handler_inherited_k =
             std::mem::replace(&mut self.current_handler_inherited_k, fused_k);
         let saved_abort_ref = std::mem::replace(&mut self.current_abort_ref, abort_ref.clone());
+        let saved_arm_reroots = std::mem::replace(&mut self.arm_reroots, false);
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
@@ -393,6 +400,11 @@ impl<'a> Lowerer<'a> {
         }
         self.current_handler_inherited_k = saved_handler_inherited_k;
         self.current_abort_ref = saved_abort_ref;
+        // An arm resumes in another frame: the resumed computation must not
+        // call a handler of this frame where it performs the operation. The
+        // arms of a handler value are lowered where it is built, which marks
+        // its tuple (`lift_for`).
+        let lift_all = std::mem::replace(&mut self.arm_reroots, saved_arm_reroots);
 
         // An entry whose arms can run where the operation is performed, in
         // any `with` inside this one, without lifting: none leaves a frame
@@ -496,10 +508,21 @@ impl<'a> Lowerer<'a> {
         let mut used = HashSet::new();
         Self::collect_var_refs(&attached, &mut used);
         let lowered = match lifted_evidence {
-            Some((frame, lifted)) if used.contains(&frame.var) => {
+            Some((frame, (inherited, r))) if used.contains(&frame.var) => {
+                let lifted = match &dynamic_installed {
+                    Some((installed, _)) => {
+                        evidence::lift_for(inherited, r, CExpr::Var(installed.clone()))
+                    }
+                    None if lift_all => evidence::lift_all_evidence(inherited, r),
+                    None => evidence::lift_evidence(inherited, r),
+                };
                 CExpr::Let(frame.var, Box::new(lifted), Box::new(attached))
             }
             _ => attached,
+        };
+        let lowered = match dynamic_installed {
+            Some((installed, value)) => CExpr::Let(installed, Box::new(value), Box::new(lowered)),
+            None => lowered,
         };
         match abort_ref {
             Some(r) => CExpr::Let(
@@ -697,6 +720,12 @@ impl<'a> Lowerer<'a> {
         // handled computation's result itself rather than flowing into an
         // enclosing function-level return continuation.
         let prev_handler_k = self.current_handler_k.replace(k_var);
+        let prev_arm_frame = std::mem::replace(
+            &mut self.current_arm_frame,
+            self.current_evidence
+                .as_ref()
+                .map(|frame| frame.var.clone()),
+        );
 
         // The tail of an arm of a general `with` that does not resume
         // throws the abort of that `with`; a tail `resume` is left as it is
@@ -802,6 +831,7 @@ impl<'a> Lowerer<'a> {
 
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
+        self.current_arm_frame = prev_arm_frame;
         self.current_handler_inherited_k = saved_inherited;
         self.current_abort_k = saved_abort_k;
         CExpr::Fun(fun_params, Box::new(body_ce))
@@ -900,6 +930,12 @@ impl<'a> Lowerer<'a> {
         fun_params.push(k_var.clone());
 
         let prev_handler_k = self.current_handler_k.replace(k_var);
+        let prev_arm_frame = std::mem::replace(
+            &mut self.current_arm_frame,
+            self.current_evidence
+                .as_ref()
+                .map(|frame| frame.var.clone()),
+        );
         let saved_finally = self.current_handler_finally.take();
         // Multi-arm inline handlers are always source-module-less, but if nested
         // inside an imported handler body their code belongs to that module —
@@ -984,6 +1020,7 @@ impl<'a> Lowerer<'a> {
         self.current_handler_finally = saved_finally;
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
+        self.current_arm_frame = prev_arm_frame;
 
         CExpr::Fun(
             fun_params,

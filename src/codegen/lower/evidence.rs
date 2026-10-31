@@ -254,6 +254,34 @@ pub(super) fn lift_evidence(evidence: CExpr, abort_ref: CExpr) -> CExpr {
     )
 }
 
+/// `lift_evidence` for a `with` whose arms resume in another frame: every
+/// entry is lifted, direct ones too (`reroot`).
+pub(super) fn lift_all_evidence(evidence: CExpr, abort_ref: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "lift_all_evidence",
+        vec![evidence, abort_ref],
+    )
+}
+
+/// The lifting for a `with` of a handler value, `installed` its tuple:
+/// `lift_all_evidence` when the value's arms resume in another frame (its
+/// tuple ends in `reroot`), otherwise `lift_evidence`.
+pub(super) fn lift_for(evidence: CExpr, abort_ref: CExpr, installed: CExpr) -> CExpr {
+    cerl_call(
+        EVIDENCE_BRIDGE_MODULE,
+        "lift_for",
+        vec![evidence, abort_ref, installed],
+    )
+}
+
+/// `let r = resume x; rest` where the frame at the `resume` is `frame`, not
+/// the one the arm's `with` lifted: the resumed computation is delimited
+/// again there, and what it performs outside its `with` goes to `frame`.
+pub(super) fn meta_reroot(resumed: CExpr, frame: CExpr, rest: CExpr) -> CExpr {
+    cerl_call(EVIDENCE_BRIDGE_MODULE, "reroot", vec![resumed, frame, rest])
+}
+
 /// Give the result of a handled computation (a plain value or a suspension)
 /// to the continuation of its `with`.
 pub(super) fn meta_bind(result: CExpr, continuation: CExpr) -> CExpr {

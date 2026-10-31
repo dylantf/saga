@@ -379,35 +379,66 @@ impl<'a> Lowerer<'a> {
         self.lower_tail(expr, return_k)
     }
 
+    /// The return clause of a handler value's tuple: the element after its
+    /// `op_count` operations when there is one and it is a function (the
+    /// tuple may end in the atom `reroot` instead, see `handler_value`),
+    /// otherwise the identity.
     pub(crate) fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
-        let param = self.fresh();
-        let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
+        let identity = |this: &mut Self| {
+            let param = this.fresh();
+            CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
+        };
         let tuple_size = cerl_call(
             "erlang",
             "tuple_size",
             vec![CExpr::Var(tuple_var.to_string())],
         );
-        let return_index = op_count as i64 + 1;
-        let return_lambda = cerl_call(
+        let has_more = cerl_call(
+            "erlang",
+            ">",
+            vec![tuple_size, CExpr::Lit(CLit::Int(op_count as i64))],
+        );
+        let element = cerl_call(
             "erlang",
             "element",
             vec![
-                CExpr::Lit(CLit::Int(return_index)),
+                CExpr::Lit(CLit::Int(op_count as i64 + 1)),
                 CExpr::Var(tuple_var.to_string()),
             ],
         );
-        CExpr::Case(
-            Box::new(tuple_size),
+        let lambda = self.fresh();
+        let is_return = cerl_call(
+            "erlang",
+            "is_function",
+            vec![CExpr::Var(lambda.clone()), CExpr::Lit(CLit::Int(1))],
+        );
+        let pick = CExpr::Case(
+            Box::new(element),
             vec![
                 CArm {
-                    pat: CPat::Lit(CLit::Int(return_index)),
-                    guard: None,
-                    body: return_lambda,
+                    pat: CPat::Var(lambda.clone()),
+                    guard: Some(is_return),
+                    body: CExpr::Var(lambda),
                 },
                 CArm {
                     pat: CPat::Var("_".to_string()),
                     guard: None,
-                    body: identity,
+                    body: identity(self),
+                },
+            ],
+        );
+        CExpr::Case(
+            Box::new(has_more),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("true".to_string())),
+                    guard: None,
+                    body: pick,
+                },
+                CArm {
+                    pat: CPat::Var("_".to_string()),
+                    guard: None,
+                    body: identity(self),
                 },
             ],
         )
