@@ -10,7 +10,37 @@ impl<'a> Lowerer<'a> {
     ///
     /// A statement that performs effects is lowered in tail position with
     /// the rest of the block as its continuation (`lower_statement`).
+    /// Lower a block. Handler names bound by its `let`s are scoped to it.
     pub(crate) fn lower_block(&mut self, stmts: &[Stmt], k: Option<CExpr>) -> CExpr {
+        let undo_mark = self.handler_binding_undo.len();
+        let lowered = self.lower_block_stmts(stmts, k);
+        self.undo_handler_bindings(undo_mark);
+        lowered
+    }
+
+    /// Restore the handler-name entries replaced since `mark`, newest first.
+    pub(crate) fn undo_handler_bindings(&mut self, mark: usize) {
+        while self.handler_binding_undo.len() > mark {
+            let (name, canonical, cond, dynamic) = self
+                .handler_binding_undo
+                .pop()
+                .expect("undo log is longer than mark");
+            match canonical {
+                Some(c) => self.handler_canonical.insert(name.clone(), c),
+                None => self.handler_canonical.remove(&name),
+            };
+            match cond {
+                Some(c) => self.handle_cond_vars.insert(name.clone(), c),
+                None => self.handle_cond_vars.remove(&name),
+            };
+            match dynamic {
+                Some(d) => self.handle_dynamic_vars.insert(name, d),
+                None => self.handle_dynamic_vars.remove(&name),
+            };
+        }
+    }
+
+    fn lower_block_stmts(&mut self, stmts: &[Stmt], k: Option<CExpr>) -> CExpr {
         match stmts {
             [] => self.apply_return_k_with(k, CExpr::Tuple(vec![])), // unit
             [Stmt::Expr(e)] => self.lower_tail(e, k),
@@ -76,9 +106,12 @@ impl<'a> Lowerer<'a> {
 
                 // Register in fun_info BEFORE lowering body so recursive
                 // calls are recognized as saturated apply
+                // The entry is scoped to the rest of this block: the previous
+                // entry for the name (an outer or top-level function) comes
+                // back once the block is lowered.
                 let fun_info =
                     FunInfo::from_abi(callable_abi.clone(), param_absorbed_effects, 0);
-                self.fun_info.insert(fun_name.clone(), fun_info);
+                let shadowed_fun_info = self.fun_info.insert(fun_name.clone(), fun_info);
 
                 let has_effects = callable_abi.evidence.is_some();
                 let base_arity = callable_abi.user_arity;
@@ -154,11 +187,19 @@ impl<'a> Lowerer<'a> {
                 };
                 self.current_evidence = saved_evidence;
 
-                let rest_ce = self.lower_block(rest, k);
+                let rest_ce = self.lower_block_stmts(rest, k);
+                match shadowed_fun_info {
+                    Some(info) => {
+                        self.fun_info.insert(fun_name.clone(), info);
+                    }
+                    None => {
+                        self.fun_info.remove(&fun_name);
+                    }
+                }
 
                 CExpr::LetRec(vec![(fun_name, arity, fun_body)], Box::new(rest_ce))
             }
-            [first, rest @ ..] => self.lower_statement(first, |this| this.lower_block(rest, k)),
+            [first, rest @ ..] => self.lower_statement(first, |this| this.lower_block_stmts(rest, k)),
         }
     }
 

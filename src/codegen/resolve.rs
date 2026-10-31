@@ -261,21 +261,23 @@ enum ScopedName {
 /// - **Local functions** (`let f x = ...` / LetFun): shadow module-scope names
 ///   AND resolve as `LocalFun` -> the lowerer emits `CExpr::FunRef`.
 ///
-/// Resolution order (first match wins):
-/// 1. Local variables -> None (not in map -> lowerer defaults to CExpr::Var)
-/// 2. Local functions -> Some(LocalFun { .. })
-/// 3. Module-level scope -> Some(LocalFun/ImportedFun/ExternalFun)
+/// Both kinds live in the same frames, so the innermost, most recent binding
+/// of a name wins whichever kind it is: `let x = 1; let x n = n + 1; x 2`
+/// calls the function. Names bound by no frame resolve in module scope.
 struct Scope<'a> {
     /// Module-level unqualified names (local funs, exposed imports, trait dicts).
     module: &'a HashMap<String, ScopedName>,
     /// Qualified names (e.g. "List.map", "Std.List.map").
     qualified: &'a HashMap<String, ScopedName>,
-    /// Stack of local variable binding frames (params, let, lambda, case).
-    /// Names here block resolution entirely.
-    locals: Vec<HashSet<String>>,
-    /// Stack of local function frames (LetFun).
-    /// Names here shadow module scope but still resolve as LocalFun.
-    local_funs: Vec<HashMap<String, ScopedName>>,
+    /// Stack of lexical frames (params, let, lambda, case, local functions).
+    frames: Vec<HashMap<String, LocalName>>,
+}
+
+/// What a lexically bound name refers to.
+#[derive(Clone)]
+enum LocalName {
+    Var,
+    Fun(Box<ScopedName>),
 }
 
 impl<'a> Scope<'a> {
@@ -286,58 +288,50 @@ impl<'a> Scope<'a> {
         Self {
             module,
             qualified,
-            locals: Vec::new(),
-            local_funs: Vec::new(),
+            frames: Vec::new(),
         }
     }
 
-    /// Push a new local variable binding frame.
+    /// Push a frame binding `names` as variables.
     fn push(&mut self, names: HashSet<String>) {
-        self.locals.push(names);
+        self.frames
+            .push(names.into_iter().map(|n| (n, LocalName::Var)).collect());
     }
 
-    /// Pop the top local variable binding frame.
+    /// Pop the innermost frame.
     fn pop(&mut self) {
-        self.locals.pop();
+        self.frames.pop();
     }
 
-    /// Push a new local function frame.
-    fn push_funs(&mut self, funs: HashMap<String, ScopedName>) {
-        self.local_funs.push(funs);
-    }
-
-    /// Pop the top local function frame.
-    fn pop_funs(&mut self) {
-        self.local_funs.pop();
-    }
-
-    fn has_local_var(&self, name: &str) -> bool {
-        self.locals.iter().rev().any(|frame| frame.contains(name))
-    }
-
-    fn resolve_local_fun(&self, name: &str) -> Option<&ScopedName> {
-        for frame in self.local_funs.iter().rev() {
-            if let Some(scoped) = frame.get(name) {
-                return Some(scoped);
-            }
+    /// Bind `names` as variables in the innermost frame, replacing earlier
+    /// bindings of the same names there.
+    fn bind_vars(&mut self, names: HashSet<String>) {
+        let frame = self.frames.last_mut().expect("bind_vars needs a frame");
+        for name in names {
+            frame.insert(name, LocalName::Var);
         }
-        None
+    }
+
+    /// Bind a local function in the innermost frame.
+    fn bind_fun(&mut self, name: String, scoped: ScopedName) {
+        let frame = self.frames.last_mut().expect("bind_fun needs a frame");
+        frame.insert(name, LocalName::Fun(Box::new(scoped)));
+    }
+
+    /// The innermost lexical binding of `name`, if any.
+    fn lookup_local(&self, name: &str) -> Option<&LocalName> {
+        self.frames.iter().rev().find_map(|frame| frame.get(name))
     }
 
     /// Resolve an unqualified name.
     /// Returns None if it's a local variable (block resolution).
     /// Returns Some(ScopedName) if it's a local function, module-level, or imported.
     fn resolve_unqualified(&self, name: &str) -> Option<&ScopedName> {
-        // 1. Local variables shadow everything
-        if self.has_local_var(name) {
-            return None;
+        match self.lookup_local(name) {
+            Some(LocalName::Var) => None,
+            Some(LocalName::Fun(scoped)) => Some(scoped),
+            None => self.module.get(name),
         }
-        // 2. Local functions shadow module scope
-        if let Some(scoped) = self.resolve_local_fun(name) {
-            return Some(scoped);
-        }
-        // 3. Module scope
-        self.module.get(name)
     }
 
     /// Resolve a qualified name (e.g. "List.map").
@@ -597,12 +591,13 @@ fn resolve_expr(
 ) {
     match &expr.kind {
         ExprKind::Var { name, .. } => {
-            if scope.has_local_var(name) {
+            match scope.lookup_local(name) {
                 // Locally bound variable, not a function ref.
-            } else if let Some(scoped) = scope.resolve_local_fun(name) {
-                map.insert(expr.id, scoped_to_resolved(scoped));
-            } else {
-                match front_resolution.value(expr.id) {
+                Some(LocalName::Var) => {}
+                Some(LocalName::Fun(scoped)) => {
+                    map.insert(expr.id, scoped_to_resolved(scoped));
+                }
+                None => match front_resolution.value(expr.id) {
                     Some(crate::typechecker::ResolvedValue::Local { .. }) => {}
                     Some(crate::typechecker::ResolvedValue::Global { lookup_name }) => {
                         if let Some(scoped) = scope.resolve_global_lookup(lookup_name) {
@@ -648,31 +643,24 @@ fn resolve_expr(
             scope.pop();
         }
         ExprKind::Block { stmts, .. } => {
-            // Let bindings are visible to subsequent statements in the block.
-            // We accumulate frames for variable bindings and local function defs.
-            let mut block_locals = HashSet::new();
-            let mut block_funs: HashMap<String, ScopedName> = HashMap::new();
-            scope.push(block_locals.clone());
-            scope.push_funs(block_funs.clone());
+            // Bindings are visible to subsequent statements in the block, and
+            // a later binding of a name replaces an earlier one of either kind.
+            scope.push(HashSet::new());
             for stmt in stmts {
                 match &stmt.node {
                     Stmt::Let { pattern, value, .. } => {
                         // Resolve the value BEFORE adding the binding (no self-reference)
                         resolve_expr(value, scope, map, front_resolution);
-                        // Add pattern vars to the block frame for subsequent stmts
-                        let new_vars = collect_pat_vars(pattern);
-                        block_locals.extend(new_vars);
-                        // Update the top frame
-                        scope.pop();
-                        scope.push(block_locals.clone());
+                        scope.bind_vars(collect_pat_vars(pattern));
                     }
                     Stmt::LetFun {
                         name, params, body, ..
                     } => {
                         // LetFun defines a local *function*, not a variable.
-                        // It resolves as LocalFun (for FunRef codegen) and shadows imports.
+                        // It resolves as LocalFun (for FunRef codegen) and shadows
+                        // imports; it is visible in its own body for recursion.
                         let arity = params.len();
-                        block_funs.insert(
+                        scope.bind_fun(
                             name.clone(),
                             ScopedName::Symbol {
                                 name: name.clone(),
@@ -685,9 +673,6 @@ fn resolve_expr(
                                 },
                             },
                         );
-                        // Update the local funs frame (visible to subsequent stmts + own body for recursion)
-                        scope.pop_funs();
-                        scope.push_funs(block_funs.clone());
                         // Params shadow within the body
                         let param_vars = collect_pats_vars(params);
                         scope.push(param_vars);
@@ -699,7 +684,6 @@ fn resolve_expr(
                     }
                 }
             }
-            scope.pop_funs();
             scope.pop();
         }
         ExprKind::If {

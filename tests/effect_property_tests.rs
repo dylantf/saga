@@ -5736,12 +5736,13 @@ result () = bound_handler () * 100 + arm_body ()
     check_result_int("with_clause_wrapped_block_scope", &src, 622);
 }
 
-// Known codegen bug, not fixed here: a local function that shadows a value
-// bound earlier in the same block. The call `x 2` lowers to the variable `X`
-// (the value 1) instead of the letrec-bound 'x'/1, and fails at runtime with
-// "tried to call a value that is not a function: 1". No nested block needed.
+// Local names are scoped by binding, not by spelling: the most recent binding
+// of a name wins whether it is a value or a local function, and a local
+// function or handler binding is gone once its block ends.
+
+// The call `x 2` used to lower to the variable `X` (the value 1) because the
+// backend resolver let any local variable of a name beat a local function.
 #[test]
-#[ignore = "codegen: a local function shadowing an earlier value of the same name is called as that value"]
 fn local_function_shadowing_a_value_is_called() {
     let_poly_int(
         "local_fun_shadows_value",
@@ -5752,14 +5753,38 @@ fn local_function_shadowing_a_value_is_called() {
     );
 }
 
-// Known codegen bug, not fixed here: the lowerer's handler-name maps
-// (`handler_canonical`, `handle_cond_vars`) are keyed by name and not scoped
-// to blocks, so the inner `h` is still the one attached after its block ends.
-// The typechecker resolves the second `with h` to the outer handler; the
-// lowered program answers 100 for it, giving 200. The same leak is what
-// lowers `{ let h = ...; ... } with h`, so it needs a deliberate fix.
+// A local function used to replace a top-level function of the same name in
+// the lowerer's function table for the rest of the module, so a later call to
+// the top-level one used the local function's arity (erlc: undefined g/2).
 #[test]
-#[ignore = "codegen: a let-bound handler in a nested block replaces the outer handler of the same name after the block (200, not 101)"]
+fn local_function_does_not_replace_top_level_function_after_its_block() {
+    let src = repro_src(
+        r#"fun g : Int -> Int needs {Skip}
+g n = n + skip! ()
+
+fun twice : (Int -> Int needs {..e}) -> Int -> Int needs {..e}
+twice f x = f (f x)
+
+fun early : Unit -> Int
+early () = {
+  let g a b = a + b
+  let twice f x = f x * 100
+  g 1 2 + twice (fun n -> n + 1) 1
+}
+
+fun late : Unit -> Int
+late () = (g 10 + twice g 1) with { skip () = resume 5 }
+
+pub fun result : Unit -> Int
+result () = early () * 1000 + late ()
+"#,
+    );
+    check_result_int("local_fun_scoped_to_block", &src, 203 * 1000 + 15 + 11);
+}
+
+// A handler `let` inside a block is scoped to that block. The lowerer's
+// handler-name tables used to keep the inner binding after the block.
+#[test]
 fn let_bound_handler_in_nested_block_does_not_replace_outer_one() {
     let_poly_int(
         "nested_block_handler_scope",
@@ -5772,6 +5797,39 @@ fn let_bound_handler_in_nested_block_does_not_replace_outer_one() {
   inner + outer"#,
         101,
     );
+}
+
+// A handler `let` in one function used to stay in the lowerer's handler-name
+// tables, so a later function's `with one` installed it instead of the
+// top-level handler `one` (100, not 1).
+#[test]
+fn let_bound_handler_does_not_replace_top_level_handler_in_later_function() {
+    let src = repro_src(
+        r#"handler one for Skip { skip () = resume 1 }
+
+fun mk : Int -> Handler Skip
+mk n = handler for Skip { skip () = resume n }
+
+fun binds_one : Unit -> Int
+binds_one () = {
+  let one = mk 100
+  skip! () with one
+}
+
+fun binds_one_inline : Unit -> Int
+binds_one_inline () = {
+  let one = handler for Skip { skip () = resume 1000 }
+  skip! () with one
+}
+
+fun uses_one : Unit -> Int
+uses_one () = skip! () with one
+
+pub fun result : Unit -> Int
+result () = binds_one () + binds_one_inline () + uses_one ()
+"#,
+    );
+    check_result_int("let_handler_scoped_to_function", &src, 1101);
 }
 
 // ---------------------------------------------------------------------------
