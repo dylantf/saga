@@ -24,7 +24,16 @@ impl<'a> Lowerer<'a> {
         let saved_ref = self.current_abort_ref.replace(abort_ref.clone());
         let saved_k = self.current_handler_inherited_k.take();
         let saved_abort_k = self.current_abort_k.take();
-        let tuple = build(self);
+        let saved_reroots = std::mem::replace(&mut self.arm_reroots, false);
+        let mut tuple = build(self);
+        // An arm that resumes in another frame (`reroot`) marks the tuple:
+        // the `with` installing it lifts every entry of its frame
+        // (`lift_for`). The marker comes after the return clause.
+        if std::mem::replace(&mut self.arm_reroots, saved_reroots)
+            && let CExpr::Tuple(elements) = &mut tuple
+        {
+            elements.push(CExpr::Lit(CLit::Atom("reroot".to_string())));
+        }
         self.current_abort_ref = saved_ref;
         self.current_handler_inherited_k = saved_k;
         self.current_abort_k = saved_abort_k;

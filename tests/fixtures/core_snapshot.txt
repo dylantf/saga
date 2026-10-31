@@ -53,8 +53,8 @@ examples/50-refs.saga 3f3a4c5566e37c97
 examples/51-shared-refs.saga a31a2dab166a4698
 examples/52-atomic-refs.saga 226d4405bbf9d478
 examples/53-mutable-vectors.saga 641bcb431b530c98
-examples/54-choose-backtracking.saga a9648defecf750ad
-examples/55-nqueens-solver.saga 2bd0705bddf50336
+examples/54-choose-backtracking.saga 0b8014d175a7eda3
+examples/55-nqueens-solver.saga 9c5f0ba75fd17e72
 examples/56-ambient-reader.saga 9a7897de780af0db
 examples/57-ambient-writer.saga 26c58f6387fe36c4
 examples/58-streams.saga f9f9685e7ebca958
@@ -106,7 +106,7 @@ examples/optimization/static-tail-resume/04-named-handler.saga 94a0418856bb2b87
 examples/optimization/static-tail-resume/05-multi-arm-guard.saga c78d54a6e705e612
 examples/optimization/static-tail-resume/06-abort-guard.saga cd5c1abb4ef253a9
 examples/optimization/static-tail-resume/07-conditional-handler-guard.saga 62490b0182b8e929
-examples/optimization/static-tail-resume/08-dynamic-handler-guard.saga 74a9ebcebf667995
+examples/optimization/static-tail-resume/08-dynamic-handler-guard.saga 1dcf0322fe51b288
 examples/optimization/static-tail-resume/09-nested-shadowing.saga 57b96afa8134f4aa
 examples/optimization/static-tail-resume/10-direct-outer-code.saga 4c81125867416ac4
 examples/optimization/static-tail-resume/11-body-pure-lets.saga 8a3ebe27bef00a6f
@@ -116,7 +116,7 @@ examples/optimization/static-tail-resume/14-let-bound-handler.saga 94a0418856bb2
 examples/optimization/static-tail-resume/15-let-bound-finally-guard.saga 72fa767f773cf059
 examples/optimization/static-tail-resume/16-let-bound-return-guard.saga c2dcfdaffe7621aa
 examples/optimization/static-tail-resume/17-handler-factory.saga 1951aa538d406655
-examples/optimization/static-tail-resume/18-handler-factory-return-guard.saga 64adf87c9ed190dc
+examples/optimization/static-tail-resume/18-handler-factory-return-guard.saga 436968427502f1c3
 examples/optimization/static-tail-resume/19-handler-factory-prefix-guard.saga 1d2a6efc8faad2e6
 examples/optimization/static-tail-resume/20-helper-call-island.saga 39e06660744f11ee
 examples/optimization/static-tail-resume/21-multi-clause-helper-guard.saga ddd7ad119cfa0c36

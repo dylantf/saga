@@ -329,6 +329,14 @@ pub struct Lowerer<'a> {
     /// The variable holding the abort continuation of the arm being lowered
     /// (`fun(V) -> abort(Ref, Tag, V)`), given to the arm body's tail.
     current_abort_k: Option<String>,
+    /// The evidence variable the handler arm being lowered starts with (the
+    /// frame its `with` lifted). A `resume` where the current frame is
+    /// another one (in a function inside the arm, or under a `with` inside
+    /// it) delimits the resumed computation again in that frame (`reroot`).
+    current_arm_frame: Option<String>,
+    /// Set when such a `resume` is lowered in an arm of the `with` whose
+    /// arms are being built, which then lifts every entry of its frame.
+    arm_reroots: bool,
     /// Pre-resolved constructor name -> mangled Erlang atom.
     /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
     /// Built by resolve::build_constructor_atoms before lowering.
@@ -451,6 +459,8 @@ impl<'a> Lowerer<'a> {
             current_handler_inherited_k: None,
             current_abort_ref: None,
             current_abort_k: None,
+            current_arm_frame: None,
+            arm_reroots: false,
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
             check_result,

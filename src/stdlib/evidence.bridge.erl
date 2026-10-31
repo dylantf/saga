@@ -2,7 +2,7 @@
 -export([find_evidence/2, insert_canonical/2, insert_static/3,
          select_evidence/2, reframe_evidence/3,
          append_tail/3,
-         lift_evidence/2, bind/2, mbind/3, run/1,
+         lift_evidence/2, lift_all_evidence/2, lift_for/3, bind/2, mbind/3, reroot/3, run/1,
          abort/3, resume_into/4, fin_resume/4, run_process/1, entry/3]).
 
 %% Evidence vector layout: a tuple of {EffectTag, OpTuple} entries sorted
@@ -138,6 +138,8 @@ entry_position(Evidence, Tag, I, N) ->
 %%                 Key in the process dictionary until it has run)
 %%   {held, Keys}  regions that a suspension carried out of themselves
 %%   run           in place of the continuation, at a `run' site
+%%   {reroot, Frame, F}  in place of the continuation, at a `resume' that
+%%                 delimits the computation again in the frame Frame
 %%
 %% An arm that does not resume aborts: it throws {'$saga_abort', Ref, Tag, V},
 %% caught where the `with' Ref delimits the computation: at its entry, at
@@ -160,6 +162,22 @@ lift_evidence(Evidence, Ref) ->
         false ->
             list_to_tuple([lift_entry(Entry, Ref) || Entry <- tuple_to_list(Evidence)])
     end.
+
+%% The frame of a `with' whose arms may resume in another frame (a `resume'
+%% in a function inside an arm, or under a `with' inside it): every entry is
+%% lifted, direct ones too. The resumed computation must reach the handlers
+%% around its `resume' (`reroot/3'); a direct entry would instead be called
+%% where the operation is performed, from the frame it was captured with.
+lift_all_evidence(Evidence, Ref) ->
+    list_to_tuple([lift_entry(Entry, Ref, all) || Entry <- tuple_to_list(Evidence)]).
+
+%% The lifting for a `with' of a handler value, Installed its tuple of
+%% operations (and return clause): it ends in `reroot' when an arm resumes in
+%% another frame.
+lift_for(Evidence, Ref, Installed) when tuple_size(Installed) > 0,
+                                        element(tuple_size(Installed), Installed) =:= reroot ->
+    lift_all_evidence(Evidence, Ref);
+lift_for(Evidence, Ref, _Installed) -> lift_evidence(Evidence, Ref).
 
 %% Whether every entry of a frame is direct. Frames are small; the common
 %% sizes are checked in one clause.
@@ -184,39 +202,60 @@ entry(Tag, Ops, Frame) ->
         false -> {Tag, Ops, lift}
     end.
 
-lift_entry({Tag, Ops, lift}, Ref) ->
-    {Tag, list_to_tuple([lift_op(Op, Ref) || Op <- tuple_to_list(Ops)]), lift};
+lift_entry({_, _, lift} = Entry, Ref) -> lift_entry(Entry, Ref, all);
 lift_entry(Entry, _Ref) -> Entry.
+
+lift_entry({Tag, Ops}, Ref, all) -> lift_entry({Tag, Ops, lift}, Ref, all);
+lift_entry({Tag, Ops, lift}, Ref, all) ->
+    {Tag, list_to_tuple([lift_op(element(I, Ops), Ref, Tag, I)
+                         || I <- lists:seq(1, tuple_size(Ops))]), lift}.
 
 %% An operation closure takes its arguments and then the continuation. Once
 %% the meta continuation is known, the handler gets a continuation that runs
 %% the rest of the handled computation, delimited again by the `with', and
-%% then the meta continuation.
-lift_op(Op, Ref) when is_function(Op, 1) -> fun(K) -> lifted(Op, [], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 2) -> fun(A, K) -> lifted(Op, [A], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 3) -> fun(A, B, K) -> lifted(Op, [A, B], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 4) ->
-    fun(A, B, C, K) -> lifted(Op, [A, B, C], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 5) ->
-    fun(A, B, C, D, K) -> lifted(Op, [A, B, C, D], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 6) ->
-    fun(A, B, C, D, E, K) -> lifted(Op, [A, B, C, D, E], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 7) ->
-    fun(A, B, C, D, E, F, K) -> lifted(Op, [A, B, C, D, E, F], K, Ref) end;
-lift_op(Op, Ref) when is_function(Op, 8) ->
-    fun(A, B, C, D, E, F, G, K) -> lifted(Op, [A, B, C, D, E, F, G], K, Ref) end;
-lift_op(Op, _Ref) -> Op.
+%% then the meta continuation. Tag and I name the operation, for a meta
+%% continuation that sends it to another frame (`reroot/3').
+lift_op(Op, Ref, T, I) when is_function(Op, 1) -> fun(K) -> lifted(Op, [], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 2) ->
+    fun(A, K) -> lifted(Op, [A], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 3) ->
+    fun(A, B, K) -> lifted(Op, [A, B], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 4) ->
+    fun(A, B, C, K) -> lifted(Op, [A, B, C], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 5) ->
+    fun(A, B, C, D, K) -> lifted(Op, [A, B, C, D], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 6) ->
+    fun(A, B, C, D, E, K) -> lifted(Op, [A, B, C, D, E], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 7) ->
+    fun(A, B, C, D, E, F, K) -> lifted(Op, [A, B, C, D, E, F], K, Ref, T, I) end;
+lift_op(Op, Ref, T, I) when is_function(Op, 8) ->
+    fun(A, B, C, D, E, F, G, K) -> lifted(Op, [A, B, C, D, E, F, G], K, Ref, T, I) end;
+lift_op(Op, _Ref, _T, _I) -> Op.
 
 %% An operation given a callback (a tagged closure) is not suspended: its
 %% handler's arm runs the callback and then resumes, and the meta continuation
 %% current at that resume cannot be passed through the arm's code. It is
 %% performed where it stands.
-lifted(Op, Args, K, Ref) ->
+lifted(Op, Args, K, Ref, Tag, I) ->
     case lists:any(fun({'$saga_cps', _}) -> true; (_) -> false end, Args) of
         true -> erlang:apply(Op, Args ++ [K]);
         false ->
             {'$saga_meta',
-             fun(Mk) -> erlang:apply(Op, Args ++ [fun(V) -> resume_into(Ref, K, V, Mk) end]) end}
+             fun(Mk) ->
+                     erlang:apply(handler_for(Op, Tag, I, Mk),
+                                  Args ++ [fun(V) -> resume_into(Ref, K, V, Mk) end])
+             end}
+    end.
+
+%% The handler a suspension goes to: the one in the frame the `with' lifted,
+%% unless its meta continuation ends at a `resume' that delimits the
+%% computation again in another frame (`reroot/3'): then the one in that
+%% frame.
+handler_for(Op, _Tag, _I, Mk) when is_function(Mk) -> Op;
+handler_for(Op, Tag, I, Mk) ->
+    case lists:last(Mk) of
+        {reroot, Frame, _} -> element(I, find_evidence(Frame, Tag));
+        _ -> Op
     end.
 
 %% The abort of an arm of the `with' Ref, from effect Tag.
@@ -249,6 +288,7 @@ bind({'$saga_meta', M}, Mk) -> guard(pending(Mk), fun() -> M(Mk) end);
 bind(Value, Mk) when is_function(Mk) -> Mk(Value);
 bind(Value, [Mk]) when is_function(Mk) -> Mk(Value);
 bind(Value, [run]) -> Value;
+bind(Value, [{reroot, _, F}]) -> F(Value);
 bind(Value, [{k, Ref, F} | Rest]) ->
     R = case {Ref =/= none andalso owns_aborts(Rest), pending(Rest)} of
             {false, []} -> F(Value);
@@ -268,6 +308,17 @@ bind(Value, [{held, _} | Rest]) -> bind(Value, Rest).
 mbind({'$saga_meta', M}, F, Ref) ->
     {'$saga_meta', fun(Mk) -> M([{k, Ref, F} | frames(Mk)]) end};
 mbind(Value, F, _Ref) -> F(Value).
+
+%% `let r = resume x; F(r)' where the frame at the `resume' is not the one
+%% the arm's `with' lifted: in a function inside the arm (which may be called
+%% anywhere, also after the `with' has returned) or under a `with' inside the
+%% arm. R is what resuming gave (its own aborts already caught). The resumed
+%% computation is delimited here again, as if its `with' were installed at
+%% the `resume': an operation it performs that the `with' does not handle
+%% goes to the handler for it in Frame, with F, and then whatever that
+%% handler captures, as its continuation.
+reroot({'$saga_meta', _} = S, Frame, F) -> bind(S, [{reroot, Frame, F}]);
+reroot(Value, _Frame, F) -> F(Value).
 
 %% `resume' in an arm with a `finally' block, Cleanup: the resumed
 %% computation is a region. Cleanup runs once, when the region ends: with a

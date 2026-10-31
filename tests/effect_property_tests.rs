@@ -7884,17 +7884,14 @@ make n = if n > 0 then handler for Ask { ask () = { let r = resume (n + 10); r }
 /// (180 and 181 under the non-tail ones), because `resume` is typed as pure.
 ///
 /// `resume` is now typed with the residual row of the `with`, so `f` is a
-/// CPS closure and the aborting and tail-resuming cells pass. The non-tail
-/// cells give `{'$saga_meta', _}`: `f` is called after its `with` has
+/// CPS closure and the aborting and tail-resuming cells passed. The non-tail
+/// cells gave `{'$saga_meta', _}`: `f` is called after its `with` has
 /// returned, so the suspension of the resumed computation (an outer `Stop`
-/// lifted by that `with`) is returned up to the outer `with`, which has no
-/// `bind` for it, or would treat it as an operation handled further out.
-/// Binding it in the closure instead (`bind` with a meta continuation that
-/// ends in the closure's own return) makes these cells pass but breaks a
-/// closure called while its `with` is still pending (the `stored` cell of
-/// `resume_under_callback_or_in_data_under_outer_handlers` gives 42 for
-/// 242). Which one is right depends on whether that `with`'s `bind` is
-/// still to come, which is not known where the closure is compiled.
+/// lifted by that `with`) was returned up to the outer `with`, which has no
+/// `bind` for it. Now a `resume` inside a function in an arm delimits the
+/// resumed computation again where it is called (`reroot`), and sends what
+/// it suspends to the handlers of the frame the function was called with
+/// (see docs/planning/escaping-resumptions.md).
 const RESUME_UNDER_LAMBDA_STATE: &str = r#"
 effect State {
   fun get : Unit -> Int
@@ -7917,7 +7914,6 @@ handler passing for State {
 "#;
 
 #[test]
-#[ignore = "codegen: a resuming closure called after its `with` returned leaks the suspension of an outer operation (non-tail cells give {'$saga_meta', _})"]
 fn resume_under_lambda_under_aborting_outer_handler() {
     check_delimited_cells(
         "delimited_state_passing",
@@ -7933,7 +7929,6 @@ fn resume_under_lambda_under_aborting_outer_handler() {
 /// The same state-passing handler declared as a named handler: what its
 /// `resume` performs is only known where it is installed.
 #[test]
-#[ignore = "codegen: a resuming closure called after its `with` returned leaks the suspension of an outer operation (non-tail cells give {'$saga_meta', _})"]
 fn resume_under_lambda_in_named_handler_under_aborting_outer_handler() {
     check_delimited_cells(
         "delimited_state_passing_named",
@@ -7943,6 +7938,130 @@ fn resume_under_lambda_in_named_handler_under_aborting_outer_handler() {
             "  let f = counter () with passing\n  f 20 + 100",
             [1000, 140, 280, 140 + 141],
         )],
+    );
+}
+
+/// A state-passing function that escapes the handler of `Stop` around its
+/// `with` (`build_*` handle the `Stop` of the computation they run, and
+/// return `f`, whose type still performs `Stop`) and is called under another
+/// one. Its `Stop` goes to the handler where it is called: the type of `f`
+/// says so, as for any function value. It went to the handler it was built
+/// under (140 for 7000), and an abort of that handler, whose `with` had
+/// returned, was an uncaught throw. Built from an inline handler, a named
+/// one and a handler value (whose arms are lowered where it is built).
+#[test]
+fn escaped_resumption_performs_under_the_handlers_where_it_is_called() {
+    let src = format!(
+        "{DELIMITED_PRELUDE}{RESUME_UNDER_LAMBDA_STATE}
+fun make_passing : Int -> Handler State
+make_passing _ = handler for State {{
+  get () = fun s -> (resume s) s
+  put n = fun _ -> (resume ()) n
+  return v = fun _ -> v
+}}
+
+fun built_inline_resuming : Unit -> (Int -> Int needs {{Stop}})
+built_inline_resuming () = {{
+  counter () with {{
+    get () = fun s -> (resume s) s
+    put n = fun _ -> (resume ()) n
+    return v = fun _ -> v
+  }}
+}} with {{ stop i = resume i }}
+
+fun built_named_resuming : Unit -> (Int -> Int needs {{Stop}})
+built_named_resuming () = (counter () with passing) with {{ stop i = resume i }}
+
+fun built_named_aborting : Unit -> (Int -> Int needs {{Stop}})
+built_named_aborting () = (counter () with passing) with {{ stop _ = fun _ -> 1000 }}
+
+fun built_value_resuming : Unit -> (Int -> Int needs {{Stop}})
+built_value_resuming () = {{
+  let h = make_passing 0
+  counter () with h
+}} with {{ stop i = resume i }}
+
+fun built_value_aborting : Unit -> (Int -> Int needs {{Stop}})
+built_value_aborting () = {{
+  let h = make_passing 0
+  counter () with h
+}} with {{ stop _ = fun _ -> 1000 }}
+
+fun call_under : (Unit -> (Int -> Int needs {{Stop}})) -> Int needs {{Stop}}
+call_under build = {{
+  let f = build ()
+  f 20 + 100
+}}
+"
+    );
+    let builds = [
+        "built_inline_resuming",
+        "built_named_resuming",
+        "built_named_aborting",
+        "built_value_resuming",
+        "built_value_aborting",
+    ];
+    // s = 20, t = stop 20, put (s + t), get: 100 + 20 + t.
+    let callers = [
+        ("abort", "stop _ = 7000", 7000),
+        ("resume", "stop i = resume (i + 1)", 141),
+        ("nontail", "stop i = (resume i) * 2", 280),
+        ("twice", "stop i = (resume i) + (resume (i + 1))", 140 + 141),
+    ];
+    let mut src = src;
+    let mut functions = Vec::new();
+    let mut wants = Vec::new();
+    for build in builds {
+        for (label, arm, want) in callers {
+            let name = format!("{build}_{label}");
+            src.push_str(&format!(
+                "\npub fun {name} : Unit -> Int\n{name} () = call_under {build} with {{ {arm} }}\n"
+            ));
+            functions.push(name.clone());
+            wants.push((name, want));
+        }
+    }
+    let results = call_each_export("escaped_resumption", &src, &functions);
+    let failures: Vec<String> = wants
+        .iter()
+        .filter_map(|(name, want)| {
+            let got = results.get(name).map(String::as_str);
+            (got != Some(want.to_string().as_str()))
+                .then(|| format!("{name}: gave {}, expected {want}", got.unwrap_or("nothing")))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} cells failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A `resume` under a `with` inside the arm resumes the computation in that
+/// `with`'s frame. One that does not handle `Stop` (here a delimited one, so
+/// that it has a `bind` of its own): the outer handler of `Stop` must see
+/// everything up to its own `with`, not only up to the inner `with` (the
+/// non-tail cell gave 121 for 242). One that handles `Stop`: the resumed
+/// computation's `Stop` goes to it, not to the handler around the `with`
+/// whose arm this is (the non-tail and aborting cells gave 242 and 1000).
+#[test]
+fn resume_under_a_with_inside_the_arm() {
+    check_delimited_cells(
+        "resume_under_inner_with",
+        "effect Note { fun note : Int -> Unit }\n",
+        &[
+            (
+                "not_handling_stop",
+                "  let v = ask_stop () with {\n    ask () = {\n      let r = { resume 1 } with { note _ = { let x = resume (); x } }\n      r + 10\n    }\n  }\n  v + 100",
+                [1000, 121, 242, 121 + 122],
+            ),
+            (
+                "handling_stop",
+                "  let v = ask_stop () with {\n    ask () = {\n      let r = (resume 1) with { stop i = resume (i + 5) }\n      r + 10\n    }\n  }\n  v + 100",
+                [126, 126, 126, 126],
+            ),
+        ],
     );
 }
 
